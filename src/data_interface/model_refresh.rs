@@ -59,12 +59,29 @@ pub(crate) struct TargetedGenerationReport {
     pub tubes_not_drawn: Option<String>,
 }
 
+/// 读一个测试钩的环境变量，生产保护统一收在这里（T-O-5）：debug 构建（`cargo test` / `cargo run`
+/// 默认 profile）照旧只看变量本身；release 构建还要显式设 `AIOS_ALLOW_TEST_HOOKS=1`，否则一律当没设
+/// ——线上进程不会被环境里残留的 `AIOS_TEST_FAIL_*` 注入失败。只认 `1`，不像
+/// `window_root_plan::root_enumeration_parity_enabled` 那样「非 0 即开」：这是保护闸，宁缺毋滥。
+/// L2 回放拉起的服务是 `CARGO_BIN_EXE_*`、与测试同 profile，harness 在 `spawn_server` 里显式带上开关，
+/// 所以 `cargo test --release` 跑回放也不丢钩子。
+pub(crate) fn test_hook_var(name: &str) -> Option<String> {
+    let allowed = cfg!(debug_assertions)
+        || std::env::var_os("AIOS_ALLOW_TEST_HOOKS").is_some_and(|value| value == "1");
+    if !allowed {
+        return None;
+    }
+    std::env::var(name).ok()
+}
+
+
 /// 测试钩：`AIOS_TEST_FAIL_ROOTS=24384/24776,24384/23257`。
-/// 名单里的根不进入生成器，回执记成失败。没设变量就是空名单。
+/// 名单里的根不进入生成器，回执记成失败。没设变量就是空名单；release 构建还要
+/// `AIOS_ALLOW_TEST_HOOKS=1` 才生效（见 [`test_hook_var`]）。
 /// L2 回放拉起的是普通服务进程，`cfg(test)` 在那边是关的，所以和
-/// `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 一样只看环境变量。
+/// `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 一样走环境变量。
 fn injected_generation_failures(roots: &[String]) -> Vec<RootGenerationFailure> {
-    let Ok(spec) = std::env::var("AIOS_TEST_FAIL_ROOTS") else {
+    let Some(spec) = test_hook_var("AIOS_TEST_FAIL_ROOTS") else {
         return Vec::new();
     };
     let named = spec

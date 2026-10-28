@@ -975,10 +975,13 @@ async fn run_one_batch_isolated(
 ///
 /// 命中的 `(dbnum, 右端)` 在解析前就记成数据批次失败，不读文件、不推水位。给 INC-H02 用：
 /// 第一次失败即停自动重跑（[`DATA_BATCH_PARK_AFTER`]），失败原因进 `logs/batch-failures-*.jsonl`。
-/// 没设这个变量时是空操作。L2 拉起的服务进程里 `cfg(test)` 是关的，所以和
-/// `AIOS_TEST_FAIL_ROOTS` 一样只看环境变量。生成失败不进数据失败账，带不动这条。
+/// 没设这个变量时是空操作；release 构建还要 `AIOS_ALLOW_TEST_HOOKS=1` 才生效（生产保护统一在
+/// `model_refresh::test_hook_var`）。L2 拉起的服务进程里 `cfg(test)` 是关的，所以和
+/// `AIOS_TEST_FAIL_ROOTS` 一样走环境变量。生成失败不进数据失败账，带不动这条。
 fn injected_data_batch_failure(dbnum: u32, end_sesno: i32) -> Option<String> {
-    let Ok(spec) = std::env::var("AIOS_TEST_FAIL_DATA_ENDS") else {
+    let Some(spec) =
+        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_FAIL_DATA_ENDS")
+    else {
         return None;
     };
     if !data_end_is_injected(&spec, dbnum, end_sesno) {
@@ -994,6 +997,52 @@ fn data_end_is_injected(spec: &str, dbnum: u32, end_sesno: i32) -> bool {
     let needle = format!("{dbnum}:{end_sesno}");
     spec.split(',').map(str::trim).any(|token| token == needle)
 }
+
+/// 测试钩：`AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH="<dbnum>:<ms>"` / `"<dbnum>/<end_sesno>:<ms>"` / `"*:<ms>"`——数据
+/// 批次收尾那一笔已落库（两枚水位已盖）、`registry.finish` 还没写终态之前，睡 `<ms>` 毫秒。只拉长时间、不改任何
+/// 判据：这段时间里库上已是 S 时刻的完整快照、`/dbnums` 三水位已齐，而 `has_running_data_batch_for` 仍为真——夹具用它
+/// 把「库已收尾、注册表仍 Running」的窗口放大成确定性复现（`/model/records` 对初始化直写、没有投影回执的根曾在
+/// 这里回 0 行，ADR-077 D5）。
+///
+/// 三种规格：`<dbnum>:<ms>` 该库每个批次都生效；`<dbnum>/<end_sesno>:<ms>` 只在批次**入队右端**（`job.end_sesno`）等于
+/// `<end_sesno>` 时生效；`*:<ms>` 全库通配。拆法：先按最后一个 `:` 拆出毫秒（库号 / 右端里没有 `:`），再把左半
+/// 按 `/` 拆库号与可选右端。为什么要右端过滤：不过滤时「水位已落、任务未落终态」的窗口会落在该库**每个**步上，
+/// 而夹具的 `latest_terminal_task` 挑的是已落终态的那条——某一步只有唯一一条任务、它还睡在延迟里时就会读空
+/// （727 那一步实测如此）。限到 init 那一批（右端 725）就只放大要复现的那个窗口。
+///
+/// 生产保护与 `AIOS_TEST_FAIL_DATA_ENDS` 同一道闸（`model_refresh::test_hook_var`）；L2 拉起的服务进程里 `cfg(test)`
+/// 是关的，所以走环境变量。毫秒或右端解析失败、毫秒为 0 都直接返回。
+async fn delay_before_registry_finish(dbnum: u32, end_sesno: i32) {
+    let Some(spec) =
+        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH")
+    else {
+        return;
+    };
+    let Some((target, millis)) = spec.rsplit_once(':') else {
+        return;
+    };
+    let Ok(millis) = millis.trim().parse::<u64>() else {
+        return;
+    };
+    let (which, wanted_end) = match target.trim().split_once('/') {
+        Some((which, end)) => {
+            let Ok(end) = end.trim().parse::<i32>() else {
+                return;
+            };
+            (which.trim(), Some(end))
+        }
+        None => (target.trim(), None),
+    };
+    let dbnum_applies = which == "*" || which.parse::<u32>().ok() == Some(dbnum);
+    let end_applies = wanted_end.is_none_or(|wanted| wanted == end_sesno);
+    if dbnum_applies && end_applies && millis > 0 {
+        println!(
+            "[测试钩] dbnum {dbnum} 右端 {end_sesno} 收尾后按 AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH 等 {millis} ms 再落注册表终态"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+    }
+}
+
 
 /// 执行一个冻结批次：数据应用 → SYST 派生入账 → 副作用补偿 → 本批交付单元生成。
 ///
@@ -1246,6 +1295,9 @@ async fn run_one_batch(
         batch_failure_ledger().clear(job.dbnum);
     }
     let result_json = serde_json::to_value(&result).unwrap_or_default();
+    // 测试钩（只在设了 `AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH` 时生效）：收尾那一笔已落、注册表仍 Running 的窗口
+    // 在这里放大；右端用入队时的 `job.end_sesno` 过滤；没设变量就是空操作。
+    delay_before_registry_finish(job.dbnum, job.end_sesno).await;
     scheduler.finish(job.dbnum);
     registry.finish(&task_id, state, result_json.clone());
     beat();

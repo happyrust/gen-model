@@ -4360,33 +4360,35 @@ pub async fn model_records(
     // 内存投影路由分三种：节点自己有回执 → 精确根；节点在根之上（ZONE / SITE）→ 展成名下盖过章的生成根逐根取；
     // 节点在根之下（BRAN 里的一个 VALV）→ 取它头上那根的记录、按祖先链只留它名下的。`owner` 三种情形下都是生成根。
     // 展开为空就是空结果——「没生成过」是 200 空，不再是 409（ADR-086 D2）；客户端要生成走 `/model/generate`。
-    let expanded_roots: Vec<(
+    // GitHub #74（2026-10-27）：「模型落后」那档投影里没有任何回执的根——冷重启、初始化直写不留投影——按库路由的
+    // 形状回读 durable（`model_records_of_root` 没有 overlay 就是冷读），而不是回空；判据在 `model_read_route`，这里只消费。
+    let durable_fallback = route.allows_durable_fallback();
+    let mut durable_fallback_roots: Vec<String> = Vec::new();
+    let mut expanded_roots: Vec<(
         String,
         Vec<(e3d_io::refno::RefNo, Option<e3d_io::refno::RefNo>)>,
-    )> = roots
-        .iter()
-        .zip(&parsed_roots)
-        .map(|(name, root)| {
-            let under = if route.is_database() || store.receipt(scope, *root).is_some() {
+    )> = Vec::with_capacity(roots.len());
+    for (name, root) in roots.iter().zip(&parsed_roots) {
+        let under = if route.is_database() || store.receipt(scope, *root).is_some() {
+            vec![(*root, None)]
+        } else {
+            let above = store.receipt_roots_under(scope, *root);
+            if !above.is_empty() {
+                above
+                    .into_iter()
+                    .map(|generation_root| (generation_root, None))
+                    .collect()
+            } else if let Some(generation_root) = store.receipt_root_above(scope, *root) {
+                vec![(generation_root, Some(*root))]
+            } else if durable_fallback {
+                durable_fallback_roots.push(name.clone());
                 vec![(*root, None)]
             } else {
-                let above = store.receipt_roots_under(scope, *root);
-                if !above.is_empty() {
-                    above
-                        .into_iter()
-                        .map(|generation_root| (generation_root, None))
-                        .collect()
-                } else {
-                    store
-                        .receipt_root_above(scope, *root)
-                        .map(|generation_root| (generation_root, Some(*root)))
-                        .into_iter()
-                        .collect()
-                }
-            };
-            (name.clone(), under)
-        })
-        .collect();
+                Vec::new()
+            }
+        };
+        expanded_roots.push((name.clone(), under));
+    }
     let mut memory_overlay_used = false;
     let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
         Vec::with_capacity(roots.len());
@@ -4425,6 +4427,8 @@ pub async fn model_records(
     let page = page_records_across_roots(per_root, cursor, limit);
     let source = if route.is_database() && memory_overlay_used {
         "rocksdb+memory-overlay"
+    } else if !durable_fallback_roots.is_empty() {
+        "model-memory+rocksdb-fallback"
     } else {
         route.source.records_source_label()
     };
@@ -4469,6 +4473,8 @@ pub async fn model_records(
         "durable": route.is_database(),
         "complete": incomplete_roots.is_empty(),
         "incomplete_roots": incomplete_roots,
+        // GitHub #74：模型落后时投影里没有回执、改从库里 S 时刻那份回读的根（请求里的写法）；库路由恒空。
+        "durable_fallback_roots": durable_fallback_roots,
         "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
         "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
         "items": page.items,

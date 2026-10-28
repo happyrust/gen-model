@@ -8,11 +8,12 @@
   "start": 725,
   "service_env": {
     "AIOS_TEST_FAIL_DATA_ENDS": "8000:726",
+    "AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH": "8000/725:5000",
     "AIOS_WATCH_RECONCILE_SECS": "2",
     "AIOS_WATCH_MIN_SWEEP_GAP_SECS": "1",
     "AIOS_WATCH_POLL_SECS": "1"
   },
-  "init": { "to": 725, "records_present": ["24384/24776", "24384/23257"] },
+  "init": { "to": 725, "records_present": ["24384/24776", "24384/23257"], "generate_prime": ["24384/24776", "24384/23257"] },
   "steps": [
     { "to": 726, "expect_batch_parked": true, "timeout_secs": 240 },
     { "to": 727, "expect_batch_failure_cleared": true, "task_state": "succeeded", "timeout_secs": 300 }
