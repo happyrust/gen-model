@@ -288,11 +288,27 @@ function Export-State([string]$Name, [int]$StateSesno, [string]$CaseId, [string]
         if ($line.Trim() -match '^Ref\s+=?(\d+/\d+)$') { $rootRefno = $Matches[1]; break }
     }
     if (-not $rootRefno) { throw "导出日志里没有 `Ref =` 行，拿不到 $Element 的 refno：$log" }
+    # ★ 补 ATT：窄口径 RVM 不带元素身份，import 后 147/148 成员是 stable_hash 未解析。
+    #   本机没有可用的 GenModelRvmExport CAF addin 入口（launch_e3d_sample_repaired.ps1
+    #   硬编码 C:\Program Files (x86)\AVEVA\Everything3D3.1\Startup.dll，该路径已不存在；
+    #   run_ams_c_entrymacro.bat 不加载 addin），所以从 PML 侧 dump 一份等价 ATT。
+    #   失败不致命：ATT 只影响身份解析率，不影响按名字比对。
+    $attFile = $null
+    try {
+        $attFile = Join-Path $dir "$StateSesno.att"
+        & (Join-Path $suiteDir 'New-SuiteAttDump.ps1') -Element $Element -OutFile $attFile `
+            -IsolatedProjectsDir $projects -MainProject $MainProject -DbFile $DbFile `
+            -L3Exe $L3Exe -E3dInstallDir $E3dInstallDir -EvidenceDir (Join-Path $dir 'att-dump') | Out-Null
+        if (-not (Test-Path -LiteralPath $attFile)) { $attFile = $null }
+    } catch {
+        Write-Warning "ATT dump 失败，本次快照的身份解析率会偏低：$($_.Exception.Message)"
+        $attFile = $null
+    }
     $truth = Join-Path $TruthDir "$StateSesno.json"
     if (Test-Path -LiteralPath $truth) {
         throw "真值 $truth 已存在：同一个 sesno 不可能对应两个状态。续跑请换 -TruthDir，或先确认库没有被回退过"
     }
-    $snapshot = Import-RvmSnapshot -Repo $repo -RvmVerifyExe $rvmVerifyExe -RvmFile $rvm -Dbnum $Dbnum -RootRefno $rootRefno -OutFile $truth
+    $snapshot = Import-RvmSnapshot -Repo $repo -RvmVerifyExe $rvmVerifyExe -RvmFile $rvm -Dbnum $Dbnum -RootRefno $rootRefno -OutFile $truth -AttFile $attFile
     $afterExport = Get-Sesno
     $entry = [ordered]@{
         sesno = $StateSesno
