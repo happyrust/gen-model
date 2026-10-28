@@ -18,23 +18,49 @@
     "staging": "录制期间先落在 output/increment-suite-rvm-truth/<时间戳>/rvm-truth/（git 忽略）；套件录成 L2 夹具后整目录搬到 <fixture_dir>/rvm-truth/ 即可被现有消费方读到",
     "sessions_per_leg": "TTY 实测每腿 +2（业务会话 + SAVEWORK 后内务会话），真值键用后者（latest_sesno）"
   },
-  "tolerances": { "aabb_mm": 1.0 },
-  "run_last": ["create/cross_db_copy_apply.mac"],
+  "tolerances": {
+    "aabb_mm": 1.0
+  },
+  "run_last": [
+    "create/cross_db_copy_apply.mac"
+  ],
   "run_last_note": "这些用例的 apply/restore 在 batch 里挪到全部用例之后：cross_db_copy_restore 把 BOX 以无名复制件带回 EQ-A，/AIOS-SUITE-BOX-A1 从此不存在，而「导航到不存在的元素会让 E3D 访问违例崩溃」（README ★★），后面的用例一个都跑不了。",
   "limits": [
     "AABB 对拍对「绕自身中心的 90° 旋转」不敏感：套件里 BOX-A1 / BOX-N / BOX-RM 都是正方体且居于设备原点，xform/rot_* 与 compound 的旋转分量在 RVM 真值里看不出来（aabb_blind）。要让旋转可见需把 BOX-A1 改成非正方体（会连带 geom/resize_restore、delete/box_restore、delete/child_then_parent_restore、delete/recreate_same_name_apply 四处写回值）——未改，先记在这里。",
     "空 EQUI 不进 RVM（E3D 不写没有图元的组，K14 的 25 已实证）：EQ-B 的改名、EQ-A 删光子件后的删除，在真值里都没有痕迹。",
     "NOZZ 自建无 CATREF，没有几何：connect/nozz_move 两腿在 RVM 里不可见（aabb_blind）。",
-    "负实体（NBOX）是否进窄口径 RVM 未验证 ★：geom/nbox_* 三条腿按 calibrate 登记，首轮录制后定。",
-    "PANE 的 RVM 表现未验证 ★：room/* 四条腿的 PANE 几何按 calibrate 登记。",
-    "伙伴库 7998（锚点已解：WORLD 16190/0、元素前缀 24382，见 README「db7998 的锚点」）：h03/* 四条腿只改 7998，主库导出看不见；要用 Export-SuiteRvmTruth.ps1 -Mode state -Element /AIOS-SUITE-7998 -Dbnum 7998 -DbFile AvevaMarineSample\\ams000\\ams7998_0001 单独补导，Compare 时加 -Root /AIOS-SUITE-7998。create/cross_db_copy_* 同一 SAVEWORK 写两库，主库导出只覆盖 8000 这半边。"
+    "负实体（NBOX）不进窄口径 RVM（2026-10-28 实测已定）：NBOX-N1 在库里确实存在（Ref =24384/27584、500×500×2500、POS 0,0,0），但它挂在 BOX-N 之下、不出现在 EQ-NBX 的 MEMBERS 里，RVM 导出的 148 个成员中也完全没有它。所以 geom/nbox_resize_apply 与 nbox_add_apply 的 union_shift 恒为 [0,0,0]、count_delta 恒为 0，这两条腿在 RVM 里**天然不可见**，只能靠 PML 侧 Q XLEN 断言（几何无痕，不是失败）。",
+    "PANE 确实进 RVM 且几何完整（2026-10-28 实测已定）：R201-P1 的 aabb_world_mm = [58000.00,3000.00,0,62000.00,7000.00,2000.00]，R202-P1 = [68000.00,3000.00,0,72000.00,7000.00,2000.00]，即 PANE 的包围盒就是四个 PAVE 顶点的并集、高度取 PLOO 的 HEIG 2000。所以 room/pane_move 与 pave_move 可以按并集变化真判，不再是 calibrate。",
+    "伙伴库 7998（锚点已解：WORLD 16190/0、元素前缀 24382，见 README「db7998 的锚点」）：h03/* 四条腿只改 7998，主库导出看不见；要用 Export-SuiteRvmTruth.ps1 -Mode state -Element /AIOS-SUITE-7998 -Dbnum 7998 -DbFile AvevaMarineSample\\ams000\\ams7998_0001 单独补导，Compare 时加 -Root /AIOS-SUITE-7998。create/cross_db_copy_* 同一 SAVEWORK 写两库，主库导出只覆盖 8000 这半边。",
+    "BRAN 的 HPOS/TPOS 在 RVM 里不可见（2026-10-28 实测：HPOS U 2900→3100 后，BRAN-S 的 9 个管件 M1..M9 的 AABB 变化全部为 0.00）。HPOS 是分支拓扑属性，改它不重算管件几何，所以 pipe/bran_hpos 只能靠 PML 侧 Q Hposition 断言（2900→3100→2900），RVM 对拍该腿必为 aabb_blind。"
   ],
   "baseline": {
     "after": "common/setup_8000.mac",
     "members_exact": {
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [39500, 4500, -500, 40500, 5500, 500],
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [45000, 4000, -1000, 47000, 6000, 1000],
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [59750, 4750, 750, 60250, 5250, 1250]
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+        39500,
+        4500,
+        -500,
+        40500,
+        5500,
+        500
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [
+        45000,
+        4000,
+        -1000,
+        47000,
+        6000,
+        1000
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [
+        59750,
+        4750,
+        750,
+        60250,
+        5250,
+        1250
+      ]
     },
     "members_calibrate": {
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ": "★ 由 /1-LNR-Q005-PJ 的 BOX（tests/fixtures/sessions/ams8000-equi-move-chain/rvm-truth/725.json：[-3001.39, 7696.57, 1125, -2641.15, 8311.35, 1675]）+ setup 的 BY E 49000 推得 ≈ [45998.61, 7696.57, 1125, 46358.85, 8311.35, 1675]，前提是 COPY 原样带过 POS 且 ZONE 在原点",
@@ -49,147 +75,381 @@
       "note": "基线；与「上一份」无可比性（setup 先删同名 SITE 再建）。对拍方式：members_exact 三件 AABB 逐分量 ≤ 1 mm，members_calibrate 记观测值。",
       "calibrate": true,
       "added": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [39500, 4500, -500, 40500, 5500, 500],
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [45000, 4000, -1000, 47000, 6000, 1000],
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [59750, 4750, 750, 60250, 5250, 1250],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          39500,
+          4500,
+          -500,
+          40500,
+          5500,
+          500
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [
+          45000,
+          4000,
+          -1000,
+          47000,
+          6000,
+          1000
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [
+          59750,
+          4750,
+          750,
+          60250,
+          5250,
+          1250
+        ],
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ": null
       },
       "subtree": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": { "calibrate": true },
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU": { "calibrate": true },
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": { "calibrate": true }
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": {
+          "calibrate": true
+        },
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU": {
+          "calibrate": true
+        },
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "calibrate": true
+        }
       },
       "unchanged_elsewhere": false
     },
     "common/teardown_8000.mac": {
       "note": "整棵 SITE 删除：after 快照里导出根不存在（E3D 对不存在的元素 export 会报错——teardown 后不导，或导出后 after 几何成员数应为 0）。",
-      "subtree": { "AIOS-SUITE-8000-Z": { "calibrate": true } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z": {
+          "calibrate": true
+        }
+      },
       "unchanged_elsewhere": false
     },
-
     "create/box_apply.mac": {
-      "added": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A2": [41150, 4600, -450, 41850, 5400, 450] },
+      "added": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A2": [
+          41150,
+          4600,
+          -450,
+          41850,
+          5400,
+          450
+        ]
+      },
       "note": "700×800×900，POS E 1500 相对 EQ-A(40000,5000,0) → 中心 (41500,5000,0)"
     },
-    "create/box_restore.mac": { "equals_state_before": "create/box_apply.mac" },
-
+    "create/box_restore.mac": {
+      "equals_state_before": "create/box_apply.mac"
+    },
     "create/subtree_apply.mac": {
       "added": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NEW/AIOS-SUITE-BOX-NEW1": [51500, 4700, -200, 52500, 5300, 200],
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NEW/AIOS-SUITE-BOX-NEW2": [53000, 4800, 0, 53400, 5200, 1200]
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NEW/AIOS-SUITE-BOX-NEW1": [
+          51500,
+          4700,
+          -200,
+          52500,
+          5300,
+          200
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NEW/AIOS-SUITE-BOX-NEW2": [
+          53000,
+          4800,
+          0,
+          53400,
+          5200,
+          1200
+        ]
       },
       "note": "EQ-NEW (52000,5000,0)；BOX-NEW1 1000×600×400 居原点；BOX-NEW2 400×400×1200 POS E 1200 U 600"
     },
-    "create/subtree_restore.mac": { "equals_state_before": "create/subtree_apply.mac" },
-
+    "create/subtree_restore.mac": {
+      "equals_state_before": "create/subtree_apply.mac"
+    },
     "create/equi_copy_apply.mac": {
       "added": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-COPY/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-COPY": { "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ", "shift": [3000, 0, 0] }
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-COPY/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-COPY": {
+          "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ",
+          "shift": [
+            3000,
+            0,
+            0
+          ]
+        }
       },
       "note": "EQ-COPY = COPY EQ-NOZ 再 BY E 3000；复制出的 NOZZ 无几何。★ 若 COPY 产生的 BOX 缺省名序号不是 1，按 after 快照订正键名"
     },
-    "create/equi_copy_restore.mac": { "equals_state_before": "create/equi_copy_apply.mac" },
-
+    "create/equi_copy_restore.mac": {
+      "equals_state_before": "create/equi_copy_apply.mac"
+    },
     "create/bran_copy_apply.mac": {
       "subtree": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-NEW": { "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S", "calibrate": true }
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-NEW": {
+          "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S",
+          "calibrate": true
+        }
       },
       "note": "BRAN-NEW 是 BRAN-S 的原位副本（COPY 不带 BY），几何与 BRAN-S 重叠：并集同位、件数相同。★ 隐含管段容器的命名/计数待首轮观测"
     },
-    "create/bran_copy_restore.mac": { "equals_state_before": "create/bran_copy_apply.mac" },
-
+    "create/bran_copy_restore.mac": {
+      "equals_state_before": "create/bran_copy_apply.mac"
+    },
     "create/cross_db_copy_apply.mac": {
-      "removed": ["AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"],
+      "removed": [
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"
+      ],
       "note": "8000 半边：EQ-A 连同 BOX-A1 删除（EQ-A 组随之消失）。7998 半边（新 EQ-X + 无名 BOX 复制件）不在主库导出里，用 -Mode state -Element /AIOS-SUITE-7998 另导。必须排在全部用例之后（run_last）。"
     },
     "create/cross_db_copy_restore.mac": {
-      "added": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-A": [39500, 4500, -500, 40500, 5500, 500] },
+      "added": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-A": [
+          39500,
+          4500,
+          -500,
+          40500,
+          5500,
+          500
+        ]
+      },
       "calibrate": true,
       "note": "★ COPY /AIOS-SUITE-EQ-X 带回来的 BOX 是无名复制件（名字不随 COPY 走），所以键是 E3D 缺省名而不是 /AIOS-SUITE-BOX-A1；EQ-A 重建在 POS E 40000 N 5000 U 0，AABB 应与基线 BOX-A1 相同。7998 半边（EQ-X 删除）另导。"
     },
-
     "delete/box_apply.mac": {
-      "removed": ["AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"],
+      "removed": [
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"
+      ],
       "note": "EQ-A 删光子件后 E3D 不再写 EQ-A 组"
     },
-    "delete/box_restore.mac": { "equals_state_before": "delete/box_apply.mac", "note": "同名同尺寸重建，refno 变、按名相等" },
-
+    "delete/box_restore.mac": {
+      "equals_state_before": "delete/box_apply.mac",
+      "note": "同名同尺寸重建，refno 变、按名相等"
+    },
     "delete/container_keep_child_apply.mac": {
-      "renamed": [ { "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1", "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-B/AIOS-SUITE-BOX-A1" } ],
-      "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [3000, 0, 0] },
+      "renamed": [
+        {
+          "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1",
+          "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-B/AIOS-SUITE-BOX-A1"
+        }
+      ],
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          3000,
+          0,
+          0
+        ]
+      },
       "calibrate": true,
       "note": "★ INCLUDE 保留的是相对属主的 POS，EQ-B(43000) 比 EQ-A(40000) 东 3000 → BOX-A1 世界位置应东移 3000；若 E3D 的 INCLUDE 保持世界位置则平移为 0。首轮录制后二选一定稿。renamed 把 after 的键折回 before 的键再比"
     },
-    "delete/container_keep_child_restore.mac": { "equals_state_before": "delete/container_keep_child_apply.mac", "calibrate": true, "note": "★ 与 apply 同一假设的逆" },
-
+    "delete/container_keep_child_restore.mac": {
+      "equals_state_before": "delete/container_keep_child_apply.mac",
+      "calibrate": true,
+      "note": "★ 与 apply 同一假设的逆"
+    },
     "delete/recreate_same_name_apply.mac": {
       "aabb_blind": true,
       "note": "同一 SAVEWORK 删 BOX-A1 再建同名同尺寸：按名快照完全相等，只有 refno 变。RVM 真值在这里只证「几何没被改坏」"
     },
-
-    "delete/child_then_parent_1_apply.mac": { "removed": ["AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"] },
-    "delete/child_then_parent_2_apply.mac": { "aabb_blind": true, "note": "EQ-A 已无几何成员，删 EQ-A 在 RVM 里无痕" },
-    "delete/child_then_parent_restore.mac": { "equals_state_before": "delete/child_then_parent_1_apply.mac" },
-
-    "attr/rename_apply.mac": { "aabb_blind": true, "note": "EQ-B 是空 EQUI，不进 RVM；改名无痕" },
-    "attr/rename_restore.mac": { "equals_state_before": "attr/rename_apply.mac" },
-    "attr/desc_apply.mac": { "aabb_blind": true, "note": "纯元数据" },
-    "attr/desc_restore.mac": { "equals_state_before": "attr/desc_apply.mac" },
+    "delete/child_then_parent_1_apply.mac": {
+      "removed": [
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1"
+      ]
+    },
+    "delete/child_then_parent_2_apply.mac": {
+      "aabb_blind": true,
+      "note": "EQ-A 已无几何成员，删 EQ-A 在 RVM 里无痕"
+    },
+    "delete/child_then_parent_restore.mac": {
+      "equals_state_before": "delete/child_then_parent_1_apply.mac"
+    },
+    "attr/rename_apply.mac": {
+      "aabb_blind": true,
+      "note": "EQ-B 是空 EQUI，不进 RVM；改名无痕"
+    },
+    "attr/rename_restore.mac": {
+      "equals_state_before": "attr/rename_apply.mac"
+    },
+    "attr/desc_apply.mac": {
+      "aabb_blind": true,
+      "note": "纯元数据"
+    },
+    "attr/desc_restore.mac": {
+      "equals_state_before": "attr/desc_apply.mac"
+    },
     "attr/owner_apply.mac": {
-      "renamed": [ { "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1", "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-B/AIOS-SUITE-BOX-A1" } ],
-      "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [3000, 0, 0] },
+      "renamed": [
+        {
+          "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1",
+          "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-B/AIOS-SUITE-BOX-A1"
+        }
+      ],
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          3000,
+          0,
+          0
+        ]
+      },
       "calibrate": true,
       "note": "★ 同 delete/container_keep_child_apply.mac 的 INCLUDE 假设"
     },
-    "attr/owner_restore.mac": { "equals_state_before": "attr/owner_apply.mac", "calibrate": true },
-
-    "xform/move_apply.mac": { "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [500, 0, 0] } },
-    "xform/move_restore.mac": { "equals_state_before": "xform/move_apply.mac" },
-    "xform/rot_u_apply.mac": { "aabb_blind": true, "note": "1000³ 正方体绕自身中心转 90°，AABB 不变（limits 第 1 条）" },
-    "xform/rot_u_restore.mac": { "equals_state_before": "xform/rot_u_apply.mac" },
-    "xform/rot_e_apply.mac": { "aabb_blind": true, "note": "同 rot_u" },
-    "xform/rot_e_restore.mac": { "equals_state_before": "xform/rot_e_apply.mac" },
-    "xform/rot_n_apply.mac": { "aabb_blind": true, "note": "同 rot_u" },
-    "xform/rot_n_restore.mac": { "equals_state_before": "xform/rot_n_apply.mac" },
-    "xform/compound_apply.mac": { "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [0, 300, 0] }, "note": "BY N 300 可见，旋转分量不可见" },
-    "xform/compound_restore.mac": { "equals_state_before": "xform/compound_apply.mac" },
+    "attr/owner_restore.mac": {
+      "equals_state_before": "attr/owner_apply.mac",
+      "calibrate": true
+    },
+    "xform/move_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          500,
+          0,
+          0
+        ]
+      }
+    },
+    "xform/move_restore.mac": {
+      "equals_state_before": "xform/move_apply.mac"
+    },
+    "xform/rot_u_apply.mac": {
+      "aabb_blind": true,
+      "note": "1000³ 正方体绕自身中心转 90°，AABB 不变（limits 第 1 条）"
+    },
+    "xform/rot_u_restore.mac": {
+      "equals_state_before": "xform/rot_u_apply.mac"
+    },
+    "xform/rot_e_apply.mac": {
+      "aabb_blind": true,
+      "note": "同 rot_u"
+    },
+    "xform/rot_e_restore.mac": {
+      "equals_state_before": "xform/rot_e_apply.mac"
+    },
+    "xform/rot_n_apply.mac": {
+      "aabb_blind": true,
+      "note": "同 rot_u"
+    },
+    "xform/rot_n_restore.mac": {
+      "equals_state_before": "xform/rot_n_apply.mac"
+    },
+    "xform/compound_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          0,
+          300,
+          0
+        ]
+      },
+      "note": "BY N 300 可见，旋转分量不可见"
+    },
+    "xform/compound_restore.mac": {
+      "equals_state_before": "xform/compound_apply.mac"
+    },
     "xform/noz_move_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ": { "count_delta": 0, "union_shift": [500, 0, 0] } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ": {
+          "count_delta": 0,
+          "union_shift": [
+            500,
+            0,
+            0
+          ]
+        }
+      },
       "note": "EQ-NOZ 整台 BY E 500；用并集而不点名构件，避开 COPY 产生的缺省名序号"
     },
-    "xform/noz_move_restore.mac": { "equals_state_before": "xform/noz_move_apply.mac" },
-
+    "xform/noz_move_restore.mac": {
+      "equals_state_before": "xform/noz_move_apply.mac"
+    },
     "geom/resize_apply.mac": {
-      "resized": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [39200, 4400, -400, 40800, 5600, 400] },
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          39200,
+          4400,
+          -400,
+          40800,
+          5600,
+          400
+        ]
+      },
       "note": "1000³ → 1600×1200×800，中心不动"
     },
-    "geom/resize_restore.mac": { "equals_state_before": "geom/resize_apply.mac" },
+    "geom/resize_restore.mac": {
+      "equals_state_before": "geom/resize_apply.mac"
+    },
     "geom/nbox_resize_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": { "count_delta": 0, "union_shift": [0, 0, 0], "calibrate": true } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "count_delta": 0,
+          "union_shift": [
+            0,
+            0,
+            0
+          ],
+          "calibrate": true
+        }
+      },
       "note": "★ NBOX-N1 XLEN 500→900 全在 BOX-N 之内，并集不变；负实体若导出，其自身 AABB 变成 [45550,4750,-1250,46450,5250,1250]"
     },
-    "geom/nbox_resize_restore.mac": { "equals_state_before": "geom/nbox_resize_apply.mac", "calibrate": true },
+    "geom/nbox_resize_restore.mac": {
+      "equals_state_before": "geom/nbox_resize_apply.mac",
+      "calibrate": true
+    },
     "geom/nbox_add_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": { "union_shift": [0, 0, 0], "calibrate": true } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "union_shift": [
+            0,
+            0,
+            0
+          ],
+          "calibrate": true
+        }
+      },
       "note": "★ NBOX-N2 300×300×2500 POS E 600（相对 BOX-N）→ 若导出应新增 [46450,4850,-1250,46750,5150,1250]，件数 +1；不导出则无痕"
     },
-    "geom/nbox_add_restore.mac": { "equals_state_before": "geom/nbox_add_apply.mac", "calibrate": true },
-
+    "geom/nbox_add_restore.mac": {
+      "equals_state_before": "geom/nbox_add_apply.mac",
+      "calibrate": true
+    },
     "connect/bran_add_member_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": { "count_delta": 1, "calibrate": true } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
+          "count_delta": 1,
+          "calibrate": true
+        }
+      },
       "note": "★ 末尾 COPY FTUB 7 成 FTUB-NEW（命名构件 /AIOS-SUITE-FTUB-NEW，原位重叠）；隐含管段重算，并集可能不变也可能延到 TPOS"
     },
-    "connect/bran_add_member_restore.mac": { "equals_state_before": "connect/bran_add_member_apply.mac" },
+    "connect/bran_add_member_restore.mac": {
+      "equals_state_before": "connect/bran_add_member_apply.mac"
+    },
     "connect/bran_del_member_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": { "count_delta": -1, "calibrate": true } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
+          "count_delta": -1,
+          "calibrate": true
+        }
+      },
       "note": "★ 删 FTUB 4 后缺省名 FTUB 5..7 顺位变 4..6，按名会表现成多件增删，所以只认子树件数与并集"
     },
-    "connect/bran_del_member_restore.mac": { "equals_state_before": "connect/bran_del_member_apply.mac", "note": "整条 BRAN-S 重 COPY，几何与基线同形同位" },
+    "connect/bran_del_member_restore.mac": {
+      "equals_state_before": "connect/bran_del_member_apply.mac",
+      "note": "整条 BRAN-S 重 COPY，几何与基线同形同位"
+    },
     "connect/bran_reparent_apply.mac": {
       "subtree": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": { "count_delta": -1, "calibrate": true },
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-NEW": { "count_delta": 1, "calibrate": true },
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": { "union_shift": [0, 0, 0], "calibrate": true }
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
+          "count_delta": -1,
+          "calibrate": true
+        },
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-NEW": {
+          "count_delta": 1,
+          "calibrate": true
+        },
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": {
+          "union_shift": [
+            0,
+            0,
+            0
+          ],
+          "calibrate": true
+        }
       },
       "note": "★ FTUB 4 从 BRAN-S INCLUDE 到 BRAN-NEW（世界位置不变）；两条支管的隐含管段都重算"
     },
@@ -198,69 +458,196 @@
       "calibrate": true,
       "note": "★ 树逆但序逆不了：FTUB 回到 BRAN-S 末位而非第 4 位，隐含管段序列不同——件数应回到原值，并集可能不同"
     },
-    "connect/nozz_move_apply.mac": { "aabb_blind": true, "note": "NOZZ-1 无 CATREF 无几何（limits 第 3 条）" },
-    "connect/nozz_move_restore.mac": { "equals_state_before": "connect/nozz_move_apply.mac" },
-
+    "connect/nozz_move_apply.mac": {
+      "aabb_blind": true,
+      "note": "NOZZ-1 无 CATREF 无几何（limits 第 3 条）"
+    },
+    "connect/nozz_move_restore.mac": {
+      "equals_state_before": "connect/nozz_move_apply.mac"
+    },
     "pipe/whole_move_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": { "count_delta": 0, "union_shift": [500, 0, 0] } },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": {
+          "count_delta": 0,
+          "union_shift": [
+            500,
+            0,
+            0
+          ]
+        }
+      },
       "note": "PIPE-P 下每条 BRAN BY E 500（含 BRAN-S）"
     },
-    "pipe/whole_move_restore.mac": { "equals_state_before": "pipe/whole_move_apply.mac" },
+    "pipe/whole_move_restore.mac": {
+      "equals_state_before": "pipe/whole_move_apply.mac"
+    },
     "pipe/bran_hpos_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": { "count_delta": 0, "calibrate": true } },
-      "note": "★ HPOS U 2900→3100：只有头段隐含管段变，件数不变；并集上界最多抬 200"
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
+          "count_delta": 0,
+          "calibrate": true
+        }
+      },
+      "note": "HPOS U 2900→3100 在 RVM 里**不可见**（2026-10-28 实测：9 个管件 M1..M9 的 AABB 变化全部为 0.00，HPOS 是分支拓扑属性，不重算管件几何）。只能靠 PML 侧 Q Hposition 断言（2900→3100→2900）。",
+      "aabb_blind": true
     },
-    "pipe/bran_hpos_restore.mac": { "equals_state_before": "pipe/bran_hpos_apply.mac" },
-
-    "room/member_move_apply.mac": { "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [10000, 0, 0] }, "note": "EQ-RM POS E 60000→70000" },
-    "room/member_move_restore.mac": { "equals_state_before": "room/member_move_apply.mac" },
+    "pipe/bran_hpos_restore.mac": {
+      "equals_state_before": "pipe/bran_hpos_apply.mac"
+    },
+    "room/member_move_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [
+          10000,
+          0,
+          0
+        ]
+      },
+      "note": "EQ-RM POS E 60000→70000"
+    },
+    "room/member_move_restore.mac": {
+      "equals_state_before": "room/member_move_apply.mac"
+    },
     "room/pane_move_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": { "count_delta": 0, "union_shift": [0, 0, -200], "calibrate": true } },
-      "note": "★ PANE BY D 200；PANE 是否出几何待首轮观测"
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": {
+          "count_delta": 0,
+          "union_shift": [
+            0,
+            0,
+            -200
+          ]
+        }
+      },
+      "note": "PANE BY D 200：PANE 出几何已实测确认（limits 已定），并集整体下移 200"
     },
-    "room/pane_move_restore.mac": { "equals_state_before": "room/pane_move_apply.mac", "calibrate": true },
+    "room/pane_move_restore.mac": {
+      "equals_state_before": "room/pane_move_apply.mac"
+    },
     "room/pave_move_apply.mac": {
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": { "count_delta": 0, "calibrate": true } },
-      "note": "★ 东边两顶点 E 62000→64000：PANE 并集应从 [58000,3000,0,62000,7000,2000] 变 [58000,3000,0,64000,7000,2000]（非平移，记观测）"
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": {
+          "count_delta": 0,
+          "union_aabb": [
+            58000,
+            3000,
+            0,
+            64000,
+            7000,
+            2000
+          ]
+        }
+      },
+      "note": "东边两顶点 E 62000→64000：PANE 并集从 [58000,3000,0,62000,7000,2000] 变 [58000,3000,0,64000,7000,2000]，属变形不是平移"
     },
-    "room/pave_move_restore.mac": { "equals_state_before": "room/pave_move_apply.mac", "calibrate": true },
+    "room/pave_move_restore.mac": {
+      "equals_state_before": "room/pave_move_apply.mac"
+    },
     "room/frmw_rename_apply.mac": {
-      "renamed": [ { "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201", "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-NOT-A-ROOM" } ],
+      "renamed": [
+        {
+          "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201",
+          "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-NOT-A-ROOM"
+        }
+      ],
       "aabb_blind": true,
       "note": "只改 FRMW 名字；renamed 把 after 的路径折回后应与 before 完全相等"
     },
-    "room/frmw_rename_restore.mac": { "equals_state_before": "room/frmw_rename_apply.mac" },
-
+    "room/frmw_rename_restore.mac": {
+      "equals_state_before": "room/frmw_rename_apply.mac"
+    },
     "compound/rename_move_add_apply.mac": {
-      "renamed": [ { "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A", "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A-V2" } ],
-      "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [500, 0, 0] },
-      "added": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A3": [38850, 4850, -150, 39150, 5150, 150] },
+      "renamed": [
+        {
+          "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A",
+          "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A-V2"
+        }
+      ],
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          500,
+          0,
+          0
+        ]
+      },
+      "added": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A3": [
+          38850,
+          4850,
+          -150,
+          39150,
+          5150,
+          150
+        ]
+      },
       "note": "EQ-A→EQ-A-V2 + BY E 500 + BOX-A3 300³ POS E -1500（相对已东移的 EQ-A：中心 39000）；键名按 renamed 折回 EQ-A 书写"
     },
-    "compound/rename_move_add_restore.mac": { "equals_state_before": "compound/rename_move_add_apply.mac" },
+    "compound/rename_move_add_restore.mac": {
+      "equals_state_before": "compound/rename_move_add_apply.mac"
+    },
     "compound/two_roots_apply.mac": {
-      "moved": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [0, 0, 400] },
-      "subtree": { "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": { "count_delta": 0, "union_shift": [0, 0, 400] } },
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          0,
+          0,
+          400
+        ]
+      },
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "count_delta": 0,
+          "union_shift": [
+            0,
+            0,
+            400
+          ]
+        }
+      },
       "note": "EQ-A 与 EQ-NBX 同窗各 BY U 400；EQ-NBX 用并集（NBOX 是否导出不影响）"
     },
-    "compound/two_roots_restore.mac": { "equals_state_before": "compound/two_roots_apply.mac" },
-
+    "compound/two_roots_restore.mac": {
+      "equals_state_before": "compound/two_roots_apply.mac"
+    },
     "h03/setup_7998.mac": {
-      "companion": 7998, "root": "/AIOS-SUITE-7998",
-      "added": { "AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX": [39500, 4500, -500, 40500, 5500, 500] },
-      "calibrate": true, "unchanged_elsewhere": false,
+      "companion": 7998,
+      "root": "/AIOS-SUITE-7998",
+      "added": {
+        "AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX": [
+          39500,
+          4500,
+          -500,
+          40500,
+          5500,
+          500
+        ]
+      },
+      "calibrate": true,
+      "unchanged_elsewhere": false,
       "note": "★ 伙伴库基线：EQ (40000,5000,0) + BOX 1000³；按 -Mode state -Element /AIOS-SUITE-7998 -Dbnum 7998 -DbFile AvevaMarineSample\\ams000\\ams7998_0001 导，Compare 加 -Root /AIOS-SUITE-7998。setup 之前 7998 里没有可导元素，所以没有 before 可比。"
     },
     "h03/teardown_7998.mac": {
-      "companion": 7998, "root": "/AIOS-SUITE-7998",
-      "removed": ["AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX"],
+      "companion": 7998,
+      "root": "/AIOS-SUITE-7998",
+      "removed": [
+        "AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX"
+      ],
       "note": "teardown 之后 /AIOS-SUITE-7998 不存在，export 会报错——teardown 后不导。"
     },
     "h03/move_apply.mac": {
-      "companion": 7998, "root": "/AIOS-SUITE-7998",
-      "moved": { "AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX": [500, 0, 0] },
+      "companion": 7998,
+      "root": "/AIOS-SUITE-7998",
+      "moved": {
+        "AIOS-SUITE-7998-Z/AIOS-SUITE-7998-EQ/AIOS-SUITE-7998-BOX": [
+          500,
+          0,
+          0
+        ]
+      },
       "note": "伙伴库 EQ BY E 500；主库 8000 的导出在这条腿前后应完全相等。"
     },
-    "h03/move_restore.mac": { "companion": 7998, "root": "/AIOS-SUITE-7998", "equals_state_before": "h03/move_apply.mac" }
+    "h03/move_restore.mac": {
+      "companion": 7998,
+      "root": "/AIOS-SUITE-7998",
+      "equals_state_before": "h03/move_apply.mac"
+    }
   }
 }
