@@ -13,11 +13,15 @@
 //! pe_ptset:⟨w0_w1⟩ = { pe, root, dbnum, noun,
 //!                      ptset: { "<P 号>": { pt: [x,y,z], dir: [x,y,z], bore, noun } },
 //!                      count, unresolved: [{ number, reason }],
-//!                      sesno, generator, reason, written_at }
+//!                      sesno, generator, storage_version, reason, written_at }
 //! ```
 //!
 //! - 坐标在管件局部系（mm），方向已归一；`bore` 按 E3D `PPBORE` 口径（未设 / 0 → `null`）。
 //! - `sesno` = 这根这次发布的 `source_sesno`；`generator` = e3d-model [`e3d_model::PTSET_EVAL_VERSION`]（求值规则的版本）。
+//! - `storage_version` = [`aios_core::model_storage::MODEL_STORAGE_VERSION`]，**行形状**的版本。
+//!   它与 `generator` 是两条正交的轴：`generator` 说「点算得对不对」，`storage_version` 说「这行读不读得懂」。
+//!   读侧（rs-server / aios_core）按 `dbnum_watermark:{dbnum}.model_storage_version` 判整库，
+//!   按这一格判单行；对不上就报 `MODEL_STORAGE_VERSION_MISMATCH`，不静默回空集。
 //! - **没有行 = 这根还没按新版发布过**；**有行但 `ptset: {}` = 这件真没有 P 点**，`reason` 说明是哪一种
 //!   （没有目录链 / 目录件没有 PTRE / 点全解不出 / PTSE 是空的）。长度函数对 `{}` 照旧回 0。
 //! - 没有异步补写也没有启动补扫（D5，2026-10-27 拍板）：发布路径是唯一写入口，部署后老根靠逐库
@@ -193,12 +197,13 @@ fn render_row(sesno: u32, set: &ProjectedPointSet) -> String {
     format!(
         "UPSERT {TABLE}:⟨{key}⟩ CONTENT {{ pe: pe:⟨{key}⟩, root: pe:⟨{root}⟩, dbnum: {dbnum}, noun: {noun}, \
          ptset: {{ {entries} }}, count: {count}, unresolved: [{unresolved}], sesno: {sesno}, generator: {generator}, \
-         reason: {reason}, written_at: time::now() }};\n",
+         storage_version: {storage_version}, reason: {reason}, written_at: time::now() }};\n",
         root = refno_key(set.root),
         dbnum = set.refno.dbno(),
         noun = sql_string(&set.noun),
         count = set.points.len(),
         generator = PTSET_EVAL_VERSION,
+        storage_version = aios_core::model_storage::MODEL_STORAGE_VERSION,
         reason = set
             .reason
             .as_deref()
@@ -289,9 +294,17 @@ mod tests {
                  ptset: {{ \"1\": {{ pt: [0, 0, 0], dir: [-1, 0, 0], bore: 500, noun: 'PTAX' }}, \
                  \"21\": {{ pt: [2000, 0, 0], dir: [0, 0, 1], bore: null, noun: 'PTAX' }} }}, count: 2, \
                  unresolved: [{{ number: 7, reason: 'P7（PTCA）方向解不出' }}], sesno: 738, generator: {}, \
-                 reason: NONE, written_at: time::now() }};\n",
-                PTSET_EVAL_VERSION
+                 storage_version: {}, reason: NONE, written_at: time::now() }};\n",
+                PTSET_EVAL_VERSION,
+                aios_core::model_storage::MODEL_STORAGE_VERSION
             )
+        );
+
+        // 两条轴必须并存且各说各的：`generator` 是求值器版本，`storage_version` 是行形状版本。
+        // 把它们合并成一个数会让「换求值规则」与「换行形状」分不开。
+        assert!(
+            sql.contains("generator: ") && sql.contains("storage_version: "),
+            "两格都要在: {sql}"
         );
     }
 
