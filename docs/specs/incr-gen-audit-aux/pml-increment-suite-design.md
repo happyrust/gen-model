@@ -2809,6 +2809,52 @@ PANE 的 AABB 就是四个 PAVE 顶点的并集、高度取 PLOO 的 `HEIG 2000`
 **教训**：AABB 差值必须实测，不能从「属性变了，几何该跟着变」推。
 这已经是本轮第二次在 RVM 可见性上推错（上一次是 34 个缺省名）。
 
+## 7.9e 支管成员换序归入 (c) 类（2026-10-28 实测结案）
+
+`connect/bran_reorder` 长期挂在待办上，原因是 `REORDER` 语法在仓内零命中。
+本轮把候选语法逐个实测，全部不成立：
+
+| 语句 | 结果 |
+|---|---|
+| `REORDER AFTER FTUB 3` | ❌ `CP: Syntax error` |
+| `MOVE FTUB 1 BEFORE FTUB 2` | ❌ `CP: Syntax error` |
+| `ORDER FTUB 1 AFTER FTUB 2` | ❌ `CP: Syntax error` |
+| `SEQUENCE 1 2 3` | ❌ `CP: Syntax error` |
+| `UNGROUP` | ❌ `CP: Syntax error` |
+
+还试了唯一有希望的路子——**删成员看序是否重排**：
+
+```
+删 /AIOS-SUITE-BRAN-S-M3（原 FTUB 2）前：
+ 1 FTUB 1 /AIOS-SUITE-BRAN-S-M1
+ 2 BEND 1 /AIOS-SUITE-BRAN-S-M2
+ 3 FTUB 2 /AIOS-SUITE-BRAN-S-M3
+ 4 FTUB 3 /AIOS-SUITE-BRAN-S-M4
+ 5 FTUB 4 /AIOS-SUITE-BRAN-S-M5
+ 6 BEND 2 /AIOS-SUITE-BRAN-S-M6
+ 7 FTUB 5 /AIOS-SUITE-BRAN-S-M7
+ 8 FTUB 6 /AIOS-SUITE-BRAN-S-M8
+ 9 FTUB 7 /AIOS-SUITE-BRAN-S-M9
+
+删 M3 后：
+ 1 FTUB 1 /AIOS-SUITE-BRAN-S-M1
+ 2 BEND 1 /AIOS-SUITE-BRAN-S-M2
+ 3 FTUB 2 /AIOS-SUITE-BRAN-S-M4     ← M4 顶上来，序号重编
+ 4 FTUB 3 /AIOS-SUITE-BRAN-S-M5
+ 5 BEND 2 /AIOS-SUITE-BRAN-S-M6
+ 6 FTUB 4 /AIOS-SUITE-BRAN-S-M7
+ 7 FTUB 5 /AIOS-SUITE-BRAN-S-M8
+ 8 FTUB 6 /AIOS-SUITE-BRAN-S-M9
+```
+
+**剩余成员的相对顺序完全不变**，只是 E3D 把序号重编了一遍。即：
+
+- 序号（`FTUB 2`、`BEND 1`）是「当前位置」的显示名，不是可写属性；
+- 成员序由拓扑连接（`Arrive` / `Leave`）决定，PML 层没有改写入口。
+
+→ 「支管成员换序」在 PML 里触发不了，该用例从覆盖矩阵**移到 (c) 类**。
+`connect/bran_reorder_probe.mac` 保留作回归证据，结论已写进文件头，换 E3D 版本可重跑一次复核。
+
 ## 7.10 复现命令
 
 ```powershell

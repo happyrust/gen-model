@@ -7,6 +7,23 @@
 -- 看 ALPHA LOG 里 REORDER 之后有没有报错、Q MEMB 的成员序有没有变。
 -- 若语法成立 → 补回 connect/bran_reorder_apply.mac + restore，登记 C0x。
 -- 若不成立 → 从覆盖矩阵里把「支管成员换序」移到 (c) 类（PML 触发不了）。
+--
+-- ═══ 实测结论（2026-10-28）：PML 层无法给 BRAN 成员换序，本用例归 (c) 类 ═══
+--
+-- 已逐个实测、全部不成立：
+--   REORDER AFTER FTUB 3      → CP: Syntax error
+--   MOVE FTUB 1 BEFORE FTUB 2 → CP: Syntax error
+--   ORDER FTUB 1 AFTER FTUB 2 → CP: Syntax error
+--   SEQUENCE 1 2 3            → CP: Syntax error
+--   UNGROUP                   → CP: Syntax error
+--
+-- 也试过「删成员后看序是否重排」（这是唯一还有希望的路子）：
+--   删掉 /AIOS-SUITE-BRAN-S-M3（原 FTUB 2）后，剩余 8 个成员的**相对顺序完全不变**，
+--   只是 E3D 把序号重新编了一遍（M4→FTUB 2、M5→FTUB 3、M6→BEND 2、M7→FTUB 4 …）。
+--   即序号是「当前位置」的显示名，不是可写的属性；成员序由拓扑连接（Arrive/Leave）决定。
+--
+-- 所以「支管成员换序」在 PML 触发不了，只能在 Design 里拖拽或用支持拓扑重排的 API。
+-- 该用例从覆盖矩阵移到 (c) 类，本探针保留作回归证据（改了 E3D 版本可重跑一次）。
 ONERROR CONTINUE
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-CONN-REORDER-PROBE-ALIVE
