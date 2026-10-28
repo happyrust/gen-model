@@ -664,6 +664,7 @@ fn catalogue_ppoints(
                 number,
                 pos: point.pos.to_array(),
                 dir: point.dir.to_array(),
+                bore: point.bore,
             }),
             Ok(None) => {}
             Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => {}
