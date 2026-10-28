@@ -1,12 +1,16 @@
--- 登记: A02 | 语义: 尺寸写回 1000³（setup 值） | expected_net: cancelled | restore 搭档: 本文件是 geom/resize_apply.mac 的 restore
+-- 登记: A02 | 语义: 尺寸写回基线 2000×1000×500（setup 值） | expected_net: cancelled | restore 搭档: 本文件是 geom/resize_apply.mac 的 restore
+-- ★ 基线尺寸 2026-10-28 从 1000³ 改成 2000×1000×500：正方体绕自身中心旋转时 AABB 不变，
+--   三条 xform/rot_* 腿在 RVM 里看不出任何差异（aabb_blind）。改成长方体后旋转可见。
+--   同步改动：common/setup_8000.mac、delete/box_restore.mac、delete/child_then_parent_restore.mac、
+--   delete/recreate_same_name_apply.mac。
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-GEOM-RESIZE-RESTORE-ALIVE
 /AIOS-SUITE-BOX-A1
 Q REF
 Q NAME
-XLEN 1000
+XLEN 2000
 YLEN 1000
-ZLEN 1000
+ZLEN 500
 Q XLEN
 Q YLEN
 Q ZLEN

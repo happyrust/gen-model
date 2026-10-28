@@ -1,5 +1,7 @@
 -- 登记: A02（补缺口「删后同名重建」，登记表无单独 ID） | 语义: 同一 SAVEWORK 里删 BOX-A1 再建同名同尺寸的 BOX-A1（新 refno） | expected_net: modified（同名新 refno；按 refno 是 deleted + added） | restore 搭档: 无（终态与基线按名相等）
 -- 预期 gen-model: datacenter_delete reason=deleted 指旧 refno；新 refno 有模型行；EQ-A regen 一次。后续链按名重解 refno。
+-- ★ 重建尺寸必须与 setup 基线一致（2026-10-28 起是 2000×1000×500，不再是 1000³），
+--   否则「终态与基线按名相等」这个不配对 restore 的前提就不成立。
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-DELETE-RECREATE-APPLY-ALIVE
 /AIOS-SUITE-BOX-A1
@@ -7,7 +9,7 @@ Q REF
 Q NAME
 DELETE BOX
 /AIOS-SUITE-EQ-A
-NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+NEW BOX XLEN 2000 YLEN 1000 ZLEN 500
 NAME /AIOS-SUITE-BOX-A1
 Q REF
 Q NAME

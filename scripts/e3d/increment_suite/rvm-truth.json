@@ -26,7 +26,7 @@
   ],
   "run_last_note": "这些用例的 apply/restore 在 batch 里挪到全部用例之后：cross_db_copy_restore 把 BOX 以无名复制件带回 EQ-A，/AIOS-SUITE-BOX-A1 从此不存在，而「导航到不存在的元素会让 E3D 访问违例崩溃」（README ★★），后面的用例一个都跑不了。",
   "limits": [
-    "AABB 对拍对「绕自身中心的 90° 旋转」不敏感：套件里 BOX-A1 / BOX-N / BOX-RM 都是正方体且居于设备原点，xform/rot_* 与 compound 的旋转分量在 RVM 真值里看不出来（aabb_blind）。要让旋转可见需把 BOX-A1 改成非正方体（会连带 geom/resize_restore、delete/box_restore、delete/child_then_parent_restore、delete/recreate_same_name_apply 四处写回值）——未改，先记在这里。",
+    "AABB 对拍对「绕自身中心的 90° 旋转」原本不敏感（BOX-A1 曾是 1000^3 正方体且居设备原点）。2026-10-28 已把 BOX-A1 基线改成 2000x1000x500 长方体，三条 xform/rot_* 腿现在能真判：rot_u 后 X/Y 互换得 [39500,4000,-250,40500,6000,250]、rot_e 后 Y/Z 互换得 [39000,4750,-500,41000,5250,500]、rot_n 后 X/Z 互换得 [39750,4500,-1000,40250,5500,1000]，三条均已实测 pass。连带改动：common/setup_8000.mac、geom/resize_restore.mac（写回 2000x1000x500）、delete/box_restore.mac、delete/child_then_parent_restore.mac、delete/recreate_same_name_apply.mac。仍不可见的是 BOX-N（2000^3 正方体）与 BOX-RM（500^3）的旋转——它们的用例不涉及旋转，未改。",
     "空 EQUI 不进 RVM（E3D 不写没有图元的组，K14 的 25 已实证）：EQ-B 的改名、EQ-A 删光子件后的删除，在真值里都没有痕迹。",
     "NOZZ 自建无 CATREF，没有几何：connect/nozz_move 两腿在 RVM 里不可见（aabb_blind）。",
     "负实体（NBOX）不进窄口径 RVM（2026-10-28 实测已定）：NBOX-N1 在库里确实存在（Ref =24384/27584、500×500×2500、POS 0,0,0），但它挂在 BOX-N 之下、不出现在 EQ-NBX 的 MEMBERS 里，RVM 导出的 148 个成员中也完全没有它。所以 geom/nbox_resize_apply 与 nbox_add_apply 的 union_shift 恒为 [0,0,0]、count_delta 恒为 0，这两条腿在 RVM 里**天然不可见**，只能靠 PML 侧 Q XLEN 断言（几何无痕，不是失败）。",
@@ -307,22 +307,49 @@
       "equals_state_before": "xform/move_apply.mac"
     },
     "xform/rot_u_apply.mac": {
-      "aabb_blind": true,
-      "note": "1000³ 正方体绕自身中心转 90°，AABB 不变（limits 第 1 条）"
+      "note": "BOX-A1 绕自身中心 U 轴转 90°：2000x1000x500 → 1000x2000x500（X/Y 互换、Z 不变），中心不动。基线 2026-10-28 从 1000^3 改为长方体后此腿在 AABB 可见",
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          39500,
+          4000,
+          -250,
+          40500,
+          6000,
+          250
+        ]
+      }
     },
     "xform/rot_u_restore.mac": {
       "equals_state_before": "xform/rot_u_apply.mac"
     },
     "xform/rot_e_apply.mac": {
-      "aabb_blind": true,
-      "note": "同 rot_u"
+      "note": "绕 E 轴转 90°：Y/Z 互换，尺寸 2000x1000x500 → 2000x500x1000；中心 E 40000/N 5000/U 0 不动，故 N 5000±250、U 0±500",
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          39000,
+          4750,
+          -500,
+          41000,
+          5250,
+          500
+        ]
+      }
     },
     "xform/rot_e_restore.mac": {
       "equals_state_before": "xform/rot_e_apply.mac"
     },
     "xform/rot_n_apply.mac": {
-      "aabb_blind": true,
-      "note": "同 rot_u"
+      "note": "绕 N 轴转 90°：X/Z 互换，尺寸 2000x1000x500 → 500x1000x2000；中心 E 40000/N 5000/U 0 不动，故 E 40000±250、U 0±1000",
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
+          39750,
+          4500,
+          -1000,
+          40250,
+          5500,
+          1000
+        ]
+      }
     },
     "xform/rot_n_restore.mac": {
       "equals_state_before": "xform/rot_n_apply.mac"
@@ -367,7 +394,7 @@
           400
         ]
       },
-      "note": "1000³ → 1600×1200×800，中心不动"
+      "note": "基线 2000x1000x500 → 1600x1200x800，中心不动"
     },
     "geom/resize_restore.mac": {
       "equals_state_before": "geom/resize_apply.mac"
