@@ -675,6 +675,27 @@
       "companion": 7998,
       "root": "/AIOS-SUITE-7998",
       "equals_state_before": "h03/move_apply.mac"
+    },
+    "pipe/spre_swap_apply.mac": {
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
+          "count_delta": 0
+        }
+      },
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S/AIOS-SUITE-BRAN-S-M2": [
+          9178.2368,
+          13217.0532,
+          2901.5,
+          9664.1171,
+          13457.0421,
+          2930.0
+        ]
+      },
+      "note": "BEND M2 的 SPRE 从 TBR:50（=13244/108844）换成 TBR90:50X150（=13244/108852）：同 bore 50 的 90 度弯头。只有 M2 自己的 AABB 变（实测 from [9365.31,13478.89,2900.00,9397.20,13522.83,2930.00] to [9178.24,13217.05,2901.50,9664.12,13457.04,2930.00]），位置和朝向不变。整棵子树的几何数 122 -> 124（换件后多了两片），但成员数不变。"
+    },
+    "pipe/spre_swap_restore.mac": {
+      "equals_state_before": "pipe/spre_swap_apply.mac"
     }
   }
 }

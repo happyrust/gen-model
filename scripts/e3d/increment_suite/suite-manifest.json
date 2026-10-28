@@ -330,6 +330,15 @@
       "expected_net": "modified",
       "registration": "H03",
       "companion_dbnum": 7998
+    },
+    {
+      "id": "E04-spre-swap",
+      "apply": "pipe/spre_swap_apply.mac",
+      "restore": "pipe/spre_swap_restore.mac",
+      "expected_net": "modified",
+      "registration": "E04",
+      "corpus": "BEND M2 的 SPRE 从 TBR:50 (=13244/108844) 换成 TBR90:50X150 (=13244/108852)，同 bore 50 的 90 度弯头；13244 = ams5052 库",
+      "tty_status": "passed (2026-10-28, RVM 几何 122->124->122, Compare pass)"
     }
   ],
   "not_encoded": [

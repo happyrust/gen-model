@@ -2612,12 +2612,97 @@ restore : 3100 → 2900   refno 24384/27054 不变   alive=True done=True exit=0
 |---|---|
 | `create/cross_db_copy_*` | ✅ **已通过**（见 7.6.8，跨库复制 + 删除 + 重建逆全闭合） |
 | `h03/setup_7998` + `teardown_7998` | ✅ **已通过**（SITE→ZONE→EQUI→BOX 全建在 7998，teardown 级联清空） |
-| `connect/bran_reorder_*` | ⚠️ 语法已证不存在，需改用别的机制触发成员换序 |
+| `connect/bran_reorder_*` | ✅ **已结案**（见 7.9e：5 种语法全不存在 + 删除重排实验证明成员序不可写，归 (c) 类） |
 | `pipe/bran_hpos_*` | ✅ **已通过**（见 7.8b，绝对值填死 + 重跑幂等） |
+| `pipe/spre_swap_*` | ✅ **已通过**（见 7.9h，语料补齐 + SPRE 可写可逆 + Compare pass） |
 | `attr/desc_restore` 写回基线值 | ✅ 通过（`desc` 两腿 completed） |
 | db7998 extent 2 为何能在单文件库写成功 | ⚠️ **未验证**（见 7.6.3，只观察到现象，没读 page 1 的 extent 表） |
 
-**34 个正式用例至此全部可跑，无一阻塞。**
+**35 个正式用例至此全部可跑，无一阻塞。**
+
+## 7.9h `pipe/spre_swap` 语料补齐并跑通（2026-10-28）
+
+### 原先的判断是错的
+
+设计文档旧版写：「`<ALT_SPRE>` 要在 db 13244 的 SPEC 13244/109234 里枚举同 bore/rating 的弯头组件，
+**该库在已接目录集里未定位**」。
+
+实测推翻：`13244` 不是独立库，它就是 **`ams5052` 的库号**
+（`docs/2026-08-12_live-test-ledger.md:447` 记「13244（ams5052）」），
+库文件 `ams000/ams5052_0001` 存在（159 MB）。SPEC 也能直接点查：
+
+```
+=13244/109234
+→ SPECIFICATION /ACP1000-Ventilated
+  Ref =13244/109234
+  Type SPEC
+```
+
+所以「卡语料」从来不是缺库，是**没找对库号**。
+
+### 组件清单在哪
+
+SPEC 的 9 个 SELE 里没有 CATR/STYP/SPRE（`Q` 全部报 does not have attribute），
+真正的组件清单在 `/ACP1000-Trough` 的第三层 SELE 下。顺着 BEND 成员的 `SPRE` 反查 owner 即可拿到：
+
+```
+/AIOS-SUITE-BRAN-S-M2
+  Q SPRE  →  Spref /ACP1000-Trough/ACP1000-TBR:50
+  !sp = !!CE.SPRE  →  =13244/108844
+  owner  →  SELEC 1 of SELEC 2 of SELEC 3 of SPECIFICATION /ACP1000-Trough   (=13244/108842)
+```
+
+该 SELE 下 6 个 SPCO，全部 refno 已取到：
+
+| 组件 | refno | 说明 |
+|---|---|---|
+| `ACP1000-TBL:50` | `13244/108843` | 50 bore 直管 |
+| `ACP1000-TBR:50` | `13244/108844` | ← M2 基线用的 |
+| `ACP1000-TBL45:50X150` | `13244/108847` | 45° |
+| `ACP1000-TBR45:50X150` | `13244/108848` | 45° |
+| `ACP1000-TBL90:50X150` | `13244/108851` | 90° |
+| `ACP1000-TBR90:50X150` | `13244/108852` | 90° ← 本用例换成这个 |
+
+### `SPRE` 可写、可逆、幂等
+
+```
+/AIOS-SUITE-BRAN-S-M2
+Q SPRE        →  Spref /ACP1000-Trough/ACP1000-TBR:50
+SPRE =13244/108852
+Q SPRE        →  Spref /ACP1000-Trough/ACP1000-TBR90:50X150
+Q POS         →  Position E 9381mm N 13500mm U 2900mm      ← 不变
+Q ORIE        →  Orientation Y is N 34 E and Z is U        ← 不变
+```
+
+写绝对值（不是增量），重跑幂等。写回 `=13244/108844` 即恢复。
+
+### RVM 可见且精准
+
+换件前后几何数 `122 → 124`（90° 弯头比直管多两片面），成员数不变。
+逐成员比对只有 M2 自己变：
+
+```
+/AIOS-SUITE-BRAN-S-M2
+  TBR:50       [9365.31, 13478.89, 2900.00, 9397.20, 13522.83, 2930.00]
+  TBR90:50X150 [9178.24, 13217.05, 2901.50, 9664.12, 13457.04, 2930.00]
+```
+
+Compare 判定 **pass**，三条断言全 ok：
+
+```
+[ok] resized: .../AIOS-SUITE-BRAN-S-M2 AABB 吻合 [9178.24, 13217.05, 2901.5, 9664.12, 13457.04, 2930]
+[ok] subtree-count: .../AIOS-SUITE-BRAN-S 成员数变化 0（成员 9→9，并集不变）
+[ok] unchanged-elsewhere: 其余成员逐一吻合（≤ 1 mm，共 117 件）
+```
+
+restore 后几何数回到 122，`equals_state_before` 成立。
+
+### 登记
+
+- 用例 id `E04-spre-swap`，登记号 `E04`，`expected_net: modified`
+- `suite-manifest.json` 的 `cases` 从 34 增到 35
+- `rvm-truth.json` 新增 `pipe/spre_swap_apply.mac`（`resized` + `subtree.count_delta: 0`）
+  与 `pipe/spre_swap_restore.mac`（`equals_state_before`）
 
 ## 7.9b 独立交叉验证（CT 窗口 #3，2026-10-28）
 
@@ -2999,3 +3084,36 @@ python .scratch\tty_batch.py A01-bran-reparent
 `/1RX03-EQUI` + `OWNER` 两行，`{{LOG_PATH}}` 展开成证据目录里的 `.log`。
 
 
+
+## 7.11 三项历史待决的归属（2026-10-28 核清）
+
+这三项长期挂在本套件待办里，但它们**都不属于 PML 测试套件的改动范围**，属于代码审计域。
+核清后从本套件待办移除，避免下一轮继续误挂。
+
+| 项 | 真实归属 | 现状 | 本套件要不要动 |
+|---|---|---|---|
+| T-D-6 越级 | 代码修复：`src/fast_model/model_initial_persist.rs`、`src/data_interface/manual_update.rs`、`src/data_interface/dbnum_initialize.rs` | 已有完整盘点 `t-d-6-initialize-vs-legacy-pointer-rows.md`（97 行），结论「红」，给了三个修复方案 | **不动**。PML 侧没有能造出「`pe` 为 0 但模型面还有 legacy 行」这个状态的手段，测不出来 |
+| G1 两处文档矛盾 | 文档：`docs/specs/incr-gen-audit/` 下的门定义 | 记录里的「`task_plan.md:208` vs `:323`」已过时——该文件不存在，实际是 `plan.md`（222 行）、`spec.md`（355 行）、`tasks.md`（137 行）、`review.md`（162 行） | **不动**。门定义是 spec 的事，与本套件无关 |
+| 是否派 CT 做只读范围门报告 | 审计：`src/data_interface/update_scope.rs:266` 的 `admits` | 未做 | **不做**。与本套件无关；本轮已用 CT 做过一次交叉验证（7.9b），价值在那处已兑现 |
+
+### 为什么核清这三项
+
+原先的记录里出现过 `docs/specs/incr-gen-audit/task_plan.md:208` 与 `:323` 这样的引用，
+但仓库里**没有 `task_plan.md`**。这类过时引用会让下一轮花时间找一个不存在的文件。
+核清一次，把真实文件名与行数写下来，后续直接查表。
+
+`t-d-6-initialize-vs-legacy-pointer-rows.md` 本身质量很高（代码路径、夹具草案、修复方案、
+未确认项都齐），不需要重做；它只是不该挂在 PML 套件的待办里。
+
+## 7.12 本套件的收口状态（2026-10-28）
+
+| 维度 | 状态 |
+|---|---|
+| 正式用例 | **35 个**（34 + `E04-spre-swap`），全部可跑，无一阻塞 |
+| 宏文件 | **77 个** `.mac`（75 + `pipe/spre_swap_apply/restore`） |
+| RVM 成员缺省名 | **0 / 148** |
+| 身份解析率 | **147 / 148**（剩 1 个是 PML `COLLECT` 不遍历的隐含 TUBI） |
+| 已实测 pass 的 RVM 腿 | `xform/move`、`xform/rot_u/e/n`、`geom/resize`、`room/pane_move`、`pipe/spre_swap` |
+| aabb_blind 但已有 PML 侧断言的腿 | `pipe/bran_hpos`（`Q Hposition`）、`geom/nbox_*`（`Q XLEN`）、`connect/nozz_move`（无 CATREF） |
+| 归 (c) 类（PML 触发不了） | `connect/bran_reorder`（成员序不可写） |
+| 仍未验证 | db7998 extent 2 为何能在单文件库写成功（7.6.3） |

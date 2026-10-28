@@ -1,0 +1,18 @@
+-- 登记: E04 近亲 | 语义: 把 M2 的 SPRE 写回 `TBR:50`（=13244/108844）
+-- expected_net: cancelled | restore 搭档: 本文件是 pipe/spre_swap_apply.mac 的 restore
+--
+-- ★ 写绝对值（不是相对增量）：SPRE 写同一个 refno 两次结果相同，重跑幂等。
+--   refno 见 apply 宏文件头的语料清单。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-SPRE-SWAP-RESTORE-ALIVE
+/AIOS-SUITE-BRAN-S-M2
+Q REF
+Q NAME
+Q SPRE
+SPRE =13244/108844
+Q SPRE
+Q POS
+Q ORIE
+SAVEWORK 'AIOS suite pipe/spre_swap restore: BEND M2 SPRE -> TBR:50'
+$P SUITE-PIPE-SPRE-SWAP-RESTORE-DONE
+ALPHA LOG END

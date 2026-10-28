@@ -1,0 +1,36 @@
+-- 登记: E04 近亲（换规格件 SPRE → DependencyCascade → Regen） | 语义: 把 BRAN-S 的 BEND 成员（M2）的规格件从
+-- `TBR:50` 换成同 bore 的 90° 弯头 `TBR90:50X150`；预期该 BEND regen（几何按新组件重算），
+-- 位置/朝向不变（SPRE 只换组件引用，不动放置）。
+-- expected_net: modified | restore 搭档: pipe/spre_swap_restore.mac
+--
+-- ★ 语料来源（2026-10-28 实测补齐，原先记的「db 13244 未定位」是错的）：
+--   13244 就是 ams5052 的库号（docs/2026-08-12_live-test-ledger.md:447 记「13244（ams5052）」），
+--   库文件 E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams5052_0001 存在（159 MB）。
+--   SPEC 13244/109234 = /ACP1000-Ventilated 可点查。
+--   真正的组件清单在 /ACP1000-Trough 的第三层 SELE（13244/108842）下，6 个 SPCO：
+--     TBL:50        =13244/108843
+--     TBR:50        =13244/108844   ← M2 当前用的
+--     TBL45:50X150  =13244/108847
+--     TBR45:50X150  =13244/108848
+--     TBL90:50X150  =13244/108851
+--     TBR90:50X150  =13244/108852   ← 本用例换成这个（同 bore 50，90° 弯头）
+--
+-- ★ `SPRE` 可写、可逆、幂等（TTY 实测 2026-10-28）：写后 Q POS / Q ORIE 不变，
+--   写回原值即恢复。所以本用例不需要判空，重跑也安全（写绝对值不是增量）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-SPRE-SWAP-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S-M2
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q POS
+Q ORIE
+SPRE =13244/108852
+Q SPRE
+Q POS
+Q ORIE
+Q SPRE
+SAVEWORK 'AIOS suite pipe/spre_swap apply: BEND M2 SPRE TBR:50 -> TBR90:50X150'
+$P SUITE-PIPE-SPRE-SWAP-APPLY-DONE
+ALPHA LOG END
