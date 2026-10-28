@@ -44,6 +44,26 @@ pub fn active_for_dbnum(dbnum: u32) -> Option<ModelRebuildReceipt> {
         .cloned()
 }
 
+/// 整库重排这个能力被配置关掉了（`model_full_rebuild_enabled = false`）。
+///
+/// 这是**配置性拒绝**，不是服务端故障：请求本身没错，是这台进程按配置不提供这个能力。
+/// 以前它是一句 `anyhow::bail!("model_full_rebuild_enabled=false")` 的裸字符串，
+/// 落进 `ApiError::from_domain` 的兜底分支变成 500 `internal`，客户端看见的只有
+/// 「服务端故障」，于是会去重试、去查日志，而真正该做的是打开开关。
+#[derive(Debug, Clone, Copy)]
+pub struct ModelFullRebuildDisabled;
+
+impl std::fmt::Display for ModelFullRebuildDisabled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "model_full_rebuild_enabled=false: 本进程按配置不提供整库模型重排"
+        )
+    }
+}
+
+impl std::error::Error for ModelFullRebuildDisabled {}
+
 pub async fn reject_ensure_during_rebuild(root: RefnoEnum) -> anyhow::Result<()> {
     // 按需 ensure 是用户面热路径：没有在飞重建就不付这次数据库往返。
     if active().is_empty() {
@@ -68,7 +88,7 @@ pub async fn reject_ensure_during_rebuild(root: RefnoEnum) -> anyhow::Result<()>
 
 pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebuildReceipt> {
     if !crate::options::model_full_rebuild_enabled() {
-        anyhow::bail!("model_full_rebuild_enabled=false");
+        anyhow::bail!(ModelFullRebuildDisabled);
     }
     if !crate::data_interface::watch_scope::admits(dbnum) {
         anyhow::bail!(crate::data_interface::watch_scope::excluded_reason(dbnum));

@@ -113,13 +113,66 @@ pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<Strin
 
 /// 最近一次核对的结果，供同步的 `/health` 读取。
 ///
-/// `model_cache_health` 是同步函数，不能 `await`，所以启动时把结果存这里。
-/// 没跑过核对就是 `None`——`/health` 里表现为 `null`，不冒充「已追平」。
-static LAST_REPORT: std::sync::OnceLock<StorageVersionReport> = std::sync::OnceLock::new();
+/// `model_cache_health` 是同步函数，不能 `await`，所以核对结果存这里，由 [`refresh_if_stale`]
+/// 在 `/health` 入口处按需刷新。没跑过核对就是 `None`——`/health` 里表现为 `null`，
+/// 不冒充「已追平」。
+///
+/// 这里**不能**用 `OnceLock`：重建完成后版本记录才写进库，一次性的缓存会让 `/health`
+/// 一直报 `caught_up: false` 直到进程重启，而「重建有没有生效」恰恰是运维要当场看见的那件事。
+static LAST_REPORT: std::sync::RwLock<Option<StorageVersionReport>> =
+    std::sync::RwLock::new(None);
+
+fn report_lock() -> std::sync::RwLockReadGuard<'static, Option<StorageVersionReport>> {
+    LAST_REPORT
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn store_report(report: StorageVersionReport) {
+    *LAST_REPORT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(report);
+}
 
 /// 同步读最近一次核对结果（给 `/health` 用）。
-pub fn last_report() -> Option<&'static StorageVersionReport> {
-    LAST_REPORT.get()
+pub fn last_report() -> Option<StorageVersionReport> {
+    report_lock().clone()
+}
+
+/// 要不要再去库里核一次。
+///
+/// 已追平就不必再问：版本号只会随代码升级前进，运行期不会倒退，一份已追平的库
+/// 不会自己变回老库。没核对过（`None`）或未追平则每次都问——那正是「刚重建完，
+/// 等它转绿」的那段时间。
+pub(crate) fn needs_refresh(last: Option<&StorageVersionReport>) -> bool {
+    last.is_none_or(|report| !report.is_caught_up())
+}
+
+/// `/health` 入口处调用：未追平时重读一次库里的版本记录。
+///
+/// 读失败保留旧值——一次查询失败不该把库改判成老库，也不该把已经追平的状态抹掉。
+/// 只有「从没追平变成追平」这一种转变打一条 info（重建生效了，值得留一行痕迹）；
+/// 其余情况由启动时的 [`report_and_log`] 负责点名，这里不重复打 warn。
+pub async fn refresh_if_stale() -> Option<StorageVersionReport> {
+    let previous = last_report();
+    if !needs_refresh(previous.as_ref()) {
+        return previous;
+    }
+    let Ok(stored) = stored_version().await else {
+        // 读库失败：保留上一次的结论，不把这一轮当成「库落后」。
+        return previous;
+    };
+    let report = StorageVersionReport::from_stored(stored);
+    let caught_up = report.is_caught_up();
+    store_report(report.clone());
+    if caught_up && previous.as_ref().is_some_and(|old| !old.is_caught_up()) {
+        log::info!(
+            "模型面存储架构版本已追平 stored={} expected={}",
+            report.expected,
+            report.expected
+        );
+    }
+    Some(report)
 }
 
 /// 启动时点名。只打日志，不排任务、不阻断启动。
@@ -128,8 +181,8 @@ pub fn last_report() -> Option<&'static StorageVersionReport> {
 /// 返回报告，方便调用方顺手塞进 `/health` 的初值。
 pub(crate) async fn report_and_log(dbnums: &[u32]) -> anyhow::Result<StorageVersionReport> {
     let report = StorageVersionReport::from_stored(stored_version().await?);
-    // 存给 `/health`；重复调用只保留第一次。
-    let _ = LAST_REPORT.set(report.clone());
+    // 存给 `/health`；重复调用覆盖（重建完成后要能看见新值）。
+    store_report(report.clone());
     if !report.is_caught_up() {
         log::warn!(
             "MODEL_STORAGE_VERSION_MISMATCH stored={} expected={} source=version: 该库的模型面行形状本进程读不懂",
@@ -182,8 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn hints_are_copy_pasteable_and_only_when_stale() {
-        let stale = StorageVersionReport::from_stored(None);
+    fn hints_are_copy_pasteable_and_only_when_stale() {        let stale = StorageVersionReport::from_stored(None);
         assert_eq!(
             stale.rebuild_hints(&[7997, 7354]),
             vec![
@@ -203,5 +255,30 @@ mod tests {
         let report = StorageVersionReport::from_stored(current());
         assert_eq!(report.shape.as_deref(), Some("shape"));
         assert_eq!(report.rebuild.as_deref(), Some("rebuild"));
+    }
+
+    /// `/health` 该不该再去库里问一次。
+    ///
+    /// 已追平不再问（版本号只前进，运行期不会退回老库）；没核对过、未追平都要问——
+    /// 「刚重建完、等它转绿」的那段时间正靠这一条。
+    #[test]
+    fn the_report_is_refreshed_only_while_it_is_not_caught_up() {
+        assert!(needs_refresh(None), "没核对过必须先问一次");
+        assert!(
+            needs_refresh(Some(&StorageVersionReport::from_stored(None))),
+            "没有记录 = 老库，要问"
+        );
+        assert!(
+            needs_refresh(Some(&StorageVersionReport::from_stored(Some((
+                aios_core::model_storage::MODEL_STORAGE_VERSION + 1,
+                None,
+                None
+            ))))),
+            "比本进程新的库同样未追平，要问"
+        );
+        assert!(
+            !needs_refresh(Some(&StorageVersionReport::from_stored(current()))),
+            "已追平不该再付一次库往返"
+        );
     }
 }

@@ -856,6 +856,10 @@ async fn run_rooms_rebuild() {
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // 存储架构版本未追平时先重读一次库里的记录：重建完成后那条记录才写进去，
+    // 一次性缓存会让 `/health` 一直报 `caught_up: false` 直到进程重启，而「重建
+    // 有没有生效」正是运维要当场看见的事。已追平则不加库往返。
+    let _ = crate::data_interface::storage_version_reconcile::refresh_if_stale().await;
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let web_options = crate::get_db_option_ext();
     let http_bind_addr = super::runtime_http_api_addr(
@@ -5435,6 +5439,28 @@ mod tests {
                 .count(),
             2,
             "connected and disconnected health responses must advertise the same capabilities"
+        );
+    }
+
+    #[test]
+    fn health_refreshes_the_storage_version_report_before_reading_it() {
+        let source = include_str!("handlers.rs").replace("\r\n", "\n");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        let refresh = health
+            .find("storage_version_reconcile::refresh_if_stale()")
+            .expect("health 必须在读库前刷新存储架构版本，否则重建完成后一直报 caught_up: false");
+        let read = health
+            .find("model_cache_health(")
+            .expect("health 要带出 model_cache 分项");
+        assert!(
+            refresh < read,
+            "刷新必须排在读取之前，否则这一轮带出去的还是上一轮的结论"
         );
     }
 

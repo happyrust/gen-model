@@ -281,6 +281,14 @@ impl ApiError {
             .and_then(|error| dependency_unavailable(error, &message))
         {
             classified
+        } else if error
+            .downcast_ref::<crate::data_interface::model_rebuild::ModelFullRebuildDisabled>()
+            .is_some()
+        {
+            // 配置性拒绝：请求没错，是这台进程按配置不提供这个能力。落 500 会让
+            // 客户端以为服务端坏了，去重试、去查日志，而该做的是打开开关。
+            // 与 rooms_rebuild 对「本进程没有这个能力」用的码保持一致。
+            Self::coded(StatusCode::CONFLICT, "unsupported", message)
         } else {
             Self::coded(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
         }
@@ -1664,5 +1672,22 @@ mod tests {
             assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(error.code, "internal");
         }
+    }
+
+    /// 整库重排被配置关掉时，落 500 会让客户端以为服务端坏了、去重试、去查日志，
+    /// 而真正该做的是打开 `model_full_rebuild_enabled`。按「本进程不提供这个能力」
+    /// 落 409 `unsupported`，与 rooms_rebuild 同码。
+    #[test]
+    fn a_disabled_full_rebuild_is_a_409_unsupported_not_a_500() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::model_rebuild::ModelFullRebuildDisabled,
+        ));
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "unsupported");
+        assert!(
+            error.message.contains("model_full_rebuild_enabled=false"),
+            "要点名是哪个开关: {}",
+            error.message
+        );
     }
 }

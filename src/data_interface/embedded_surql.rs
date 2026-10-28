@@ -257,4 +257,98 @@ mod tests {
         );
         assert_eq!(none, None, "没有 room_relate 边的构件仍回 NONE");
     }
+
+    /// `gy_common.surql` 里那一个字面量必须与 `aios_core::model_storage::MODEL_STORAGE_VERSION` 同值。
+    ///
+    /// SurrealQL 没有跨语言常量，`let $storage_version_expected = 1;` 是唯一一处手抄。
+    /// 改版本号时如果只改 Rust 常量、忘了改这里，读侧会拿新版本去比一条旧字面量，
+    /// 库里的记录永远「对不上」——所有库都被判成老库，而且没有任何报错指向这一行。
+    /// 顺带钉住错误文本的两个片段：稳定码与可复制的重建入口。
+    #[test]
+    fn the_surql_storage_version_literal_matches_the_crate_constant() {
+        let text = EMBEDDED_SURQL
+            .iter()
+            .find(|(name, _)| *name == "gy_common.surql")
+            .map(|(_, text)| *text)
+            .expect("gy_common.surql 必须在内置快照里");
+
+        let expected_literal = format!(
+            "let $storage_version_expected = {};",
+            aios_core::model_storage::MODEL_STORAGE_VERSION
+        );
+        assert!(
+            text.contains(&expected_literal),
+            "gy_common.surql 的版本字面量与 aios_core 常量不同值，应当是 `{expected_literal}`"
+        );
+        assert!(
+            text.contains("MODEL_STORAGE_VERSION_MISMATCH"),
+            "错误文本必须带稳定码，rs-server 按它映射 409"
+        );
+        assert!(
+            text.contains("/model/rebuild"),
+            "错误文本必须带可复制的重建入口"
+        );
+    }
+
+    /// 老库（没有 `storage_version:current` 这条记录）上 `fn::pe_ptset_of` 必须 THROW，
+    /// 不能静默回 NONE——否则 `fn::bran_comp_len` 这类长度函数会回 0.0，被误当成
+    /// 「这根没有点」。补上记录之后同一次调用必须不再报错（这里没有 `pe_ptset` 行，
+    /// 所以回 NONE，那是「这根还没按新版发布过」的正常状态）。
+    #[tokio::test]
+    async fn pe_ptset_of_throws_on_a_database_without_the_storage_version_record() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_storage_version")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        db.query("CREATE pe:⟨24381_100817⟩ SET dbnum = 7997;")
+            .await
+            .expect("fixture reaches db")
+            .check()
+            .expect("fixture row created");
+
+        let expected = aios_core::model_storage::MODEL_STORAGE_VERSION;
+        let error = db
+            .query("RETURN fn::pe_ptset_of(pe:⟨24381_100817⟩);")
+            .await
+            .expect("statement reaches db")
+            .check()
+            .expect_err("缺版本记录时必须 THROW，不能静默回 NONE")
+            .to_string();
+        for fragment in [
+            "MODEL_STORAGE_VERSION_MISMATCH".to_owned(),
+            "dbnum=7997".to_owned(),
+            "stored=none".to_owned(),
+            format!("expected={expected}"),
+            "POST /api/v1/dbnums/7997/model/rebuild".to_owned(),
+        ] {
+            assert!(
+                error.contains(&fragment),
+                "错误文本缺少片段 `{fragment}`，实际: {error}"
+            );
+        }
+
+        db.query(format!(
+            "UPSERT storage_version:current CONTENT {{ version: {expected}, shape: 'test', rebuild: 'test' }};"
+        ))
+        .await
+        .expect("seed storage version reaches db")
+        .check()
+        .expect("seed storage version statement");
+
+        let mut response = db
+            .query("RETURN fn::pe_ptset_of(pe:⟨24381_100817⟩);")
+            .await
+            .expect("statement reaches db")
+            .check()
+            .expect("版本对上之后不应再报错");
+        let ptset: Option<serde_json::Value> = response.take(0).expect("decode ptset");
+        assert!(ptset.is_none(), "没有 pe_ptset 行时应回 NONE，实际: {ptset:?}");
+    }
 }
