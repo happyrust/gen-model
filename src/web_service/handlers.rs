@@ -2883,6 +2883,25 @@ fn apply_scrub_headers(response: &mut Response, headers: &[(&'static str, String
     }
 }
 
+/// `If-None-Match` 的候选值解析 + `matches_key` 的合并入口：Property 38 与 handler 共用同一段逻辑。
+#[cfg(test)]
+fn conditional_outcome(
+    if_none_match: &[String],
+    geometry_key: &str,
+    cached: std::sync::Arc<crate::fast_model::realtime_history::CachedHistoryResponse>,
+) -> crate::fast_model::realtime_history::RealtimeOutcome {
+    use crate::fast_model::realtime_history::{RealtimeOutcome, query::matches_key};
+    if matches_key(if_none_match, geometry_key) {
+        RealtimeOutcome::NotModified {
+            sesno: cached.sesno,
+            session_time: cached.session_time.clone(),
+            geometry_key: cached.geometry_key.clone(),
+        }
+    } else {
+        RealtimeOutcome::Body(cached)
+    }
+}
+
 /// `GET /api/v1/node/versions/resolve` 的查询串（Requirement 8）。
 ///
 /// `at` 原样收成字符串交给 `parse_instant_text`：axum 反序列化失败时会给自带的 400 体，
@@ -2978,22 +2997,48 @@ fn resolve_node_time(
         .collect();
     match crate::fast_model::time_resolve::resolve_at_rows(&instants, at) {
         Ok(resolved) => Ok(resolved),
-        Err(crate::fast_model::time_resolve::ResolveError::InvalidFormat) => Err(ApiError::coded(
-            StatusCode::BAD_REQUEST,
-            "INVALID_SELECTOR",
-            format!("at 不合法: {at:?}"),
-        )
-        .with_detail(json!({ "params": ["at"] }))),
-        Err(crate::fast_model::time_resolve::ResolveError::BeforeOldest) => Err(ApiError::coded(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "TIME_BEFORE_OLDEST_SESSION",
-            "时间点早于该节点全部带时间的会话",
+        // 与实时几何路由共用同一张映射（Property 32：两条路由的时间解析一致）。
+        Err(error) => Err(resolve_error(
+            error,
+            if matches!(
+                error,
+                crate::fast_model::time_resolve::ResolveError::InvalidFormat
+            ) {
+                Some(format!("at 不合法: {at:?}"))
+            } else {
+                None
+            },
         )),
-        Err(crate::fast_model::time_resolve::ResolveError::NoResolvable) => Err(ApiError::coded(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "NO_RESOLVABLE_SESSION",
-            "该节点的版本表里没有任何带 Session_Time 的行",
-        )),
+    }
+}
+
+/// 把时间点解析失败搬成 HTTP 错误：状态与错误码取
+/// [`crate::fast_model::realtime_history::resolve_error_status`] /
+/// [`resolve_error_code`]，`detail.params` 点名 `at`。
+fn resolve_error(error: crate::fast_model::time_resolve::ResolveError, message: Option<String>) -> ApiError {
+    use crate::fast_model::realtime_history as rh;
+    let status = StatusCode::from_u16(rh::resolve_error_status(error))
+        .unwrap_or(StatusCode::UNPROCESSABLE_ENTITY);
+    let api = ApiError::coded(status, rh::resolve_error_code(error), message.unwrap_or_else(|| {
+        match error {
+            crate::fast_model::time_resolve::ResolveError::InvalidFormat => {
+                "at 不符合 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]".to_string()
+            }
+            crate::fast_model::time_resolve::ResolveError::BeforeOldest => {
+                "时间点早于该节点全部带时间的会话".to_string()
+            }
+            crate::fast_model::time_resolve::ResolveError::NoResolvable => {
+                "该节点的版本表里没有任何带 Session_Time 的行".to_string()
+            }
+        }
+    }));
+    if matches!(
+        error,
+        crate::fast_model::time_resolve::ResolveError::InvalidFormat
+    ) {
+        api.with_detail(json!({ "params": ["at"] }))
+    } else {
+        api
     }
 }
 
@@ -6720,5 +6765,261 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("400 body is JSON");
         assert_eq!(body["code"], "bad_request");
         assert!(body["detail"].is_null(), "{body}");
+    }
+
+    // Feature: model-version-timeline-scrub, Property 38: ETag / If-None-Match 一致性（后端）。
+    mod prop_conditional {
+        use std::sync::Arc;
+
+        use proptest::prelude::*;
+
+        use super::super::*;
+        use crate::fast_model::realtime_history::{CachedHistoryResponse, RealtimeOutcome};
+
+        fn geometry_key() -> impl Strategy<Value = String> {
+            "[0-9a-f]{32}".prop_map(|hex| format!("g:{hex}"))
+        }
+
+        /// 一个 `If-None-Match` 变体。与 `key` 分开生成，避免 shrink 时把「头与键的绑定关系」shrink 掉。
+        #[derive(Debug, Clone, Copy)]
+        enum Variant {
+            Quoted,
+            Weak,
+            Bare,
+            ListWithKey,
+            Star,
+            OtherKey,
+            Suffixed,
+            Absent,
+            EmptyList,
+        }
+
+        fn variant() -> impl Strategy<Value = (Variant, usize)> {
+            (
+                prop_oneof![
+                    Just(Variant::Quoted),
+                    Just(Variant::Weak),
+                    Just(Variant::Bare),
+                    Just(Variant::ListWithKey),
+                    Just(Variant::Star),
+                    Just(Variant::OtherKey),
+                    Just(Variant::Suffixed),
+                    Just(Variant::Absent),
+                    Just(Variant::EmptyList),
+                ],
+                0usize..4,
+            )
+        }
+
+        /// 按变体拼出 `If-None-Match` 原文与「是否应命中」。
+        fn header_for(key: &str, variant: Variant, count: usize) -> (Option<String>, bool) {
+            let digits = &key[2..];
+            let flipped = format!(
+                "g:{}{}",
+                if digits.starts_with('0') { "1" } else { "0" },
+                &digits[1..]
+            );
+            match variant {
+                Variant::Quoted => (Some(format!("\"{key}\"")), true),
+                Variant::Weak => (Some(format!("W/\"{key}\"")), true),
+                Variant::Bare => (Some(key.to_string()), true),
+                Variant::ListWithKey => (
+                    Some(format!("  \"{key}\" ,  \"{flipped}\" ")),
+                    true,
+                ),
+                Variant::Star => (Some("*".to_string()), true),
+                Variant::OtherKey => (Some(format!("\"{flipped}\"")), false),
+                Variant::Suffixed => (Some(format!("\"{key}x\"")), false),
+                Variant::Absent => (None, false),
+                Variant::EmptyList => {
+                    let mut parts: Vec<String> = (0..count)
+                        .map(|index| format!("\"g:{:032x}\"", index + 1))
+                        .collect();
+                    parts.push(format!("\"{key}\""));
+                    (Some(parts.join(", ")), true)
+                }
+            }
+        }
+
+        /// `(sesno, key, If-None-Match 原文, 是否应命中)`。
+        fn case() -> impl Strategy<Value = (u32, String, Option<String>, bool)> {
+            (1u32..10_000, geometry_key(), variant()).prop_map(|(sesno, key, (variant, count))| {
+                let (header, should_match) = header_for(&key, variant, count);
+                (sesno, key, header, should_match)
+            })
+        }
+
+        fn cached(sesno: u32, geometry_key: String) -> Arc<CachedHistoryResponse> {
+            // 体与 200 的真实形状一致：`geometryKey` 与 `ETag` 必须指同一个值。
+            let body = serde_json::to_vec(&json!({
+                "sesno": sesno,
+                "geometryKey": geometry_key,
+            }))
+            .expect("serialize");
+            Arc::new(CachedHistoryResponse::new(
+                sesno,
+                Some("2024-03-01T08:00:00+08:00".to_string()),
+                geometry_key,
+                body,
+            ))
+        }
+
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(future)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            /// 304 当且仅当集合含 k；304 体为空、`ETag` 为 k、`X-Sesno` 为解析后 sesno；
+            /// 200 的 `ETag` 与体中 `geometryKey` 一致。
+            #[test]
+            fn not_modified_iff_the_header_set_contains_the_key(
+                (sesno, key, header, should_match) in case(),
+            ) {
+                let candidates = if_none_match_candidates(header.as_deref());
+                let stored = cached(sesno, key.clone());
+                let outcome = conditional_outcome(&candidates, &key, Arc::clone(&stored));
+                let expect_not_modified = matches!(outcome, RealtimeOutcome::NotModified { .. });
+                prop_assert_eq!(expect_not_modified, should_match, "{:?}", header);
+
+                let response = realtime_response(outcome);
+                let want_status = if should_match {
+                    StatusCode::NOT_MODIFIED
+                } else {
+                    StatusCode::OK
+                };
+                prop_assert_eq!(response.status(), want_status, "{:?}", header);
+                let quoted_key = format!("\"{key}\"");
+                prop_assert_eq!(
+                    response.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+                    Some(quoted_key.as_str()),
+                    "{:?}",
+                    header
+                );
+                let sesno_text = sesno.to_string();
+                prop_assert_eq!(
+                    response.headers().get("x-sesno").and_then(|v| v.to_str().ok()),
+                    Some(sesno_text.as_str())
+                );
+
+                let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                    .expect("body readable");
+                if should_match {
+                    prop_assert!(bytes.is_empty(), "304 body = {:?}", bytes);
+                } else {
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(&bytes).expect("body JSON");
+                    prop_assert_eq!(parsed["geometryKey"].as_str(), Some(key.as_str()));
+                }
+            }
+
+            /// `W/` 与引号被逐项剥掉：同一串里混排几种写法都能命中（Requirement 7.9）。
+            #[test]
+            fn weak_and_quoted_forms_are_normalised(
+                key in geometry_key(),
+                spaces in 0usize..3,
+            ) {
+                let pad = " ".repeat(spaces);
+                let text = format!("W/\"{key}\",{pad}\"{key}\"{pad}");
+                let candidates = if_none_match_candidates(Some(&text));
+                prop_assert!(crate::fast_model::realtime_history::query::matches_key(
+                    &candidates, &key
+                ));
+                prop_assert_eq!(candidates, vec![key.clone(), key.clone()]);
+            }
+        }
+    }
+
+    // Feature: model-version-timeline-scrub, Property 32: 两条路由的时间解析一致。
+    //
+    // 实时几何路由的 `time` 选择器与 `node/versions/resolve`（`scope=self`）共用
+    // `resolve_at_rows`；这里钉住「同一张表 + 同一时间点 → 同一个 sesno，失败时同一个错误码」。
+    mod prop_two_routes_agree {
+        use proptest::prelude::*;
+
+        use super::super::*;
+        use crate::fast_model::realtime_history as rh;
+        use crate::fast_model::time_resolve::{
+            ResolveError, VersionInstant, parse_instant_text, resolve_at_rows, resolve_parsed_at_rows,
+        };
+
+        /// 一张「仅自身」版本表：sesno 递增，时刻可缺、可重复、可倒退。
+        fn version_table() -> impl Strategy<Value = Vec<VersionInstant>> {
+            (0usize..10).prop_flat_map(|len| {
+                prop::collection::vec((any::<bool>(), 0i64..4_000i64), len).prop_map(|entries| {
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (timed, secs))| VersionInstant {
+                            sesno: index as u32 + 1,
+                            session_time: timed.then(|| {
+                                chrono::DateTime::from_timestamp(secs, 0)
+                                    .unwrap()
+                                    .fixed_offset()
+                                    .to_rfc3339()
+                            }),
+                        })
+                        .collect()
+                })
+            })
+        }
+
+        fn instant_text() -> impl Strategy<Value = String> {
+            prop_oneof![
+                4 => (0i64..4_000).prop_map(|secs| {
+                    chrono::DateTime::from_timestamp(secs, 0)
+                        .unwrap()
+                        .fixed_offset()
+                        .to_rfc3339()
+                }),
+                2 => (0i64..4_000).prop_map(|secs| {
+                    chrono::DateTime::from_timestamp(secs, 0)
+                        .unwrap()
+                        .fixed_offset()
+                        .naive_local()
+                        .format("%Y-%m-%dT%H:%M:%S")
+                        .to_string()
+                }),
+                1 => Just("not-a-time".to_string()),
+                1 => Just("2026-02-30T00:00:00Z".to_string()),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            #[test]
+            fn both_routes_pick_the_same_session_or_the_same_error(
+                rows in version_table(),
+                at in instant_text(),
+            ) {
+                // 实时几何路由：先 `parse_instant_text`（校验阶段），再 `resolve_parsed_at_rows`。
+                let realtime = match parse_instant_text(&at) {
+                    None => Err((400u16, "INVALID_SELECTOR")),
+                    Some(parsed) => match resolve_parsed_at_rows(&rows, parsed) {
+                        Ok((sesno, _)) => Ok(sesno),
+                        Err(error) => Err((
+                            rh::resolve_error_status(error),
+                            rh::resolve_error_code(error),
+                        )),
+                    },
+                };
+                // `node/versions/resolve`：`resolve_at_rows` 一次给出（内部先做语法检查）。
+                let node = match resolve_at_rows(&rows, &at) {
+                    Ok((sesno, _)) => Ok(sesno),
+                    Err(ResolveError::InvalidFormat) => Err((400u16, "INVALID_SELECTOR")),
+                    Err(error) => Err((
+                        rh::resolve_error_status(error),
+                        rh::resolve_error_code(error),
+                    )),
+                };
+                prop_assert_eq!(realtime, node, "rows = {:?}, at = {}", rows, at);
+            }
+        }
     }
 }

@@ -36,4 +36,5 @@ pub mod query;
 pub use query::{
     ComputedGeometry, RealtimeCalculator, RealtimeError, RealtimeHistoryRequest,
     RealtimeHistoryState, RealtimeOutcome, ServiceCalculator, query_realtime, query_realtime_with,
+    resolve_error_code, resolve_error_status,
 };

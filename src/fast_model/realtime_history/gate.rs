@@ -195,4 +195,109 @@ mod tests {
         }
         assert_eq!(gate.in_flight(), 0);
     }
+
+    // Feature: model-version-timeline-scrub, Property 37: 并发闸与无快照副作用（后端）。
+    //
+    // 闸的语义部分在这里做属性验证：任意交错的「取名额 / 放名额 / 满时再来一次」序列，
+    // 进行中计算数任一时刻不超过上限、忙拒绝不改变进行中计算数、每个名额恰好释放一次。
+    // 「整个序列前后 `HistoricalModelStore::stats().snapshots` 与任务表条数不变」需要真库
+    // 与真计算器，由 W4 集成脚本 `realtime-history-smoke.ps1` 覆盖（见 tasks.md 第 8 组）。
+    mod prop_gate_model {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// 一条操作：取名额、放掉某个已持有的名额、或在满时尝试取。
+        #[derive(Debug, Clone)]
+        enum Op {
+            Acquire,
+            Release(usize),
+            TryWhileFull,
+        }
+
+        fn ops() -> impl Strategy<Value = Vec<Op>> {
+            prop::collection::vec(
+                prop_oneof![
+                    4 => Just(Op::Acquire),
+                    4 => (0usize..8).prop_map(Op::Release),
+                    2 => Just(Op::TryWhileFull),
+                ],
+                0..30,
+            )
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            #[test]
+            fn interleaved_acquire_release_never_exceeds_the_limit(
+                limit in 1usize..=64,
+                operations in ops(),
+            ) {
+                let gate = RealtimeGate::new(limit);
+                let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
+                let mut acquired_total = 0usize;
+
+                for (step, op) in operations.iter().enumerate() {
+                    match op {
+                        Op::Acquire | Op::TryWhileFull => {
+                            let full = held.len() >= limit;
+                            match gate.try_acquire() {
+                                Ok(permit) => {
+                                    prop_assert!(!full, "step {}: acquired while full", step);
+                                    held.push(permit);
+                                    acquired_total += 1;
+                                }
+                                Err(busy) => {
+                                    prop_assert!(full, "step {}: rejected below the limit", step);
+                                    // 忙拒绝不改变进行中计算数，Retry-After 落在 [1, 5]。
+                                    prop_assert_eq!(busy.in_flight, held.len(), "step {}", step);
+                                    prop_assert_eq!(busy.limit, limit);
+                                    prop_assert!(
+                                        (RETRY_AFTER_MIN_SECS..=RETRY_AFTER_MAX_SECS)
+                                            .contains(&busy.retry_after_secs),
+                                        "step {}: retry_after = {}",
+                                        step,
+                                        busy.retry_after_secs
+                                    );
+                                }
+                            }
+                        }
+                        Op::Release(index) => {
+                            if !held.is_empty() {
+                                let index = index % held.len();
+                                held.remove(index);
+                                // 名额恰好释放一次：in_flight 跟着持有数走。
+                                prop_assert_eq!(gate.in_flight(), held.len(), "step {}", step);
+                            }
+                        }
+                    }
+                    prop_assert_eq!(gate.in_flight(), held.len(), "step {}", step);
+                    prop_assert!(gate.in_flight() <= limit, "step {}: over the limit", step);
+                }
+
+                // 全部放掉后回到零，且名额总数守恒。
+                let released = held.len();
+                drop(held);
+                prop_assert_eq!(gate.in_flight(), 0);
+                prop_assert!(acquired_total >= released);
+            }
+
+            /// 上限 0 按 1 处理，永远只放一个名额进来。
+            #[test]
+            fn zero_limit_degrades_to_one_slot(attempts in 1usize..8) {
+                let gate = RealtimeGate::new(0);
+                prop_assert_eq!(gate.limit(), 1);
+                let mut held = Vec::new();
+                for _ in 0..attempts {
+                    match gate.try_acquire() {
+                        Ok(permit) => held.push(permit),
+                        Err(busy) => prop_assert_eq!(busy.in_flight, 1),
+                    }
+                    prop_assert!(gate.in_flight() <= 1);
+                }
+                prop_assert_eq!(held.len(), 1);
+            }
+        }
+    }
 }

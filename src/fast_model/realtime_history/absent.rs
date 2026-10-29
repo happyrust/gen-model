@@ -217,4 +217,120 @@ mod tests {
             AbsentKind::UnitNotPresent(AbsentReason::Deleted)
         );
     }
+
+    // Feature: model-version-timeline-scrub, Property 34: 单元不存在的原因判定（后端）。
+    mod prop_absent_reason {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// 一条链序版本行序列：sesno 严格递增，影响随机（含 tombstone 与删除后重建）。
+        fn chain() -> impl Strategy<Value = Vec<UnitVersionImpact>> {
+            (0usize..14).prop_flat_map(|len| {
+                prop::collection::vec(
+                    prop_oneof![
+                        3 => Just(UnitVersionImpact::Delivery),
+                        1 => Just(UnitVersionImpact::Mesh),
+                        1 => Just(UnitVersionImpact::Placement),
+                        1 => Just(UnitVersionImpact::Noop),
+                        2 => Just(UnitVersionImpact::Tombstone),
+                    ],
+                    len,
+                )
+            })
+        }
+
+        /// 参考实现：按 sesno 找请求会话之前（含）的最后一行，再按四种情况分支。
+        fn reference(rows: &[UnitVersion], requested: u32) -> AbsentKind {
+            if rows.is_empty() {
+                return AbsentKind::RefnoNotInChain;
+            }
+            let mut last: Option<&UnitVersion> = None;
+            for row in rows {
+                if row.sesno <= requested && last.is_none_or(|current| row.sesno > current.sesno) {
+                    last = Some(row);
+                }
+            }
+            match last {
+                None => AbsentKind::UnitNotPresent(AbsentReason::NotYet),
+                Some(row) if row.impact_kind == UnitVersionImpact::Tombstone => {
+                    AbsentKind::UnitNotPresent(AbsentReason::Deleted)
+                }
+                Some(row) => AbsentKind::Inconsistent {
+                    last_sesno: row.sesno,
+                    last_impact: row.impact_kind,
+                },
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            #[test]
+            fn classify_matches_the_reference_and_its_http_surface(
+                impacts in chain(),
+                requested in 0u32..20,
+            ) {
+                let table: Vec<UnitVersion> = impacts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, impact_kind)| UnitVersion {
+                        sesno: index as u32 * 2 + 1,
+                        session_time: None,
+                        impact_kind,
+                    })
+                    .collect();
+                let kind = classify_absent(&table, requested);
+                prop_assert_eq!(kind, reference(&table, requested));
+
+                // 状态码与错误码与判定一一对应（Requirement 6.5）。
+                match kind {
+                    AbsentKind::RefnoNotInChain => {
+                        prop_assert_eq!(kind.code(), "REFNO_NOT_IN_CHAIN");
+                        prop_assert_eq!(kind.status(), 404);
+                        prop_assert_eq!(kind.reason(), None);
+                    }
+                    AbsentKind::UnitNotPresent(AbsentReason::NotYet) => {
+                        prop_assert_eq!(kind.code(), "UNIT_NOT_PRESENT");
+                        prop_assert_eq!(kind.status(), 404);
+                        prop_assert_eq!(kind.reason().map(|r| r.as_str()), Some("not-yet"));
+                    }
+                    AbsentKind::UnitNotPresent(AbsentReason::Deleted) => {
+                        prop_assert_eq!(kind.code(), "UNIT_NOT_PRESENT");
+                        prop_assert_eq!(kind.status(), 404);
+                        prop_assert_eq!(kind.reason().map(|r| r.as_str()), Some("deleted"));
+                    }
+                    AbsentKind::Inconsistent { .. } => {
+                        prop_assert_eq!(kind.code(), "GEOMETRY_GENERATION_FAILED");
+                        prop_assert_eq!(kind.status(), 500);
+                        prop_assert_eq!(kind.reason(), None);
+                    }
+                }
+            }
+
+            /// 顺序无关：任意重排输入结论不变（版本表来源不保证有序）。
+            #[test]
+            fn classify_is_independent_of_input_order(
+                impacts in chain(),
+                requested in 0u32..20,
+                shift in any::<prop::sample::Index>(),
+            ) {
+                let mut table: Vec<UnitVersion> = impacts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, impact_kind)| UnitVersion {
+                        sesno: index as u32 * 2 + 1,
+                        session_time: None,
+                        impact_kind,
+                    })
+                    .collect();
+                let want = classify_absent(&table, requested);
+                if !table.is_empty() {
+                    let offset = shift.index(table.len());
+                    table.rotate_left(offset);
+                }
+                prop_assert_eq!(classify_absent(&table, requested), want);
+            }
+        }
+    }
 }

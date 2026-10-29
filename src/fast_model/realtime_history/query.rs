@@ -567,7 +567,9 @@ fn configured_unit_types() -> Vec<String> {
 }
 
 /// `If-None-Match` 是否命中这个 `geometryKey`（已去引号、去 `W/`）。
-fn matches_key(candidates: &[String], geometry_key: &str) -> bool {
+///
+/// `pub(crate)`：handler 层用它做 `If-None-Match` 一致性的属性测试（Property 38）。
+pub(crate) fn matches_key(candidates: &[String], geometry_key: &str) -> bool {
     candidates
         .iter()
         .any(|candidate| candidate == geometry_key || candidate == "*")
@@ -604,23 +606,41 @@ fn resolve_session(
                 .collect();
             match resolve_parsed_at_rows(&rows, *parsed) {
                 Ok((sesno, time)) => Ok((sesno, Some(time))),
-                Err(ResolveError::InvalidFormat) => Err(RealtimeError::new(
-                    400,
-                    "INVALID_SELECTOR",
-                    "time 不符合 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]",
-                )),
-                Err(ResolveError::BeforeOldest) => Err(RealtimeError::new(
-                    422,
-                    "TIME_BEFORE_OLDEST_SESSION",
-                    "时间点早于该单元全部带时间的会话",
-                )),
-                Err(ResolveError::NoResolvable) => Err(RealtimeError::new(
-                    422,
-                    "NO_RESOLVABLE_SESSION",
-                    "该单元的版本表里没有任何带 Session_Time 的行",
+                Err(error) => Err(RealtimeError::new(
+                    resolve_error_status(error),
+                    resolve_error_code(error),
+                    resolve_error_message(error),
                 )),
             }
         }
+    }
+}
+
+/// 时间点解析失败在 HTTP 上的状态码（Requirement 8.3、8.6、8.10）。
+///
+/// `node/versions/resolve` 用同一张映射（Property 32「两条路由的时间解析一致」）：
+/// 两条路由对同一张表同一时间点给出同一个 sesno，失败时错误码也相同。
+pub fn resolve_error_status(error: ResolveError) -> u16 {
+    match error {
+        ResolveError::InvalidFormat => 400,
+        ResolveError::BeforeOldest | ResolveError::NoResolvable => 422,
+    }
+}
+
+/// 时间点解析失败的错误码。
+pub fn resolve_error_code(error: ResolveError) -> &'static str {
+    match error {
+        ResolveError::InvalidFormat => "INVALID_SELECTOR",
+        ResolveError::BeforeOldest => "TIME_BEFORE_OLDEST_SESSION",
+        ResolveError::NoResolvable => "NO_RESOLVABLE_SESSION",
+    }
+}
+
+fn resolve_error_message(error: ResolveError) -> &'static str {
+    match error {
+        ResolveError::InvalidFormat => "time 不符合 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]",
+        ResolveError::BeforeOldest => "时间点早于该单元全部带时间的会话",
+        ResolveError::NoResolvable => "该单元的版本表里没有任何带 Session_Time 的行",
     }
 }
 
@@ -748,5 +768,96 @@ mod tests {
             .expect("computed");
         assert_eq!(computed.visited, 3);
         assert_eq!(fake.calls.load(Ordering::Relaxed), 1);
+    }
+
+    // 例子测试（tasks.md 6.10）：错误码与 HTTP 状态的映射表。需要真库的那几条
+    // （`SESSION_NOT_FOUND`、`NOT_A_DELIVERY_UNIT_ROOT`、413、`REFNO_NOT_IN_CHAIN`）由 W4 的
+    // `scripts/verify/realtime-history-smoke.ps1` 走 HTTP 覆盖。
+
+    #[test]
+    fn unit_versions_errors_map_to_the_documented_status_codes() {
+        let cases = [
+            ("INVALID_REFNO", 400),
+            ("INVALID_VERSION_PAIR", 400),
+            ("REFNO_NOT_FOUND", 404),
+            ("NOT_A_DELIVERY_UNIT_ROOT", 422),
+            ("COMPUTATION_TIMEOUT", 504),
+            ("SOURCE_NOT_FOUND", 503),
+            ("SESSION_TIME_UNAVAILABLE", 503),
+            ("SOMETHING_NEW", 500),
+        ];
+        for (code, want) in cases {
+            let error = UnitVersionsError {
+                code,
+                message: format!("{code} 的说明"),
+                detail: None,
+            };
+            let mapped: RealtimeError = error.into();
+            assert_eq!(mapped.status, want, "{code}");
+            assert_eq!(mapped.code, code);
+        }
+    }
+
+    #[test]
+    fn historical_model_errors_map_to_the_documented_status_codes() {
+        let cases = [
+            ("INVALID_SELECTOR", 400),
+            ("INVALID_REFNO", 400),
+            ("SESSION_NOT_FOUND", 404),
+            ("REFNO_NOT_FOUND_AT_SESSION", 404),
+            ("TIME_BEFORE_OLDEST_SESSION", 422),
+            ("NO_RESOLVABLE_SESSION", 422),
+            ("GENERATION_LIMIT_EXCEEDED", 413),
+            ("GENERATION_CANCELLED", 504),
+            ("SESSION_TIME_UNAVAILABLE", 503),
+            ("SOURCE_NOT_FOUND", 503),
+            ("internal", 500),
+        ];
+        for (code, want) in cases {
+            let error = HistoricalModelError::new(code, format!("{code} 的说明"));
+            let mapped: RealtimeError = error.into();
+            assert_eq!(mapped.status, want, "{code}");
+            assert_eq!(mapped.code, code);
+        }
+    }
+
+    /// 时间点解析失败在两条路由上的状态与错误码必须一致（Requirement 8.3、8.6、8.10）。
+    #[test]
+    fn resolve_errors_share_one_mapping_for_both_routes() {
+        for (error, status, code) in [
+            (ResolveError::InvalidFormat, 400u16, "INVALID_SELECTOR"),
+            (ResolveError::BeforeOldest, 422, "TIME_BEFORE_OLDEST_SESSION"),
+            (ResolveError::NoResolvable, 422, "NO_RESOLVABLE_SESSION"),
+        ] {
+            assert_eq!(resolve_error_status(error), status, "{error:?}");
+            assert_eq!(resolve_error_code(error), code, "{error:?}");
+        }
+    }
+
+    /// `Retry-After` 与忙拒绝的 `detail` 取值一致（Requirement 7.1）。
+    #[test]
+    fn busy_outcome_carries_the_gate_numbers() {
+        let gate = RealtimeGate::new(1);
+        let _permit = gate.try_acquire().expect("permit");
+        let busy = gate.try_acquire().expect_err("full");
+        assert_eq!(busy.in_flight, 1);
+        assert_eq!(busy.limit, 1);
+        assert!((1..=5).contains(&busy.retry_after_secs));
+        assert_eq!(
+            busy.retry_after_secs,
+            crate::fast_model::realtime_history::retry_after_secs(busy.in_flight, busy.limit)
+        );
+    }
+
+    /// 超时与取消都归 504 `HISTORY_QUERY_TIMEOUT`，调用方不必分辨（Requirement 6.9、6.14）。
+    #[test]
+    fn timeout_and_cancel_share_the_504_code() {
+        let timed_out = RealtimeError::timed_out(1);
+        assert_eq!((timed_out.status, timed_out.code), (504, "HISTORY_QUERY_TIMEOUT"));
+        let cancelled = RealtimeError::cancelled();
+        assert_eq!(
+            (cancelled.status, cancelled.code),
+            (504, "HISTORY_QUERY_TIMEOUT")
+        );
     }
 }

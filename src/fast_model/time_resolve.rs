@@ -533,4 +533,285 @@ mod tests {
             );
         }
     }
+
+    /// 共享样例逐条对拍 `resolve_at_rows`（Requirement 8.1–8.3、8.6、8.10 的三处一致守护）。
+    #[test]
+    fn shared_fixture_resolves_like_the_recorded_expectation() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/version-time-resolve-cases.json"
+        );
+        let text = std::fs::read_to_string(path).expect("read shared fixture");
+        let fixture: serde_json::Value = serde_json::from_str(&text).expect("fixture json");
+        let cases = fixture["cases"].as_array().expect("cases");
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let at = case["at"].as_str().unwrap();
+            let rows: Vec<VersionInstant> = case["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| VersionInstant {
+                    sesno: row["sesno"].as_u64().unwrap() as u32,
+                    session_time: row["session_time"].as_str().map(str::to_string),
+                })
+                .collect();
+            let actual = resolve_at_rows(&rows, at);
+            match case["expect"].get("error").and_then(|v| v.as_str()) {
+                Some("invalid-format") => {
+                    assert_eq!(actual, Err(ResolveError::InvalidFormat), "case {name}")
+                }
+                Some("before-oldest") => {
+                    assert_eq!(actual, Err(ResolveError::BeforeOldest), "case {name}")
+                }
+                Some("no-resolvable") => {
+                    assert_eq!(actual, Err(ResolveError::NoResolvable), "case {name}")
+                }
+                Some(other) => panic!("case {name}: unknown error {other}"),
+                None => {
+                    let want = (
+                        case["expect"]["sesno"].as_u64().unwrap() as u32,
+                        case["expect"]["session_time"].as_str().unwrap().to_string(),
+                    );
+                    assert_eq!(actual, Ok(want), "case {name}");
+                }
+            }
+        }
+    }
+
+    // Feature: model-version-timeline-scrub, Property 29: 时间点解析遵循链序规则，
+    // 前端、后端与会话链包装一致。
+    mod prop_chain_order {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// 一条版本行：sesno 严格递增（链序），时刻可缺、可重复、可倒退。
+        fn version_table() -> impl Strategy<Value = Vec<VersionInstant>> {
+            (0usize..12).prop_flat_map(|len| {
+                let rows = prop::collection::vec(
+                    (any::<bool>(), 0i64..5_000i64),
+                    len,
+                );
+                rows.prop_map(|entries| {
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (timed, secs))| VersionInstant {
+                            sesno: index as u32 + 1,
+                            session_time: timed.then(|| {
+                                chrono::DateTime::from_timestamp(secs, 0)
+                                    .unwrap()
+                                    .fixed_offset()
+                                    .to_rfc3339()
+                            }),
+                        })
+                        .collect()
+                })
+            })
+        }
+
+        /// 暴力参考实现：带时间且秒级时间 ≤ t 的行里 sesno 最大者。
+        ///
+        /// 不带偏移的时间点按 Chain_Order 中第一条带时间行的偏移解释（design §1.5 第 4 点）。
+        fn reference(rows: &[VersionInstant], parsed: ParsedInstant) -> Result<(u32, String), ResolveError> {
+            let first_offset = rows
+                .iter()
+                .find_map(|row| {
+                    row.session_time
+                        .as_deref()
+                        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                })
+                .map(|time| *time.offset());
+            let Some(first_offset) = first_offset else {
+                return Err(ResolveError::NoResolvable);
+            };
+            let at = parsed.with_fallback(first_offset);
+            let mut best: Option<&VersionInstant> = None;
+            let mut any_timed = false;
+            for row in rows {
+                let Some(time) = row
+                    .session_time
+                    .as_deref()
+                    .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                else {
+                    continue;
+                };
+                any_timed = true;
+                if time.timestamp() <= at.timestamp()
+                    && best.is_none_or(|current| row.sesno > current.sesno)
+                {
+                    best = Some(row);
+                }
+            }
+            match best {
+                Some(row) => Ok((
+                    row.sesno,
+                    row.session_time.clone().expect("timed row"),
+                )),
+                None if any_timed => Err(ResolveError::BeforeOldest),
+                None => Err(ResolveError::NoResolvable),
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100))]
+
+            #[test]
+            fn resolve_at_rows_matches_the_brute_force_reference(
+                rows in version_table(),
+                at_secs in 0i64..5_000i64,
+                floating in any::<bool>(),
+            ) {
+                let at = chrono::DateTime::from_timestamp(at_secs, 0)
+                    .unwrap()
+                    .fixed_offset();
+                let text = if floating {
+                    at.naive_local().format("%Y-%m-%dT%H:%M:%S").to_string()
+                } else {
+                    at.to_rfc3339()
+                };
+                let parsed = parse_instant_text(&text).expect("generated time parses");
+                prop_assert_eq!(
+                    resolve_at_rows(&rows, &text),
+                    reference(&rows, parsed),
+                    "rows = {:?}, at = {}",
+                    rows,
+                    text
+                );
+            }
+
+            /// `select_session_at` 的包装对同一序列给出同一结论（会话链与版本表共用一把尺子）。
+            #[test]
+            fn session_chain_wrapper_agrees_with_the_version_table(
+                rows in version_table(),
+                at_secs in 0i64..5_000i64,
+            ) {
+                let at = chrono::DateTime::from_timestamp(at_secs, 0)
+                    .unwrap()
+                    .fixed_offset();
+                let time_of = |row: &VersionInstant| {
+                    row.session_time
+                        .as_deref()
+                        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                };
+                let via_rows = resolve_at_rows(&rows, &at.to_rfc3339());
+                let via_chain = match select_latest_at(&rows, time_of, at) {
+                    SelectAt::Found(row) => Ok((
+                        row.sesno,
+                        row.session_time.clone().expect("timed row"),
+                    )),
+                    SelectAt::BeforeOldest => Err(ResolveError::BeforeOldest),
+                    SelectAt::NoTimed => Err(ResolveError::NoResolvable),
+                };
+                prop_assert_eq!(via_rows, via_chain);
+            }
+        }
+    }
+
+    // Feature: model-version-timeline-scrub, Property 31: 时间点解析往返。
+    mod prop_round_trip {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        fn version_table() -> impl Strategy<Value = Vec<VersionInstant>> {
+            (1usize..10).prop_flat_map(|len| {
+                prop::collection::vec((any::<bool>(), 0i64..3_000i64), len).prop_map(|entries| {
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (timed, secs))| VersionInstant {
+                            sesno: index as u32 + 1,
+                            session_time: timed.then(|| {
+                                chrono::DateTime::from_timestamp(secs, 0)
+                                    .unwrap()
+                                    .fixed_offset()
+                                    .to_rfc3339()
+                            }),
+                        })
+                        .collect()
+                })
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100))]
+
+            /// 用版本 v 的 Session_Time 去解析，得到的 w 的 sesno ≥ v 的 sesno；
+            /// 且若 v 之后没有时间不晚于 v 的带时间版本，则 w = v。
+            #[test]
+            fn resolving_a_versions_own_time_never_goes_backwards(
+                rows in version_table(),
+                pick in any::<prop::sample::Index>(),
+            ) {
+                let timed: Vec<&VersionInstant> =
+                    rows.iter().filter(|row| row.session_time.is_some()).collect();
+                prop_assume!(!timed.is_empty());
+                let v = timed[pick.index(timed.len())];
+                let at = v.session_time.as_deref().unwrap();
+                let (sesno, _) = resolve_at_rows(&rows, at).expect("v's own time resolves");
+                prop_assert!(sesno >= v.sesno, "v={} w={}", v.sesno, sesno);
+
+                // 若 v 之后所有带时间行都晚于 v，则必须落在 v 上。
+                let v_time = chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp();
+                let any_later_within = rows.iter().any(|row| {
+                    row.sesno > v.sesno
+                        && row
+                            .session_time
+                            .as_deref()
+                            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                            .is_some_and(|time| time.timestamp() <= v_time)
+                });
+                if !any_later_within {
+                    prop_assert_eq!(sesno, v.sesno);
+                }
+            }
+        }
+    }
+
+    // Feature: model-version-timeline-scrub, Property 30: 非法时间点被拒。
+    mod prop_invalid_instant {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        fn invalid_text() -> impl Strategy<Value = String> {
+            let year = 1970u32..=2099;
+            prop_oneof![
+                Just(String::new()),
+                "[a-z ]{0,10}",
+                year.clone().prop_map(|y| format!("{y:04}-01-02")),
+                year.clone().prop_map(|y| format!("{y:04}-02-30T00:00:00Z")),
+                year.clone().prop_map(|y| format!("{y:04}-13-01T00:00:00Z")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T24:00:00Z")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:60")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00:60")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00:00.1234")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02t10:00")),
+                year.clone().prop_map(|y| format!("{y:04}/01/02 10:00")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00+24:00")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00z")),
+                year.clone().prop_map(|y| format!(" {y:04}-01-02T10:00Z")),
+                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00Z ")),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100))]
+
+            #[test]
+            fn every_out_of_grammar_text_is_rejected(text in invalid_text()) {
+                prop_assert_eq!(parse_instant_text(&text), None, "{:?}", text);
+                prop_assert_eq!(parse_instant(&text, None), None, "{:?}", text);
+                // 空表 + 非法文本仍是语法错，不是「没有可解析的版本」。
+                prop_assert_eq!(
+                    resolve_at_rows(&[], &text),
+                    Err(ResolveError::InvalidFormat),
+                    "{:?}",
+                    text
+                );
+            }
+        }
+    }
 }

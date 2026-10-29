@@ -352,4 +352,211 @@ mod tests {
         assert_eq!((stats.hits, stats.misses), (2, 2));
         assert_eq!(stats.entries, 0);
     }
+
+    // Feature: model-version-timeline-scrub, Property 36: 结果缓存模型（后端）。
+    mod prop_cache_model {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// 一条操作：查（可能命中）、写（可能带非 200 状态）、记一次未命中。
+        #[derive(Debug, Clone)]
+        enum Op {
+            Get { sesno: u32, fp: u8 },
+            Insert { sesno: u32, fp: u8, status: u16 },
+            Miss,
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                3 => (0u32..6, 0u8..3).prop_map(|(sesno, fp)| Op::Get { sesno, fp }),
+                4 => (0u32..6, 0u8..3, prop_oneof![Just(200u16), Just(404), Just(504)])
+                    .prop_map(|(sesno, fp, status)| Op::Insert { sesno, fp, status }),
+                1 => Just(Op::Miss),
+            ]
+        }
+
+        fn ops() -> impl Strategy<Value = Vec<Op>> {
+            prop::collection::vec(op(), 0..40)
+        }
+
+        fn fp(byte: u8) -> String {
+            (byte as char).to_string().repeat(64)
+        }
+
+        fn cache_key(sesno: u32, byte: u8) -> RealtimeCacheKey {
+            RealtimeCacheKey {
+                dbnum: 1112,
+                unit: (24384, 23257),
+                sesno,
+                fingerprint: fp(byte),
+            }
+        }
+
+        /// 参考模型：逐条复刻 design §1.2 第 4、8 步的语义，独立于实现写法。
+        #[derive(Default)]
+        struct Reference {
+            capacity: usize,
+            current_fp: Option<String>,
+            /// `(key, last_used, 值)`，顺序无关，只按 `last_used` 取最久未使用。
+            entries: Vec<(RealtimeCacheKey, u64, u32)>,
+            next_tick: u64,
+            hits: u64,
+            misses: u64,
+        }
+
+        impl Reference {
+            fn new(capacity: usize) -> Self {
+                Self {
+                    capacity,
+                    ..Default::default()
+                }
+            }
+
+            fn adopt(&mut self, fingerprint: &str) {
+                if self.current_fp.as_deref() != Some(fingerprint) {
+                    self.current_fp = Some(fingerprint.to_string());
+                    self.entries.clear();
+                }
+            }
+
+            fn tick(&mut self) -> u64 {
+                self.next_tick += 1;
+                self.next_tick
+            }
+
+            fn get(&mut self, key: &RealtimeCacheKey) -> Option<u32> {
+                if self.capacity == 0 {
+                    return None;
+                }
+                self.adopt(&key.fingerprint);
+                let tick = self.tick();
+                let found = self
+                    .entries
+                    .iter_mut()
+                    .find(|(entry, _, _)| entry == key)
+                    .map(|(_, last_used, value)| {
+                        *last_used = tick;
+                        *value
+                    });
+                if found.is_some() {
+                    self.hits += 1;
+                }
+                found
+            }
+
+            fn record_miss(&mut self) {
+                self.misses += 1;
+            }
+
+            fn insert(&mut self, key: RealtimeCacheKey, status: u16, value: u32) -> bool {
+                if status != 200 || self.capacity == 0 {
+                    return false;
+                }
+                match self.current_fp.as_deref() {
+                    None => self.current_fp = Some(key.fingerprint.clone()),
+                    Some(current) if current != key.fingerprint => return false,
+                    Some(_) => {}
+                }
+                if !self.entries.iter().any(|(entry, _, _)| *entry == key) {
+                    while self.entries.len() >= self.capacity {
+                        let Some((index, _)) = self
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, (_, last_used, _))| *last_used)
+                        else {
+                            break;
+                        };
+                        self.entries.remove(index);
+                    }
+                }
+                let last_used = self.tick();
+                match self.entries.iter_mut().find(|(entry, _, _)| *entry == key) {
+                    Some(slot) => {
+                        slot.1 = last_used;
+                        slot.2 = value;
+                    }
+                    None => self.entries.push((key, last_used, value)),
+                }
+                true
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100))]
+
+            #[test]
+            fn cache_behaves_like_the_reference_model(
+                capacity in 0usize..8,
+                operations in ops(),
+            ) {
+                let cache: RealtimeResultCache<u32> = RealtimeResultCache::new(capacity);
+                let mut reference = Reference::new(capacity);
+
+                for (step, op) in operations.iter().enumerate() {
+                    match op {
+                        Op::Get { sesno, fp: byte } => {
+                            let key = cache_key(*sesno, *byte);
+                            let want = reference.get(&key);
+                            let got = cache.get(&key).map(|value| *value);
+                            prop_assert_eq!(got, want, "step {}: get {:?}", step, key);
+                        }
+                        Op::Insert { sesno, fp: byte, status } => {
+                            let key = cache_key(*sesno, *byte);
+                            // 值与键绑定，命中时能验证「原样回放同一份结果」。
+                            let value = *sesno * 1000 + u32::from(*byte);
+                            let want = reference.insert(key.clone(), *status, value);
+                            let got = cache.insert(key.clone(), *status, Arc::new(value));
+                            prop_assert_eq!(got, want, "step {}: insert {:?}", step, key);
+                            // 命中的条目内容必须与写入时完全相同；两边都再查一次，计数同步推进。
+                            let replayed = cache.get(&key).map(|stored| *stored);
+                            prop_assert_eq!(replayed, reference.get(&key), "step {}: replay", step);
+                        }
+                        Op::Miss => {
+                            cache.record_miss();
+                            reference.record_miss();
+                        }
+                    }
+
+                    let stats = cache.stats();
+                    prop_assert!(stats.entries <= capacity, "step {}: entries over capacity", step);
+                    prop_assert_eq!(stats.entries, reference.entries.len(), "step {}: entries", step);
+                    prop_assert_eq!(stats.capacity, capacity, "step {}: capacity", step);
+                    prop_assert_eq!(stats.hits, reference.hits, "step {}: hits", step);
+                    prop_assert_eq!(stats.misses, reference.misses, "step {}: misses", step);
+                }
+            }
+
+            /// 指纹变化后旧指纹条目既不命中也不占条目数（7.4）；命中与未命中只增不减（7.5）。
+            #[test]
+            fn fingerprint_change_drops_old_entries_without_rewinding_counters(
+                capacity in 1usize..6,
+                old_fp in 0u8..3,
+                new_fp in 3u8..6,
+                writes in prop::collection::vec(0u32..6, 1..8),
+            ) {
+                let cache: RealtimeResultCache<u32> = RealtimeResultCache::new(capacity);
+                for sesno in &writes {
+                    cache.insert(cache_key(*sesno, old_fp), 200, Arc::new(*sesno));
+                }
+                let before = cache.stats();
+                prop_assert!(before.entries <= capacity);
+
+                // 新指纹的第一次查询清表；此后旧指纹条目一个都不命中。
+                prop_assert!(cache.get(&cache_key(writes[0], new_fp)).is_none());
+                for sesno in &writes {
+                    prop_assert!(cache.get(&cache_key(*sesno, old_fp)).is_none());
+                    prop_assert!(cache.get(&cache_key(*sesno, new_fp)).is_none());
+                }
+                let after = cache.stats();
+                prop_assert_eq!(after.entries, 0);
+                prop_assert!(after.hits >= before.hits);
+                prop_assert!(after.misses >= before.misses);
+                // 旧指纹的结果即使算完也不写回。
+                prop_assert!(!cache.insert(cache_key(writes[0], old_fp), 200, Arc::new(0)));
+                prop_assert_eq!(cache.stats().entries, 0);
+            }
+        }
+    }
 }

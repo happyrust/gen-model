@@ -381,4 +381,163 @@ mod tests {
         );
         assert_eq!(memo.get_or_compute(other, start, compute("ok")).unwrap(), "ok");
     }
+
+    // Feature: model-version-timeline-scrub, Property 35: geometryKey 是几何内容摘要（后端）。
+    mod prop_geometry_key {
+        use proptest::prelude::*;
+        use serde_json::{Map, json};
+
+        use super::super::*;
+
+        /// 一行的全部内容。`id` 由序号补齐保证唯一，避免同 `(kind, source_refno, id)`
+        /// 的排序歧义把参考实现写歪。
+        #[derive(Debug, Clone)]
+        struct Row {
+            kind: &'static str,
+            id: String,
+            source_refno: String,
+            sesno: u32,
+            snapshot_key: String,
+            payload: String,
+        }
+
+        fn rows_spec() -> impl Strategy<Value = Vec<Row>> {
+            prop::collection::vec(
+                (
+                    prop_oneof![Just(KIND_INSTANCE), Just(KIND_TUBE)],
+                    "[a-z]{1,3}",
+                    "[0-9]{4}_[0-9]{1,3}",
+                    0u32..50,
+                    "[0-9]{4}_[0-9]{1,3}@[0-9]{1,3}",
+                    "[a-z]{1,4}",
+                ),
+                1..10,
+            )
+            .prop_map(|entries| {
+                entries
+                    .into_iter()
+                    .enumerate()
+                    .map(
+                        |(index, (kind, id, source_refno, sesno, snapshot_key, payload))| Row {
+                            kind,
+                            id: format!("{id}-{index}"),
+                            source_refno,
+                            sesno,
+                            snapshot_key,
+                            payload,
+                        },
+                    )
+                    .collect()
+            })
+        }
+
+        fn row_json(row: &Row, keep_volatile: bool) -> Value {
+            let mut map = Map::new();
+            map.insert("id".into(), json!(row.id));
+            map.insert("source_refno".into(), json!(row.source_refno));
+            map.insert("payload".into(), json!(row.payload));
+            let mut direct = Map::new();
+            direct.insert("source".into(), json!("e3d-model"));
+            if keep_volatile {
+                map.insert("snapshot_key".into(), json!(row.snapshot_key));
+                direct.insert("sesno".into(), json!(row.sesno));
+            }
+            map.insert("direct_model".into(), Value::Object(direct));
+            Value::Object(map)
+        }
+
+        fn split(rows: &[Row], keep_volatile: bool) -> (Vec<Value>, Vec<Value>) {
+            let mut instances = Vec::new();
+            let mut tubes = Vec::new();
+            for row in rows {
+                let value = row_json(row, keep_volatile);
+                if row.kind == KIND_TUBE {
+                    tubes.push(value);
+                } else {
+                    instances.push(value);
+                }
+            }
+            (instances, tubes)
+        }
+
+        /// 参考：去掉 `snapshot_key` 与 `direct_model.sesno` 后按
+        /// `(kind, source_refno, id)` 排序（`id` 唯一，顺序确定）。
+        fn reference(rows: &[Row]) -> Vec<(String, String, String, String)> {
+            let mut out: Vec<_> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.kind.to_string(),
+                        row.source_refno.clone(),
+                        row.id.clone(),
+                        canonical_json(&row_json(row, false)),
+                    )
+                })
+                .collect();
+            out.sort();
+            out
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            /// 重排 + 换掉全部易变字段后摘要不变；与另一组行比较时，
+            /// 「摘要相等」当且仅当「去掉易变字段并按 (kind, source_refno, id) 排序后逐项相等」。
+            #[test]
+            fn digest_equality_mirrors_content_equality(
+                rows in rows_spec(),
+                other in rows_spec(),
+                shift in any::<prop::sample::Index>(),
+                rerun in any::<prop::sample::Index>(),
+            ) {
+                let mut perturbed = rows.clone();
+                let offset = shift.index(perturbed.len());
+                perturbed.rotate_left(offset);
+                for index in 0..perturbed.len() {
+                    perturbed[index].sesno =
+                        perturbed[index].sesno.wrapping_add(rerun.index(97) as u32 + 1);
+                    perturbed[index].snapshot_key =
+                        format!("{}-{index}", perturbed[index].snapshot_key);
+                }
+
+                let base = split(&rows, true);
+                let shuffled = split(&perturbed, true);
+                let base_digest = geometry_digest(&base.0, &base.1);
+                prop_assert_eq!(base_digest.clone(), geometry_digest(&shuffled.0, &shuffled.1));
+                prop_assert_eq!(reference(&rows), reference(&perturbed));
+
+                // 没有易变字段的行与有易变字段的行摘要相同（去掉的正是这两处）。
+                let stripped = split(&rows, false);
+                prop_assert_eq!(base_digest.clone(), geometry_digest(&stripped.0, &stripped.1));
+
+                let rival = split(&other, true);
+                let rival_digest = geometry_digest(&rival.0, &rival.1);
+                prop_assert_eq!(
+                    base_digest == rival_digest,
+                    reference(&rows) == reference(&other),
+                    "rows = {:?}, other = {:?}",
+                    rows,
+                    other
+                );
+            }
+
+            /// 改任意一个非易变字段（`payload`）或挪到另一个 `kind` 下，摘要必变。
+            #[test]
+            fn any_content_change_changes_the_digest(
+                rows in rows_spec(),
+                pick in any::<prop::sample::Index>(),
+            ) {
+                let mut changed = rows.clone();
+                let index = pick.index(changed.len());
+                changed[index].payload.push('!');
+                prop_assert_ne!(reference(&rows), reference(&changed));
+                let base = split(&rows, true);
+                let after = split(&changed, true);
+                prop_assert_ne!(
+                    geometry_digest(&base.0, &base.1),
+                    geometry_digest(&after.0, &after.1)
+                );
+            }
+        }
+    }
 }
