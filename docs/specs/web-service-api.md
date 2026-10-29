@@ -2255,6 +2255,102 @@ A 时不存在 → `kind: "created"`；B 时不存在 → `"deleted"`；两头�
   "mesh_repaired": 0, "unique_meshes": 52, "elapsed_ms": 8120 }
 ```
 
+### 4.16 模型版本时间轴三条只读路由（2026-10-29，spec `model-version-timeline-scrub`）
+
+三条路由共同的前提：**只读、同步、不建任务**。`model/history/geometry` 与 `element/attributes-at` 都在请求内按会话链现算，
+既不写 `HistoricalModelStore`（快照回执表），也不写投影存储；`node/versions/resolve` 只读 `node_versions` 那张版本表。
+三者都照 §3 校验 `project` / `mdb` / `namespace`。
+
+#### 4.16.1 `GET /api/v1/model/history/geometry` — 单元在某一版下的实时几何
+
+| 参数 | 类型 | 含义 |
+|---|---|---|
+| `dbnum` | int | 必填。缺 → 400 `INVALID_FIELD`（`detail.field`） |
+| `unit_refno` | `a/b` \| `a_b` | 必填。解不出或 `dbno != dbnum` → 400 `INVALID_REFNO` |
+| `sesno` | int | 与 `time` **恰好给一个**，`∈ [1, 2³¹−1]` |
+| `time` | 时间点 | 语法 `YYYY-MM-DD[T\| ]HH:mm[:ss[.f{1,3}]][Z\|±HH:MM]`；不带偏移按链序第一条带时间行的偏移解释 |
+
+- 选择器不合格（两个都给 / 都不给 / `sesno` 越界 / `time` 语法错）→ 400 `INVALID_SELECTOR`，`detail.params` 列出无效参数名。
+  优先级按 §3 统一顺序：缺字段或 refno 无效 → 选择器无效。
+- 响应 200：
+
+```json
+{ "dbnum": 7997, "unit_refno": "24384_23257", "sesno": 12,
+  "session_time": "2026-09-22T02:00:00+00:00",
+  "geometryKey": "g:0123456789abcdef0123456789abcdef",
+  "instances": [ … ], "tubes": [ … ],
+  "stats": { "visited": 41, "generated": 3, "failed": 0, "elapsed_ms": 812 } }
+```
+
+  | 头 | 值 |
+  |---|---|
+  | `ETag` | `"<geometryKey>"`（带引号） |
+  | `X-Sesno` | 解析出的会话号 |
+  | `X-Session-Time` | 该会话的 `Session_Time`；会话无时间时为空串 |
+  | `Cache-Control` | `no-cache` |
+
+  `geometryKey` 是**几何内容**摘要：每行去掉 `snapshot_key` 与 `direct_model.sesno`，按 `(kind, source_refno, id)` 排序后
+  规范化 JSON 喂 SHA-256，取前 16 字节 hex 加 `g:` 前缀。所以「只改了属性」的会话与前一版摘要相同。`instances` / `tubes`
+  已按 `(source_refno, id)` 排序、按 `id` 去重留最后、不含 `snapshot_key`。
+- 304：`If-None-Match` 含当前 `geometryKey`（可带 `W/`、可带引号、可逗号分隔、可为 `*`）→ 304，体为空，四个头同 200。
+- 503 `HISTORY_BUSY`：并发闸满。带 `Retry-After: 1..5` 秒与 JSON 体
+  `{ "code": "HISTORY_BUSY", "message": …, "detail": { "in_flight", "limit", "retry_after_secs" } }`。不排队、不计命中 / 未命中。
+- 504 `HISTORY_QUERY_TIMEOUT`：超过 `model_history_query_timeout_secs`，取消标志已置位，阻塞线程在下一个检查点退出。
+  客户端断开同样归这个码（`CancelOnDrop` 置位）。
+- 413 `GENERATION_LIMIT_EXCEEDED`：元素数超 `MAX_HISTORY_ELEMENTS`，不带任何几何。
+- 404 `SESSION_NOT_FOUND`（`sesno` 不在该单元的版本表上）/ `REFNO_NOT_IN_CHAIN`（该 refno 在整条会话链上没有记录）/
+  `UNIT_NOT_PRESENT`（带 `detail.reason` = `not-yet` 或 `deleted`）。
+- 422 `NOT_A_DELIVERY_UNIT_ROOT`（`unit_refno` 不是配置的最小交付单元名词）/ `NO_RESOLVABLE_SESSION`（表里一行带时间的都没有）/
+  `TIME_BEFORE_OLDEST_SESSION`（时间点早于全部带时间行）。
+- 500 `GEOMETRY_GENERATION_FAILED`：版本表说单元还在、索引里却没有根，数据不一致。
+- 缓存：键 `(dbnum, unit, sesno, 源文件集指纹)`，容量 `model_history_realtime_cache`（0–1024，缺省 32，0 = 停用）；
+  只写 200；指纹一变整表清空。命中回放的体字节与头与首次计算逐字节相同。
+
+#### 4.16.2 `GET /api/v1/node/versions/resolve` — 把时间点解析成节点版本表上的一个会话
+
+| 参数 | 类型 | 含义 |
+|---|---|---|
+| `dbnum` | int | 必填 |
+| `refno` | `a/b` \| `a_b` | 必填，任意节点（构件 / 单元根 / SITE、ZONE 容器） |
+| `scope` | `self` \| `subtree` | 缺省 `self`。其它值 → 400 `INVALID_SELECTOR`（`detail.params = ["scope"]`） |
+| `at` | 时间点 | 必填，语法同 §4.16.1 的 `time` |
+
+- 响应 200：`{ "sesno": 12, "session_time": "2026-09-22T02:00:00+00:00" }`
+- 解析规则与 §4.16.1 的 `time` **同一把尺子**（`resolve_at_rows`）：在带 `Session_Time` 且秒级时间 ≤ `at` 的行里取 `sesno` 最大者。
+  所以「按时刻取到哪一版」与 `node/versions` 时间轴上看到的那一行永远一致。
+- 错误：400 `INVALID_SELECTOR`（`at` 语法错或 `scope` 不认）、404 `NODE_NOT_FOUND`、422 `NO_RESOLVABLE_SESSION` /
+  `TIME_BEFORE_OLDEST_SESSION`。状态与错误码与 §4.16.1 对同一时间点完全相同。
+
+#### 4.16.3 `GET /api/v1/element/attributes-at` — 构件在某一版下的属性
+
+| 参数 | 类型 | 含义 |
+|---|---|---|
+| `dbnum` | int | 必填 |
+| `refno` | `a/b` \| `a_b` | 必填 |
+| `sesno` | int | 必填 |
+
+- 与 `POST /api/v1/model/history/query`（`tool=attributes`）**同一个渲染器**，区别是不经过快照回执：调用方只要
+  `(dbnum, refno, sesno)`，不需要先 `generate`。响应体与 `tool=attributes` 同形，去掉 `snapshot_key`。
+- 构件在该会话不存在 → `exists: false`（**不是错误**；这条路由不报 `REFNO_NOT_FOUND_AT_SESSION`）。
+- 错误：400 `INVALID_REFNO`（格式错或 `dbno != dbnum`）、404 `SESSION_NOT_FOUND`、503 `SOURCE_NOT_FOUND`。
+
+#### 4.16.4 `/health.model_cache.realtime_history`
+
+```json
+"realtime_history": {
+  "cache_entries": 3, "cache_capacity": 32,
+  "hits_total": 118, "misses_total": 27,
+  "in_flight": 1, "concurrency_limit": 4,
+  "input_cache": { "entries": 2, "capacity": 8 },
+  "timeout_secs": 20
+}
+```
+
+- `cache_entries` 只数当前指纹下的条目；`in_flight` = `limit − available_permits()`，反映真正还在占 CPU 的计算数
+  （名额随计算闭包进阻塞线程，计算停下才归还）。`input_cache` 是只给历史用的生成输入缓存。
+- 与 `historical` 分项**互不影响**：实时路径不碰 `HistoricalModelStore`，`historical.snapshots` 不因它变动。
+- 只报读数，不参与任何 health gate。
+
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
 ### 5.1 信封
