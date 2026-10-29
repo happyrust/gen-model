@@ -130,11 +130,23 @@ jobs:
 
       # 运行期/编译期路径（include_str!、测试 fixture、schema 目录）走仓内 vendor/shared——
       # 把兄弟 vendor/ 联接进去，和本地 vendor/shared junction 同形状。
+      #
+      # 路径一律用 $GITHUB_WORKSPACE 拼绝对路径，不要写相对路径：本 job 的
+      # `defaults.run.working-directory: gen-model` 让 cwd 变成 `$GITHUB_WORKSPACE\gen-model`，
+      # 于是 `gen-model\vendor` 会落到 `$GITHUB_WORKSPACE\gen-model\gen-model\vendor`——
+      # 多一层 gen-model。之前就是这么写的，junction 建到了错误位置，
+      # `include_str!("../../vendor/shared/e3d-model/tests/reference_reads_guard.rs")`
+      # 一直报 os error 3。
       - name: Link vendor into gen-model/vendor/shared
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force gen-model\vendor | Out-Null
-          New-Item -ItemType Junction -Path gen-model\vendor\shared -Target "$env:GITHUB_WORKSPACE\vendor" | Out-Null
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'gen-model'
+          $link = Join-Path $repo 'vendor\shared'
+          New-Item -ItemType Directory -Force (Join-Path $repo 'vendor') | Out-Null
+          New-Item -ItemType Junction -Path $link -Target (Join-Path $env:GITHUB_WORKSPACE 'vendor') | Out-Null
+          if (-not (Test-Path -LiteralPath (Join-Path $link 'e3d-model\tests\reference_reads_guard.rs'))) {
+            throw "vendor/shared 联接没接上：$link 下找不到 e3d-model\tests\reference_reads_guard.rs"
+          }
 
       # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
       # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。
@@ -426,8 +438,15 @@ jobs:
       - name: Link vendor into gen-model/vendor/shared
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force gen-model\vendor | Out-Null
-          New-Item -ItemType Junction -Path gen-model\vendor\shared -Target "$env:GITHUB_WORKSPACE\vendor" | Out-Null
+          # 同上一个 job：cwd 已被 `defaults.run.working-directory: gen-model` 带进
+          # `$GITHUB_WORKSPACE\gen-model`，相对路径会多叠一层 gen-model。一律用绝对路径。
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'gen-model'
+          $link = Join-Path $repo 'vendor\shared'
+          New-Item -ItemType Directory -Force (Join-Path $repo 'vendor') | Out-Null
+          New-Item -ItemType Junction -Path $link -Target (Join-Path $env:GITHUB_WORKSPACE 'vendor') | Out-Null
+          if (-not (Test-Path -LiteralPath (Join-Path $link 'e3d-model\tests\reference_reads_guard.rs'))) {
+            throw "vendor/shared 联接没接上：$link 下找不到 e3d-model\tests\reference_reads_guard.rs"
+          }
 
       # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
       # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。
