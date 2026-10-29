@@ -2904,20 +2904,22 @@ fn conditional_outcome(
 
 /// `GET /api/v1/node/versions/resolve` 的查询串（Requirement 8）。
 ///
-/// `at` 原样收成字符串交给 `parse_instant_text`：axum 反序列化失败时会给自带的 400 体，
-/// 而这里要的是 `INVALID_SELECTOR` + `detail.params`（Requirement 8.8）。
-#[derive(Debug, Deserialize)]
+/// 字段全用 `Option<String>` 原样收下：axum 的 `Query` 反序列化失败会给自带的 400 体
+/// （`Failed to deserialize query string: missing field ...`），不含 `error.code`，
+/// 而 Requirement 8.4 / 8.8 要的是 `INVALID_SELECTOR` + `detail.params`。
+/// 缺字段与非法值都由 handler 自己裁决，与 `model/history/geometry` 的 `RealtimeQueryParams` 同一套做法。
+#[derive(Debug, Default, Deserialize)]
 pub struct ResolveNodeTimeReq {
     #[serde(flatten)]
     pub identity: ProjectReq,
-    pub dbnum: u32,
+    pub dbnum: Option<String>,
     /// `a/b` 或 `a_b`
-    pub refno: String,
+    pub refno: Option<String>,
     /// `self` / `subtree`，缺省 `self`（Requirement 8.7 的「节点版本表」默认口径）
     #[serde(default)]
     pub scope: Option<String>,
     /// 时间点；不带偏移时按链序第一条带时间行的偏移解释（Requirement 8.1）
-    pub at: String,
+    pub at: Option<String>,
 }
 
 /// GET /api/v1/node/versions/resolve — 把时间点解析成节点版本表上的一个会话（Requirement 8）。
@@ -2946,26 +2948,41 @@ pub async fn node_versions_resolve(
             .with_detail(json!({ "params": ["scope"] })));
         }
     };
-    if crate::fast_model::time_resolve::parse_instant_text(&req.at).is_none() {
+    // 缺字段与非法值一视同仁，都归 `INVALID_SELECTOR` 并点名 `at`（Requirement 8.4）
+    let Some(at) = req.at.as_deref().map(str::trim).filter(|text| !text.is_empty()) else {
         return Err(ApiError::coded(
             StatusCode::BAD_REQUEST,
             "INVALID_SELECTOR",
-            format!(
-                "at 必须匹配 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]，收到 {:?}",
-                req.at
-            ),
+            "missing required parameter at",
+        )
+        .with_detail(json!({ "params": ["at"] })));
+    };
+    if crate::fast_model::time_resolve::parse_instant_text(at).is_none() {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_SELECTOR",
+            format!("at 必须匹配 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]，收到 {at:?}"),
         )
         .with_detail(json!({ "params": ["at"] })));
     }
-    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+    let dbnum = parse_dbnum_param(req.dbnum.as_deref())?;
+    let refno_text = req.refno.as_deref().map(str::trim).filter(|text| !text.is_empty());
+    let Some(refno_text) = refno_text else {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            "missing required parameter refno",
+        )
+        .with_detail(json!({ "field": "refno" })));
+    };
+    let refno = crate::fast_model::e3d_model_service::parse_refno(refno_text).map_err(|error| {
         ApiError::coded(
             StatusCode::BAD_REQUEST,
             "INVALID_REFNO",
             format!("{error:#}"),
         )
     })?;
-    let dbnum = req.dbnum;
-    let at = req.at;
+    let at = at.to_string();
     let (sesno, session_time) = tokio::task::spawn_blocking(move || {
         resolve_node_time(dbnum, refno, scope, &at)
     })
@@ -3073,15 +3090,59 @@ fn node_versions_error(error: crate::fast_model::unit_versions::UnitVersionsErro
     unit_versions_error(error)
 }
 
+/// `dbnum` 查询参数的裁决：缺 → 400 `INVALID_FIELD`（`detail.field = "dbnum"`）；
+/// 不是正整数 → 同样 `INVALID_FIELD`。与 `model/history/geometry` 的 `validate_fields` 同一口径，
+/// 供两条新只读路由共用（避免 axum `Query` 反序列化失败给出不带 `error.code` 的裸 400 体）。
+fn parse_dbnum_param(raw: Option<&str>) -> Result<u32, ApiError> {
+    let Some(text) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            "missing required parameter dbnum",
+        )
+        .with_detail(json!({ "field": "dbnum" })));
+    };
+    match text.parse::<u32>() {
+        Ok(value) if value > 0 => Ok(value),
+        _ => Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            format!("dbnum must be a positive integer, got {text:?}"),
+        )
+        .with_detail(json!({ "field": "dbnum" }))),
+    }
+}
+
+/// 正整数查询参数（`sesno`）：缺 → `Ok(None)`（调用方决定报什么码）；给了但不是正整数 →
+/// 400 `INVALID_FIELD`。
+fn parse_positive_u32_param(raw: Option<&str>, field: &'static str) -> Result<Option<u32>, ApiError> {
+    let Some(text) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    match text.parse::<u32>() {
+        Ok(value) if value > 0 => Ok(Some(value)),
+        _ => Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            format!("{field} must be a positive integer, got {text:?}"),
+        )
+        .with_detail(json!({ "field": field }))),
+    }
+}
+
 /// `GET /api/v1/element/attributes-at` 的查询串（Requirement 6.13）。
-#[derive(Debug, Deserialize)]
+///
+/// 字段全用 `Option<String>` 原样收下，缺字段与非法值由 handler 自己裁决：
+/// axum 的 `Query` 反序列化失败会给自带 400 体（`Failed to deserialize query string`），
+/// 不含 `error.code`，前端 `toHistoryError` 只能把它当成裸错误。与 `RealtimeQueryParams` 同一套做法。
+#[derive(Debug, Default, Deserialize)]
 pub struct AttributesAtReq {
     #[serde(flatten)]
     pub identity: ProjectReq,
-    pub dbnum: u32,
+    pub dbnum: Option<String>,
     /// `a/b` 或 `a_b`
-    pub refno: String,
-    pub sesno: u32,
+    pub refno: Option<String>,
+    pub sesno: Option<String>,
 }
 
 /// GET /api/v1/element/attributes-at — 某构件在某会话下的属性，不要快照句柄（Requirement 6.13）。
@@ -3098,27 +3159,43 @@ pub async fn element_attributes_at(
     Query(req): Query<AttributesAtReq>,
 ) -> Result<Json<Value>, ApiError> {
     resolve_identity(&state, &req.identity)?;
-    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+    let dbnum = parse_dbnum_param(req.dbnum.as_deref())?;
+    let refno_text = req.refno.as_deref().map(str::trim).filter(|text| !text.is_empty());
+    let Some(refno_text) = refno_text else {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            "missing required parameter refno",
+        )
+        .with_detail(json!({ "field": "refno" })));
+    };
+    let refno = crate::fast_model::e3d_model_service::parse_refno(refno_text).map_err(|error| {
         ApiError::coded(
             StatusCode::BAD_REQUEST,
             "INVALID_REFNO",
             format!("{error:#}"),
         )
     })?;
-    if refno.dbno() != req.dbnum {
+    if refno.dbno() != dbnum {
         return Err(ApiError::coded(
             StatusCode::BAD_REQUEST,
             "INVALID_REFNO",
             format!(
                 "refno {} 属于 dbnum {}，不是请求的 dbnum {}",
-                req.refno,
+                refno_text,
                 refno.dbno(),
-                req.dbnum
+                dbnum
             ),
         ));
     }
-    let dbnum = req.dbnum;
-    let sesno = req.sesno;
+    let Some(sesno) = parse_positive_u32_param(req.sesno.as_deref(), "sesno")? else {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FIELD",
+            "missing required parameter sesno",
+        )
+        .with_detail(json!({ "field": "sesno" })));
+    };
     let service = state
         .element_attributes
         .get()
@@ -7021,5 +7098,55 @@ mod tests {
                 prop_assert_eq!(realtime, node, "rows = {:?}, at = {}", rows, at);
             }
         }
+    }
+
+    /// 两条新只读路由的查询串全部用 `Option<String>` 收下，缺字段与非法值由 handler 裁决
+    /// （design §1.1 第 1 点）：axum `Query` 反序列化失败会给自带 400 体，不含 `error.code`，
+    /// 前端只能当成裸错误。这条例子钉住「缺 / 非法都还是带码的 400」。
+    #[test]
+    fn new_readonly_routes_report_coded_400_instead_of_axum_deserialize_errors() {
+        fn code_of(error: &ApiError) -> (u16, String) {
+            (error.status.as_u16(), error.code.to_string())
+        }
+
+        // resolve：缺 dbnum / 缺 refno / dbnum 非正整数 → INVALID_FIELD
+        assert_eq!(
+            code_of(&parse_dbnum_param(None).unwrap_err()),
+            (400, "INVALID_FIELD".to_string())
+        );
+        assert_eq!(
+            code_of(&parse_dbnum_param(Some("abc")).unwrap_err()),
+            (400, "INVALID_FIELD".to_string())
+        );
+        assert_eq!(parse_dbnum_param(Some(" 8000 ")).unwrap(), 8000);
+
+        // attributes-at：sesno 缺 → None（调用方报 INVALID_FIELD）；非法 → INVALID_FIELD
+        assert_eq!(parse_positive_u32_param(None, "sesno").unwrap(), None);
+        assert_eq!(parse_positive_u32_param(Some("  "), "sesno").unwrap(), None);
+        assert_eq!(
+            code_of(&parse_positive_u32_param(Some("abc"), "sesno").unwrap_err()),
+            (400, "INVALID_FIELD".to_string())
+        );
+        assert_eq!(parse_positive_u32_param(Some("12"), "sesno").unwrap(), Some(12));
+        // 0 不算正整数：sesno 从 1 起
+        assert_eq!(
+            code_of(&parse_positive_u32_param(Some("0"), "sesno").unwrap_err()),
+            (400, "INVALID_FIELD".to_string())
+        );
+    }
+
+    /// 反序列化本身不再因为缺字段失败：`Query` 拿到的永远是 `None`，不是 400。
+    #[test]
+    fn resolve_and_attributes_at_deserialize_without_required_fields() {
+        let resolve: ResolveNodeTimeReq = serde_json::from_str("{}").expect("空查询串也要能反序列化");
+        assert!(resolve.dbnum.is_none());
+        assert!(resolve.refno.is_none());
+        assert!(resolve.at.is_none());
+        assert!(resolve.scope.is_none());
+
+        let attributes: AttributesAtReq = serde_json::from_str("{}").expect("空查询串也要能反序列化");
+        assert!(attributes.dbnum.is_none());
+        assert!(attributes.refno.is_none());
+        assert!(attributes.sesno.is_none());
     }
 }
