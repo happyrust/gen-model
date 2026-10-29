@@ -19,6 +19,8 @@ pub mod node_diff_summary;
 pub mod node_versions;
 /// 时间点解析：时间点语法与「链序上第一条时刻 ≤ t」规则，会话链与版本表共用。
 pub mod time_resolve;
+/// 实时历史几何查询（`GET model/history/geometry`）：同步计算、不建任务、不写投影存储。
+pub mod realtime_history;
 /// 只给历史用的生成输入缓存：键 `(dbnum, sesno, identity)`，不挤掉当前模型那份输入。
 pub mod historical_input;
 /// 实时历史计算的取消标志（`CancelToken` / `CancelOnDrop`）与 DFS 停止钩子。
