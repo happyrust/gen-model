@@ -6950,21 +6950,31 @@ mod tests {
         );
 
         // 启动 / 周期重扫：装完清单、排完自己的行，同一把活动闸内收养。
-        let scan_side = include_str!("increment_manager.rs");
-        let sweep_install = scan_side
-            .find("coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);")
+        //
+        // 先在 `increment_manager.rs` 里把生产函数体切出来，再在体内找字面量。
+        // 不能直接在整份源码上 `rfind`：本文件 `mod tests` 在**前部**（159 行），生产函数
+        // 在后（约 4900 行），测试模块里也写着这些字面量，最后一次出现落在生产代码之后，
+        // 于是 `scan_side[..sweep_install].rfind("epoch_activation_guard();")` 会命中测试
+        // 断言自己的 `.find("epoch_activation_guard();")`，切出的区间跨进测试代码，里面
+        // 自然有 `.await`，误报（2026-10-29 修）。
+        let scan_source = include_str!("increment_manager.rs");
+        let scan_body = scan_source
+            .split_once("fn enqueue_discovered(")
+            .map_or(scan_source, |(_, body)| body);
+        let sweep_install = scan_body
+            .rfind("coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);")
             .expect("重扫装清单");
-        let sweep_adopt = scan_side
-            .find("adopt_stale_rows_into(origin, epoch_id);")
+        let sweep_adopt = scan_body
+            .rfind("adopt_stale_rows_into(origin, epoch_id);")
             .expect("重扫装完清单也要收养");
         assert!(sweep_install < sweep_adopt, "重扫先装清单再收养");
-        let sweep_gate = scan_side[..sweep_install]
+        let sweep_gate = scan_body[..sweep_install]
             .rfind("epoch_activation_guard();")
             .expect("重扫的开 epoch / 装清单在活动闸内");
         assert!(
-            !scan_side[sweep_gate..sweep_adopt].contains(".await"),
+            !scan_body[sweep_gate..sweep_adopt].contains(".await"),
             "重扫活动闸内不得有 .await: {}",
-            &scan_side[sweep_gate..sweep_adopt]
+            &scan_body[sweep_gate..sweep_adopt]
         );
 
         // worker：每次 drain 开头兜底收养，早于第一处出队。

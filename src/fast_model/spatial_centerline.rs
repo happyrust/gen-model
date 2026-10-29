@@ -479,6 +479,9 @@ mod tests {
             name: None,
             stext: None,
             connection: None,
+            // `BranchMember` 新加了 `adjust_len`（调整焊附加长度，另一条工作线的
+            // adjust_weld 功能）。这个测试夹具不关心调整焊，填 None 保持原行为。
+            adjust_len: None,
         }
     }
 
