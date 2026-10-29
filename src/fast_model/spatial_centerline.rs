@@ -457,32 +457,26 @@ mod tests {
         Aabb::new(min.into(), max.into())
     }
 
+    /// 造一个 `BranchMember` 夹具。
+    ///
+    /// 按 JSON 构造而不是逐字段字面量：`BranchMember` 是跨仓契约（`vendor/plant-mbd`
+    /// 的 `data_source.rs`），字段会随那边的分支增减。字面量写法让本文件在那边加字段
+    /// 时立刻编不过（`E0063: missing field`），而这里只关心 refno / 两端点 / 序号 /
+    /// 外径——调整焊的 `adjust_len`、P 点 `ppoints`、焊缝 `weld_number` 这些都不参与
+    /// 中心线计算。省略的字段一律走契约里的 `#[serde(default)]`。
     fn member(refno: &str, order: u32, start: [f64; 3], end: [f64; 3], od: Option<f64>) -> BranchMember {
-        BranchMember {
-            refno: refno.to_string(),
-            owner_refno: "1_100".to_string(),
-            start,
-            end,
-            noun: None,
-            arrive_axis: None,
-            leave_axis: None,
-            pos: None,
-            arrive_refno: None,
-            order,
-            outside_diameter: od,
-            arrive_noun: None,
-            ppoints: Vec::new(),
-            arrive_ppoint: None,
-            leave_ppoint: None,
-            dtxr: None,
-            weld_number: None,
-            name: None,
-            stext: None,
-            connection: None,
-            // `BranchMember` 新加了 `adjust_len`（调整焊附加长度，另一条工作线的
-            // adjust_weld 功能）。这个测试夹具不关心调整焊，填 None 保持原行为。
-            adjust_len: None,
+        let mut value = serde_json::json!({
+            "refno": refno,
+            "owner_refno": "1_100",
+            "start": start,
+            "end": end,
+            "order": order,
+        });
+        if let Some(od) = od {
+            value["outside_diameter"] = serde_json::json!(od);
         }
+        serde_json::from_value(value)
+            .expect("BranchMember 的测试夹具字段名必须与 vendor 契约一致")
     }
 
     #[test]
