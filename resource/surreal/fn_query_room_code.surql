@@ -1,40 +1,161 @@
-REMOVE FUNCTION fn::room_code;
-DEFINE FUNCTION fn::room_code($pe:record) {
-    let $noun = $pe.refno.TYPE;
-    // SurrealDB 2.x：块的值是块内最后一条语句的值，而 `$id = …;` 这种赋值语句的值是 NONE，
-    // 所以每个分支只放一个表达式，不在块里再赋值。
-    // First handle different entity types
-    let $id = if ($noun == 'EQUI' || $noun == 'STRU' || $noun == 'REST') {
-        array::flatten([$pe<-pe_owner.in.id, $pe<-pe_owner.in<-pe_owner.in.id])[0]
-    } else if ($noun == 'BRAN') {
-        $pe<-pe_owner.in.id
-    } else if ($noun == 'SUPPO' || $noun == 'ZONE') {
-        array::flatten($pe<-pe_owner.in<-pe_owner.in<-pe_owner.in.id)[0]
-    } else {
-        $pe
-    };
-
-    // Then check room relation
-    // 多归属时按归属强度取最强的一条，结果确定（ADR-010 §5）。
+remove function if exists fn::single_room_code;
+// 目标查找节点的房间号。
+// 跨多房构件（横跨两室的桶形件）会有多条 room_relate 边，这里取 ADR-010 §5 定义的
+// 最强边（inside_count desc, center_dist asc, room_num asc），不再按存储序取首条。
+// 无房间边时**先判空**：`fn::room_relate_of($pe).in` 在 NONE 上取字段会让整条语句以
+// `CoerceTo { from: None, into: "record" }` 报错（2026-10-29 mem 引擎实测）。
+DEFINE FUNCTION fn::single_room_code($pe:record) {
     let $res = fn::room_relate_of($pe);
-    if ($res == none) {
+    if $res == NONE {
         return none;
     };
-
-    let $prefix = string::split(string::slice($res.in.owner.name, 1), '-')[0];
-    // Handle room number formatting
-    let $code = if (string::len($res.room_num) == 4) {
+    // $res.in 是面板 pe。缺面板行（数据残缺、或测试夹具没建面板）时，
+    // `$res.in.owner` 会让整条语句以「Expected a record but found NONE」报错，
+    // 所以面板与面板属主都先单独取出来判空，不在表达式里链式访问。
+    let $panel = $res.in;
+    if $panel == NONE {
+        return none;
+    };
+    // 注意：`$panel.owner` 取到的是**记录 id**（`pe:…`），不是记录本身；
+    // 记录 id 上取 `.noun` / `.name` 会回 NONE（mem 引擎实测，会拼出 "NONE-R144"）。
+    // 显式 `select * from only` 把整行取出来再用。
+    let $owner_id = $panel.owner;
+    if $owner_id == NONE {
+        return none;
+    };
+    let $owner = select * from only type::thing('pe', record::id($owner_id));
+    if $owner == NONE {
+        return none;
+    };
+    // 先取FRMW上:BPENCODEID的值，没有再从name上取
+    let $room_code_uda = fn::get_uda_value($owner.id,'/BPENCODEID')?:'';
+    if $room_code_uda != '' && $room_code_uda != 'unset' {
+        return $room_code_uda;
+    };
+    // 前缀取「面板属主名字的第一段」（'/1RX-RM01-R144-VOLU' → '1RX'）。
+    // SBFR 的属主是楼层面板，要再上一层取楼名；缺行时退回 SBFR 自己的名字。
+    // 注意 mem 引擎的坑：`if <变量> != '' { … } else { … }` 这种**嵌套 IF 里的字符串
+    // 比较**会判假（2026-10-29 实测，变量明明有值却走 else）。因此这里不写嵌套 IF，
+    // 改成先把两个候选前缀都算出来，再用 `?:` 取第一个非空值。
+    let $owner_name = $owner.name ?: '';
+    let $owner_prefix = string::split(string::slice($owner_name, 1), '-')[0];
+    let $upper_id = $owner.owner;
+    let $upper_name = if $upper_id == NONE { '' } else { $upper_id.name ?: '' };
+    let $upper_prefix = string::split(string::slice($upper_name, 1), '-')[0];
+    let $prefix = if $owner.noun == 'SBFR' {
+            ($upper_prefix ?: '') ?: $owner_prefix
+        } else { $owner_prefix };
+    if $prefix == '' {
+        return none;
+    };
+    // 房间号归一：4 位直接用；5 位（如 R0144）去掉第二位，与「1RX-R144」同形。
+    // 真库 167407 条边实测全是 4 位，5 位分支是给旧数据/其它项目留的（gen-model 的
+    // hd 用例钉住了这条路）；其它长度回 NONE，不拼出畸形码。
+    let $code = if string::len($res.room_num) == 4 {
         $res.room_num
-    } else if (string::len($res.room_num) == 5) {
+    } else if string::len($res.room_num) == 5 {
         string::concat(string::slice($res.room_num, 0, 1), string::slice($res.room_num, 2))
     } else {
         none
     };
-
-    // Return the formatted room code
-    if ($code == none) {
+    if $code == none {
         return none;
     };
-
     return string::concat($prefix, '-', $code);
+};
+
+remove function if exists fn::room_code;
+// 返回**数组**：消费方一律按 `fn::room_code($pe)[0]` 取首个房间码
+// （core 的 `AiosDBMgr::get_room_code`、rs-server 的 `heat_dissipation.rs`）。
+// 返回字符串会让 `[0]` 取到首字符，因此这里与 hh 版保持同一形状。
+DEFINE FUNCTION fn::room_code($pe:record) {
+    // 入口收敛：`$pe` 可能是记录 id，也可能是整行对象（mem 引擎在函数里读字段后会
+    // 物化）。先取出 noun 与纯记录 id，后面**只用**这两个局部变量，不再碰 `$pe`。
+    // 直接把整行对象传给 `fn::single_room_code` 会让它内部的 `record::id($pe)` 以
+    // 「Expected a record but found { id: pe:…, … }」报错（2026-10-29 mem 引擎实测）。
+    let $noun = $pe.noun;
+    let $pe_id = type::thing('pe', record::id($pe));
+    // 优先使用接口保存到 room_data 表中的房间编码。
+    // room_data 与 pe 使用相同的 refno 作为记录主键，例如：
+    // pe:24383_67869 -> room_data:24383_67869。
+    // 记录不存在时 type::thing 回 NONE，直接 `$saved_room_data.type` 会在 NONE 上取字段
+    // 并以「Expected a record but found NONE」整条报错（2026-10-29 mem 引擎实测），
+    // 所以先取记录本身再判空。
+    let $room_data_id = type::thing('room_data', record::id($pe_id));
+    let $saved_room_data = select * from only $room_data_id;
+    let $saved_type = if $saved_room_data == NONE { NONE } else { $saved_room_data.type };
+    let $saved_code = if $saved_room_data == NONE { NONE } else { $saved_room_data.room };
+    let $query_type = string::uppercase($saved_type ?: $noun ?: '');
+
+    // BRAN 返回其所有直接子节点保存的房间编码。
+    if $query_type == 'BRAN' {
+        let $child_room_codes = array::distinct(array::complement(
+            (select value type::thing('room_data', record::id(id)).room
+                from array::flatten($pe_id<-pe_owner.in.id)),
+            [NONE, '']
+        ));
+        if array::len($child_room_codes) > 0 {
+            return $child_room_codes;
+        };
+    };
+
+    let $saved_room_code = $saved_code;
+    if $saved_room_code != none && $saved_room_code != '' {
+        return [$saved_room_code];
+    };
+
+    // 注意：这里**不能**写 `return if … { return … } else { … }`——把 `return` 嵌在
+    // `return` 的表达式里，mem 引擎会把分支里的 `return` 当成表达式值，`$pe` 退化成
+    // 整行对象后 `record::id($pe)` 报「Expected a record but found { … }」。
+    // 改成平铺的 IF 语句，每支自己 return（2026-10-29 实测）。
+    // EQUI可能有两层
+    if ($noun == 'EQUI' || $noun == 'STRU' || $noun == 'REST') {
+        for $id in array::flatten([$pe_id<-pe_owner.in.id, array::flatten($pe_id<-pe_owner.in<-pe_owner.in.id)]) {
+            let $room_code = fn::single_room_code($id);
+            if $room_code != NONE && $room_code != '' {
+               return [$room_code];
+            }
+        };
+        return none;
+    };
+    if $noun == 'BRAN' {
+        return array::distinct(array::complement(
+            (select value fn::single_room_code(id) from array::flatten($pe_id<-pe_owner.in.id)),
+            [NONE, '']
+        ));
+    };
+    if $noun == 'SUPPO' || $noun == 'ZONE' {
+        for $id in array::flatten(array::flatten(array::flatten($pe_id<-pe_owner.in<-pe_owner.in<-pe_owner.in.id))) {
+            let $room_code = fn::single_room_code($id);
+            if $room_code != NONE && $room_code != '' {
+               return [$room_code];
+            }
+        };
+        return none;
+    };
+    // 其余构件（PANE / TUBI / 普通板件）看自己。
+    // 再次收敛：`$pe_id` 被读过字段后会退化成整行对象，直接传给 `single_room_code`
+    // 会以「Expected a record but found { … }」报错（mem 引擎实测）。
+    let $self_code = fn::single_room_code(type::thing('pe', record::id($pe_id)));
+    if $self_code == NONE || $self_code == '' {
+        return none;
+    };
+    return [$self_code];
+};
+
+remove function fn::get_room_code_from_name;
+define function fn::get_room_code_from_name($pe:record) {
+    let $name = $pe.name;
+    if $name == none { return none };
+    // 分割并判断是否是房间号
+    let $room = string::split($name,'-')[1];
+    if $room == NONE || !string::matches($room,"^[A-Z][0-9]{3}$") { return NONE; };
+    return $room;
+    // 找到对应的frmw
+    let $frmw = (select value NAME from FRMW where NAME != NONE && string::ends_with(NAME,string::concat('-R-',$room)))[0];
+    if $frmw == NONE { return NONE; };
+    let $frmw_split = string::split($frmw,'-');
+    // 直接用数组索引，方便判断是否是房间，不是房间就是NONE
+    let $room_code = string::concat(string::slice($frmw_split[0]?:'/',1),'-',$frmw_split[4]?:'');
+    return if $room_code == '-' { return NONE; } else { return $room_code; };
 };

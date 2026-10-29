@@ -9,41 +9,23 @@ define function fn::code($pe: record, $opt: option<number>){
     };
 };
 
-remove function fn::normal_name;
-DEFINE FUNCTION fn::normal_name($name: string) {
-    return if string::starts_with($name, '/') ||  string::starts_with($name, ':') {
-        string::slice($name, 1)
-    } else {
-        $name
-    };
-};
+
 
 
 // 返回 UDA 的某个属性，这里如果在 ATT_UDA 里如果没有找到，需要去查找默认值
-remove FUNCTION fn::get_uda_value;
-DEFINE FUNCTION fn::get_uda_value($pe:record, $uda_name:string) {
 
-   let $a = SELECT VALUE (
-                SELECT VALUE object::values(v) FROM ONLY udas.* WHERE u.NAME ==  $uda_name LIMIT 1
-            )[0] FROM ONLY type::thing("ATT_UDA", record::id($pe)) limit 1;
-    return if $a == NONE {
-        let $n = fn::normal_name($uda_name);
-        return select value DFLT from only UDA
-            where !UHIDE and $pe.noun in ELEL and (DYUDNA == $n || UDNA == $n) limit 1;
-    } else {
-        $a
-    };
-};
 
 //添加获取 panel 的长宽的方法
 remove function fn::pane_size;
 DEFINE FUNCTION fn::pane_size($pe:record) {
-    //活的下方的顶点，然后求出长宽
+    //获得下方的顶点，然后求出长宽
     let $ps =  (select value <-pe_owner[0].in<-pe_owner.in.refno.POS from only $pe limit 1);
+    // 获取ploo的厚度
+    let $ploo = (select value <-pe_owner[0].in.refno.HEIG from only $pe limit 1);
     return if $ps==NONE || array::len($ps) != 4 {
          NONE
     } else {
-        [vector::distance::euclidean($ps[1],$ps[0]) , vector::distance::euclidean($ps[1],$ps[2])]
+        [vector::distance::euclidean($ps[1],$ps[0]) , vector::distance::euclidean($ps[1],$ps[2]),$ploo?:0.0]
     };
 };
 
@@ -83,18 +65,6 @@ DEFINE FUNCTION fn::get_uda_value($pe:record, $uda_name:string) {
     };
 };
 
-//添加获取 panel 的长宽的方法
-remove function fn::pane_size;
-DEFINE FUNCTION fn::pane_size($pe:record) {
-    //活的下方的顶点，然后求出长宽
-    let $ps =  (select value <-pe_owner[0].in<-pe_owner.in.refno.POS from only $pe limit 1);
-    return if $ps==NONE || array::len($ps) != 4 {
-         NONE
-    } else {
-        [vector::distance::euclidean($ps[1],$ps[0]) , vector::distance::euclidean($ps[1],$ps[2])]
-    };
-};
-
 
 -- let $refno = [pe:24383_84092];
 -- let $code = fn::code($refno);
@@ -110,11 +80,17 @@ DEFINE FUNCTION fn::pre_or_next_b_type($pe:record,$type:string){
 remove function fn::get_world_pos;
 DEFINE FUNCTION fn::get_world_pos($pe:record) {
     let $noun = $pe.noun;
+    // 读法（2026-10-29 修）：inst_relate 是**普通表**（inst_relate:⟨ref0_ref1⟩），
+    // 不是从 pe 出去的边，所以旧写法 `->inst_relate.world_trans.d.translation`
+    // 恒为空（真库实测 get_world_pos(pe:15516_104) = [[]]）。现在按键读 world_trans_d。
+    // 形状保持 `[[x,y,z]]`：消费方是 `fn::get_world_pos(id)[0]` 再取下标
+    // （rs-server/src/datacenter/read_excel.rs:246）。
+    // 缺几何的件回 `[[]]`（不是 NONE），与旧写法形状一致，下游按空数组处理。
     return
     if $noun == 'EQUI' {
         return select value world_trans.d.translation from type::thing('cal_equi',record::id($pe))
     } else {
-        return select value array::flatten(->inst_relate.world_trans.d.translation) from $pe
+        return [array::map([$pe], |$p| type::thing('inst_relate', record::id($p)).world_trans_d.translation ?: [])[0]]
     }
 };
 
@@ -233,4 +209,3 @@ define function fn::str_into_int($input:string) {
         0
     }
 };
-

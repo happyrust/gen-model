@@ -305,8 +305,8 @@ DEFINE FUNCTION fn::first_child($pe:record) {
 };
 
 remove function fn::first_child_exclude_type;
-DEFINE FUNCTION fn::first_child_exclude_type($pe:record, $exclude_type: string) {
-    return select value in from only $pe<-pe_owner where in.noun != $exclude_type limit 1;
+DEFINE FUNCTION fn::first_child_exclude_type($pe:record, $exclude_types: array) {
+    return select value in from only $pe<-pe_owner where !$exclude_types.any(in.noun) limit 1;
 };
 
 remove function fn::last_child;
@@ -314,50 +314,47 @@ DEFINE FUNCTION fn::last_child($pe:record) {
     return array::last((select value (<-pe_owner.in) from only $pe limit 1)?:[]);
 };
 
-remove function fn::last_child_exclude_type;
-DEFINE FUNCTION fn::last_child_exclude_type($pe:record, $exclude_type: string) {
-    return (select * from only $pe<-pe_owner where in.noun != $exclude_type order by id desc limit 1).in;
-};
+
 
 remove function fn::prev_pe;
 DEFINE FUNCTION fn::prev_pe($pe:record) {
     if $pe == none || !record::exists($pe) {
-                return none;
-        };
-        let $a = (record::id($pe->pe_owner.id[0])[1]);
-        return (select value in from ($pe->pe_owner->pe<-pe_owner)[..$a]).last();
+        return none;
+    };
+    let $a = (record::id($pe->pe_owner.id[0])[1]) - 1;
+    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
 };
 
 remove function fn::prev_pe_exclude_type;
-DEFINE FUNCTION fn::prev_pe_exclude_type($pe:record, $exclude_type: string) {
+DEFINE FUNCTION fn::prev_pe_exclude_type($pe:record, $exclude_types: array) {
     if $pe == none || !record::exists($pe) {
             return none;
     };
     let $a = (record::id($pe->pe_owner.id[0])[1]);
-    return (select value in from ($pe->pe_owner->pe<-pe_owner)[..$a] where in.noun != $exclude_type).last();
+    return (select value in from ($pe->pe_owner->pe<-pe_owner)[..$a] where !$exclude_types.any(in.noun)).last();
 };
 
 remove function fn::last_child_exclude_type;
-DEFINE FUNCTION fn::last_child_exclude_type($pe:record, $exclude_type: string) {
-    return (select * from only $pe<-pe_owner where in.noun != $exclude_type order by id desc limit 1).in;
+DEFINE FUNCTION fn::last_child_exclude_type($pe:record, $exclude_types: array) {
+    return (select * from only $pe<-pe_owner where !$exclude_types.any(in.noun) order by id desc limit 1).in;
 };
 
 remove function fn::next_pe;
 DEFINE FUNCTION fn::next_pe($pe:record) {
-     if $pe == none || !record::exists($pe) {
-                return none;
-            };
-        let $a = (record::id($pe->pe_owner.id[0])[1]) + 1;
-        return select value in from only ($pe->pe_owner->pe<-pe_owner)[$a..] limit 1;
+    if $pe == none || !record::exists($pe) {
+        return none;
+    };
+    let $a = (record::id($pe->pe_owner.id[0])[1]) + 1;
+    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
 };
 
 remove function fn::next_pe_exclude_type;
-DEFINE FUNCTION fn::next_pe_exclude_type($pe:record, $exclude_type: string) {
+DEFINE FUNCTION fn::next_pe_exclude_type($pe:record, $exclude_types: array) {
     if $pe == none || !record::exists($pe) {
             return none;
         };
     let $a = (record::id($pe->pe_owner.id[0])[1]) + 1;
-    return select value in from only ($pe->pe_owner->pe<-pe_owner)[$a..] where in.noun != $exclude_type  limit 1;
+    return select value in from only ($pe->pe_owner->pe<-pe_owner)[$a..] where !$exclude_types.any(in.noun)  limit 1;
 };
 
 remove function fn::prev_connect_pe;
@@ -365,13 +362,13 @@ DEFINE FUNCTION fn::prev_connect_pe($pe:record) {
     if $pe == none {
         return none;
     };
-    let $p = fn::prev_pe_exclude_type($pe, 'ATTA');
+    let $p = fn::prev_pe_exclude_type($pe, ['ATTA','GASK']);
     return if $p != none {
         return $p;
     } else {
         let $connect_bran = $pe.owner.refno.HREF;
         return if $connect_bran != none {
-            return fn::last_child($connect_bran)?:$connect_bran;
+            return fn::last_child_exclude_type($connect_bran,['ATTA','GASK'])?:$connect_bran;
         } else {
             return none;
         };
@@ -381,19 +378,30 @@ DEFINE FUNCTION fn::prev_connect_pe($pe:record) {
 remove function fn::prev_connect_pe_data;
 DEFINE FUNCTION fn::prev_connect_pe_data($pe:record) {
     let $p = fn::prev_connect_pe($pe);
+    // 判断上一个跨bran连接的是否有tubi
+    // $p 可能是 NONE（管段首尾、孤立件）：先判空再查 tubi，否则
+    // fn::query_tubi_to($p) 会因「Expected a record but found NONE」整条函数报错
+    // （真库 pe:24381_101412 实测：rs 版原样回 ERR，gm 版回 null）。
+    let $p_tubi = if $p == NONE { NONE } else { fn::query_tubi_to($p).arrive };
     //如果有到达这个元件的直段，则返回这个直段的leave
     let $tmp_tubi_refno = fn::query_tubi_from($pe).leave;
+    let $b_href_bran = $pe.owner.refno.HREF.noun == 'BRAN';
     let $tubi_refno = if $tmp_tubi_refno != none {
         $tmp_tubi_refno
-    } else if fn::query_tubi_to($pe.owner) != none {   //判断bran的最尾部是不是TUBI
-        // 返回是否有bran开启的直段
-        fn::query_tubi_to($pe.owner)
+    } else if fn::first_child($pe.owner) == $pe && $b_href_bran && fn::query_tubi_to($pe.owner) != none {
+        // 判断在bran第一节点时有没有tubi
+        fn::query_tubi_to($pe.owner).arrive
+    } else if $p_tubi != none && $b_href_bran {
+        // 判断跨bran的上一个元件，该元件下面有没有tubi  并排除HREF连接的是TEE等管件的情况
+        $p
     } else {
        none
     };
     let $tubi_name = return if $tubi_refno == none {
         none
-    } else { string::concat('ileave tube of ',  fn::default_full_name($tubi_refno)) };
+    } else {
+        string::concat('ileave tube of ',  fn::default_full_name($tubi_refno))
+    };
     return if $p != none {   //如果存在上一个节点
         //如果tubi_refno是branch的最后一个节点，则需要判断关联的branch有tubi
         let $tubi_spref = return if $tubi_refno == none {
@@ -432,33 +440,40 @@ DEFINE FUNCTION fn::next_connect_pe($pe:record) {
     if $pe == none {
         return none;
     };
-    let $p = fn::next_pe_exclude_type($pe, 'ATTA');
+    let $p = fn::next_pe_exclude_type($pe, ['ATTA','GASK']);
     return if $p != none {
         return $p;
     } else {
         let $connect_bran = $pe.owner.refno.TREF;
         return if $connect_bran != none {
-            return fn::first_child($connect_bran)?:$connect_bran;
+            return fn::first_child_exclude_type($connect_bran,['ATTA','GASK'])?:$connect_bran;
         } else {
             return none;
-        };  
+        };
     };
 };
 
 remove function fn::next_connect_pe_data;
 DEFINE FUNCTION fn::next_connect_pe_data($pe:record) {
     let $p = fn::next_connect_pe($pe);
+    // $p 可能是 NONE（管段首尾、孤立件）：先判空再查 tubi，否则
+    // fn::query_tubi_from($p) 会因「Expected a record but found NONE」整条函数报错
+    // （真库 pe:24381_101412 实测：rs 版原样回 ERR，gm 版回 null）。
+    let $p_tubi = if $p == NONE { NONE } else { fn::query_tubi_from($p).leave };
+    let $b_tref_bran = $pe.owner.refno.TREF.noun == 'BRAN';
     let $tubi_refno = if fn::query_tubi_to($pe) != none {
         $pe
-    } else if fn::query_tubi_to($pe.owner.refno.TREF) != none {
+    } else if fn::last_child($pe.owner) == $pe && $b_tref_bran && fn::query_tubi_to($pe.owner.refno.TREF) != none {
         // 返回是否有bran开启的直段
       $pe.owner.refno.TREF
+    } else if $p_tubi!= NONE && $b_tref_bran {
+       $p
     } else {
-       none
+        NONE
     };
     let $tubi_name = return if $tubi_refno == none {
        none
-   } else { string::concat('ileave tube of ',  fn::default_full_name($pe)) };
+   } else { string::concat('ileave tube of ',  fn::default_full_name($tubi_refno)) };
     return if $p != none {
         let $tubi_spref = return if $tubi_refno == none {
             none
@@ -483,7 +498,7 @@ DEFINE FUNCTION fn::next_connect_pe_data($pe:record) {
                 next: $pe,
                 tubi_refno: tubi_refno,
                 tubi_name: $tubi_name,
-                tubi_spref: $pe.refno.LSTU.name           
+                tubi_spref: $pe.refno.LSTU.name
             };
         } else {
             none
@@ -493,12 +508,20 @@ DEFINE FUNCTION fn::next_connect_pe_data($pe:record) {
 
 remove function fn::query_tubi_to;
 DEFINE FUNCTION fn::query_tubi_to($pe:record) {
-    return select arrive from only $pe.owner->tubi_relate where leave=$pe limit 1;
+    if $pe.noun == 'BRAN' {
+       return select arrive from only $pe->tubi_relate where leave=$pe limit 1;
+    } else {
+        return select arrive from only $pe.owner->tubi_relate where leave=$pe limit 1;
+    }
 };
 
 remove function fn::query_tubi_from;
 DEFINE FUNCTION fn::query_tubi_from($pe:record) {
-    return select leave from only $pe.owner->tubi_relate where arrive=$pe limit 1;
+    if $pe.noun == 'BRAN' {
+        return select leave from only $pe->tubi_relate where arrive=$pe limit 1;
+    } else {
+        return select leave from only $pe.owner->tubi_relate where arrive=$pe limit 1;
+    }
 };
 
 remove function fn::query_bran_first_tubi;
@@ -666,7 +689,7 @@ remove function fn::get_flan_bolt_list;
 define function fn::get_flan_bolt_list($pe:record) {
     if $pe.refno.SPRE == NONE { return NONE; };
     let $bltf = select value refno.SPRE.refno.CATR.refno.BLRF[0].name from $pe;
-    if $bltf == NONE { return NONE; };
+    if $bltf[0] == NONE { return NONE; };
     let $bltf_split = array::last(string::split($bltf[0],'-')?:[]);
     let $blot_size = string::concat($bltf_split,'W')?:'';
     let $ancestor = fn::find_ancestor_type($pe.refno.SPRE?:pe:0_0,'SPEC').refno.BSPE;
@@ -699,6 +722,13 @@ DEFINE FUNCTION fn::room_relate_of($pe: record) {
 
 REMOVE FUNCTION fn::room_num_of;
 -- fn::room_relate_of 的房间号快捷方式。
+-- 无房间边时 room_relate_of 回 NONE，直接 `.room_num` 会让整条语句以
+-- `CoerceTo { from: None, into: "record" }` 报错（2026-10-29 mem 引擎实测），
+-- 消费方拿不到「没有房间」这个答案。这里显式判空。
 DEFINE FUNCTION fn::room_num_of($pe: record) {
-    return fn::room_relate_of($pe).room_num;
+    let $res = fn::room_relate_of($pe);
+    if $res == NONE {
+        return NONE;
+    };
+    return $res.room_num;
 };
