@@ -169,6 +169,18 @@ pub struct DbOptionExt {
     /// 历史快照（`POST /model/history/generate` 造的 `Historical(*)` 作用域）最多同时留几格（没写 = 16；0 = 不限）。详见 [`model_historical_snapshots_max`]。
     #[serde(default)]
     pub model_historical_snapshots_max: Option<usize>,
+    /// 实时历史查询同时计算几个（1–64，没写 = 4）。详见 [`model_history_realtime_concurrency`]。
+    #[serde(default)]
+    pub model_history_realtime_concurrency: Option<i64>,
+    /// 实时历史结果缓存条数（0–1024，0 = 停用，没写 = 32）。详见 [`model_history_realtime_cache`]。
+    #[serde(default)]
+    pub model_history_realtime_cache: Option<i64>,
+    /// 实时历史查询超时秒数（1–600，没写 = 60）。详见 [`model_history_query_timeout_secs`]。
+    #[serde(default)]
+    pub model_history_query_timeout_secs: Option<i64>,
+    /// 历史输入缓存留几份（0–64，0 = 每次现建，没写 = 4）。详见 [`model_history_input_max`]。
+    #[serde(default)]
+    pub model_history_input_max: Option<i64>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -544,6 +556,10 @@ impl From<DbOption> for DbOptionExt {
             model_element_cache_max_entries: None,
             model_generation_input_max_dbnums: None,
             model_historical_snapshots_max: None,
+            model_history_realtime_concurrency: None,
+            model_history_realtime_cache: None,
+            model_history_query_timeout_secs: None,
+            model_history_input_max: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -641,6 +657,14 @@ struct DbOptionExtFields {
     model_generation_input_max_dbnums: Option<usize>,
     #[serde(default)]
     model_historical_snapshots_max: Option<usize>,
+    #[serde(default)]
+    model_history_realtime_concurrency: Option<i64>,
+    #[serde(default)]
+    model_history_realtime_cache: Option<i64>,
+    #[serde(default)]
+    model_history_query_timeout_secs: Option<i64>,
+    #[serde(default)]
+    model_history_input_max: Option<i64>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -966,6 +990,10 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_element_cache_max_entries: ext.model_element_cache_max_entries,
         model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
         model_historical_snapshots_max: ext.model_historical_snapshots_max,
+        model_history_realtime_concurrency: ext.model_history_realtime_concurrency,
+        model_history_realtime_cache: ext.model_history_realtime_cache,
+        model_history_query_timeout_secs: ext.model_history_query_timeout_secs,
+        model_history_input_max: ext.model_history_input_max,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -1178,6 +1206,160 @@ fn effective_count_limit(
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .or(configured)
         .unwrap_or(default)
+}
+
+/// 环境变量名：覆盖 [`model_history_realtime_concurrency`]。
+pub const MODEL_HISTORY_REALTIME_CONCURRENCY_ENV: &str = "AIOS_MODEL_HISTORY_REALTIME_CONCURRENCY";
+/// 环境变量名：覆盖 [`model_history_realtime_cache`]。
+pub const MODEL_HISTORY_REALTIME_CACHE_ENV: &str = "AIOS_MODEL_HISTORY_REALTIME_CACHE";
+/// 环境变量名：覆盖 [`model_history_query_timeout_secs`]。
+pub const MODEL_HISTORY_QUERY_TIMEOUT_SECS_ENV: &str = "AIOS_MODEL_HISTORY_QUERY_TIMEOUT_SECS";
+/// 环境变量名：覆盖 [`model_history_input_max`]。
+pub const MODEL_HISTORY_INPUT_MAX_ENV: &str = "AIOS_MODEL_HISTORY_INPUT_MAX";
+
+/// [`model_history_realtime_concurrency`] 的范围与缺省（Requirement 7.1）。
+pub const MODEL_HISTORY_REALTIME_CONCURRENCY_RANGE: (usize, usize, usize) = (1, 64, 4);
+/// [`model_history_realtime_cache`] 的范围与缺省（Requirement 7.2，0 = 停用）。
+pub const MODEL_HISTORY_REALTIME_CACHE_RANGE: (usize, usize, usize) = (0, 1024, 32);
+/// [`model_history_query_timeout_secs`] 的范围与缺省（Requirement 6.9）。
+pub const MODEL_HISTORY_QUERY_TIMEOUT_SECS_RANGE: (usize, usize, usize) = (1, 600, 60);
+/// [`model_history_input_max`] 的范围与缺省（0 = 每次现建）。
+pub const MODEL_HISTORY_INPUT_MAX_RANGE: (usize, usize, usize) = (0, 64, 4);
+
+/// [`bounded_setting`] 的结果：取用的值，以及被拒的原始值（越界时为 `Some`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundedSetting {
+    pub value: usize,
+    pub rejected: Option<i64>,
+}
+
+/// 有界配置的裁决：没写 = `default`；落在 `[min, max]` 内就用它；越界回落 `default` 并在
+/// `rejected` 里留下原值，由调用方告警。与 [`effective_count_limit`] 不同，这里 0 没有「不限」的意思，
+/// 只是区间里的一个普通值（`min` 为 0 时合法）。
+pub fn bounded_setting(raw: Option<i64>, min: usize, max: usize, default: usize) -> BoundedSetting {
+    match raw {
+        None => BoundedSetting {
+            value: default,
+            rejected: None,
+        },
+        Some(v) if v >= min as i64 && v <= max as i64 => BoundedSetting {
+            value: v as usize,
+            rejected: None,
+        },
+        Some(v) => BoundedSetting {
+            value: default,
+            rejected: Some(v),
+        },
+    }
+}
+
+/// 一项有界配置从环境变量 / `DbOption.toml` 到最终取值：环境变量非空就压过配置；环境变量不是整数、
+/// 或取到的值越界，都回落缺省并给出一句告警（第二项）。纯函数，供 [`model_history_settings`] 与测试共用。
+fn resolve_bounded_setting(
+    key: &str,
+    env_name: &str,
+    env_override: Option<&str>,
+    configured: Option<i64>,
+    (min, max, default): (usize, usize, usize),
+) -> (usize, Option<String>) {
+    let env_override = env_override.map(str::trim).filter(|raw| !raw.is_empty());
+    let (raw, source) = match env_override {
+        Some(text) => match text.parse::<i64>() {
+            Ok(v) => (Some(v), env_name),
+            Err(_) => {
+                return (
+                    default,
+                    Some(format!(
+                        "{env_name}={text:?} 不是整数（范围 {min}–{max}），{key} 按缺省 {default}"
+                    )),
+                );
+            }
+        },
+        None => (configured, key),
+    };
+    let setting = bounded_setting(raw, min, max, default);
+    let notice = setting
+        .rejected
+        .map(|v| format!("{source}={v} 超出范围 {min}–{max}，{key} 按缺省 {default}"));
+    (setting.value, notice)
+}
+
+/// 实时历史查询的四项有界配置，进程内解析一次（越界告警因此只打一遍）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelHistorySettings {
+    pub realtime_concurrency: usize,
+    pub realtime_cache: usize,
+    pub query_timeout_secs: usize,
+    pub input_max: usize,
+}
+
+/// 解析并缓存 [`ModelHistorySettings`]；第一次调用时对每个越界项 `log::warn!` 一行。
+/// 启动横幅（`lib.rs::print_store_mode_notices_once`）会先调一次，让告警出现在启动日志里。
+pub fn model_history_settings() -> ModelHistorySettings {
+    static INSTANCE: OnceLock<ModelHistorySettings> = OnceLock::new();
+    *INSTANCE.get_or_init(|| {
+        let ext = load_ext_fields();
+        let resolve =
+            |key: &str, env_name: &str, configured: Option<i64>, range: (usize, usize, usize)| {
+                let env = std::env::var(env_name).ok();
+                let (value, notice) =
+                    resolve_bounded_setting(key, env_name, env.as_deref(), configured, range);
+                if let Some(notice) = notice {
+                    log::warn!("{notice}");
+                }
+                value
+            };
+        ModelHistorySettings {
+            realtime_concurrency: resolve(
+                "model_history_realtime_concurrency",
+                MODEL_HISTORY_REALTIME_CONCURRENCY_ENV,
+                ext.model_history_realtime_concurrency,
+                MODEL_HISTORY_REALTIME_CONCURRENCY_RANGE,
+            ),
+            realtime_cache: resolve(
+                "model_history_realtime_cache",
+                MODEL_HISTORY_REALTIME_CACHE_ENV,
+                ext.model_history_realtime_cache,
+                MODEL_HISTORY_REALTIME_CACHE_RANGE,
+            ),
+            query_timeout_secs: resolve(
+                "model_history_query_timeout_secs",
+                MODEL_HISTORY_QUERY_TIMEOUT_SECS_ENV,
+                ext.model_history_query_timeout_secs,
+                MODEL_HISTORY_QUERY_TIMEOUT_SECS_RANGE,
+            ),
+            input_max: resolve(
+                "model_history_input_max",
+                MODEL_HISTORY_INPUT_MAX_ENV,
+                ext.model_history_input_max,
+                MODEL_HISTORY_INPUT_MAX_RANGE,
+            ),
+        }
+    })
+}
+
+/// 实时历史查询同时计算几个（`DbOption.toml` 的 `model_history_realtime_concurrency`，
+/// 环境变量 [`MODEL_HISTORY_REALTIME_CONCURRENCY_ENV`] 压过；1–64，缺省 4）。
+pub fn model_history_realtime_concurrency() -> usize {
+    model_history_settings().realtime_concurrency
+}
+
+/// 实时历史结果缓存条数（`model_history_realtime_cache` / [`MODEL_HISTORY_REALTIME_CACHE_ENV`]；
+/// 0–1024，0 = 停用，缺省 32）。
+pub fn model_history_realtime_cache() -> usize {
+    model_history_settings().realtime_cache
+}
+
+/// 实时历史查询超时秒数（`model_history_query_timeout_secs` / [`MODEL_HISTORY_QUERY_TIMEOUT_SECS_ENV`]；
+/// 1–600，缺省 60）。
+pub fn model_history_query_timeout_secs() -> usize {
+    model_history_settings().query_timeout_secs
+}
+
+/// 历史输入缓存最多留几份 `GenerationInput`（`model_history_input_max` / [`MODEL_HISTORY_INPUT_MAX_ENV`]；
+/// 0–64，0 = 每次现建，缺省 4）。
+pub fn model_history_input_max() -> usize {
+    model_history_settings().input_max
 }
 
 pub fn model_root_inflight_max() -> usize {
@@ -4673,6 +4855,93 @@ dir = "review_attachments"
             "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
             "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
         );
+    }
+
+    /// 实时历史查询的有界配置（Requirement 6.9 / 7.1 / 7.2）：区间内照用、边界值合法、越界回落缺省并留原值。
+    #[test]
+    fn a_bounded_setting_keeps_in_range_values_and_falls_back_on_out_of_range() {
+        let ok = |value| BoundedSetting {
+            value,
+            rejected: None,
+        };
+        assert_eq!(bounded_setting(None, 1, 64, 4), ok(4), "没写 = 缺省");
+        assert_eq!(bounded_setting(Some(1), 1, 64, 4), ok(1), "下界合法");
+        assert_eq!(bounded_setting(Some(64), 1, 64, 4), ok(64), "上界合法");
+        assert_eq!(
+            bounded_setting(Some(0), 0, 1024, 32),
+            ok(0),
+            "min 为 0 时 0 合法"
+        );
+        assert_eq!(
+            bounded_setting(Some(0), 1, 64, 4),
+            BoundedSetting {
+                value: 4,
+                rejected: Some(0)
+            },
+            "低于下界回落缺省"
+        );
+        assert_eq!(
+            bounded_setting(Some(601), 1, 600, 60),
+            BoundedSetting {
+                value: 60,
+                rejected: Some(601)
+            },
+            "高于上界回落缺省"
+        );
+        assert_eq!(bounded_setting(Some(-1), 0, 64, 4).rejected, Some(-1));
+        assert_eq!(MODEL_HISTORY_REALTIME_CONCURRENCY_RANGE, (1, 64, 4));
+        assert_eq!(MODEL_HISTORY_REALTIME_CACHE_RANGE, (0, 1024, 32));
+        assert_eq!(MODEL_HISTORY_QUERY_TIMEOUT_SECS_RANGE, (1, 600, 60));
+        assert_eq!(MODEL_HISTORY_INPUT_MAX_RANGE, (0, 64, 4));
+    }
+
+    /// 环境变量压过 `DbOption.toml`；环境变量越界或不是整数时回落缺省（不回配置）并给出一句告警。
+    #[test]
+    fn a_bounded_setting_env_override_wins_and_bad_values_warn() {
+        let range = MODEL_HISTORY_REALTIME_CACHE_RANGE;
+        let env = MODEL_HISTORY_REALTIME_CACHE_ENV;
+        let key = "model_history_realtime_cache";
+        assert_eq!(
+            resolve_bounded_setting(key, env, None, None, range),
+            (32, None)
+        );
+        assert_eq!(
+            resolve_bounded_setting(key, env, None, Some(8), range),
+            (8, None)
+        );
+        assert_eq!(
+            resolve_bounded_setting(key, env, Some(" 0 "), Some(8), range),
+            (0, None),
+            "环境变量压过配置，0 = 停用"
+        );
+        assert_eq!(
+            resolve_bounded_setting(key, env, Some(""), Some(8), range),
+            (8, None),
+            "空环境变量当没设"
+        );
+        let (value, notice) = resolve_bounded_setting(key, env, Some("2000"), Some(8), range);
+        assert_eq!(value, 32, "环境变量越界回落缺省");
+        let notice = notice.expect("越界要告警");
+        assert!(notice.contains(env) && notice.contains("2000"), "{notice}");
+        let (value, notice) = resolve_bounded_setting(key, env, None, Some(-3), range);
+        assert_eq!(value, 32, "配置越界回落缺省");
+        assert!(notice.expect("越界要告警").contains(key));
+        let (value, notice) = resolve_bounded_setting(key, env, Some("many"), Some(8), range);
+        assert_eq!(value, 32, "非整数回落缺省");
+        assert!(notice.is_some());
+        assert_eq!(
+            MODEL_HISTORY_REALTIME_CONCURRENCY_ENV,
+            "AIOS_MODEL_HISTORY_REALTIME_CONCURRENCY"
+        );
+        assert_eq!(
+            MODEL_HISTORY_REALTIME_CACHE_ENV,
+            "AIOS_MODEL_HISTORY_REALTIME_CACHE"
+        );
+        assert_eq!(
+            MODEL_HISTORY_QUERY_TIMEOUT_SECS_ENV,
+            "AIOS_MODEL_HISTORY_QUERY_TIMEOUT_SECS"
+        );
+        assert_eq!(MODEL_HISTORY_INPUT_MAX_ENV, "AIOS_MODEL_HISTORY_INPUT_MAX");
     }
 
     /// d-149 / ADR-082 D5：两道按数量的内存闸的裁决——环境变量是合法非负整数就压过配置，拼错了当没设

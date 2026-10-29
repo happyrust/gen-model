@@ -310,6 +310,8 @@ windows-sys = { version = "0.59", features = [
 # 校审域 handler 级单测用 `tower::ServiceExt::oneshot` 直接打 Router（旧端 82 个单测同一写法，
 # docs/plans/2026-09-12-review-backend-port-plan.md §6 A7）；tower 本就是 axum 的传递依赖，这里只是显式化。
 tower = { version = "0.5", features = ["util"] }
+# 属性测试（model-version-timeline-scrub 的后端 Correctness Properties）。
+proptest = "1"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

@@ -17,6 +17,10 @@ pub mod attribute_diff;
 pub mod node_diff_summary;
 /// 任意节点按对比范围（自身 / 整棵子树）折叠的模型版本表：容器节点的时间线靠它，每版附动了几个单元。
 pub mod node_versions;
+/// 只给历史用的生成输入缓存：键 `(dbnum, sesno, identity)`，不挤掉当前模型那份输入。
+pub mod historical_input;
+/// 实时历史计算的取消标志（`CancelToken` / `CancelOnDrop`）与 DFS 停止钩子。
+pub mod cancel;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;

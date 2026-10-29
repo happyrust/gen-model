@@ -22,7 +22,10 @@ use e3d_model::increment::{
     plan_update, plan_update_with,
 };
 use e3d_model::ledger::{ChangeLedger, Disposition};
-use e3d_model::pipeline::{Report, generate_subtree_with_cache};
+use e3d_model::pipeline::{
+    GenerationHooks, GenerationStopped, NoHooks, Report, Stop, generate_subtree_with_cache,
+    generate_subtree_with_hooks,
+};
 use e3d_model::primitive_instance::canonical_primitive_mesh;
 use e3d_model::transform::dmat4_to_affine4x3;
 use glam::DMat4;
@@ -39,6 +42,7 @@ use crate::data_interface::model_source;
 use crate::data_interface::rigid_motion::{
     RepublishGate, TransformAnchor, bounds_of_points, republish_gate, republish_records,
 };
+use crate::fast_model::historical_input::HistoricalInputLru;
 use crate::fast_model::model_memory_store::{
     CommitScope, ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube,
     ProjectionCommit, ProjectionScope, RootReceipt, packed_refno,
@@ -1287,6 +1291,35 @@ impl std::fmt::Display for SnapshotSourceError {
 
 impl std::error::Error for SnapshotSourceError {}
 
+/// [`E3dModelService::realtime_compute_source`] 没有产出快照的两种结局。
+#[derive(Debug)]
+pub enum RealtimeComputeError {
+    /// DFS 钩子叫停（取消或超过元素上限）：已访问 `visited` 个元素，部分产出丢弃。
+    Stopped { stop: Stop, visited: usize },
+    /// 与 [`E3dModelService::generate_snapshot_source`] 同一种失败：根不在会话索引里
+    /// （可 downcast 成 [`SnapshotSourceError`]）、读库失败、`Required` 策略下有失败元素。
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for RealtimeComputeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped { stop, visited } => {
+                write!(f, "generation stopped after {visited} element(s): {stop:?}")
+            }
+            Self::Failed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeComputeError {}
+
+impl From<anyhow::Error> for RealtimeComputeError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
 /// Pure, session-pinned generation result.  It contains no database handle and
 /// is safe to route either to the current projection or to the historical
 /// in-memory projection.
@@ -1705,13 +1738,9 @@ fn generation_input_cache() -> &'static std::sync::Mutex<DbnumLru<GenerationInpu
     GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(DbnumLru::new()))
 }
 
-fn generation_input(
-    service: &E3dModelService,
-    dbnum: u32,
-    source_sesno: u32,
-) -> anyhow::Result<GenerationInput> {
-    let cache = generation_input_cache();
-    let identity = service.generation_identity.clone().unwrap_or_else(|| {
+/// 输入缓存键里的 identity：冻结源摘要，没有时取库文件规范路径。调用方已确认 `dbnum` 有 pin。
+fn generation_input_identity(service: &E3dModelService, dbnum: u32) -> String {
+    service.generation_identity.clone().unwrap_or_else(|| {
         let pin = service
             .pin(dbnum)
             .expect("generation db pin checked by caller");
@@ -1719,8 +1748,59 @@ fn generation_input(
             .unwrap_or_else(|_| pin.file.clone())
             .to_string_lossy()
             .into_owned()
-    });
-    let key = (dbnum, source_sesno, identity);
+    })
+}
+
+/// 现建一份生成输入（扫索引 + 建 `DbSet`）：当前模型缓存与历史缓存共用这一段，两路输入一致。
+fn build_generation_input(
+    service: &E3dModelService,
+    dbnum: u32,
+    source_sesno: u32,
+) -> anyhow::Result<GenerationInput> {
+    let pin = service.pin(dbnum)?;
+    let index = Arc::new(scan_index(&pin.file, Some(source_sesno))?);
+    let set = service.build_set(dbnum, Some(source_sesno))?;
+    Ok(GenerationInput {
+        set,
+        index,
+        dependency_sessions: service.dependency_sessions.clone(),
+    })
+}
+
+/// 只给历史用的输入缓存（设计 §1.3，[`HistoricalInputLru`]）：与 `GENERATION_INPUT_CACHE` 分开，
+/// 来回拖动历史会话不会把当前模型那份输入挤掉。
+static HISTORICAL_INPUT_CACHE: OnceLock<HistoricalInputLru<GenerationInput>> = OnceLock::new();
+
+fn historical_input_cache() -> &'static HistoricalInputLru<GenerationInput> {
+    HISTORICAL_INPUT_CACHE.get_or_init(HistoricalInputLru::with_configured_capacity)
+}
+
+fn historical_input(
+    service: &E3dModelService,
+    dbnum: u32,
+    source_sesno: u32,
+) -> anyhow::Result<GenerationInput> {
+    service.pin(dbnum)?;
+    let key = (
+        dbnum,
+        source_sesno,
+        generation_input_identity(service, dbnum),
+    );
+    historical_input_cache()
+        .get_or_build(key, || build_generation_input(service, dbnum, source_sesno))
+}
+
+fn generation_input(
+    service: &E3dModelService,
+    dbnum: u32,
+    source_sesno: u32,
+) -> anyhow::Result<GenerationInput> {
+    let cache = generation_input_cache();
+    let key = (
+        dbnum,
+        source_sesno,
+        generation_input_identity(service, dbnum),
+    );
     if let Some(value) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1728,14 +1808,7 @@ fn generation_input(
     {
         return Ok(value);
     }
-    let pin = service.pin(dbnum)?;
-    let index = Arc::new(scan_index(&pin.file, Some(source_sesno))?);
-    let set = service.build_set(dbnum, Some(source_sesno))?;
-    let input = GenerationInput {
-        set,
-        index,
-        dependency_sessions: service.dependency_sessions.clone(),
-    };
+    let input = build_generation_input(service, dbnum, source_sesno)?;
     // 按库数上限（ADR-084，`model_generation_input_max_dbnums`，0 = 不限）：被替 / 被逐的那几份在锁外 drop。
     let max_dbnums = crate::options::model_generation_input_max_dbnums();
     let (displaced, resident_dbnums) = {
@@ -2940,25 +3013,36 @@ impl E3dModelService {
     ) -> anyhow::Result<GeneratedSnapshot> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
         let input = generation_input(self, dbnum, source_sesno)?;
-        if !input.index.owners.contains_key(&(root.word0, root.word1)) {
-            return Err(SnapshotSourceError::RootNotInSession {
-                root,
-                dbnum,
-                sesno: source_sesno,
+        let computed =
+            compute_snapshot_source(&input, dbnum, root, source_sesno, failure_policy, &NoHooks);
+        match computed {
+            Ok(snapshot) => Ok(snapshot),
+            Err(RealtimeComputeError::Failed(error)) => Err(error),
+            Err(RealtimeComputeError::Stopped { stop, visited }) => {
+                unreachable!("空钩子从不叫停，却在访问 {visited} 个元素后收到 {stop:?}")
             }
-            .into());
         }
-        let mut cache = CatalogueMeshCache::default();
-        let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, &mut cache)?;
-        if !snapshot.report.failed.is_empty()
-            && matches!(failure_policy, GeometryFailurePolicy::Required)
-        {
-            bail!(
-                "e3d-model root {root} has {} failed element(s)",
-                snapshot.report.failed.len()
-            );
-        }
-        Ok(snapshot)
+    }
+
+    /// 实时历史几何的计算源（设计 §1.3）：与 [`Self::generate_snapshot_source`] 同一段求值
+    /// （[`compute_snapshot_source`]），区别只有三处：
+    ///
+    /// - **不拿** `db_generation_lock`：纯读源文件、不写投影，没有要护的发布链；
+    /// - 输入取自只给历史用的 [`HistoricalInputLru`]，不挤掉当前模型那份 `generation_input`；
+    /// - DFS 带钩子（[`crate::fast_model::cancel::HistoryHooks`]）：取消或超过元素上限时中途返回
+    ///   [`RealtimeComputeError::Stopped`]。
+    ///
+    /// 同步阻塞（冷输入要扫索引、建 `DbSet`，求值要三角化），调用方放在 `spawn_blocking` 里跑。
+    pub fn realtime_compute_source(
+        &self,
+        dbnum: u32,
+        root: RefNo,
+        source_sesno: u32,
+        failure_policy: GeometryFailurePolicy,
+        hooks: &dyn GenerationHooks,
+    ) -> Result<GeneratedSnapshot, RealtimeComputeError> {
+        let input = historical_input(self, dbnum, source_sesno)?;
+        compute_snapshot_source(&input, dbnum, root, source_sesno, failure_policy, hooks)
     }
 
     pub(crate) fn source_file(&self, dbnum: u32) -> anyhow::Result<&Path> {
@@ -3790,6 +3874,75 @@ fn generate_snapshot_from_set(
     })
 }
 
+/// 与 [`generate_snapshot_from_set`] 相同，但 DFS 走 [`generate_subtree_with_hooks`]：钩子叫停时返回
+/// [`RealtimeComputeError::Stopped`]；读库失败照旧包成 `generate root …` 上下文。
+fn generate_snapshot_from_set_with_hooks(
+    set: &Arc<DbSet>,
+    index: &SourceIndex,
+    root: RefNo,
+    cache: &mut CatalogueMeshCache,
+    hooks: &dyn GenerationHooks,
+) -> Result<GeneratedSnapshot, RealtimeComputeError> {
+    let outcome = match generate_subtree_with_hooks(set.element(root), cache, hooks) {
+        Ok(outcome) => outcome,
+        Err(GenerationStopped::Hook { stop, visited }) => {
+            return Err(RealtimeComputeError::Stopped { stop, visited });
+        }
+        Err(GenerationStopped::Failed(error)) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("generate root {root}"))
+                .into());
+        }
+    };
+    Ok(GeneratedSnapshot {
+        elements: outcome.elements,
+        owners: Arc::clone(&index.owners),
+        report: outcome.report,
+        visited: outcome.visited,
+        point_sets: outcome.point_sets,
+    })
+}
+
+/// 单根快照的求值本体：Legacy 快照源（空钩子、当前模型输入、外面套 `db_generation_lock`）与
+/// 实时计算源（历史钩子、历史输入缓存、不拿锁）共用这一段，两路求值代码一致（Requirement 6.15）。
+///
+/// 根不在那一会话的元素索引里，在求几何**之前**以 [`SnapshotSourceError::RootNotInSession`] 退出。
+fn compute_snapshot_source(
+    input: &GenerationInput,
+    dbnum: u32,
+    root: RefNo,
+    source_sesno: u32,
+    failure_policy: GeometryFailurePolicy,
+    hooks: &dyn GenerationHooks,
+) -> Result<GeneratedSnapshot, RealtimeComputeError> {
+    if !input.index.owners.contains_key(&(root.word0, root.word1)) {
+        return Err(anyhow::Error::from(SnapshotSourceError::RootNotInSession {
+            root,
+            dbnum,
+            sesno: source_sesno,
+        })
+        .into());
+    }
+    let mut cache = CatalogueMeshCache::default();
+    let snapshot = generate_snapshot_from_set_with_hooks(
+        &input.set,
+        &input.index,
+        root,
+        &mut cache,
+        hooks,
+    )?;
+    if !snapshot.report.failed.is_empty()
+        && matches!(failure_policy, GeometryFailurePolicy::Required)
+    {
+        return Err(anyhow::anyhow!(
+            "e3d-model root {root} has {} failed element(s)",
+            snapshot.report.failed.len()
+        )
+        .into());
+    }
+    Ok(snapshot)
+}
+
 /// One evaluated element, reduced to what publication actually needs.
 ///
 /// Triangulation, the SHA-256 content id and the mesh file write all happen
@@ -4360,24 +4513,94 @@ pub(crate) async fn apply_geometry_delta_on(
     owners: &BTreeMap<(u32, u32), RefNo>,
     mesh_dir: &Path,
 ) -> anyhow::Result<E3dPersistReport> {
-    let (commit, mut report) = project_geometry_delta(
-        dbnum,
-        source_sesno,
-        bake_elements(upserts, mesh_dir, None)?,
-        removals,
-        None,
-        owners,
-    )?;
-    match scope {
+    let mut report = match scope {
         ProjectionScope::Current => {
+            let (commit, report) = project_geometry_delta(
+                dbnum,
+                source_sesno,
+                bake_elements(upserts, mesh_dir, None)?,
+                removals,
+                None,
+                owners,
+            )?;
             super::model_write_behind::publish(vec![commit])?;
+            report
         }
         ProjectionScope::Historical(_) => {
-            ModelMemoryStore::global().commit(scope, vec![commit]);
+            // 历史快照每次整根重生成（调用方先 `drop_snapshot`），没有要删的旧记录。
+            anyhow::ensure!(
+                removals.is_empty(),
+                "a historical snapshot is generated whole and carries no removals"
+            );
+            let projected =
+                project_historical_records(dbnum, source_sesno, upserts, owners, mesh_dir, None)?;
+            ModelMemoryStore::global().commit(scope, vec![projected.commit]);
+            projected.report
         }
-    }
+    };
     report.unique_meshes = report.mesh_ids.len();
     Ok(report)
+}
+
+/// [`project_historical_records`] 在 bake 两个元素之间看到取消标志已置位。
+///
+/// 调用方用 `error.downcast_ref::<HistoricalProjectionCancelled>()` 区分「被取消」与「算失败」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HistoricalProjectionCancelled;
+
+impl std::fmt::Display for HistoricalProjectionCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("historical projection cancelled")
+    }
+}
+
+impl std::error::Error for HistoricalProjectionCancelled {}
+
+/// 一次历史投影的产物：记录在 `commit.upserts`，`report` 是 bake 与投影的计数。
+#[derive(Debug, Clone)]
+pub(crate) struct HistoricalProjection {
+    /// 与 `project_geometry_delta(…, removals = [], publication = None, …)` 产出的提交逐位相同。
+    /// Legacy 路整笔提交进 `ProjectionScope::Historical`；实时路只取 `upserts` 序列化。
+    pub(crate) commit: ProjectionCommit,
+    pub(crate) report: E3dPersistReport,
+}
+
+impl HistoricalProjection {
+    /// 投影记录，按产出顺序（同一 `record_id` 可能出现多次，存储里后写覆盖先写）。
+    pub(crate) fn records(&self) -> &[ProjectedGeometry] {
+        &self.commit.upserts
+    }
+
+    pub(crate) fn into_records(self) -> Vec<ProjectedGeometry> {
+        self.commit.upserts
+    }
+}
+
+/// 历史快照的「bake + project」：Legacy 快照路（随后 `commit` 进 `ProjectionScope::Historical`）与
+/// 实时历史路（直接序列化记录）共用这一个函数，两路的记录出自同一段代码（Requirement 6.15）。
+///
+/// - bake：逐个元素三角化、算内容寻址 `mesh_id`、把网格写进共享网格目录；历史不算房间归属（`rooms = None`）。
+/// - 取消：每 bake 一个元素**之前**查一次 `cancel`，置位即返回 [`HistoricalProjectionCancelled`]；
+///   已写下的网格文件是内容寻址的，留着无害。投影段是纯结构化，不再查。
+/// - project：`project_geometry_delta(…, removals = [], publication = None, owners)`，不产回执。
+pub(crate) fn project_historical_records(
+    dbnum: u32,
+    source_sesno: u32,
+    elements: Vec<GeneratedElement>,
+    owners: &BTreeMap<(u32, u32), RefNo>,
+    mesh_dir: &Path,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<HistoricalProjection> {
+    let mut baked = Vec::with_capacity(elements.len());
+    for element in elements {
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            return Err(HistoricalProjectionCancelled.into());
+        }
+        baked.push(bake_element(element, mesh_dir, None)?);
+    }
+    let (commit, report) =
+        project_geometry_delta(dbnum, source_sesno, baked, Vec::new(), None, owners)?;
+    Ok(HistoricalProjection { commit, report })
 }
 
 /// 把一次增量折成投影存储要的一笔改动。
@@ -5568,6 +5791,119 @@ mod tests {
             .expect("project invalid tube");
 
         assert!(commit.upserts[0].tube.as_ref().unwrap().invalid);
+    }
+
+    fn historical_fixture_element(refno: RefNo, translation: glam::DVec3) -> GeneratedElement {
+        let world = DMat4::from_translation(translation);
+        let parts = vec![
+            manifold_csg::Manifold::cube(20.0, 20.0, 20.0, true)
+                .transform(&dmat4_to_affine4x3(world)),
+        ];
+        GeneratedElement {
+            geometry_id: GeometryId::Element {
+                refno: refno.to_string(),
+            },
+            refno,
+            noun: "VALV".into(),
+            is_invalid_tubi: false,
+            name: None,
+            solid: manifold_csg::Manifold::compose(&parts),
+            parts: Some(parts),
+            part_catalogue_nouns: Vec::new(),
+            degenerate_parts: Vec::new(),
+            part_record_repeats: Vec::new(),
+            world,
+            primitive_instance: None,
+            analytic_primitive: None,
+            negatives_applied: 0,
+            own_ngms_cuts: 0,
+            negatives_skipped: vec![],
+            joint_cuts_explained: vec![],
+            notes: vec![],
+        }
+    }
+
+    fn historical_fixture() -> (Vec<GeneratedElement>, BTreeMap<(u32, u32), RefNo>) {
+        let root = RefNo::new(24383, 100);
+        let first = RefNo::new(24383, 201);
+        let second = RefNo::new(24383, 202);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((first.word0, first.word1), root),
+            ((second.word0, second.word1), root),
+        ]);
+        let elements = vec![
+            historical_fixture_element(first, glam::DVec3::new(0.0, 0.0, 0.0)),
+            historical_fixture_element(second, glam::DVec3::new(100.0, 0.0, 0.0)),
+        ];
+        (elements, owners)
+    }
+
+    /// 任务 2.3 / R6.15：共用的 bake + project 与它取代的 Legacy 组合
+    /// `project_geometry_delta(…, bake_elements(…, None), [], None, …)` 产出逐位相同的记录与计数，
+    /// 不置位的取消标志与不给标志结果相同。
+    #[test]
+    fn project_historical_records_matches_the_legacy_bake_then_project() {
+        let (elements, owners) = historical_fixture();
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let (legacy, legacy_report) = project_geometry_delta(
+            24383,
+            7,
+            bake_elements(elements, legacy_dir.path(), None).unwrap(),
+            Vec::new(),
+            None,
+            &owners,
+        )
+        .unwrap();
+
+        let shared_dir = tempfile::tempdir().unwrap();
+        let shared = project_historical_records(
+            24383,
+            7,
+            historical_fixture().0,
+            &owners,
+            shared_dir.path(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(shared.records(), legacy.upserts.as_slice());
+        assert_eq!(shared.commit.tube_branch_resets, legacy.tube_branch_resets);
+        assert!(shared.commit.removals.is_empty() && shared.commit.receipt.is_none());
+        assert_eq!(shared.report.upserted, legacy_report.upserted);
+        assert_eq!(shared.report.mesh_ids, legacy_report.mesh_ids);
+        assert_eq!(shared.report.baked_instances, legacy_report.baked_instances);
+
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let with_flag = project_historical_records(
+            24383,
+            7,
+            historical_fixture().0,
+            &owners,
+            shared_dir.path(),
+            Some(&flag),
+        )
+        .unwrap();
+        assert_eq!(with_flag.into_records(), legacy.upserts);
+    }
+
+    /// 取消标志在 bake 每个元素之前查：置位后一个网格都不写，错误能按类型认出来。
+    #[test]
+    fn project_historical_records_stops_before_baking_once_cancelled() {
+        let (elements, owners) = historical_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let flag = std::sync::atomic::AtomicBool::new(true);
+
+        let error =
+            project_historical_records(24383, 7, elements, &owners, dir.path(), Some(&flag))
+                .unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<HistoricalProjectionCancelled>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// B/T2：bake 时房间判定看到的这件几何（`baked_room_input`）与它随后变成的投影记录（`project_geometry_delta`）
@@ -10270,12 +10606,38 @@ mod tests {
     #[test]
     fn snapshot_source_rejects_a_root_missing_from_the_session_index_before_generating() {
         let source = service_source();
-        let body = source
+        // Legacy 快照源与实时计算源都只经 `compute_snapshot_source` 求值（R6.15），门在那里。
+        let entries = source
             .split_once("pub async fn generate_snapshot_source(")
             .expect("snapshot source")
             .1
             .split_once("pub(crate) fn source_file(")
             .expect("snapshot source end")
+            .0;
+        let (legacy, realtime) = entries
+            .split_once("pub fn realtime_compute_source(")
+            .expect("realtime compute source");
+        for (name, entry) in [("legacy", legacy), ("realtime", realtime)] {
+            assert!(
+                entry.contains("compute_snapshot_source(&input, dbnum, root, source_sesno"),
+                "{name} entry must evaluate through the shared compute_snapshot_source"
+            );
+            assert!(
+                !entry.contains("generate_snapshot_from_set"),
+                "{name} entry must not evaluate on its own"
+            );
+        }
+        assert!(
+            legacy.contains("db_generation_lock(dbnum).lock_owned().await")
+                && !realtime.contains("db_generation_lock"),
+            "only the legacy entry takes the generation lock"
+        );
+        let body = source
+            .split_once("fn compute_snapshot_source(")
+            .expect("shared snapshot evaluation")
+            .1
+            .split_once("/// One evaluated element")
+            .expect("shared snapshot evaluation end")
             .0;
         let index_gate = body
             .find("input.index.owners.contains_key(&(root.word0, root.word1))")
@@ -10284,7 +10646,7 @@ mod tests {
             .find("SnapshotSourceError::RootNotInSession")
             .expect("the typed not-in-session error");
         let generation = body
-            .find("generate_snapshot_from_set(")
+            .find("generate_snapshot_from_set_with_hooks(")
             .expect("snapshot generation");
         assert!(
             index_gate < generation && typed_error < generation,

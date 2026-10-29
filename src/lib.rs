@@ -201,6 +201,8 @@ fn print_store_mode_notices_once() {
         for notice in crate::options::store_mode_notices() {
             eprintln!("*** {notice} ***");
         }
+        // 实时历史查询的四项有界配置在启动时解析一次，越界项在这里 `log::warn!`（Requirement 6.9）。
+        let _ = crate::options::model_history_settings();
         // 网格目录同一条纪律（ADR-068 D7）：配置里的 `meshes_path` 被 `PLANT_ASSET_ROOT` 压掉时
         // 当场点名——生成落盘、/assets/meshes、房间面板预热此后都按压过之后的那个目录走，
         // 人若照着文件里那句去翻目录，翻到的是个空的。
