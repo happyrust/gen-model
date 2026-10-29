@@ -18,10 +18,21 @@
 # Usage: powershell -File scripts\Check-LegacyPdmsIo.ps1
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $PSScriptRoot '..' | Resolve-Path | Select-Object -ExpandProperty Path
+# 交互式 pwsh 的 profile 可能把 rg 换成函数（例如转发给 tgrep，没有服务进程时只查过期索引），
+# 护栏会因此静默漏报；这里固定调用 PATH 上真正的 ripgrep 可执行文件。
+$rgExe = (Get-Command rg -CommandType Application -ErrorAction Stop | Select-Object -First 1).Path
 Push-Location $root
 try {
-    $tree = (& cargo tree --workspace -e normal --locked 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) { $tree; throw 'cargo tree --workspace (default features) failed' }
+    # 冷缓存下 cargo 会往 stderr 打进度（`Downloading crates ...` / `Updating crates.io index`）。
+    # `powershell.exe`（5.1）在 Stop 模式下把原生命令的任何 stderr 行都当异常抛出，
+    # 于是这条护栏在 CI 的干净 runner 上必然红（本地有缓存所以看不到）。这一段只放宽
+    # `$ErrorActionPreference`，判定仍靠 `$LASTEXITCODE` 与 `$tree` 的内容。
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $tree = (& cargo tree --workspace -e normal --locked 2>&1 | ForEach-Object { "$_" } | Out-String)
+    $treeExit = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($treeExit -ne 0) { $tree; throw 'cargo tree --workspace (default features) failed' }
     $hits = @(($tree -split "`n") | Where-Object { $_ -match 'pdms_io|pdms-io' })
     if ($hits.Count -gt 0) {
         $hits
@@ -60,13 +71,18 @@ try {
     'MANIFESTS_HAVE_NO_PDMS_IO'
 
     # 只认代码行：注释行与字符串字面量里的 "pdms_io::"（护栏测试自己的禁词表）不算。
+    # 同样要放宽 Stop：rg 在无匹配时按约定以 1 退出，5.1 会把它算成原生错误。
     $pattern = '^(?!\s*//).*(?<!")(pdms_io::|use pdms_io|feature = "legacy_pdms_io"|feature = "legacy_session_replay")'
-    $leaks = & rg -n --pcre2 --glob '*.rs' $pattern src tests python\src
-    if ($LASTEXITCODE -eq 0) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $leaks = & $rgExe -n --pcre2 --glob '*.rs' $pattern src tests python\src
+    $rgExit = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($rgExit -eq 0) {
         $leaks
         throw 'these source lines still reference old-pdms-io or its feature gates'
-    } elseif ($LASTEXITCODE -ne 1) {
-        throw "rg failed with exit code $LASTEXITCODE"
+    } elseif ($rgExit -ne 1) {
+        throw "rg failed with exit code $rgExit"
     }
     'SOURCE_HAS_NO_PDMS_IO'
 } finally {
