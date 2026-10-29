@@ -19,8 +19,14 @@
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $PSScriptRoot '..' | Resolve-Path | Select-Object -ExpandProperty Path
 # 交互式 pwsh 的 profile 可能把 rg 换成函数（例如转发给 tgrep，没有服务进程时只查过期索引），
-# 护栏会因此静默漏报；这里固定调用 PATH 上真正的 ripgrep 可执行文件。
-$rgExe = (Get-Command rg -CommandType Application -ErrorAction Stop | Select-Object -First 1).Path
+# 护栏会因此静默漏报；这里优先固定调用 PATH 上真正的 ripgrep 可执行文件。
+#
+# 但 GitHub 的 windows-latest runner **不自带 rg**，workflow 也不装它。脚本自 B9
+# （`06bb56fa3`）引入这条硬依赖起，这一步在 CI 上一直是 `CommandNotFoundException`，
+# 从来没绿过——只是没人往触发分支推过。所以 rg 只当加速手段：找不到就回退到
+# PowerShell 原生实现（.NET 正则同样支持这里的 lookahead / lookbehind）。
+$rgExe = (Get-Command rg -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1).Path
 Push-Location $root
 try {
     # 冷缓存下 cargo 会往 stderr 打进度（`Downloading crates ...` / `Updating crates.io index`）。
@@ -71,18 +77,43 @@ try {
     'MANIFESTS_HAVE_NO_PDMS_IO'
 
     # 只认代码行：注释行与字符串字面量里的 "pdms_io::"（护栏测试自己的禁词表）不算。
-    # 同样要放宽 Stop：rg 在无匹配时按约定以 1 退出，5.1 会把它算成原生错误。
     $pattern = '^(?!\s*//).*(?<!")(pdms_io::|use pdms_io|feature = "legacy_pdms_io"|feature = "legacy_session_replay")'
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $leaks = & $rgExe -n --pcre2 --glob '*.rs' $pattern src tests python\src
-    $rgExit = $LASTEXITCODE
-    $ErrorActionPreference = $previous
-    if ($rgExit -eq 0) {
-        $leaks
-        throw 'these source lines still reference old-pdms-io or its feature gates'
-    } elseif ($rgExit -ne 1) {
-        throw "rg failed with exit code $rgExit"
+    if ($rgExe) {
+        # 同样要放宽 Stop：rg 在无匹配时按约定以 1 退出，5.1 会把它算成原生错误。
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $leaks = & $rgExe -n --pcre2 --glob '*.rs' $pattern src tests python\src
+        $rgExit = $LASTEXITCODE
+        $ErrorActionPreference = $previous
+        if ($rgExit -eq 0) {
+            $leaks
+            throw 'these source lines still reference old-pdms-io or its feature gates'
+        } elseif ($rgExit -ne 1) {
+            throw "rg failed with exit code $rgExit"
+        }
+    } else {
+        # runner 上没有 rg：同样的正则交给 .NET，逐文件逐行扫。判定口径与 rg 分支一致。
+        Write-Host 'rg 不在 PATH 上，改用 PowerShell 原生扫描'
+        $regex = [regex]::new($pattern, 'Compiled')
+        $leaks = @()
+        foreach ($dir in @('src', 'tests', 'python\src')) {
+            $full = Join-Path $root $dir
+            if (-not (Test-Path -LiteralPath $full)) { continue }
+            foreach ($file in Get-ChildItem -LiteralPath $full -Recurse -Filter '*.rs' -File) {
+                $lineNo = 0
+                foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
+                    $lineNo++
+                    if ($regex.IsMatch($line)) {
+                        $rel = $file.FullName.Substring($root.Length).TrimStart('\', '/')
+                        $leaks += ('{0}:{1}: {2}' -f $rel, $lineNo, $line.Trim())
+                    }
+                }
+            }
+        }
+        if ($leaks.Count -gt 0) {
+            $leaks
+            throw 'these source lines still reference old-pdms-io or its feature gates'
+        }
     }
     'SOURCE_HAS_NO_PDMS_IO'
 } finally {
