@@ -178,6 +178,12 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   in_flight}`；`resume` 是启动续跑的进度（`loading|waiting_for_readiness|running|finished|load_failed`，
   读透形态与服务刚起时为 `null`）。与两枚水位一样是仪表，不进 `status` / `degraded_sections` /
   `blocking_conditions`。
+- `storage_version`（2026-10-28，ADR-091 二次修订）：数据库架构版本，只在进程启动时全局核对。
+  `{ expected, stored, caught_up, upgrade_required, shape, rebuild, upgrade }`。`stored = null` = 库里没有
+  `storage_version:current`（老库）；`upgrade_required = !caught_up`。`upgrade` 是最近一次一键升级的进度：
+  `{ state: idle|running|failed|done, requested, done, done_dbnums, failed: [{dbnum, reason}], started_at,
+  finished_at, full_scope }`。这一格**不参与** health gate：老库不该把进程标成不健康，但必须能被巡检看见。
+  运行期读点集不再做任何版本判断。
 - `gen_spatial_tree` 字段已于 2026-08-07 退役：空间/房间计算恒开启，界面不再需要
   「房间增量没开」的降级文案（历史语义见 ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
@@ -529,9 +535,12 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 {"task_id":"model-rebuild-7997-...","dbnum":7997,"expected_roots":2720,"state":"queued"}
 ```
 
-相同 dbnum 已有活动重建时返回同一 `task_id`。任务调用权威生成根同步并把全部根投入
-既有模型协调器，不直调整库生成函数；不预删旧模型、不改变水位。重建期间同库
-`/model/ensure` 返回 409。任务仅进程内有效，重启后需重新调用本端点。
+`state` = `new`（新排一行）或 `merged`（并进该库已排队的行，名单取并集）。相同 dbnum 已有活动重建时
+返回同一 `task_id`。任务调用权威生成根同步并把全部根投入既有模型协调器，不直调整库生成函数；
+不预删旧模型、不改变水位。重建期间同库 `/model/ensure` 返回 409。任务仅进程内有效，重启后需重新调用本端点。
+
+`model_full_rebuild_enabled=false` 时返回 `409 unsupported`（配置性拒绝，不是 500）。本端点只重算模型，
+**不写 `storage_version:current`**，也不是架构升级手段——升级走 §4.5.1D。
 
 ### 4.5.1B `POST /api/v1/dbnums/{dbnum}/model/ensure` — 整库即时生成
 
@@ -640,6 +649,29 @@ rebuild、不推进应用/模型水位。
 `ref0s` 的元素是**字符串**（这张表的主键就是字符串前缀），与 §4.7 行上那个同名的整数数组
 **不是同一个形状**。只拿得到 refno 的客户端（浏览器）两边都要认：整库清理的回执这一格此前
 只被当成整数收，整条回执会在解析阶段就失败。
+
+### 4.5.1D `POST /api/v1/storage-version/upgrade` — 数据库架构版本一键升级
+
+数据库架构版本（`storage_version:current.version`）与本进程 `MODEL_STORAGE_VERSION` 不一致时，
+读侧读不懂旧模型行。本端点把「清空旧数据 → 重新解析 → 重新生成模型」做成一次可记账的批处理：
+逐库排既有 `intent=reinitialize` 批次（复用逐库重新解析入口），全部请求库成功且请求集为全范围时
+才写版本记录。
+
+- 请求：`{ project?, mdb?, namespace?, dbnums?: [u32] }`。缺省 `dbnums` = 当前 MDB 声明的全部设计库 ∩
+  监听范围；显式名单必须是这个范围的子集，越界 `400 bad_request`。读透数据面无数据可清，`409 conflict`。
+- 响应 `202 Accepted`：`{ target_version, requested, full_scope, upgrade: {state, started_at}, receipt }`，
+  `receipt` 与 `/update/execute` 同形（`enqueued / merged / already_covered / blocked / warnings`）。
+- 进度持久在 `storage_upgrade:current`：`{ target_version, requested, done, failed: [{dbnum, reason}],
+  started_at, finished_at, tasks, full_scope }`；`/health.storage_version.upgrade` 是它的对外快照。
+  判定在数据批次 worker 空闲轮与 `/health` 按需刷新里，handler 不等。
+- 只有**全部请求库 `Succeeded` 且 `full_scope=true`** 才写 `storage_version:current`；部分名单只更新进度。
+  `full_scope` 的分母是**当前 MDB 声明的全部设计库**，不是本进程的 `watch_dbnums` 子集：
+  监听限定模式下请求集即便等于监听范围也**不写**版本记录——限定进程不能替整库作证。
+  已有升级在跑时再调用返回 `409 conflict`。
+- 进程重启后 `TaskRegistry` 是空的：进度记录里的任务号查不到，那一轮会落成 `failed` 且**不写**
+  版本记录（原因文本写明「不在任务注册表」）。队列里的 `reinitialize` 仍会继续跑完；要补上版本
+  记录就再调一次本端点（已升级的库会再排一次重新解析，代价是重复清库）。
+- 升级会清空被点名库的旧数据并重新解析、生成；面板按钮必须二次确认并列出库清单。
 
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
@@ -1032,7 +1064,7 @@ gen-model-v1 读透形态两样都没有（投影只存网格与世界矩阵，`
 > **整根发布的同一笔事务里**把每个路由成员（BRAN / HANG 等容器的直属管件）与类 28 NOZZ 的点集写进
 > `pe_ptset:⟨word0_word1⟩ = { pe, root, dbnum, noun, ptset: { "<P 号>": { pt, dir, bore, noun } }, count, unresolved: [{ number, reason }], sesno, generator, reason, written_at }`
 > （局部系 mm，与本端点 `points[]` 同源：e3d-model `GenerationOutcome::point_sets`，`fast_model::ptset_rows`），三个函数改读这张表（`fn::pe_ptset_of`）。
-> 没有行 = 这根还没按新版发布过（部署后逐库 `POST /api/v1/dbnums/{dbnum}/model/rebuild` 补齐，没有后台补写）；有行但 `ptset: {}` = 这件真没有 P 点（`reason` 说明）。
+> 没有行 = 这根还没按新版发布过（没有后台补写；需要补齐时用 `POST /api/v1/dbnums/{dbnum}/model/rebuild` 重算该库模型，架构升级另走 §4.5.1D）；有行但 `ptset: {}` = 这件真没有 P 点（`reason` 说明）。
 
 - 请求：`{ "refno": "24381/145031", "include_members": false }`（`refno` 收 `a/b` / `a_b` /
   带 `=` 前缀；身份三元组可选，同 §3）。`include_members=true` 一并解**直属成员**的点集：

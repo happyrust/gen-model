@@ -18,10 +18,10 @@
 //!
 //! - 坐标在管件局部系（mm），方向已归一；`bore` 按 E3D `PPBORE` 口径（未设 / 0 → `null`）。
 //! - `sesno` = 这根这次发布的 `source_sesno`；`generator` = e3d-model [`e3d_model::PTSET_EVAL_VERSION`]（求值规则的版本）。
-//! - **行上不带存储架构版本**：那个号是整库一条记录（`storage_version:current`，见
-//!   [`aios_core::model_storage`]），回答的是「这份库的模型面是哪一版代码建的」，
-//!   不是某张表、也不是某一行的属性。读侧（rs-server / aios_core）只按那一条判，
-//!   对不上就报 `MODEL_STORAGE_VERSION_MISMATCH`，不静默回空集。
+//! - **行上不带数据库架构版本**：那个号是整库一条记录（`storage_version:current`，见
+//!   [`aios_core::model_storage`]），回答的是「整个数据库的架构是哪一版代码建的」，
+//!   不是某张表、也不是某一行的属性。版本只在进程启动时全局核对；读点集
+//!   （rs-server / aios_core）不做版本判断，没有行就是 NONE / 空集。
 //! - **没有行 = 这根还没按新版发布过**；**有行但 `ptset: {}` = 这件真没有 P 点**，`reason` 说明是哪一种
 //!   （没有目录链 / 目录件没有 PTRE / 点全解不出 / PTSE 是空的）。长度函数对 `{}` 照旧回 0。
 //! - 没有异步补写也没有启动补扫（D5，2026-10-27 拍板）：发布路径是唯一写入口，部署后老根靠逐库
@@ -298,7 +298,7 @@ mod tests {
             )
         );
 
-        // 行上不带存储架构版本：那个号是整库一条记录（`storage_version:current`），
+        // 行上不带数据库架构版本：那个号是整库一条记录（`storage_version:current`），
         // 不是某一行的属性。行上留着它会多出一处会分叉的副本。
         assert!(
             !sql.contains("storage_version"),

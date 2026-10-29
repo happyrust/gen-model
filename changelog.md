@@ -1,3 +1,20 @@
+## 2026-10-29
+
+### 数据库架构版本只在启动核对，升级收成「一键清库重建」；读点集不再做版本判断
+
+- **为什么**：上一版把 `storage_version:current` 写成「模型面行形状版本」，并把检测挂在读点集路径上（surql `THROW` → aios_core `check` → rs-server 409）。但它回答的是**整个数据库的架构**，不是某张表、某个 dbnum 的属性；运行期每读一次点集就判一次版本，既把读路绑死在版本上，也让「不匹配」只能逐库 `model/rebuild`（那不清旧数据，不是架构升级）。
+- **改**：
+  - 核对只剩启动一次：gen-model 读 `storage_version:current`，不匹配在日志、`/health.storage_version`（`upgrade_required`）与运维面板横幅点名，不阻断启动；rs-server 启动同样核对，不匹配**拒绝启动**并提示用 aios-database 升级（`AIOS_STORAGE_VERSION_CHECK=warn` 仅供开发机临时降级）。
+  - 新 `POST /api/v1/storage-version/upgrade`（`src/data_interface/storage_upgrade.rs`）：缺省 = 当前 MDB 全部设计库 ∩ 监听范围，显式名单须为子集；逐库排既有 `intent=reinitialize`（清空 → 重新解析 → 重新生成），进度写 `storage_upgrade:current`（`requested / done / failed / started_at / finished_at`）。只有全部请求库 `Succeeded` 且请求集 = 全范围才写 `storage_version:current`；部分名单只记进度。
+  - `/health.storage_version` 增加 `upgrade_required` 与 `upgrade` 快照；`web/ops.html` 增加版本横幅、二次确认的「全部升级 / 升级指定库」与进度。
+  - `task_end.rs` 不再随单库模型水位写版本记录（整库一条，只在全量升级完成 / 全新空库首次初始化完成时写）。
+  - 移除 ptset 侧全部版本检测：`gy_common.surql` 的 `fn::pe_ptset_of` 回到单语句读 `pe_ptset`；aios_core `ptset_map_projection` 不再投版本列、`query_*_point_map` 不再 `check`；`ModelStorageVersionMismatch` 去掉 `dbnum`、文案改指升级入口；rs-server 的 `StorageVersionMismatch` / 409 映射 / 文本解析及测试删除；`ptset_read_is_versioned_7997` 删除，`ptset_alignment_7997` 的前置改为「库已升级到当前架构版本」。
+- **验证**：gen-model 全量 `cargo test --lib --no-default-features --features ws,gen_model,manifold,project_hd,http_api` **2689 passed / 0 failed / 134 ignored**，定向用例（`storage_upgrade` 8 + `storage_version` 8 + `task_end` 25 + `model_rebuild` 3 + `disabled_full_rebuild` 1 + `pe_ptset_rows_land` 1 + `batch_worker` 63 + `startup_reconcile` 7 + `embedded_surql` 3）全绿，`cargo check --lib` 通过；aios_core `model_storage` 5 + `heat_dissipation` 3 全绿（`geom` 的 7 条集成用例需外部库，本机 `Connection uninitialised`，与本改动无关）；rs-server `cargo test --bin rs-server` 64 passed / 0 failed / 29 ignored，`extraction_fixes_7997 -- --ignored` 2 passed（启动核对读到 `stored=1 expected=1`）。`cargo check --bins --tests` 被 `src/bin/e3d_mcp.rs` 既有的 rmcp 3.1.1 宏漂移（`ServerConfig` 已移除）挡下，该文件未改、与本改动无关。
+- **现场差异**：计划记录「库内没有 `storage_version:current`」已过时——执行前的运行进程（build `20fa5f8c`）已按旧写入点把 version=1 写上；`pe_ptset` 14325、`pe` 661966。因此本机没有可复现的「不匹配 → 一键升级」现场，未对真实库触发清空重建；新端点/进度的真实升级路径只由单测覆盖。
+- **演练（2026-10-29，丢弃库）**：独立 SurrealDB（`127.0.0.1:18009`，memory 后端）+ `watch_dbnums=[7352]`，走完「启动点名老库 → `POST /storage-version/upgrade` → 逐库重新解析 → 写 `storage_version:current` → `/health` 转绿 → rs-server 启动」。55 秒完成，`upgrade.state=done / caught_up=true`；删掉记录后 rs-server **exit 1** 拒绝启动，`AIOS_STORAGE_VERSION_CHECK=warn` 只告警。证据、命令与未覆盖项见 `docs/verification/storage-version-upgrade-rehearsal-2026-10-29.md`。
+- **旧库副本部分升级（2026-10-29，`ams-8009-fresh`）**：旧库的 `ams-db` 自带 RocksDB 校验和损坏（`001703.sst`），改用 `ams-8009-fresh` 副本（`pe_ptset` 13,276 行、7997/8000 两库、无版本记录；MDB 声明 71 库 / 29 个元素库）。显式 `dbnums:[8000]`：202、`full_scope=false`，约 42 秒完成（任务 37.4 秒）；8000 清空 6,639 行 PE 后重解析出 953 根 / 2,814 条记录，7997 原样保留。`storage_version:current` 仍空、`/health.upgrade_required=true`、rs-server 仍 `exit 1`（`stored=none`）——部分列表不写整库记录，整库语义成立。
+- **演练中修掉四处**：① `/health.storage_version` 原本塞在 `model_cache` 里，面板按顶层读永远看不见——提到顶层（连接/断开两套响应都带）并加钉；② 启动提示没按 `watch_dbnums` 收窄，只放开 7352 却列了 29 个「将被清空」的库——改为「MDB 声明 ∩ 监听范围」；③ rs-server 版本不匹配时走 `resident_db_runtime` 的 `panic!`（exit 101），改为把建连结论返回给 `init_aios_mgr` 的 `?`，启动输出一行 `Error: MODEL_STORAGE_VERSION_MISMATCH …`（exit 1），测试入口仍保留 panic 语义；④ 升级完成判定把 `MDB ∩ watch_dbnums` 当成整库分母，`watch_dbnums=[8000]` 只升 8000 也会写整库记录——改为 `covers_whole_database(requested, declared)`，分母是 MDB 声明的全部设计库，部分列表永不写。回归：gen-model 2689 passed / 134 ignored，rs-server 64 passed / 29 ignored。
+
 ## 2026-10-28
 
 ### 模型存储架构版本号收成整库一条 `storage_version:current`：老库读侧直接报错，要求逐库重建

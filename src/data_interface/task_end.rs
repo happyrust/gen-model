@@ -146,9 +146,6 @@ fn render_watermark_update(end: &TaskEnd) -> String {
     } = *end;
     let mut sets: Vec<String> = Vec::new();
     let mut stamps = false;
-    // 这一笔要不要 upsert `storage_version:current`。与 `stamps` 分开：`stamps` 管的是
-    // 数据水位闸（`applied_sesno >= target_sesno`），版本记录只跟模型水位盖章走。
-    let mut stamps_storage_version = false;
 
     if let Some(model) = &end.model {
         if end.model_stamps() {
@@ -164,16 +161,9 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 "model_sesno = math::max([model_sesno ?: 0, {target_sesno}])"
             ));
             sets.push("model_settled_at = time::now()".to_owned());
-            // 存储架构版本随 `model_sesno` 同一笔盖：这一格回答「这个库的模型面行形状是哪一版」，
-            // 与 `model_generator`（几何是哪一版 e3d-model 算的）和 `pe_ptset.generator`
-            // （点算得对不对）是三条正交的轴，见 `aios_core::model_storage` 的模块注释。
-            // 读侧按它判整库能不能读；缺列 = 前版本化 = 需要 rebuild。
-            // 存储架构版本是整库一条记录（`storage_version:current`），不是水位行上的一格：
-            // 行形状是整个模型面共用的一份约定，不针对某张表、也不针对某个 dbnum。
-            // 这条记录随模型水位同一笔 upsert（见 `render_storage_version_record`），
-            // `version` / `shape` / `rebuild` 三格一起写，保证人读的那两格永远与 `version` 同代。
-            // 读侧按它判「这份库的行形状读不读得懂」；缺记录 = 前版本化 = 需要 rebuild。
-            stamps_storage_version = true;
+            // 数据库架构版本（`storage_version:current`）**不在这里写**：它是整库一条记录，
+            // 只在全新空库初始化完成或全部库升级完成时由 `storage_upgrade` 写。
+            // 单库水位盖章不代表整个数据库已经换成新架构。
             if let Some(stamps) = model
                 .catalogue_sessions
                 .as_ref()
@@ -214,36 +204,9 @@ fn render_watermark_update(end: &TaskEnd) -> String {
     } else {
         String::new()
     };
-    let watermark = format!(
+    format!(
         "UPDATE {WATERMARK_TABLE}:{dbnum} SET {}{guard} RETURN id;",
         sets.join(", ")
-    );
-    if !stamps_storage_version {
-        return watermark;
-    }
-    // 顺序是契约：`commit_task_end_via` 用**最后一条带回执的语句**判「水位有没有盖上」
-    // （数据水位闸挡下时 `UPDATE` 影响 0 行，`touched` 为空）。版本记录必须排在它前面，
-    // 否则 `UPSERT … RETURN id` 恒有回执，闸门判据就永远为真。
-    format!("{}\n{watermark}", render_storage_version_record())
-}
-
-/// 存储架构版本记录那一句。
-///
-/// 整库一条（`storage_version:current`），不按 dbnum 分行：行形状是整个模型面共用的
-/// 一份约定。`version` / `shape` / `rebuild` 三格永远一起写——`shape` 与 `rebuild`
-/// 是给人读的，靠代码里的常量落库，不靠人工在库里改，这样它们不会与 `version` 分叉。
-///
-/// 用 `UPSERT … CONTENT` 而不是 `SET`：三格要整份替换，旧的说明文字不该残留。
-fn render_storage_version_record() -> String {
-    use aios_core::model_storage::{
-        StorageVersionRecord, REBUILD_COLUMN, SHAPE_COLUMN, STORAGE_VERSION_RECORD, VERSION_COLUMN,
-    };
-    let record = StorageVersionRecord::current();
-    format!(
-        "UPSERT {STORAGE_VERSION_RECORD} CONTENT {{ {VERSION_COLUMN}: {}, {SHAPE_COLUMN}: '{}', {REBUILD_COLUMN}: '{}' }} RETURN id;",
-        record.version,
-        escape_surql_str(record.shape),
-        escape_surql_str(record.rebuild)
     )
 }
 
@@ -1336,16 +1299,24 @@ mod tests {
         let mut end = end();
         end.info = None;
         let sql = render_task_end_tail(&end);
+        // 判据是「语句分隔符」——`;` 后面紧跟换行或串尾，不裸数 `';'`（内容里本来就有分号）。
+        // 这一笔现在是四句：BEGIN / write_state / UPDATE 水位 / COMMIT。版本记录已迁到升级流程。
+        let statements = sql
+            .match_indices(';')
+            .filter(|(i, _)| {
+                sql[i + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '\n' || c == '\r')
+            })
+            .count();
         assert_eq!(
-            sql.matches(';').count(),
-            5,
-            "BEGIN / write_state / UPSERT storage_version / UPDATE / COMMIT 五句：{sql}"
+            statements, 4,
+            "BEGIN / write_state / UPDATE / COMMIT 四句：{sql}"
         );
-        // 版本记录必须排在水位 `UPDATE` 之前：`commit_task_end_via` 用最后一条带回执的
-        // 语句判「水位有没有盖上」，`UPSERT … RETURN id` 恒有回执，排在后面会让闸门判据恒真。
         assert!(
-            sql.contains("UPSERT storage_version:current CONTENT"),
-            "模型水位盖章要顺带把版本记录写上: {sql}"
+            !sql.contains("storage_version"),
+            "task end 不再写数据库架构版本：{sql}"
         );
 
         let receipt = commit_task_end_on(&db, &end).await.unwrap();

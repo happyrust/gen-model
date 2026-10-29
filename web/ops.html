@@ -118,6 +118,22 @@ body{
    单独一行摆在泳道上方。 */
 .notice{font-size:12px;line-height:18px;color:var(--amber);padding:0 2px}
 
+/* ── storage upgrade ─────────────────────────────────────── */
+/* 版本不匹配是整库级别的事，摆在泳道上方：它不参与数据/模型两条凭证的判决，
+   但「这台进程读不懂库里旧数据」必须先于任何一条泳道被看见。 */
+.upgrade-banner{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;
+  background:var(--panel);border:1px solid var(--warn-edge);border-left:3px solid var(--amber);
+  border-radius:8px;padding:14px 18px;flex-wrap:wrap}
+.upgrade-banner.bad{border-color:var(--tint-red);border-left-color:var(--red)}
+.upgrade-banner[hidden]{display:none}
+.upgrade-banner .u-main{flex:1 1 520px;min-width:0;display:flex;flex-direction:column;gap:6px}
+.upgrade-banner .u-title{font-size:14px;font-weight:600}
+.upgrade-banner .u-note{font-size:12px;color:var(--t2);line-height:18px}
+.upgrade-banner .u-dbs{font-family:var(--mono);font-size:11.5px;color:var(--t3);word-break:break-all}
+.upgrade-banner .u-act{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.upgrade-banner input{width:190px;background:var(--panel);border:1px solid var(--edge);border-radius:6px;
+  color:var(--t1);padding:7px 9px;font:11.5px var(--mono)}
+
 /* ── actions ────────────────────────────────────────────── */
 .acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px}
 .btn{
@@ -424,6 +440,7 @@ button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{
   </div>
 
   <div id="halt"></div>
+  <div id="upgrade-banner" hidden></div>
   <div class="lanes" id="lanes">
   <div class="verdict" id="verdict">
     <div class="verdict-body">
@@ -778,6 +795,31 @@ const ACTIONS = {
               note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型生成（房间边随模型块落库）。`,
               body:{ dbnums:[Number(dbnum)] } }),
             run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
+  // 数据库架构版本一键升级：缺省 = 当前 MDB 的全部设计库，显式输入 = 这个范围的子集。
+  // 它会清空旧数据，二次确认必须把「清空 + 重新解析 + 重新生成」和「部分名单不写版本」
+  // 都说出来——这两句少一句，人都会以为点完就完事了。
+  storageUpgrade:{ label:"升级数据库", req:"POST /api/v1/storage-version/upgrade", cls:"warn",
+            hint:"清空所选库的旧数据，重新解析并生成模型；全部库完成才写架构版本",
+            resolve:async (raw) => {
+              const text = String(raw || "").trim();
+              const dbnums = text
+                ? [...new Set(text.split(/[,，\s]+/).map(Number).filter(v => Number.isInteger(v) && v > 0))].sort((a,b) => a-b)
+                : [];
+              if(text && !dbnums.length) throw new Error("dbnum 名单解析为空；不填则升级全部设计库");
+              return {
+                note: dbnums.length
+                  ? `将升级 ${dbnums.length} 个库：${dbnums.join("、")}。这会清空这些库的旧数据并重新解析、生成模型；部分名单完成也不写架构版本。`
+                  : "将升级当前 MDB 的全部设计库：逐个清空旧数据、重新解析、生成模型；全部完成才写架构版本。升级期间 rs-server 会拒绝启动。",
+                body: dbnums.length ? { dbnums } : {},
+              };
+            },
+            run:async (ctx) => {
+              const r = await post("/storage-version/upgrade", ctx.body);
+              const requested = (r.requested || []).length;
+              return `202 已排升级 — target ${r.target_version} · 请求 ${requested} 个库`
+                + `${r.full_scope ? "（全范围）" : "（部分名单，完成也不写版本记录）"}；`
+                + `进度看 /health.storage_version.upgrade 与 /tasks`;
+            } },
   initializeBatch:{ label:"初始化所选库", req:"POST /api/v1/update/execute", cls:"go",
             hint:"从等待手动初始化的库中多选；一次提交精确的 dbnums[]，不改变全范围监听",
             resolve:async (raw) => {
@@ -1485,6 +1527,7 @@ function render(){
     $("v-tsince").textContent = "since " + v.timer.since;
   }
 
+  renderUpgrade(m);
   renderKpi(m);
   renderQueue(m, now);
   renderFailures(m);
@@ -1589,6 +1632,60 @@ function renderSysbar(m){
 function kpiCell(label, value, cls, sub){
   return `<div><div class="l">${esc(label)}</div><div class="v ${cls}">${esc(value)}</div><div class="s">${esc(sub)}</div></div>`;
 }
+/* ── database architecture upgrade ─────────────────────── */
+// `storage_version` 只在启动时核对；这里读 `/health` 的最近一次报告与升级账。
+// 升级中/失败/不匹配都摆在泳道上方：它不参与数据/模型判决，但「读不懂旧数据」
+// 必须先于任何一条泳道被看见。
+function renderUpgrade(m){
+  const el = $("upgrade-banner");
+  if(!el) return;
+  const sv = m.h && m.h.storage_version;
+  if(!sv){ el.hidden = true; el.innerHTML = ""; return; }
+  const up = sv.upgrade || { state:"idle" };
+  const running = up.state === "running";
+  const failed = up.state === "failed";
+  const required = !!sv.upgrade_required;
+  if(!required && !running && !failed){ el.hidden = true; el.innerHTML = ""; return; }
+
+  const design = (m.inScope || [])
+    .filter(r => String(r.db_type || "").toUpperCase() === "DESI")
+    .map(r => Number(r.dbnum))
+    .sort((a,b) => a-b);
+  const requested = Array.isArray(up.requested) && up.requested.length ? up.requested.map(Number) : design;
+  const shown = requested.slice(0, 48).map(String).join("、")
+    + (requested.length > 48 ? ` …共 ${requested.length} 个` : "");
+  const failedRows = (up.failed || []).map(f => `dbnum ${f.dbnum}：${f.reason}`).join("；");
+  const done = Number(up.done || 0);
+
+  let title, note, actions = "";
+  if(running){
+    title = "数据库架构升级进行中";
+    note = `已排 ${requested.length} 个库，完成 ${done} 个；全部完成才写 storage_version:current。`
+         + `升级期间 rs-server 会拒绝启动。`;
+  }else if(failed){
+    title = "数据库架构升级未全部成功";
+    note = `未写版本记录。${failedRows || "有库没有成功完成重新解析，详见 /health.storage_version.upgrade"}`;
+  }else{
+    title = "数据库架构版本不匹配";
+    note = `库里 ${sv.stored ?? "none"} / 期望 ${sv.expected}。升级会清空旧数据，重新解析并生成模型；`
+         + `全部设计库完成才写版本记录。`;
+  }
+  if(!running && WRITE){
+    actions = `<div class="u-act">`
+      + `<input id="upgrade-dbnums" inputmode="numeric" autocomplete="off" placeholder="可选 dbnum，如 7997,7354">`
+      + `<button class="btn warn" data-act="storageUpgrade" data-from-input="1">升级指定库</button>`
+      + `<button class="btn warn" data-act="storageUpgrade" data-arg="">全部升级</button>`
+      + `</div>`;
+  }
+  el.className = "upgrade-banner" + ((failed || (required && !running)) ? " bad" : "");
+  el.innerHTML = `<div class="u-main">`
+    + `<div class="u-title">${esc(title)}</div>`
+    + `<div class="u-note">${esc(note)}</div>`
+    + `<div class="u-dbs">${running ? "本次清单" : "将清空并重建"}：${esc(shown || "（范围尚未读出，展开库列表后重试）")}</div>`
+    + `</div>${actions}`;
+  el.hidden = false;
+}
+
 function renderKpi(m){
   const lag = m.lagging[0];
   const worst = m.parked[0] || m.failures[0];
@@ -2376,6 +2473,13 @@ $("t-body").addEventListener("click", e => {
   if(!row) return;
   S.openTask = S.openTask === row.dataset.task ? "" : row.dataset.task;
   try{ render(); }catch(err){ console.error(err); }
+});
+$("upgrade-banner").addEventListener("click", e => {
+  const button = e.target.closest("button[data-act]");
+  if(!button) return;
+  const fromInput = button.dataset.fromInput === "1";
+  const input = $("upgrade-dbnums");
+  act(button.dataset.act, fromInput ? (input ? input.value : "") : (button.dataset.arg || ""));
 });
 $("acts").addEventListener("click", e => {
   const initOpen = e.target.closest("[data-init-open]");

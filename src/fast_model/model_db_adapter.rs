@@ -9458,17 +9458,6 @@ mod tests {
         .expect("seed members")
         .check()
         .expect("seed member statements");
-        // 存储架构版本是整库一条记录（`storage_version:current`）。这里把它写上，
-        // 行级那格已经不存在了。缺这条记录时 `fn::pe_ptset_of` 会按「老库」THROW ——
-        // 那是另一个用例（rs-server 的 `ptset_read_is_versioned_7997`）要看的形状。
-        db.query(format!(
-            "UPSERT storage_version:current CONTENT {{ version: {}, shape: 'test', rebuild: 'test' }};",
-            aios_core::model_storage::MODEL_STORAGE_VERSION
-        ))
-        .await
-        .expect("seed storage version")
-        .check()
-        .expect("seed storage version statement");
         let root = RefNo::new(24383, 1);
         let ftub = RefNo::new(24383, 500);
         let atta = RefNo::new(24383, 600);

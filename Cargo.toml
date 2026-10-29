@@ -161,7 +161,7 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "5f6d00408fea5cd77eb2c47f4a43051911426b69", default-features = false }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d5a6a88c2c3b2093621bf72ead42493fcab67515", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
 # old-pdms-io（`pdms_io`）不再是依赖——连 optional 都不是。`cargo tree --workspace -i pdms_io`

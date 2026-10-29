@@ -5073,6 +5073,13 @@ async fn idle_round(mgr: &Arc<AiosDBManager>, _registry: &'static TaskRegistry) 
         && model_coverage_current
         && initialization.data_ready()
         && initialization.mark_model_ready();
+    // D-7：全新空库从零初始化完成时自动写架构版本记录（只写一次；老库不碰）。
+    if model_became_ready {
+        let _ = crate::data_interface::storage_upgrade::write_version_if_fresh_database().await;
+    }
+    // 升级完成判定：全部请求库落终态才写 `storage_version:current`。没有升级记录时
+    // `ensure_loaded` 只读一次库，空闲轮不会反复付这次往返。
+    let _ = crate::data_interface::storage_upgrade::reconcile_progress().await;
     let outcome = if model_became_ready && outcome == IdleOutcome::Settled {
         IdleOutcome::MoreWork
     } else {

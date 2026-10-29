@@ -257,22 +257,43 @@ fn model_cache_health(store_reachable: bool) -> Value {
     health["store_reachable"] = json!(store_reachable);
     health["degraded_read_only"] =
         json!(crate::options::store_mode().is_durable() && !store_reachable);
-    // 模型面存储架构版本：`storage_version:current` 那一条记录的三格原样带出来
-    // （机器可读，不是散文）。`null` = 启动核对还没跑过，不冒充「已追平」。
-    // 这一格**不参与**任何 health gate 判定：一份老库不该把整个进程标成不健康，
-    // 但它必须能被巡检看见——否则「重建」这件事永远没人做。
-    health["storage_version"] = match crate::data_interface::storage_version_reconcile::last_report()
-    {
+    health
+}
+
+/// 数据库架构版本这一格（顶层 `/health.storage_version`）。
+///
+/// `storage_version:current` 那一条记录的三格原样带出来（机器可读，不是散文）。
+/// `null` = 启动核对还没跑过，不冒充「已追平」。这一格**不参与**任何 health gate：
+/// 一份老库不该把整个进程标成不健康，但它必须能被巡检看见——否则「升级」这件事
+/// 永远没人做。
+///
+/// 必须挂在顶层：运维面板按 `m.h.storage_version` 读，巡检也按这个路径取。
+pub(crate) fn storage_version_health() -> Value {
+    let upgrade = crate::data_interface::storage_upgrade::last_progress();
+    match crate::data_interface::storage_version_reconcile::last_report() {
         Some(report) => json!({
             "expected": report.expected,
             "stored": report.stored,
             "caught_up": report.is_caught_up(),
+            "upgrade_required": !report.is_caught_up(),
             "shape": report.shape,
             "rebuild": report.rebuild,
+            "upgrade": match &upgrade {
+                Some(progress) => json!({
+                    "state": progress.state(),
+                    "requested": progress.requested,
+                    "done": progress.done.len(),
+                    "done_dbnums": progress.done,
+                    "failed": progress.failed,
+                    "started_at": progress.started_at,
+                    "finished_at": progress.finished_at,
+                    "full_scope": progress.full_scope,
+                }),
+                None => json!({ "state": "idle" }),
+            },
         }),
         None => Value::Null,
-    };
-    health
+    }
 }
 
 /// 运维面板的内嵌副本。
@@ -860,6 +881,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 一次性缓存会让 `/health` 一直报 `caught_up: false` 直到进程重启，而「重建
     // 有没有生效」正是运维要当场看见的事。已追平则不加库往返。
     let _ = crate::data_interface::storage_version_reconcile::refresh_if_stale().await;
+    // 升级账：进程重启后第一次 `/health` 时装载；之后每轮顺手做一次完成判定，
+    // 让面板在队列仍忙时也能看到 `done` 逐个增长（空闲轮是另一处判定点）。
+    let _ = crate::data_interface::storage_upgrade::reconcile_progress().await;
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let web_options = crate::get_db_option_ext();
     let http_bind_addr = super::runtime_http_api_addr(
@@ -1028,6 +1052,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_incremental_types": model_incremental_types,
             "model_incremental_types_origin": model_incremental_types_origin,
             "in_memory_db": !crate::options::store_mode().is_durable(),
+            // 架构版本挂在**顶层**：面板与巡检都按 `/health.storage_version` 读，与服务拓扑
+            // 无关。放在 `model_cache` 里时面板永远读不到、横幅不会出现（2026-10-29 演练发现）。
+            "storage_version": storage_version_health(),
             "model_cache": model_cache_health(false),
         }));
     }
@@ -1170,6 +1197,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 与 model_sesno 照常推进，只跳过房间边重算；重新打开不自动补历史欠账。这个字段让
         // 客户端知道「模型一致」是否包含房间归属。
         "room_membership": crate::options::room_membership(),
+        "storage_version": storage_version_health(),
         "model_cache": model_cache_health(true),
         // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
         // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
@@ -3332,6 +3360,95 @@ pub async fn dbnum_model_roots(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct StorageVersionUpgradeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// 缺省 = 当前 MDB 声明的全部设计库 ∩ 监听范围。显式名单必须是这个范围的子集。
+    #[serde(default)]
+    pub dbnums: Option<Vec<u32>>,
+}
+
+/// POST /api/v1/storage-version/upgrade — 数据库架构版本一键升级。
+///
+/// 版本不匹配时本进程读不懂旧模型行，出路是清空旧数据、重新解析、重新生成模型。
+/// 这里逐库排既有的 `intent=reinitialize` 批次（不另写清库 / 解析 / 生成路径），
+/// 进度写在 `storage_upgrade:current`；全部请求库 `Succeeded` 且请求集等于全范围时
+/// 才写 `storage_version:current`（判定在 worker 空闲轮与 `/health`，不在本 handler 里等）。
+pub async fn storage_version_upgrade(
+    State(state): State<AppState>,
+    Json(request): Json<StorageVersionUpgradeReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = resolve_identity(&state, &request.identity)?;
+    if crate::options::data_face().is_read_through() {
+        return Err(ApiError::conflict(
+            "read-through data face has no ingested data to upgrade",
+        ));
+    }
+    // 分母用 MDB 声明的全部设计库，不用 ``watch_dbnums`` 子集：限定进程只升级
+    // 8000 时，请求集等于监听范围却远不等于整库，不能写整库版本记录。
+    let declared = crate::data_interface::storage_upgrade::declared_dbnums()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let scope: Vec<u32> = declared
+        .iter()
+        .copied()
+        .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
+        .collect();
+    if scope.is_empty() {
+        return Err(ApiError::bad_request(
+            "当前 MDB 没有可升级的设计库（检查 mdb / watch_scope 配置）",
+        ));
+    }
+    let (requested, _requested_covers_watch_scope) =
+        crate::data_interface::storage_upgrade::resolve_requested(&scope, request.dbnums)
+            .map_err(|out_of_scope| {
+                ApiError::bad_request(format!(
+                    "dbnums 不在当前 MDB 的设计库范围里: {out_of_scope:?}；全范围是 {scope:?}"
+                ))
+            })?;
+    let full_scope = crate::data_interface::storage_upgrade::covers_whole_database(
+        &requested,
+        &declared,
+    );
+    if requested.is_empty() {
+        return Err(ApiError::bad_request(
+            "dbnums 不能为空；不传 dbnums 表示升级全部设计库",
+        ));
+    }
+    let (progress, receipt) = crate::data_interface::storage_upgrade::start(
+        &state.mgr,
+        &identity.project,
+        Some(&identity.mdb),
+        &requested,
+        full_scope,
+    )
+    .await
+    .map_err(|error| {
+        let text = format!("{error:#}");
+        if text.contains("已有存储架构升级在进行中") {
+            ApiError::conflict(text)
+        } else {
+            ApiError::from_domain(error)
+        }
+    })?;
+    // 与 `/update/execute`、逐库 reinitialize 同一条纪律：显式触发要放行本进程的持久积压。
+    crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "target_version": progress.target_version,
+            "requested": progress.requested,
+            "full_scope": progress.full_scope,
+            "upgrade": {
+                "state": progress.state(),
+                "started_at": progress.started_at,
+            },
+            "receipt": receipt,
+        })),
+    ))
+}
+
 /// POST /api/v1/dbnums/{dbnum}/data/reinitialize — 人工「重新解析」（2026-09-10 重新计算契约 C2 / C3）。
 ///
 /// 它就是 `enqueue_manual_update(selected=[dbnum], reinitialize=true)` 的单库糖：排一条
@@ -5461,6 +5578,11 @@ mod tests {
         assert!(
             refresh < read,
             "刷新必须排在读取之前，否则这一轮带出去的还是上一轮的结论"
+        );
+        assert!(
+            health.matches("\"storage_version\": storage_version_health(),").count() >= 2,
+            "架构版本必须挂在顶层（连接与断开两套响应都要有）：面板按 m.h.storage_version 读，\
+             放在 model_cache 里就永远看不见"
         );
     }
 

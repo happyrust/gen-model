@@ -262,9 +262,12 @@ pub mod model_concurrency;
 
 pub mod model_rebuild;
 
-/// 模型面存储架构版本核对：库里 `storage_version:current.version` 与本进程
-/// `aios_core::model_storage::MODEL_STORAGE_VERSION` 不一致时只点名、不自动重建。
+/// 数据库架构版本核对：库里 `storage_version:current.version` 与本进程
+/// `aios_core::model_storage::MODEL_STORAGE_VERSION` 不一致时只点名、不自动升级。
 pub mod storage_version_reconcile;
+
+/// 数据库架构版本一键升级：逐库排 `reinitialize`，全部成功后写 `storage_version:current`。
+pub mod storage_upgrade;
 
 pub mod batch_queue;
 

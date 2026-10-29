@@ -388,6 +388,45 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
     if let Some(line) = catalogue_dependency_refresh.banner_line() {
         println!("目录版本核对：{line}");
     }
+    // 数据库架构版本：启动时全局核对一次，只点名、不排任务（与 generator 的自动重排刻意不同）。
+    // 读失败这一轮就不点名——一次库抖动不该把库报成老库。
+    // 放在候选早退之前：没有要恢复的库也要看见版本是否匹配，否则全新空库永远不写版本记录。
+    // 升级范围 = 当前 MDB 声明的设计库 ∩ 监听范围——与升级入口的缺省名单同一分母。
+    // 少了监听范围这一层，日志会把本次根本不会碰的库也列进「将被清空」清单；
+    // 有 watch_dbnums 时那就是句假话（2026-10-29 演练发现：只放开 7352 却列了 29 个库）。
+    // 分母与升级入口同一份：本库主项目拥有的元素库（同号外部项目库不进来，
+    // 它们的数据不在这份库里），再叠监听范围。读不到就退回候选 ∩ 监听范围。
+    let reconcile_dbnums = match crate::data_interface::storage_upgrade::scope_dbnums().await {
+        Ok(dbnums) => dbnums,
+        Err(error) => {
+            log::warn!("数据库架构版本升级范围核对失败，按 MDB 候选 ∩ 监听范围退避: {error:#}");
+            candidate_dbnums
+                .iter()
+                .copied()
+                .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
+                .collect()
+        }
+    };
+    match crate::data_interface::storage_version_reconcile::report_and_log(&reconcile_dbnums).await
+    {
+        Ok(report) => {
+            crate::data_interface::storage_upgrade::observe_startup(&report).await;
+            if !report.is_caught_up() {
+                println!(
+                    "数据库架构版本不匹配（库里 {} / 期望 {}）：请在运维面板或 POST /api/v1/storage-version/upgrade 升级，升级会清空并重新解析、生成以下库：{:?}",
+                    report
+                        .stored
+                        .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                    report.expected,
+                    reconcile_dbnums
+                );
+            }
+        }
+        Err(error) => {
+            println!("数据库架构版本核对：读不到 storage_version:current，本次跳过: {error:#}");
+        }
+    }
+
     if candidate_dbnums.is_empty() {
         println!("模型水位核对：没有需要恢复的库");
         coverage.reconcile.result = "ok";
@@ -405,26 +444,6 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
     let mut examined = 0usize;
     let mut windows = 0usize;
     let mut enqueued = 0usize;
-    // 模型面存储架构版本：只点名、不排任务（与 generator 的自动重排刻意不同）。
-    // 读失败这一轮就不点名——一次库抖动不该把库报成老库。
-    // 版本是整库一条记录，重建命令要写库号，所以把这次启动会碰的库一起传进去。
-    let reconcile_dbnums = registered_by_dbnum.keys().copied().collect::<Vec<_>>();
-    match crate::data_interface::storage_version_reconcile::report_and_log(&reconcile_dbnums).await
-    {
-        Ok(report) if !report.is_caught_up() => {
-            println!(
-                "存储架构版本核对：库里记的是 {:?}，本进程 expected={}；未自动重建。重建命令: {:?}",
-                report.stored,
-                report.expected,
-                report.rebuild_hints(&reconcile_dbnums)
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            println!("存储架构版本核对：读不到 storage_version:current，本次跳过: {error:#}");
-        }
-    }
-
     let mut unreadable = 0usize;
     let mut not_in_mdb: Vec<u32> = Vec::new();
     let window_failed = 0usize;

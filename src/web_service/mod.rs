@@ -681,6 +681,12 @@ async fn serve_with_ready(
             "/api/v1/dbnums/{dbnum}/data",
             delete(handlers::dbnum_fast_delete),
         )
+        // 数据库架构版本一键升级：缺省升级全部设计库，逐库排既有 reinitialize，
+        // 全部成功且全范围才写 `storage_version:current`（ADR-091 二次修订）。
+        .route(
+            "/api/v1/storage-version/upgrade",
+            post(handlers::storage_version_upgrade),
+        )
         // 人工「重新解析」（2026-09-10 重新计算契约 C3）：排一条整库重建批次，清库在 worker
         // 冻结点做。与上面那条运维快删是两回事——这条不要求先暂停队列。
         .route(

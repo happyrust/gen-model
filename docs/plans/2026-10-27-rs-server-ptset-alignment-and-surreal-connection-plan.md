@@ -181,18 +181,15 @@
   `define_common_functions` 逐文件灌入同一个 ns/db，会把 gen-model 的新版函数打回旧版。
 - **`legacy_fallback` 已拍板：删，不回退。** `geom.rs` 的 `ptset_map_projection` 里
   `?? $pe->inst_relate.out.ptset[0]` 整段移除，只读 `pe_ptset`。
-- **新增存储架构版本号 `MODEL_STORAGE_VERSION`（= 1）**，粒度「每 dbnum + 每行核对」：
-  载体是 `dbnum_watermark.model_storage_version`（判整库）与 `pe_ptset.storage_version`（判单行）。
-  判「老库」只看前者；**「没有 `pe_ptset` 行」不等于老库**。
-- **不匹配的动作**：aios_core 读侧返回 `ModelStorageVersionMismatch`（稳定码
-  `MODEL_STORAGE_VERSION_MISMATCH`）；rs-server 映射成 **409** + JSON（带 `action` 重建命令）；
-  gen-model 启动只点名（日志 + `/health.model_cache.storage_version`），**不阻断、不自动重建**。
-  SurrealQL 的 `fn::pe_ptset_of` 同步加 `THROW` 守卫，长度函数不再对老库静默回 0。
-- **A5 已落地**：`extraction_fixes_7997_test.rs` 追加两条用例——
-  `ptset_read_is_versioned_7997`（老库必须被拒绝，两种库态都绿）与
-  `ptset_alignment_7997`（rebuild 后点集非空且坐标有限，rebuild 前红属预期）。
+- **后续修订（2026-10-28，已批准）**：版本不再按 dbnum / 行核对，改为**整个数据库的架构版本**，
+  载体只有 `storage_version:current` 一条记录；核对只在进程启动时全局做一次。读点集
+  （surql / aios_core `query_*_point_map` / rs-server）不再做任何版本判断，没有行就是 NONE / 空集。
+  gen-model 不匹配只点名（日志 + `/health.storage_version` + 运维面板一键升级）；rs-server 不匹配
+  拒绝启动并提示用 aios-database 升级。409 映射、SurrealQL `THROW` 与 `ptset_read_is_versioned_7997`
+  已随本修订删除；`ptset_alignment_7997` 保留，前置条件改为「库已升级到当前架构版本」。
+- **升级不是 `model/rebuild`**：一键入口 `POST /api/v1/storage-version/upgrade` 逐库复用
+  `intent=reinitialize`（清空 → 重新解析 → 重新生成），全范围全部成功才写版本记录；进度在
+  `storage_upgrade:current`。单库 `model/rebuild` 只重算模型、不写版本记录。
 
-完整论证与三条正交轴的定义见 **ADR-091**。
-
-与 D5 的关系：不自动重建正是 D5 的延续，旧数据一律走
-`POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+完整论证、三条正交轴与两次修订见 **ADR-091**；收尾与升级流程见
+`docs/plans/2026-10-28-storage-version-closure-plan.md`。

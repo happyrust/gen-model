@@ -1,28 +1,32 @@
-//! 模型存储架构版本核对：库里的 `storage_version:current` ↔ 本进程的
+//! 数据库架构版本核对：库里的 `storage_version:current` ↔ 本进程的
 //! `aios_core::model_storage::MODEL_STORAGE_VERSION`。
 //!
 //! # 它回答什么
 //!
-//! 「这份库的模型面行形状，本进程读不读得懂」。读不懂的库不该被静默当成「没有数据」，
-//! 而应当被点名、要求按当前版本重新生成：
+//! 「这**整个数据库**的架构，本进程读不读得懂」。读不懂的库不该被静默当成「没有数据」，
+//! 而应当被点名、提示用 aios-database 一键升级：
 //!
 //! ```text
-//! POST /api/v1/dbnums/{dbnum}/model/rebuild
+//! POST /api/v1/storage-version/upgrade
 //! ```
 //!
 //! # 只有一条记录，没有逐库的副本
 //!
-//! 行形状是整个模型面共用的一份约定，不是某个 dbnum 的属性，所以版本只有一处来源：
-//! `storage_version:current`。它要么在（且 `version` 等于本进程常量），要么不在——
-//! 不存在「有的库追平了、有的没有」这种可读状态：重建会重写那个库的全部模型行，
-//! 逐库进度看水位（`dbnum_watermark.model_sesno`），不看版本。
+//! 行形状是整个数据库共用的一份约定，不是某张表、也不是某个 dbnum 的属性，所以版本只有
+//! 一处来源：`storage_version:current`。它要么在（且 `version` 等于本进程常量），要么不在——
+//! 不存在「有的库追平了、有的没有」这种可读状态。逐库进度看升级账
+//! （`storage_upgrade:current`），不看版本。
+//!
+//! # 只在启动时核对
+//!
+//! 运行期不对任何表、任何查询做版本判断；读点集没有行就是 NONE / 空集。
 //!
 //! # 与 `generator_reconcile` 的关键差别
 //!
 //! `generator_reconcile` 发现生成器变了会**自动整库重排**。这里刻意不这么做：
-//! 存储架构升级要重算的量级与影响面都远大于换生成器版本，重建时机必须由人挑
-//! （低峰、逐库、可回退）。所以本模块只做两件事——启动时点名、`/health` 里报数，
-//! 不排任何任务。这与 ptset 分表计划的 D5（不做补扫，老根靠逐库 `model/rebuild`）一致。
+//! 架构升级会清空并重新解析全部旧数据，影响面远大于换生成器版本，升级时机必须由人挑。
+//! 所以本模块只做两件事——启动时点名、`/health` 里报数，不排任何任务；排任务由
+//! [`crate::data_interface::storage_upgrade`] 的升级入口负责。
 //!
 //! # 「没有 `pe_ptset` 行」不等于「老库」
 //!
@@ -40,7 +44,7 @@ pub struct StorageVersionReport {
     pub stored: Option<u32>,
     /// 库里那条记录写的行形状说明（人读，原样带出来）。
     pub shape: Option<String>,
-    /// 库里那条记录写的重建要求（人读，原样带出来）。
+    /// 库里那条记录写的升级要求（人读，原样带出来）。
     pub rebuild: Option<String>,
 }
 
@@ -50,18 +54,15 @@ impl StorageVersionReport {
         self.stored == Some(self.expected)
     }
 
-    /// 可以直接发给运维的重建命令。已追平则空。
+    /// 可以直接发给运维的升级命令。已追平则空。
     ///
-    /// 版本是整库一条记录，命令里仍要写库号（重建的单位是 dbnum），
-    /// 所以这里收一个库号列表；空列表时不产出命令。
-    pub fn rebuild_hints(&self, dbnums: &[u32]) -> Vec<String> {
+    /// 版本是整库一条记录，升级入口也只有一条；逐库重建（`model/rebuild`）不再是
+    /// 版本升级手段，它只重算模型、不清旧数据。
+    pub fn upgrade_hints(&self) -> Vec<String> {
         if self.is_caught_up() {
             return Vec::new();
         }
-        dbnums
-            .iter()
-            .map(|dbnum| format!("POST /api/v1/dbnums/{dbnum}/model/rebuild"))
-            .collect()
+        vec!["POST /api/v1/storage-version/upgrade".to_owned()]
     }
 
     /// 纯函数：把库里读到的三格与期望版本拼成报告。
@@ -185,26 +186,30 @@ pub async fn refresh_if_stale() -> Option<StorageVersionReport> {
 
 /// 启动时点名。只打日志，不排任务、不阻断启动。
 ///
-/// `dbnums` 是这次启动会碰的库（用于拼重建命令）；传空切片就只报版本状态。
+/// `dbnums` 是这次启动会碰的库，只用于把升级会影响到的库列给人看。
 /// 返回报告，方便调用方顺手塞进 `/health` 的初值。
 pub(crate) async fn report_and_log(dbnums: &[u32]) -> anyhow::Result<StorageVersionReport> {
     let report = StorageVersionReport::from_stored(stored_version().await?);
-    // 存给 `/health`；重复调用覆盖（重建完成后要能看见新值）。
+    // 存给 `/health`；重复调用覆盖（升级完成后要能看见新值）。
     store_report(report.clone());
     if !report.is_caught_up() {
         log::warn!(
-            "MODEL_STORAGE_VERSION_MISMATCH stored={} expected={} source=version: 该库的模型面行形状本进程读不懂",
+            "MODEL_STORAGE_VERSION_MISMATCH stored={} expected={} source=version: 数据库架构版本与本进程不一致",
             report
                 .stored
                 .map_or_else(|| "none".to_owned(), |v| v.to_string()),
             report.expected
         );
         if let Some(rebuild) = &report.rebuild {
-            log::warn!("库里记的重建要求：{rebuild}");
+            log::warn!("库里记的升级要求：{rebuild}");
         }
-        for hint in report.rebuild_hints(dbnums) {
+        for hint in report.upgrade_hints() {
             log::warn!("{hint}");
         }
+        log::warn!(
+            "升级会清空并重新解析、生成以下库：{:?}",
+            dbnums
+        );
     }
     Ok(report)
 }
@@ -245,16 +250,13 @@ mod tests {
     #[test]
     fn hints_are_copy_pasteable_and_only_when_stale() {        let stale = StorageVersionReport::from_stored(None);
         assert_eq!(
-            stale.rebuild_hints(&[7997, 7354]),
-            vec![
-                "POST /api/v1/dbnums/7997/model/rebuild".to_string(),
-                "POST /api/v1/dbnums/7354/model/rebuild".to_string(),
-            ]
+            stale.upgrade_hints(),
+            vec!["POST /api/v1/storage-version/upgrade".to_string()]
         );
         let caught_up = StorageVersionReport::from_stored(current());
         assert!(
-            caught_up.rebuild_hints(&[7997]).is_empty(),
-            "已追平不该再产出重建命令"
+            caught_up.upgrade_hints().is_empty(),
+            "已追平不该再产出升级命令"
         );
     }
 
