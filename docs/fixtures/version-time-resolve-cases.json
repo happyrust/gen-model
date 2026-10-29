@@ -1,0 +1,346 @@
+{
+  "description": "时间点解析共享样例。plant3d-web 与 gen-model refactor 各放一份，内容逐字节一致；Rust resolve_at_rows / select_session_at 包装与 TS resolveAt 读同一份对拍。",
+  "rule": [
+    "rows 按 sesno 升序（Chain_Order）给出。",
+    "从 sesno 最大的行往前逐行检查，跳过 session_time 为 null 的行，返回第一个 Session_Time <= at 的行（秒级比较，按 UTC 瞬时比较）。",
+    "一行带时间的都没有（含 rows 为空） -> no-resolvable；有带时间的行但都晚于 at -> before-oldest。",
+    "at 不带偏移时按 Chain_Order 中第一条带时间行的偏移解释；rows 全无时间时直接 no-resolvable。",
+    "at 语法 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]，不合法 -> invalid-format。",
+    "expect.session_time 是命中行 session_time 的原文。"
+  ],
+  "cases": [
+    {
+      "name": "ams-session-one-latest/now-resolves-to-chain-head",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2026-09-08T11:00:00Z",
+      "expect": { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+    },
+    {
+      "name": "ams-session-one-latest/after-session-one-time-still-chain-head",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2016-06-01T00:00:00Z",
+      "expect": { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+    },
+    {
+      "name": "ams-session-one-latest/mid-history-walks-back",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2015-06-01T00:00:00Z",
+      "expect": { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" }
+    },
+    {
+      "name": "ams-session-one-latest/early-history-walks-back-to-session-two",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2014-12-31T00:00:00Z",
+      "expect": { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" }
+    },
+    {
+      "name": "ams-session-one-latest/before-whole-chain",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2014-01-01T00:00:00Z",
+      "expect": { "error": "before-oldest" }
+    },
+    {
+      "name": "ams-session-one-latest/round-trip-of-session-one-is-chain-head",
+      "rows": [
+        { "sesno": 1, "session_time": "2016-01-05T01:12:00+00:00" },
+        { "sesno": 2, "session_time": "2014-08-06T02:00:00+00:00" },
+        { "sesno": 37, "session_time": "2015-03-11T06:20:00+00:00" },
+        { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+      ],
+      "at": "2016-01-05T01:12:00+00:00",
+      "expect": { "sesno": 64, "session_time": "2015-08-19T08:45:00+00:00" }
+    },
+    {
+      "name": "mid-chain-regression/chain-order-beats-closest-time",
+      "rows": [
+        { "sesno": 10, "session_time": "2026-03-01T00:00:00+00:00" },
+        { "sesno": 11, "session_time": "2026-03-05T00:00:00+00:00" },
+        { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" },
+        { "sesno": 13, "session_time": "2026-03-10T00:00:00+00:00" }
+      ],
+      "at": "2026-03-07T00:00:00Z",
+      "expect": { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" }
+    },
+    {
+      "name": "mid-chain-regression/between-regressed-and-earlier-rows",
+      "rows": [
+        { "sesno": 10, "session_time": "2026-03-01T00:00:00+00:00" },
+        { "sesno": 11, "session_time": "2026-03-05T00:00:00+00:00" },
+        { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" },
+        { "sesno": 13, "session_time": "2026-03-10T00:00:00+00:00" }
+      ],
+      "at": "2026-02-25T00:00:00Z",
+      "expect": { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" }
+    },
+    {
+      "name": "mid-chain-regression/exact-head-time",
+      "rows": [
+        { "sesno": 10, "session_time": "2026-03-01T00:00:00+00:00" },
+        { "sesno": 11, "session_time": "2026-03-05T00:00:00+00:00" },
+        { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" },
+        { "sesno": 13, "session_time": "2026-03-10T00:00:00+00:00" }
+      ],
+      "at": "2026-03-10T00:00:00Z",
+      "expect": { "sesno": 13, "session_time": "2026-03-10T00:00:00+00:00" }
+    },
+    {
+      "name": "mid-chain-regression/before-regressed-minimum",
+      "rows": [
+        { "sesno": 10, "session_time": "2026-03-01T00:00:00+00:00" },
+        { "sesno": 11, "session_time": "2026-03-05T00:00:00+00:00" },
+        { "sesno": 12, "session_time": "2026-02-20T00:00:00+00:00" },
+        { "sesno": 13, "session_time": "2026-03-10T00:00:00+00:00" }
+      ],
+      "at": "2026-02-19T23:59:59Z",
+      "expect": { "error": "before-oldest" }
+    },
+    {
+      "name": "same-second/picks-largest-sesno",
+      "rows": [
+        { "sesno": 20, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 21, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 22, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 23, "session_time": "2026-05-02T00:00:00+00:00" }
+      ],
+      "at": "2026-05-01T08:00:00Z",
+      "expect": { "sesno": 22, "session_time": "2026-05-01T08:00:00+00:00" }
+    },
+    {
+      "name": "same-second/fraction-of-same-second-compares-at-second",
+      "rows": [
+        { "sesno": 20, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 21, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 22, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 23, "session_time": "2026-05-02T00:00:00+00:00" }
+      ],
+      "at": "2026-05-01T08:00:00.999Z",
+      "expect": { "sesno": 22, "session_time": "2026-05-01T08:00:00+00:00" }
+    },
+    {
+      "name": "same-second/just-before-that-second",
+      "rows": [
+        { "sesno": 20, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 21, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 22, "session_time": "2026-05-01T08:00:00+00:00" },
+        { "sesno": 23, "session_time": "2026-05-02T00:00:00+00:00" }
+      ],
+      "at": "2026-05-01T07:59:59.999Z",
+      "expect": { "error": "before-oldest" }
+    },
+    {
+      "name": "same-second/same-instant-written-with-different-offsets",
+      "rows": [
+        { "sesno": 24, "session_time": "2026-01-01T08:00:00+08:00" },
+        { "sesno": 25, "session_time": "2026-01-01T00:00:00Z" },
+        { "sesno": 26, "session_time": "2026-01-02T00:00:00Z" }
+      ],
+      "at": "2026-01-01T12:00:00+08:00",
+      "expect": { "sesno": 25, "session_time": "2026-01-01T00:00:00Z" }
+    },
+    {
+      "name": "no-offset/uses-first-timed-row-offset",
+      "rows": [
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-06-01T09:00:00+08:00" },
+        { "sesno": 5, "session_time": "2026-06-01T10:00:00+08:00" }
+      ],
+      "at": "2026-06-01T09:30:00",
+      "expect": { "sesno": 4, "session_time": "2026-06-01T09:00:00+08:00" }
+    },
+    {
+      "name": "no-offset/space-separator-without-seconds",
+      "rows": [
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-06-01T09:00:00+08:00" },
+        { "sesno": 5, "session_time": "2026-06-01T10:00:00+08:00" }
+      ],
+      "at": "2026-06-01 10:00",
+      "expect": { "sesno": 5, "session_time": "2026-06-01T10:00:00+08:00" }
+    },
+    {
+      "name": "no-offset/before-oldest-in-first-timed-row-offset",
+      "rows": [
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-06-01T09:00:00+08:00" },
+        { "sesno": 5, "session_time": "2026-06-01T10:00:00+08:00" }
+      ],
+      "at": "2026-06-01T08:59:59",
+      "expect": { "error": "before-oldest" }
+    },
+    {
+      "name": "no-offset/first-timed-row-in-chain-order-not-last",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-06-01T00:00:00Z" },
+        { "sesno": 2, "session_time": "2026-06-01T10:00:00+08:00" }
+      ],
+      "at": "2026-06-01T03:00:00",
+      "expect": { "sesno": 2, "session_time": "2026-06-01T10:00:00+08:00" }
+    },
+    {
+      "name": "no-offset/backend-utc-session-times",
+      "rows": [
+        { "sesno": 7, "session_time": "2026-06-01T01:00:00+00:00" },
+        { "sesno": 8, "session_time": "2026-06-01T02:00:00+00:00" }
+      ],
+      "at": "2026-06-01T01:59:59",
+      "expect": { "sesno": 7, "session_time": "2026-06-01T01:00:00+00:00" }
+    },
+    {
+      "name": "all-untimed/with-offset",
+      "rows": [
+        { "sesno": 1, "session_time": null },
+        { "sesno": 2, "session_time": null },
+        { "sesno": 3, "session_time": null }
+      ],
+      "at": "2026-01-01T00:00:00Z",
+      "expect": { "error": "no-resolvable" }
+    },
+    {
+      "name": "all-untimed/without-offset",
+      "rows": [
+        { "sesno": 1, "session_time": null },
+        { "sesno": 2, "session_time": null },
+        { "sesno": 3, "session_time": null }
+      ],
+      "at": "2026-01-01T00:00:00",
+      "expect": { "error": "no-resolvable" }
+    },
+    {
+      "name": "all-untimed/empty-rows",
+      "rows": [],
+      "at": "2026-01-01T00:00:00Z",
+      "expect": { "error": "no-resolvable" }
+    },
+    {
+      "name": "untimed-rows-skipped/head-untimed",
+      "rows": [
+        { "sesno": 1, "session_time": null },
+        { "sesno": 2, "session_time": "2026-07-01T00:00:00+00:00" },
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-07-02T00:00:00+00:00" },
+        { "sesno": 5, "session_time": null }
+      ],
+      "at": "2026-08-01T00:00:00Z",
+      "expect": { "sesno": 4, "session_time": "2026-07-02T00:00:00+00:00" }
+    },
+    {
+      "name": "untimed-rows-skipped/walks-past-untimed-middle",
+      "rows": [
+        { "sesno": 1, "session_time": null },
+        { "sesno": 2, "session_time": "2026-07-01T00:00:00+00:00" },
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-07-02T00:00:00+00:00" },
+        { "sesno": 5, "session_time": null }
+      ],
+      "at": "2026-07-01T12:00:00Z",
+      "expect": { "sesno": 2, "session_time": "2026-07-01T00:00:00+00:00" }
+    },
+    {
+      "name": "before-all-timed/untimed-rows-do-not-rescue",
+      "rows": [
+        { "sesno": 1, "session_time": null },
+        { "sesno": 2, "session_time": "2026-07-01T00:00:00+00:00" },
+        { "sesno": 3, "session_time": null },
+        { "sesno": 4, "session_time": "2026-07-02T00:00:00+00:00" },
+        { "sesno": 5, "session_time": null }
+      ],
+      "at": "2026-06-30T23:59:59Z",
+      "expect": { "error": "before-oldest" }
+    },
+    {
+      "name": "round-trip/later-row-not-later-than-v-wins",
+      "rows": [
+        { "sesno": 30, "session_time": "2026-08-10T00:00:00+00:00" },
+        { "sesno": 31, "session_time": "2026-08-09T00:00:00+00:00" },
+        { "sesno": 32, "session_time": "2026-08-11T00:00:00+00:00" }
+      ],
+      "at": "2026-08-10T00:00:00+00:00",
+      "expect": { "sesno": 31, "session_time": "2026-08-09T00:00:00+00:00" }
+    },
+    {
+      "name": "round-trip/later-row-same-time-as-v-wins",
+      "rows": [
+        { "sesno": 40, "session_time": "2026-08-10T00:00:00+00:00" },
+        { "sesno": 41, "session_time": "2026-08-10T00:00:00+00:00" },
+        { "sesno": 42, "session_time": "2026-08-11T00:00:00+00:00" }
+      ],
+      "at": "2026-08-10T00:00:00+00:00",
+      "expect": { "sesno": 41, "session_time": "2026-08-10T00:00:00+00:00" }
+    },
+    {
+      "name": "round-trip/all-later-rows-later-returns-v",
+      "rows": [
+        { "sesno": 30, "session_time": "2026-08-10T00:00:00+00:00" },
+        { "sesno": 31, "session_time": "2026-08-09T00:00:00+00:00" },
+        { "sesno": 32, "session_time": "2026-08-11T00:00:00+00:00" }
+      ],
+      "at": "2026-08-11T00:00:00+00:00",
+      "expect": { "sesno": 32, "session_time": "2026-08-11T00:00:00+00:00" }
+    },
+    {
+      "name": "invalid-format/garbage",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-01-01T00:00:00+00:00" }
+      ],
+      "at": "not-a-time",
+      "expect": { "error": "invalid-format" }
+    },
+    {
+      "name": "invalid-format/empty",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-01-01T00:00:00+00:00" }
+      ],
+      "at": "",
+      "expect": { "error": "invalid-format" }
+    },
+    {
+      "name": "invalid-format/date-only",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-01-01T00:00:00+00:00" }
+      ],
+      "at": "2026-01-02",
+      "expect": { "error": "invalid-format" }
+    },
+    {
+      "name": "invalid-format/impossible-calendar-day",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-01-01T00:00:00+00:00" }
+      ],
+      "at": "2026-02-30T00:00:00Z",
+      "expect": { "error": "invalid-format" }
+    },
+    {
+      "name": "invalid-format/hour-out-of-range",
+      "rows": [
+        { "sesno": 1, "session_time": "2026-01-01T00:00:00+00:00" }
+      ],
+      "at": "2026-01-02T24:00:00Z",
+      "expect": { "error": "invalid-format" }
+    }
+  ]
+}

@@ -11,7 +11,7 @@ use std::sync::RwLock;
 use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::Context;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset};
 use e3d_io::ReadOnlyEngine;
 use e3d_io::refno::RefNo;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ use crate::fast_model::e3d_model_service::{
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope,
 };
+use crate::fast_model::time_resolve::{SelectAt, select_latest_at};
 
 pub const MAX_HISTORY_ELEMENTS: usize = 100_000;
 
@@ -731,24 +732,24 @@ fn select_session_at(
     chain: &[ChainTime],
     requested: &DateTime<FixedOffset>,
 ) -> Result<(u32, String), HistoricalModelError> {
-    if chain.is_empty() {
-        return Err(HistoricalModelError::new(
+    // 链上的时刻都由 `session_chain_times` 用 `rfc3339()` 写出，必能解回；
+    // 链序规则本身与版本表共用（`time_resolve::select_latest_at`，design §1.5）。
+    // 会话时刻是整秒，所以那里的秒级比较与这里原先的全精度比较结果相同。
+    match select_latest_at(
+        chain,
+        |entry| DateTime::parse_from_rfc3339(&entry.time).ok(),
+        *requested,
+    ) {
+        SelectAt::Found(entry) => Ok((entry.sesno, entry.time.clone())),
+        SelectAt::BeforeOldest => Err(HistoricalModelError::new(
+            "TIME_BEFORE_OLDEST_SESSION",
+            requested.to_rfc3339(),
+        )),
+        SelectAt::NoTimed => Err(HistoricalModelError::new(
             "SESSION_TIME_UNAVAILABLE",
             "source has no decodable session timestamps",
-        ));
+        )),
     }
-    let requested_utc = requested.with_timezone(&Utc);
-    for entry in chain.iter().rev() {
-        let time = DateTime::parse_from_rfc3339(&entry.time)
-            .map_err(|e| HistoricalModelError::new("SESSION_TIME_UNAVAILABLE", e))?;
-        if time.with_timezone(&Utc) <= requested_utc {
-            return Ok((entry.sesno, entry.time.clone()));
-        }
-    }
-    Err(HistoricalModelError::new(
-        "TIME_BEFORE_OLDEST_SESSION",
-        requested.to_rfc3339(),
-    ))
 }
 
 /// 一条会话的号与时刻。**装在 `Vec` 里而不是 `HashMap`，因为顺序是链序**——
@@ -933,6 +934,11 @@ mod tests {
             select_session_at(&chain, &early).unwrap_err().code,
             "TIME_BEFORE_OLDEST_SESSION"
         );
+        // 包装到 `select_latest_at` 后，空链仍是原来的错误码。
+        assert_eq!(
+            select_session_at(&[], &late).unwrap_err().code,
+            "SESSION_TIME_UNAVAILABLE"
+        );
     }
 
     /// **改回按时刻取最大值，这一条立刻变红。**
@@ -986,7 +992,7 @@ mod tests {
             std::env::var("AIOS_AMS_PROJECT_DIR")
                 .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000".into()),
         );
-        let now: DateTime<FixedOffset> = Utc::now().into();
+        let now: DateTime<FixedOffset> = chrono::Utc::now().into();
 
         let mut checked = 0usize;
         let mut wrong: Vec<String> = Vec::new();
@@ -1071,8 +1077,26 @@ mod tests {
         );
         // 合并后 `bake_elements` 多了房间计算器那一位（ADR-073 D1，B/T2）；历史快照不算房间归属，传 `None`。
         assert!(
-            body.contains("bake_elements(upserts, mesh_dir, None)"),
-            "meshes are the one on-disk artifact, baked before the scope dispatch"
+            current_arm.contains("bake_elements(upserts, mesh_dir, None)"),
+            "meshes are the one on-disk artifact, baked before the current projection is published"
+        );
+        // 历史那一臂的 bake + project 收在 `project_historical_records`（Legacy 与实时两路共用，R6.15），
+        // 提交前网格已落盘。
+        assert!(
+            historical_arm.contains("project_historical_records("),
+            "historical projections are produced by the shared bake + project: {historical_arm}"
+        );
+        let shared = service
+            .split_once("pub(crate) fn project_historical_records(")
+            .expect("project_historical_records must exist")
+            .1
+            .split_once("\n}\n")
+            .expect("function body must end")
+            .0;
+        assert!(
+            shared.contains("bake_element(element, mesh_dir, None)")
+                && shared.contains("project_geometry_delta("),
+            "the shared function bakes (no room calculator) then projects: {shared}"
         );
         // 本模块自己：快照回执只活在进程内的 `RwLock<HashMap>`，没有任何库句柄
         let this = include_str!("historical_model.rs");
