@@ -625,6 +625,18 @@ async fn serve_with_ready(
         // 任意节点按对比范围折叠的版本表（同一节 ADR 0066 的第三条）：容器「所有子节点」下的时间线只有它能列，
         // 每版附「动了几个最小交付单元」。同样按需算、只活在进程内。
         .route("/api/v1/node/versions", get(handlers::node_versions))
+        // 时间点解析（spec `model-version-timeline-scrub` Requirement 8）：把 `at` 按链序规则
+        // 解成节点版本表上的一个会话，与 `node/versions` 共用同一张表同一条规则。
+        .route(
+            "/api/v1/node/versions/resolve",
+            get(handlers::node_versions_resolve),
+        )
+        // 构件属性时点查询（Requirement 6.13）：与 `model/history/query tool=attributes` 同一个
+        // 渲染器，但不经快照回执。
+        .route(
+            "/api/v1/element/attributes-at",
+            get(handlers::element_attributes_at),
+        )
         .route(
             "/api/v1/dbnums/{dbnum}/model",
             delete(handlers::dbnum_model_delete),

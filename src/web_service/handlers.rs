@@ -2883,6 +2883,257 @@ fn apply_scrub_headers(response: &mut Response, headers: &[(&'static str, String
     }
 }
 
+/// `GET /api/v1/node/versions/resolve` 的查询串（Requirement 8）。
+///
+/// `at` 原样收成字符串交给 `parse_instant_text`：axum 反序列化失败时会给自带的 400 体，
+/// 而这里要的是 `INVALID_SELECTOR` + `detail.params`（Requirement 8.8）。
+#[derive(Debug, Deserialize)]
+pub struct ResolveNodeTimeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` 或 `a_b`
+    pub refno: String,
+    /// `self` / `subtree`，缺省 `self`（Requirement 8.7 的「节点版本表」默认口径）
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// 时间点；不带偏移时按链序第一条带时间行的偏移解释（Requirement 8.1）
+    pub at: String,
+}
+
+/// GET /api/v1/node/versions/resolve — 把时间点解析成节点版本表上的一个会话（Requirement 8）。
+///
+/// 与 `node/versions` 共用同一张表与同一条链序规则（`resolve_at_rows`），所以
+/// 「按时刻取到哪一版」与时间轴上看到的那一行永远一致（Requirement 8.10）。
+///
+/// 错误：`scope` / `at` 不合法 → 400 `INVALID_SELECTOR`；节点不存在 → 404 `NODE_NOT_FOUND`；
+/// 表里一行带时间的都没有 → 422 `NO_RESOLVABLE_SESSION`；时间点早于全部带时间行 →
+/// 422 `TIME_BEFORE_OLDEST_SESSION`。
+pub async fn node_versions_resolve(
+    State(state): State<AppState>,
+    Query(req): Query<ResolveNodeTimeReq>,
+) -> Result<Json<Value>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let scope = match req.scope.as_deref().map(str::trim) {
+        None | Some("") => crate::fast_model::node_diff_summary::DiffScope::SelfOnly,
+        Some("self") => crate::fast_model::node_diff_summary::DiffScope::SelfOnly,
+        Some("subtree") => crate::fast_model::node_diff_summary::DiffScope::Subtree,
+        Some(other) => {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "INVALID_SELECTOR",
+                format!("scope 只能是 self 或 subtree，收到 {other:?}"),
+            )
+            .with_detail(json!({ "params": ["scope"] })));
+        }
+    };
+    if crate::fast_model::time_resolve::parse_instant_text(&req.at).is_none() {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_SELECTOR",
+            format!(
+                "at 必须匹配 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]，收到 {:?}",
+                req.at
+            ),
+        )
+        .with_detail(json!({ "params": ["at"] })));
+    }
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let at = req.at;
+    let (sesno, session_time) = tokio::task::spawn_blocking(move || {
+        resolve_node_time(dbnum, refno, scope, &at)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("时间点解析线程异常退出: {error}"),
+        )
+    })??;
+    Ok(Json(json!({ "sesno": sesno, "session_time": session_time })))
+}
+
+/// 取节点版本表全表（> 5000 行按 `since_sesno` 翻页）再按链序规则解析时间点。
+fn resolve_node_time(
+    dbnum: u32,
+    refno: e3d_io::refno::RefNo,
+    scope: crate::fast_model::node_diff_summary::DiffScope,
+    at: &str,
+) -> Result<(u32, String), ApiError> {
+    let rows = node_version_rows(dbnum, refno, scope)?;
+    let instants: Vec<crate::fast_model::time_resolve::VersionInstant> = rows
+        .iter()
+        .map(|row| crate::fast_model::time_resolve::VersionInstant {
+            sesno: row.sesno,
+            session_time: row.session_time.clone(),
+        })
+        .collect();
+    match crate::fast_model::time_resolve::resolve_at_rows(&instants, at) {
+        Ok(resolved) => Ok(resolved),
+        Err(crate::fast_model::time_resolve::ResolveError::InvalidFormat) => Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_SELECTOR",
+            format!("at 不合法: {at:?}"),
+        )
+        .with_detail(json!({ "params": ["at"] }))),
+        Err(crate::fast_model::time_resolve::ResolveError::BeforeOldest) => Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "TIME_BEFORE_OLDEST_SESSION",
+            "时间点早于该节点全部带时间的会话",
+        )),
+        Err(crate::fast_model::time_resolve::ResolveError::NoResolvable) => Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "NO_RESOLVABLE_SESSION",
+            "该节点的版本表里没有任何带 Session_Time 的行",
+        )),
+    }
+}
+
+/// 节点版本表全表：一次最多 5000 行，截断时按 `since_sesno` 续取。
+fn node_version_rows(
+    dbnum: u32,
+    refno: e3d_io::refno::RefNo,
+    scope: crate::fast_model::node_diff_summary::DiffScope,
+) -> Result<Vec<crate::fast_model::node_versions::NodeVersion>, ApiError> {
+    const PAGE: usize = 5000;
+    let mut all = Vec::new();
+    let mut since: Option<u32> = None;
+    loop {
+        let report = crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since, Some(PAGE))
+            .map_err(node_versions_error)?;
+        let last = report.versions.last().map(|row| row.sesno);
+        let truncated = report.truncated;
+        all.extend(report.versions);
+        match (truncated, last) {
+            (true, Some(sesno)) => since = Some(sesno),
+            _ => break,
+        }
+    }
+    Ok(all)
+}
+
+/// `node/versions` 的错误映射：`REFNO_NOT_FOUND` 在这条路由上叫 `NODE_NOT_FOUND`（Requirement 8.5）。
+fn node_versions_error(error: crate::fast_model::unit_versions::UnitVersionsError) -> ApiError {
+    if error.code == "REFNO_NOT_FOUND" {
+        return ApiError::coded(StatusCode::NOT_FOUND, "NODE_NOT_FOUND", error.message);
+    }
+    unit_versions_error(error)
+}
+
+/// `GET /api/v1/element/attributes-at` 的查询串（Requirement 6.13）。
+#[derive(Debug, Deserialize)]
+pub struct AttributesAtReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` 或 `a_b`
+    pub refno: String,
+    pub sesno: u32,
+}
+
+/// GET /api/v1/element/attributes-at — 某构件在某会话下的属性，不要快照句柄（Requirement 6.13）。
+///
+/// 与 `POST model/history/query tool=attributes` 同一个渲染器（[`read_attributes_at`]），
+/// 区别是不经过快照回执：调用方只要 `(dbnum, refno, sesno)`。体与 `tool=attributes` 同形，
+/// 去掉 `snapshot_key`；构件在该会话不存在回 `exists: false`（不是错误）。
+///
+/// 错误：refno 格式错 / 不属于 `dbnum` → 400 `INVALID_REFNO`；会话不在链上 → 404
+/// `SESSION_NOT_FOUND`；构件在该会话不存在**且调用方要 404** 时用 `REFNO_NOT_FOUND_AT_SESSION`
+/// ——本路由按 Requirement 6.13 回 `exists: false`，不报这个码。
+pub async fn element_attributes_at(
+    State(state): State<AppState>,
+    Query(req): Query<AttributesAtReq>,
+) -> Result<Json<Value>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    if refno.dbno() != req.dbnum {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!(
+                "refno {} 属于 dbnum {}，不是请求的 dbnum {}",
+                req.refno,
+                refno.dbno(),
+                req.dbnum
+            ),
+        ));
+    }
+    let dbnum = req.dbnum;
+    let sesno = req.sesno;
+    let service = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let started = std::time::Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let source_file = crate::fast_model::historical_model::source_service()
+            .and_then(|service| service.source_file(dbnum).map(std::path::Path::to_path_buf))
+            .map_err(|error| {
+                crate::fast_model::historical_model::HistoricalModelError::new(
+                    "SOURCE_NOT_FOUND",
+                    format!("{error:#}"),
+                )
+            })?;
+        crate::fast_model::historical_model::read_attributes_at(
+            &service,
+            &source_file,
+            dbnum,
+            sesno,
+            refno,
+            None,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性读取线程异常退出: {error}"),
+        )
+    })?
+    .map_err(historical_error)?;
+    let refno_text = format!("{}/{}", refno.word0, refno.word1);
+    Ok(Json(match outcome {
+        Some(response) => json!({
+            "dbnum": dbnum,
+            "sesno": sesno,
+            "refno": refno_text,
+            "exists": true,
+            "noun": response.noun,
+            "complete": response.complete,
+            "attributes": response.attributes,
+            "diagnostics": response.diagnostics,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        }),
+        None => json!({
+            "dbnum": dbnum,
+            "sesno": sesno,
+            "refno": refno_text,
+            "exists": false,
+            "noun": Value::Null,
+            "complete": true,
+            "attributes": [],
+            "diagnostics": Value::Null,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        }),
+    }))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()

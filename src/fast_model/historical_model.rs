@@ -84,7 +84,7 @@ pub struct HistoricalModelError {
 }
 
 impl HistoricalModelError {
-    fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
+    pub(crate) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
             code,
             message: error.to_string(),
@@ -303,43 +303,7 @@ impl HistoricalModelStore {
         let file = PathBuf::from(&report.source_file);
         let dbnum = report.dbnum;
         let outcome = tokio::task::spawn_blocking(move || {
-            let header = DbFileHeader::read(&file).map_err(|error| {
-                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
-            })?;
-            let pin = PinnedRead {
-                dbnum: dbnum as i32,
-                db_type: header.db_type,
-                file,
-                sesno,
-            };
-            let set = service.open_pinned(&pin).map_err(|error| {
-                HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}"))
-            })?;
-            let element = set.element(target);
-            let exists = element.exists().map_err(|error| {
-                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
-            })?;
-            if !exists {
-                return Ok(None);
-            }
-            if target != unit {
-                let root = set.element(unit);
-                let inside = element.is_descendant_of(&root).map_err(|error| {
-                    HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
-                })?;
-                if !inside {
-                    return Err(HistoricalModelError::new(
-                        "REFNO_OUTSIDE_SNAPSHOT",
-                        format!(
-                            "{}/{} 在会话 {sesno} 不在单元 {}/{} 的子树里",
-                            target.word0, target.word1, unit.word0, unit.word1
-                        ),
-                    ));
-                }
-            }
-            service.read_pinned(&set, &pin, target).map_err(|error| {
-                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
-            })
+            read_attributes_at(&service, &file, dbnum, sesno, target, Some(unit))
         })
         .await
         .map_err(|error| {
@@ -373,7 +337,67 @@ impl HistoricalModelStore {
             }),
         })
     }
+}
 
+/// 读某构件在某会话下的属性（`attributes_at` 与 `element/attributes-at` 路由共用的阻塞段，
+/// design §1.7）。不经快照回执：调用方给全 `(file, dbnum, sesno, target)`。
+///
+/// - 构件在那个会话不存在 → `Ok(None)`（调用方回 `exists: false`，不是错误）；
+/// - 给了 `unit` 且构件不在该单元子树里 → `REFNO_OUTSIDE_SNAPSHOT`；不传 `unit` 就不做子树判定
+///   （`element/attributes-at` 只问「这一件在那时是什么样」，不假定单元）；
+/// - 会话打不开 → `SESSION_NOT_FOUND`；读库失败 → `SOURCE_NOT_FOUND`。
+///
+/// 同步阻塞，调用方放 `spawn_blocking`。
+pub(crate) fn read_attributes_at(
+    service: &ElementAttributeService,
+    file: &Path,
+    dbnum: u32,
+    sesno: u32,
+    target: RefNo,
+    unit: Option<RefNo>,
+) -> Result<Option<crate::data_interface::element_attributes::ElementAttributesResponse>, HistoricalModelError>
+{
+    let header = DbFileHeader::read(file)
+        .map_err(|error| HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
+    let pin = PinnedRead {
+        dbnum: dbnum as i32,
+        db_type: header.db_type,
+        file: file.to_path_buf(),
+        sesno,
+    };
+    let set = service.open_pinned(&pin).map_err(|error| {
+        HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}"))
+    })?;
+    let element = set.element(target);
+    let exists = element
+        .exists()
+        .map_err(|error| HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
+    if !exists {
+        return Ok(None);
+    }
+    if let Some(unit) = unit
+        && target != unit
+    {
+        let root = set.element(unit);
+        let inside = element.is_descendant_of(&root).map_err(|error| {
+            HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+        })?;
+        if !inside {
+            return Err(HistoricalModelError::new(
+                "REFNO_OUTSIDE_SNAPSHOT",
+                format!(
+                    "{}/{} 在会话 {sesno} 不在单元 {}/{} 的子树里",
+                    target.word0, target.word1, unit.word0, unit.word1
+                ),
+            ));
+        }
+    }
+    service
+        .read_pinned(&set, &pin, target)
+        .map_err(|error| HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}")))
+}
+
+impl HistoricalModelStore {
     async fn publish(&self, report: &HistoricalModelReport) -> anyhow::Result<()> {
         let evicted = self
             .publish_capped(report, crate::options::model_historical_snapshots_max())
