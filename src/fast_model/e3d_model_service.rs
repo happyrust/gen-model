@@ -1790,6 +1790,11 @@ fn historical_input(
         .get_or_build(key, || build_generation_input(service, dbnum, source_sesno))
 }
 
+/// 历史输入缓存此刻的条数与容量（`/health.model_cache.realtime_history.input_cache`）。
+pub(crate) fn historical_input_stats() -> crate::fast_model::historical_input::HistoricalInputStats {
+    historical_input_cache().stats()
+}
+
 fn generation_input(
     service: &E3dModelService,
     dbnum: u32,

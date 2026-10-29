@@ -697,7 +697,7 @@ fn compute_table(
     })
 }
 
-fn ensure_delivery_unit(
+pub(crate) fn ensure_delivery_unit(
     noun: &str,
     unit_types: &[String],
     unit: RefNo,

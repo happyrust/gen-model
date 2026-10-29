@@ -365,6 +365,17 @@ const RETRY_AFTER_CODES: [&str; 3] = [
     "dependency_db_unreadable",
 ];
 
+/// 浏览器端要读的响应头（实时历史几何 + 忙拒绝）。
+///
+/// `ETag` 是 `geometryKey` 的回显（304 时调用方据此认已装入的那份几何），`X-Sesno` /
+/// `X-Session-Time` 是解析后的会话，`Retry-After` 是 503 的退避秒数。
+const SCRUB_EXPOSED_HEADERS: [header::HeaderName; 4] = [
+    header::ETAG,
+    header::RETRY_AFTER,
+    header::HeaderName::from_static("x-sesno"),
+    header::HeaderName::from_static("x-session-time"),
+];
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let retry_after = self.status == StatusCode::SERVICE_UNAVAILABLE
@@ -573,6 +584,12 @@ async fn serve_with_ready(
         .route(
             "/api/v1/model/history/generate",
             post(handlers::model_history_generate),
+        )
+        // 实时历史几何（spec `model-version-timeline-scrub`）：只读、不建任务、不写投影存储；
+        // 支持 `If-None-Match` → 304，忙时 503 + `Retry-After`。语义见 `fast_model::realtime_history`。
+        .route(
+            "/api/v1/model/history/geometry",
+            get(handlers::model_history_geometry),
         )
         .route(
             "/api/v1/model/history/query",
@@ -1010,10 +1027,16 @@ fn build_attachment_content_disposition(stored_name: &str, query: &str) -> Strin
 }
 
 /// CORS 策略：未配置或包含 `*` 时放开（开发期）；否则按 origin 白名单。
+///
+/// 两种分支都显式 `expose_headers`：实时历史几何的 `ETag` / `X-Sesno` / `X-Session-Time`
+/// 与忙拒绝的 `Retry-After` 都在响应头里，不暴露浏览器端就读不到
+/// （spec `model-version-timeline-scrub` design §1.2 响应头）。
 fn build_cors(origins: Option<Vec<String>>) -> CorsLayer {
     match origins {
-        None => CorsLayer::permissive(),
-        Some(list) if list.iter().any(|o| o == "*") => CorsLayer::permissive(),
+        None => CorsLayer::permissive().expose_headers(SCRUB_EXPOSED_HEADERS),
+        Some(list) if list.iter().any(|o| o == "*") => {
+            CorsLayer::permissive().expose_headers(SCRUB_EXPOSED_HEADERS)
+        }
         Some(list) => {
             let parsed: Vec<HeaderValue> = list
                 .iter()
@@ -1023,6 +1046,7 @@ fn build_cors(origins: Option<Vec<String>>) -> CorsLayer {
                 .allow_origin(parsed)
                 .allow_methods(Any)
                 .allow_headers(Any)
+                .expose_headers(SCRUB_EXPOSED_HEADERS)
         }
     }
 }

@@ -475,7 +475,7 @@ fn direct_model_json(record: &ProjectedGeometry) -> Value {
     })
 }
 
-fn instance_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
+pub(crate) fn instance_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
     let mut row = json!({
         "id": record.record_id,
         "snapshot_key": snapshot_key,
@@ -508,7 +508,7 @@ fn instance_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
     row
 }
 
-fn tube_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
+pub(crate) fn tube_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
     let tube = record.tube.as_ref().expect("tube record");
     json!({
         "id": record.record_id,

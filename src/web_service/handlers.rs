@@ -9,7 +9,7 @@ use anyhow::Context;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -254,6 +254,11 @@ fn model_cache_health(store_reachable: bool) -> Value {
         },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
+    // 实时历史几何（spec `model-version-timeline-scrub`）：结果缓存、并发闸与历史输入缓存三项。
+    // 只报读数，不参与任何 health gate；`in_flight` 是真正还在占 CPU 的计算数（permit 随闭包
+    // 进阻塞线程，计算停下才归还）。实时路径不碰 `HistoricalModelStore`，上面 `historical`
+    // 那一分项因此不受影响（Requirement 6.12）。
+    health["realtime_history"] = realtime_history_health();
     health["store_reachable"] = json!(store_reachable);
     health["degraded_read_only"] =
         json!(crate::options::store_mode().is_durable() && !store_reachable);
@@ -294,6 +299,30 @@ pub(crate) fn storage_version_health() -> Value {
         }),
         None => Value::Null,
     }
+}
+
+/// `/health.model_cache.realtime_history`（design §1.8）。
+///
+/// `cache_entries` 只数当前指纹下的条目（指纹一变整表清空，Requirement 7.4）；`in_flight` =
+/// `limit − available_permits()`；`input_cache` 是只给历史用的生成输入缓存。四项配置都在
+/// 启动时夹到范围内（3.1 的 `bounded_setting`），这里直接报生效值。
+fn realtime_history_health() -> Value {
+    let state = crate::fast_model::realtime_history::RealtimeHistoryState::global();
+    let stats = state.cache().stats();
+    let input = crate::fast_model::e3d_model_service::historical_input_stats();
+    json!({
+        "cache_entries": stats.entries,
+        "cache_capacity": stats.capacity,
+        "hits_total": stats.hits,
+        "misses_total": stats.misses,
+        "in_flight": state.gate().in_flight(),
+        "concurrency_limit": state.gate().limit(),
+        "input_cache": {
+            "entries": input.entries,
+            "capacity": input.capacity,
+        },
+        "timeout_secs": state.timeout_secs(),
+    })
 }
 
 /// 运维面板的内嵌副本。
@@ -2714,6 +2743,144 @@ pub async fn node_versions(
     })?
     .map_err(unit_versions_error)?;
     Ok(Json(report))
+}
+
+/// `GET /api/v1/model/history/geometry` 的查询串：请求身份 + 原样收下的四个参数。
+///
+/// 全部 `Option<String>`：由 `validate_request` 裁决，避免 axum 反序列化失败时回 axum 自带的 400 体
+/// （Requirement 6.2、6.6、6.16）。
+#[derive(Debug, Default, Deserialize)]
+pub struct RealtimeGeometryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub params: crate::fast_model::realtime_history::RealtimeQueryParams,
+}
+
+/// `If-None-Match` 的候选值：逗号分隔，逐项去 `W/` 前缀与引号。
+fn if_none_match_candidates(value: Option<&str>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .map(|item| item.strip_prefix("W/").unwrap_or(item))
+        .map(|item| item.trim_matches('"').trim())
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// GET /api/v1/model/history/geometry — 实时历史几何（spec `model-version-timeline-scrub`）。
+///
+/// 只读、同步：请求内由 e3d-model 按会话链算出单元在该会话下的几何，`instances` 与 `tubes`
+/// 同一个响应返回；不建任务、不写投影存储、不碰历史快照表（Requirement 6.12）。
+///
+/// - 200：`ETag: "<geometryKey>"`、`X-Sesno`、`X-Session-Time`、`Cache-Control: no-cache`；
+/// - 304：`If-None-Match` 命中同一 `geometryKey`，头与 200 相同；
+/// - 503 `HISTORY_BUSY`：并发闸满，带 `Retry-After`（Requirement 7.1）；
+/// - 504 `HISTORY_QUERY_TIMEOUT`：超时，取消标志已置位（6.9）。
+///
+/// 请求断开（6.14）：handler future 被 hyper 丢弃时 [`CancelOnDrop`] 置位取消标志，
+/// 阻塞线程在下一个检查点退出。
+pub async fn model_history_geometry(
+    State(state): State<AppState>,
+    Query(req): Query<RealtimeGeometryReq>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let if_none_match = if_none_match_candidates(
+        headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let cancel = crate::fast_model::cancel::CancelToken::new();
+    // future 被丢弃时（连接断开）置位；正常返回时计算已结束，置位无害。
+    let _guard = crate::fast_model::cancel::CancelOnDrop(cancel.clone());
+    let request = crate::fast_model::realtime_history::RealtimeHistoryRequest {
+        params: req.params,
+        if_none_match,
+    };
+    let outcome = crate::fast_model::realtime_history::query_realtime(request, cancel)
+        .await
+        .map_err(realtime_error)?;
+    Ok(realtime_response(outcome))
+}
+
+fn realtime_error(error: crate::fast_model::realtime_history::RealtimeError) -> ApiError {
+    let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let api = ApiError::coded(status, error.code, error.message);
+    match error.detail {
+        Some(detail) => api.with_detail(detail),
+        None => api,
+    }
+}
+
+/// 把编排结局搬成 HTTP 响应：200 / 304 都带全套头，503 带 `Retry-After`。
+fn realtime_response(outcome: crate::fast_model::realtime_history::RealtimeOutcome) -> Response {
+    use crate::fast_model::realtime_history::RealtimeOutcome;
+    match outcome {
+        RealtimeOutcome::Body(cached) => {
+            let mut response = Response::new(Body::from(cached.body.clone()));
+            *response.status_mut() = StatusCode::OK;
+            apply_scrub_headers(&mut response, &cached.headers);
+            response
+        }
+        RealtimeOutcome::NotModified {
+            sesno,
+            session_time,
+            geometry_key,
+        } => {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::NOT_MODIFIED;
+            apply_scrub_headers(
+                &mut response,
+                &[
+                    ("ETag", format!("\"{geometry_key}\"")),
+                    ("X-Sesno", sesno.to_string()),
+                    ("X-Session-Time", session_time.unwrap_or_default()),
+                    ("Cache-Control", "no-cache".to_string()),
+                ],
+            );
+            response
+        }
+        RealtimeOutcome::Busy(busy) => {
+            let body = json!({
+                "code": "HISTORY_BUSY",
+                "message": format!(
+                    "实时历史计算已满（{}/{}），请 {} 秒后重试",
+                    busy.in_flight, busy.limit, busy.retry_after_secs
+                ),
+                "detail": {
+                    "in_flight": busy.in_flight,
+                    "limit": busy.limit,
+                    "retry_after_secs": busy.retry_after_secs,
+                },
+            });
+            let mut response = Response::new(Body::from(body.to_string()));
+            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            if let Ok(value) = HeaderValue::from_str(&busy.retry_after_secs.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            response
+        }
+    }
+}
+
+fn apply_scrub_headers(response: &mut Response, headers: &[(&'static str, String)]) {
+    for (name, value) in headers {
+        if let (Ok(name), Ok(value)) = (
+            header::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
 }
 
 /// GET /api/v1/model/history/{snapshot_key}
