@@ -1,4 +1,4 @@
-# old-parse-pdms-db 退出护栏（docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md B9；
+﻿# old-parse-pdms-db 退出护栏（docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md B9；
 # 2026-09-04 从「只许在 legacy 门后」收紧为「一处都不许有」）。
 #
 #   1. 整个工作区（默认 features）的依赖图里没有 parse_pdms_db：`cargo tree --workspace -e normal`
@@ -19,11 +19,70 @@
 # Usage: powershell -File scripts\Check-LegacyParsePdmsDb.ps1
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $PSScriptRoot '..' | Resolve-Path | Select-Object -ExpandProperty Path
+# 交互式 pwsh 的 profile 可能把 rg 换成函数（例如转发给 tgrep，没有服务进程时只查过期索引），
+# 护栏会因此静默漏报；这里优先固定调用 PATH 上真正的 ripgrep 可执行文件。
+#
+# 但 GitHub 的 windows-latest runner **不自带 rg**，workflow 也不装它。脚本自 B9
+# 把护栏接进 CI 那天起就硬依赖 rg，这一步在 CI 上一直是 `CommandNotFoundException`。
+# 所以 rg 只当加速手段：找不到就回退到 PowerShell 原生实现（.NET 正则支持同样的
+# lookahead / lookbehind）。两条路径都走下面的 canary 自证，谁都不会静默变成空门。
+$rgExe = (Get-Command rg -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1).Path
+
+# 统一的扫描入口：返回命中行（`路径:行号: 内容`），零命中返回空数组。
+# 判定「有没有命中」必须看返回的条数，不能看退出码——两条实现路径的退出码语义不同。
+function Invoke-GuardScan {
+    param(
+        [Parameter(Mandatory)][string] $ScanPattern,
+        [Parameter(Mandatory)][string[]] $ScanPaths,
+        [string] $FileGlob = '*.rs'
+    )
+    if ($rgExe) {
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $out = & $rgExe -n --pcre2 --glob $FileGlob $ScanPattern @ScanPaths
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $previous
+        if ($code -eq 1) { return @() }
+        if ($code -ne 0) { throw "rg failed with exit code $code" }
+        return @($out)
+    }
+    $regex = [regex]::new($ScanPattern, 'Compiled')
+    $hits = @()
+    foreach ($path in $ScanPaths) {
+        $full = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $root $path }
+        $items = if (Test-Path -LiteralPath $full -PathType Leaf) {
+            @(Get-Item -LiteralPath $full)
+        } else {
+            @(Get-ChildItem -LiteralPath $full -Recurse -Filter $FileGlob -File -ErrorAction SilentlyContinue)
+        }
+        foreach ($file in $items) {
+            $lineNo = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
+                $lineNo++
+                if ($regex.IsMatch($line)) {
+                    $shown = if ([System.IO.Path]::IsPathRooted($path)) { $file.FullName } else {
+                        $file.FullName.Substring($root.Length).TrimStart('\', '/')
+                    }
+                    $hits += ('{0}:{1}: {2}' -f $shown, $lineNo, $line.Trim())
+                }
+            }
+        }
+    }
+    return $hits
+}
+
 Push-Location $root
 try {
-    # 1. 依赖图。
-    $tree = (& cargo tree --workspace -e normal --locked 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) { $tree; throw 'cargo tree --workspace (default features) failed' }
+    # 冷缓存下 cargo 会往 stderr 打进度（`Downloading crates ...`）。`powershell.exe`（5.1）
+    # 在 Stop 模式下把原生命令的任何 stderr 行都当异常抛出，护栏在干净 runner 上必然红。
+    # 这一段只放宽 `$ErrorActionPreference`，判定仍靠退出码与 `$tree` 的内容。
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $tree = (& cargo tree --workspace -e normal --locked 2>&1 | ForEach-Object { "$_" } | Out-String)
+    $treeExit = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($treeExit -ne 0) { $tree; throw 'cargo tree --workspace (default features) failed' }
     $hits = @(($tree -split "`n") | Where-Object { $_ -match 'parse_pdms_db|old-parse-pdms-db' })
     if ($hits.Count -gt 0) {
         $hits
@@ -77,9 +136,9 @@ try {
         New-Item -ItemType Directory -Path $probe | Out-Null
         try {
             [System.IO.File]::WriteAllText((Join-Path $probe 'canary.rs'), $mustMatch)
-            & rg -q --pcre2 --glob '*.rs' $scanPattern $probe
-            if ($LASTEXITCODE -ne 0) {
-                throw ('guard scanner is dead (rg exit {0}): 样本行没被模式命中，零命中不可信' -f $LASTEXITCODE)
+            $hit = @(Invoke-GuardScan -ScanPattern $scanPattern -ScanPaths @($probe))
+            if ($hit.Count -eq 0) {
+                throw 'guard scanner is dead: 样本行没被模式命中，零命中不可信'
             }
         } finally {
             Remove-Item -Recurse -Force $probe
@@ -88,12 +147,10 @@ try {
     Assert-ScannerIsAlive $pattern 'use parse_pdms_db::parse::EleData;'
     'SCANNER_IS_ALIVE'
 
-    $leaks = & rg -n --pcre2 --glob '*.rs' $pattern src tests python\src
-    if ($LASTEXITCODE -eq 0) {
+    $leaks = @(Invoke-GuardScan -ScanPattern $pattern -ScanPaths @('src', 'tests', 'python\src'))
+    if ($leaks.Count -gt 0) {
         $leaks
         throw 'these source lines still reference old-parse-pdms-db or its feature gate'
-    } elseif ($LASTEXITCODE -ne 1) {
-        throw "rg failed with exit code $LASTEXITCODE"
     }
     'SOURCE_HAS_NO_PARSE_PDMS_DB'
 
@@ -105,12 +162,11 @@ try {
     $intermediatePattern = '^(?!\s*//).*(DbBasicData|member_prune)'
     Assert-ScannerIsAlive $intermediatePattern 'let basic: DbBasicData = read_full_basic_data();'
     foreach ($baselineFile in $baselineFiles) {
-        $intermediates = & rg -n --pcre2 $intermediatePattern (Join-Path $root $baselineFile)
-        if ($LASTEXITCODE -eq 0) {
+        $intermediates = @(Invoke-GuardScan -ScanPattern $intermediatePattern -ScanPaths @($baselineFile) -FileGlob '*.rs')
+        if ($intermediates.Count -gt 0) {
             $intermediates
             throw "$baselineFile fell back to the legacy parser's intermediates (DbBasicData / member_prune)"
         }
-        if ($LASTEXITCODE -ne 1) { throw "rg failed with exit code $LASTEXITCODE" }
     }
     'BASELINE_HAS_NO_LEGACY_INTERMEDIATES'
 } finally {

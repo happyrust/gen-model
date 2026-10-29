@@ -1,4 +1,4 @@
-# old-pdms-io 退出护栏（docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md §0；
+﻿# old-pdms-io 退出护栏（docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md §0；
 # 2026-09-04 从「只许在 legacy 门后」收紧为「一处都不许有」）。
 #
 #   1. 整个工作区（默认 features）的依赖图里没有 pdms_io：`cargo tree --workspace -i pdms_io`
