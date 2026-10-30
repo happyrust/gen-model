@@ -757,6 +757,26 @@ mod tests {
         use crate::data_interface::window_root_plan::{PersistedRoot, WindowRootSources};
         use crate::fast_model::e3d_model_service::scan_index;
 
+        /// 语料缺失就跳过，存在就必须真跑。
+        ///
+        /// 这些用例读本机安装的 E3D 样例库（DESI），CI 上没有。以前靠 `#[ignore]`
+        /// 挡住，结果是**任何机器上都永远不跑**——包括装了语料的开发机。改成
+        /// 「文件不在 → 打一行 skip 后 return；文件在 → 继续，失败就是真失败」。
+        ///
+        /// 返回 `false` 表示应当跳过（调用方直接 `return`）。
+        fn corpus_ready(what: &str, paths: &[&Path]) -> bool {
+            for path in paths {
+                if !path.exists() {
+                    eprintln!(
+                        "skip {what}: 语料不在本机（{}）——装了 E3D 样例库的机器上这条会真跑",
+                        path.display()
+                    );
+                    return false;
+                }
+            }
+            true
+        }
+
         fn open(schema: &DirectSchema, file: &Path, sesno: u32) -> Arc<DbSet> {
             let set = Arc::new(
                 DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
@@ -835,13 +855,20 @@ mod tests {
         ///
         /// 只读文件：`AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+
         /// `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the AvevaPlantSample DESI files and the E3D template directory"]
         fn live_aps_one_ended_windows_pull_the_far_end_roots_into_regen() {
             let dir =
                 PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
                     r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
                 }));
+            if !corpus_ready(
+                "aps 的两个单端窗口",
+                &[dir.join("aps7200_0001").as_path(), dir.join("aps250110_0001").as_path()],
+            ) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             // (库, S, T, 持属性端 noun, 普查的回指成立边数, 开关关着对端根是否已全在 regen 里)
             let table = [
@@ -931,8 +958,9 @@ mod tests {
         /// 语料里一条跨库边都没有也是结论（打印出来，测试仍过）。有的话钉住今天的形状：生产口径一根都
         /// 上卷不到、而对端库自己能找到根——这就是 #33 要回答的「读得到、上卷不到」。只读文件：
         /// `AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+ `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs a project directory of DESI files and the E3D template directory"]
         fn live_probe_cross_db_structural_connection_edges() {
             use crate::data_interface::db_file_header::DbFileHeader;
 
@@ -940,6 +968,9 @@ mod tests {
                 PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
                     r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
                 }));
+            if !corpus_ready("aps000 的跨库结构连接边", &[dir.as_path()]) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let unit_types = resolve_delivery_unit_types(&[]);
 
@@ -1230,12 +1261,16 @@ mod tests {
         /// 九个钉死窗口（`window_root_plan::tests::live_ams8000_pinned_windows_land_in_the_expected_buckets`
         /// 的表）开关两态 `regen` 逐字相同——它们没有跨根的结构连接改动。只读文件：
         /// `AIOS_PROJAMS_GEOMETRY_FILE`（默认 ams8000_0001）+ `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the real ams8000 DESI file and the E3D template directory"]
         fn live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off() {
             let file = PathBuf::from(std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(
                 |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into(),
             ));
+            if !corpus_ready("ams8000 的九个钉死窗口（结构连接）", &[file.as_path()]) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let windows = [
                 (255u32, 256u32),

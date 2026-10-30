@@ -984,6 +984,27 @@ mod tests {
             )
         }
 
+        /// 语料缺失就跳过，存在就必须真跑。
+        ///
+        /// 这些用例读的是本机安装的 E3D 样例库（DESI），CI 上没有。以前靠 `#[ignore]`
+        /// 挡住，结果是**任何机器上都永远不跑**——包括装了语料的开发机。改成
+        /// 「文件不在 → 打一行 skip 后 return；文件在 → 继续，失败就是真失败」，
+        /// 于是开发机上它们进了默认回归，CI 上也不会红。
+        ///
+        /// 返回 `false` 表示应当跳过（调用方直接 `return`）。
+        fn corpus_ready(what: &str, paths: &[&Path]) -> bool {
+            for path in paths {
+                if !path.exists() {
+                    eprintln!(
+                        "skip {what}: 语料不在本机（{}）——装了 E3D 样例库的机器上这条会真跑",
+                        path.display()
+                    );
+                    return false;
+                }
+            }
+            true
+        }
+
         fn open(schema: &DirectSchema, file: &Path, sesno: u32) -> Arc<DbSet> {
             let set = Arc::new(
                 DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
@@ -1004,10 +1025,14 @@ mod tests {
         /// 规则 F 查表必须把接在它上面的电缆根全部拉进来；规则 E 假定一条 `CWBRAN` 变了，路过它
         /// 的电缆根必须进来；两条都只能拉进 `CABLE` 根。只读文件：`AIOS_ZDJ7200_FILE`
         /// （默认 zdj7200_0001）+ `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the ZDJ zdj7200_0001 DESI file and the E3D template directory"]
         fn live_zdj7200_an_equi_or_cwbran_source_pulls_its_cable_roots_in() {
             let file = zdj7200();
+            if !corpus_ready("zdj7200 的电缆根", &[file.as_path()]) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let unit_types = resolve_delivery_unit_types(&[]);
             let sesno = ReadOnlyEngine::open(&file)
@@ -1127,15 +1152,23 @@ mod tests {
         /// 逐字相同——语料里没有「只改 EQUI / CWBRAN 一端」的自然窗口（2→3 电缆还没建；4→5
         /// 电缆与端点一起建，电缆根本来就在 `touched` 里）。只读文件：`AIOS_ZDJ7200_FILE`、
         /// `AIOS_APS_PROJECT_DIR` + `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the ZDJ / AvevaPlantSample DESI files and the E3D template directory"]
         fn live_existing_windows_are_identical_with_the_cascade_on_and_off() {
-            let schema = DirectSchema::open_from_env().expect("E3D template directory");
-            let unit_types = resolve_delivery_unit_types(&[]);
             let aps =
                 PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
                     r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
                 }));
+            let zdj = zdj7200();
+            if !corpus_ready(
+                "zdj7200 / aps000 的两态逐字对拍",
+                &[zdj.as_path(), aps.join("aps7200_0001").as_path()],
+            ) {
+                return;
+            }
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let unit_types = resolve_delivery_unit_types(&[]);
             let mut windows: Vec<(PathBuf, u32, u32)> = vec![
                 (aps.join("aps7200_0001"), 3, 4),
                 (aps.join("aps250514_0001"), 3, 4),
@@ -1235,8 +1268,9 @@ mod tests {
         /// [`read_foreign_referrers`] 到其余设计库的反向表去查——必须查回那根电缆（或它的 `EXTGEO` 段），再用跨库交接
         /// 同一段 [`crate::data_interface::cross_db_handoff::fold_elements_to_roots`] 在电缆库的 T 端索引上折回 `CABLE` 根。
         /// 只读文件：`AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+ `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the AvevaPlantSample DESI files and the E3D template directory"]
         fn live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library() {
             use crate::data_interface::db_file_header::DbFileHeader;
 
@@ -1244,6 +1278,9 @@ mod tests {
                 PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
                     r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
                 }));
+            if !corpus_ready("aps000 的跨库电缆端点", &[dir.as_path()]) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let unit_types = resolve_delivery_unit_types(&[]);
             let mut desi: Vec<(u32, PathBuf, u32)> = std::fs::read_dir(&dir)
@@ -1594,12 +1631,16 @@ mod tests {
         /// 九个钉死窗口（`window_root_plan::tests::live_ams8000_pinned_windows_land_in_the_expected_buckets`
         /// 的表）开关两态 `regen` 逐字相同——它们没有跨根的电缆端点或桥架路由改动。只读文件：
         /// `AIOS_PROJAMS_GEOMETRY_FILE`（默认 ams8000_0001）+ `AIOS_E3D_TEMPLATE_DIR`。
+        ///
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
         #[test]
-        #[ignore = "manual live: needs the real ams8000 DESI file and the E3D template directory"]
         fn live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off() {
             let file = PathBuf::from(std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(
                 |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into(),
             ));
+            if !corpus_ready("ams8000 的九个钉死窗口", &[file.as_path()]) {
+                return;
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let windows = [
                 (255u32, 256u32),
