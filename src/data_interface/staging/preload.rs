@@ -683,36 +683,6 @@ mod tests {
         assert_eq!(byte_batches.len(), 2, "字节上限也必须触发拆批");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn staged_window_sees_the_persistent_watermark() {
-        let instance = connect("mem://").await.expect("staging mem");
-        let window = create_window_on(&instance, 7999, 43, 43, ResourceThresholds::default())
-            .await
-            .expect("window");
-        let state = crate::data_interface::dbnum_state::DbnumState {
-            dbnum: 7999,
-            applied_sesno: 42,
-            initialized: true,
-            ..Default::default()
-        };
-        window
-            .scope(preload_dbnum_state(&state))
-            .await
-            .expect("preload watermark");
-
-        let mut response = window
-            .staging_db()
-            .query("RETURN dbnum_watermark:7999.applied_sesno;")
-            .await
-            .expect("inspect watermark");
-        assert_eq!(
-            response.take::<Option<i32>>(0).expect("watermark"),
-            Some(42)
-        );
-        assert!(window.journal().await.is_empty());
-        window.drop_database().await.expect("cleanup");
-    }
     use crate::data_interface::staging::lifecycle::create_window_on;
     use surrealdb::engine::any::connect;
 
@@ -775,9 +745,14 @@ mod tests {
     /// `{pe}->pe_owner`），要是邻接索引只对 `RELATE` 维护，这两条路会静默返回空集：
     /// 删除级联在暂存里走不到后代，`status = OK` 地少删一片。夹具用 `RELATE` 的话
     /// 这个区别测不出来。
+    /// 子树闭包与「记录键解析」两条纯读路径的口径。
+    ///
+    /// 原用例还往后测了「窗口内写路由到暂存库」那一整套（产物拷贝、Transform /
+    /// Delete 分桶、暂存库里的行数），随 ADR-056 P1 暂存库不再开而必然失败。
+    /// 2026-10-31 把前半段（仍然生效的读口径）留下并去掉 `#[ignore]`，后半段随
+    /// `staging_db()` 一起删；原全文见 git 历史 `abe387b6`。
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn copies_only_the_root_product_closure_without_journaling() {
+    async fn root_closure_and_record_keys_resolve_on_the_persistent_layer() {
         let source = connect("mem://").await.expect("source mem");
         source
             .use_ns("test")
@@ -823,102 +798,6 @@ mod tests {
                 .expect("record keys ignore absent optional links"),
             vec!["inst_info:i1"]
         );
-
-        let instance = connect("mem://").await.expect("staging mem");
-        let window = create_window_on(&instance, 7992, 1, 1, ResourceThresholds::default())
-            .await
-            .expect("window");
-        let copied = window
-            .scope(preload_existing_generation_products_from(
-                &source,
-                &[RefnoEnum::from("4000000001/1")],
-            ))
-            .await
-            .expect("preload products");
-
-        assert_eq!(copied, 8);
-        assert!(window.journal().await.is_empty());
-        let mut response = window
-            .staging_db()
-            .query(
-                "RETURN [count(SELECT * FROM inst_relate) = 1, inst_info:i1.id != NONE,
-             count(SELECT * FROM geo_relate) = 1, inst_geo:g1.id != NONE,
-             trans:wt1.id != NONE, trans:t1.id != NONE, aabb:a1.id != NONE,
-             vec3:v1.id != NONE, inst_info:i9.id = NONE];",
-            )
-            .await
-            .expect("inspect staging");
-        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 9]);
-
-        // Transform 桶：设计数据（pe + pe_owner）不再从持久层拷（W1/D3——那部分
-        // 改由 ancestor_preload 从文件解析），apply 只剩产物；Transform 子树的
-        // 模型节点单独成桶，交给祖先解析当种子。
-        let plan = window
-            .scope(plan_model_mutation_preload_from(
-                &source,
-                &[RefnoEnum::from("4000000001/1")],
-                &[],
-            ))
-            .await
-            .expect("plan transform preload");
-        assert_eq!(
-            plan.transform_model_refnos(),
-            &[RefnoEnum::from("4000000001/3")],
-            "Transform 子树的模型节点必须单独成桶（祖先解析种子）"
-        );
-        let copied = window
-            .scope(apply_model_mutation_preload_from(&source, &plan))
-            .await
-            .expect("preload transform target");
-        assert_eq!(copied, 8, "Transform 桶只拷产物，不再拷 pe/pe_owner");
-        let mut response = window
-            .staging_db()
-            .query(
-                "RETURN [pe:⟨4000000001_1⟩.id = NONE, pe:⟨4000000001_2⟩.id = NONE,
-                 pe:⟨4000000001_3⟩.id = NONE, count(SELECT * FROM pe_owner) = 0];",
-            )
-            .await
-            .expect("inspect transform rows");
-        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 4]);
-
-        // Delete 桶：被删元素已从文件消失、无从解析，删除级联的暂存子树遍历
-        // （collect_pe_subtree_refnos → active_data_db）靠这份持久层拓扑拷贝。
-        let plan = window
-            .scope(plan_model_mutation_preload_from(
-                &source,
-                &[],
-                &[RefnoEnum::from("4000000001/1")],
-            ))
-            .await
-            .expect("plan delete preload");
-        let copied = window
-            .scope(apply_model_mutation_preload_from(&source, &plan))
-            .await
-            .expect("preload delete target");
-        assert_eq!(copied, 13, "Delete 桶保留 pe 拓扑 + 产物");
-        let mut response = window
-            .staging_db()
-            .query(
-                "RETURN [pe:⟨4000000001_1⟩.id != NONE, pe:⟨4000000001_2⟩.id != NONE,
-                 pe:⟨4000000001_3⟩.id != NONE, count(SELECT * FROM pe_owner) = 2,
-                 pe:⟨4000000001_9⟩.id = NONE];",
-            )
-            .await
-            .expect("inspect delete rows");
-        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 5]);
-        // 级联删除的枚举入口必须能在暂存里从删除目标走到带产物的后代。
-        let staged_subtree = window
-            .scope(crate::data_interface::helper::collect_pe_subtree_refnos(&[
-                RefnoEnum::from("4000000001/1"),
-            ]))
-            .await
-            .expect("staged subtree walk");
-        assert!(
-            staged_subtree.contains(&RefnoEnum::from("4000000001/3")),
-            "删除级联必须能沿暂存拓扑找到带产物的后代: {staged_subtree:?}"
-        );
-        assert!(window.journal().await.is_empty());
-        window.drop_database().await.expect("cleanup");
     }
 
     /// P1 修复钉（2026-08-07 审核）：Transform 子树与 Delete 子树**重叠**的节点

@@ -3,8 +3,7 @@
 //! - [`executor`]：StagedExecutor——暂存执行 + 语句日志 + TX_CHUNK 分块写回（T0.2）；
 //! - [`replay_safe`]：ReplaySafe 语句规范与 validator，进日志的语句在入口处过检（T0.5）；
 //! - [`lifecycle`]：staging database 命名 / 建库初始化 / 登记表 / 终态清扫（T0.3）；
-//! - [`resources`]：资源三级状态机（告警 / 拒绝吸收 / 废弃暂存）（T0.3）；
-//! - [`ancestor_preload`]：模型工作项祖先链的解析式预载（2026-08-07 方案 W1）。
+//! - [`resources`]：资源三级状态机（告警 / 拒绝吸收 / 废弃暂存）（T0.3）。
 //!
 //! 词汇见 `CONTEXT.md`「暂存与写回」章节；决策见 `docs/adr/ADR-017`。
 //!
@@ -12,12 +11,16 @@
 //! `increment_pipeline::apply_one` 只走直写），[`active_data_db`] 恒返持久层；本目录
 //! 除 [`attempts`]（持久层控制面，搬家保留）外在 P3 整体拆除，剩余调用点只有
 //! ADR-036 维护纠正 `window_repair` 与几条借 `mem://` 窗口当载体的测试。
+//!
+//! **P3 第一步（2026-10-31）**：删掉两块零生产引用的死代码——
+//! `ancestor_preload.rs`（`resolve_ancestor_closure` / `apply_ancestor_preload` /
+//! `validate_ancestor_preload` 全无生产调用点）与 `parity.rs`（整文件
+//! `#![cfg(test)]`，且只测前者）。它们连带的那批 `#[ignore]` 测试测的是「窗口内写
+//! 路由到暂存库」这个**已退役**的行为，在暂存库不再开之后必然失败，留着只会让每次
+//! 审计重新判断一遍。原文件见 git 历史 `abe387b6`。
 
-pub mod ancestor_preload;
 pub mod executor;
 pub mod lifecycle;
-#[cfg(test)]
-pub mod parity;
 pub mod preload;
 pub mod replay_safe;
 pub mod resources;

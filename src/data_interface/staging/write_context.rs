@@ -284,41 +284,6 @@ mod tests {
     use crate::data_interface::staging::lifecycle::create_window_on;
     use surrealdb::engine::any::connect;
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn spawned_model_writes_share_the_window_journal() {
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7995, 1, 1, ResourceThresholds::default())
-            .await
-            .expect("create window");
-
-        with_staging_writes(window.write_context(), async {
-            let a = spawn_with_staged_io(async {
-                crate::surreal_retry::execute_model_write("UPSERT pe:a SET noun = 'PIPE'", "test a")
-                    .await
-            });
-            let b = spawn_with_staged_io(async {
-                crate::surreal_retry::execute_model_write("UPSERT pe:b SET noun = 'EQUI'", "test b")
-                    .await
-            });
-            a.await.expect("join a").expect("write a");
-            b.await.expect("join b").expect("write b");
-        })
-        .await;
-
-        assert_eq!(window.journal().await.len(), 2);
-        let mut response = window
-            .staging_db()
-            .query("SELECT VALUE id FROM pe")
-            .await
-            .expect("query staged rows");
-        let rows: surrealdb::Value = response.take(0).expect("take rows");
-        let text = serde_json::to_string(&rows).expect("serialize");
-        assert!(text.contains("a") && text.contains("b"), "{text}");
-
-        window.drop_database().await.expect("cleanup");
-    }
-
     /// 第二个调用者必须等到锁**真的到手**才返回，而不是看见「有人登记过」就走。
     ///
     /// 登记与到手若不是同一步，下面这次 `hold` 会在锁还捏在别人手里时立刻返回，调用方
