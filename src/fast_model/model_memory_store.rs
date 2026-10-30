@@ -2437,12 +2437,18 @@ mod tests {
                 }
             });
             barrier.wait();
+            // 读侧不能假设「我转 2000 圈，写侧一定已经交过货」。2 核的 CI runner 上读线程
+            // 可能整段跑在写线程第一次 commit 之前，`observed` 就是 0，断言误报
+            // （2026-10-30 CI 实测红过一次）。所以这里改成：一直读到至少撞见一次为止，
+            // 上限只是防死循环的保险，不是「跑满这么多圈就该结束」。
             let mut observed = 0;
-            for _ in 0..2_000 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while observed == 0 && std::time::Instant::now() < deadline {
                 if let Some((receipt, records)) =
                     store.root_snapshot(ProjectionScope::Current, root)
                 {
                     if receipt.published_via != "unit" {
+                        std::thread::yield_now();
                         continue;
                     }
                     observed += 1;
@@ -2452,6 +2458,20 @@ mod tests {
                 std::thread::yield_now();
             }
             assert!(observed > 0, "读者至少撞见一次局部提交之后的状态");
+            // 撞见之后再多看一段，确保「局部提交期间读到的快照也自洽」这条在被观察到的
+            // 时间窗里成立，而不是只看了一眼就结束。
+            for _ in 0..2_000 {
+                if let Some((receipt, records)) =
+                    store.root_snapshot(ProjectionScope::Current, root)
+                {
+                    if receipt.published_via != "unit" {
+                        continue;
+                    }
+                    assert_eq!(records.len(), receipt.geometry_count);
+                    assert_eq!(receipt.manifest_hash, shared_recipe(&records).0);
+                }
+                std::thread::yield_now();
+            }
         });
     }
 
