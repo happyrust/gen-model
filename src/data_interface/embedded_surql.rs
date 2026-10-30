@@ -380,10 +380,19 @@ mod tests {
             Some("R301"),
             "fn::get_room_number 必须走 fn::room_num_of，不能按存储序取首条"
         );
+        // `fn::room_code` 的返回形状随构建口径不同，两边都必须取到**同一条最强边**
+        // 的 R301，只是拼不拼房间码前缀不一样：
+        // - hd 版经 `fn::single_room_code` 读面板属主的名字，拼出 `1RX-R301`；
+        // - hh 版直接读 `fn::room_num_of`（并带 `$uda_room` 标记），只回 `R301`。
+        // 这个用例钉的是「取哪条边」，不是「拼不拼前缀」，所以按口径分支断言。
+        #[cfg(feature = "project_hd")]
+        let expected_code = "1RX-R301";
+        #[cfg(not(feature = "project_hd"))]
+        let expected_code = "R301";
         assert_eq!(
             first_code(&code_raw).as_deref(),
-            Some("1RX-R301"),
-            "fn::room_code 同样取最强边，实际: {code_raw:?}"
+            Some(expected_code),
+            "fn::room_code 同样取最强边（口径期望 {expected_code}），实际: {code_raw:?}"
         );
     }
 

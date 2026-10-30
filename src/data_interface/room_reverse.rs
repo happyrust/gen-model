@@ -312,9 +312,19 @@ pub(crate) async fn durable_panel_members(
 ) -> anyhow::Result<BTreeSet<i64>> {
     let mut out = BTreeSet::new();
     for panel in panels {
+        // `out.deleted != true`（2026-10-30 修）：构件被删后 `pe` 行留着
+        // `deleted=true`，而 `room_relate` 边不清，真库实测有 196 条这样的脏边
+        // （BEND 44 / FTUB 152），它们的 `out` 端既已删除又没有 `inst_relate` 几何。
+        // 不过滤的话这些边会以「房间成员」身份进入枚举，`durable_ancestors` 查不到
+        // 祖先链 → 进 `unresolved` → 要么多算根、要么把定向增量退化成整库重算。
+        //
+        // 写成 `!= true` 而不是 `!deleted`：大量老边的 `deleted` 字段是 NONE，
+        // `!NONE` 在 mem 引擎上不是 true，会误杀老边。
+        // 用 graph traversal 后接 WHERE（真库实测 +20ms），不用
+        // `FROM room_relate WHERE in = …`——后者要走全表扫，慢 13 倍。
         let members: Vec<RefnoEnum> = db
             .query(format!(
-                "SELECT VALUE out FROM {}->room_relate;",
+                "SELECT VALUE out FROM {}->room_relate WHERE out.deleted != true;",
                 panel.to_pe_key()
             ))
             .await?
@@ -798,11 +808,20 @@ mod tests {
             CREATE tubi_relate:⟨t500⟩ SET in=pe:⟨24381_500⟩, anc=[{}], dbnum=7997, aabb=aabb:far;
             CREATE tubi_relate:⟨t501⟩ SET in=pe:⟨24381_500⟩, anc=[{}], dbnum=7997, aabb=aabb:far;
             CREATE tubi_relate:⟨t9⟩ SET in=pe:⟨24382_9⟩, anc=[{}], dbnum=7998, aabb=aabb:near;
+            -- 已删构件：`deleted=true` 且没有 `inst_relate` 几何（真库 196 条脏边的形状）。
+            -- 它挂在面板 7 名下，但 `durable_panel_members` 必须把它滤掉。
+            CREATE pe:⟨24381_600⟩ SET deleted = true, noun = 'BEND';
+            -- 老边的 `deleted` 是 NONE（真库大量如此），必须**不**被误杀。给它一条 anc，
+            -- 让它折到根 C 上，不落进 `unresolved` 干扰既有断言。
+            CREATE pe:⟨24381_601⟩ SET noun = 'FTUB';
+            CREATE inst_relate:⟨24381_601⟩ SET in=pe:⟨24381_601⟩, anc=[{}], dbnum=7997;
             INSERT RELATION INTO room_relate [
                 {{ id: room_relate:7_100, in: pe:⟨24381_7⟩, out: pe:⟨24381_100⟩, room_num: 'R1' }},
                 {{ id: room_relate:7_310, in: pe:⟨24381_7⟩, out: pe:⟨24381_310⟩, room_num: 'R1' }},
                 {{ id: room_relate:7_500, in: pe:⟨24381_7⟩, out: pe:⟨24381_500⟩, room_num: 'R1' }},
                 {{ id: room_relate:7_20, in: pe:⟨24381_7⟩, out: pe:⟨24382_20⟩, room_num: 'R1' }},
+                {{ id: room_relate:7_600, in: pe:⟨24381_7⟩, out: pe:⟨24381_600⟩, room_num: 'R1' }},
+                {{ id: room_relate:7_601, in: pe:⟨24381_7⟩, out: pe:⟨24381_601⟩, room_num: 'R1' }},
                 {{ id: room_relate:8_900, in: pe:⟨24381_8⟩, out: pe:⟨24381_900⟩, room_num: 'R2' }}
             ];
             "#,
@@ -816,12 +835,15 @@ mod tests {
             packed_refno(root_d),
             packed_refno(root_d),
             packed(24382, 1),
+            packed_refno(root_c),
         ))
         .await
         .unwrap()
         .check()
         .unwrap();
         // 离开的成员：只问面板 7（面板 8 名下的 900 不进）。
+        // 601 的 `deleted` 是 NONE（老边），必须保留——`!NONE` 在 mem 引擎上不是 true，
+        // 写成 `!deleted` 会把它误杀，所以过滤条件必须是 `!= true`。
         let member_hits = durable_panel_members(&db, &[refno(24381, 7)])
             .await
             .unwrap();
@@ -832,8 +854,9 @@ mod tests {
                 packed(24381, 310),
                 packed(24381, 500),
                 packed(24382, 20),
+                packed(24381, 601),
             ]),
-            "面板此刻名下的成员，去重、不分库"
+            "面板此刻名下的成员，去重、不分库；已删的 600 不进，`deleted` 为 NONE 的 601 保留"
         );
         assert!(
             durable_panel_members(&db, &[refno(24381, 99)])
@@ -915,8 +938,8 @@ mod tests {
             "投影里的 200 与 24382/10 + 库上的 400 与 24382/9；远处的 101 / 500 不按盒算——两路都不分库"
         );
         assert_eq!(
-            affected.member_hits, 4,
-            "面板 7 名下的四个成员（含别的库的）"
+            affected.member_hits, 5,
+            "面板 7 名下的五个成员（含别的库的；已删的 600 不算，`deleted` 为 NONE 的 601 算）"
         );
         assert_eq!(
             affected.foreign,
@@ -943,16 +966,16 @@ mod tests {
         );
         assert_eq!(
             affected.summary(),
-            "roots=4 tree_hits=5 tube_hits=4 member_hits=4 cross_library=5 foreign_libraries=2 unresolved=1"
+            "roots=4 tree_hits=5 tube_hits=4 member_hits=5 cross_library=5 foreign_libraries=2 unresolved=1"
         );
-        // L2 的量具：树上命中、投影里没有的 300 / 24382-8 / 24383-8 / 600 加成员里投影没有的 310 / 500 / 24382-20，
-        // 七个回库取 anc（500 在 inst_relate 没有行，第二遍按 in 到 tubi_relate 取到，两行只算一次）；三次库读各自计了时
+        // L2 的量具：树上命中、投影里没有的 300 / 24382-8 / 24383-8 / 600 加成员里投影没有的 310 / 500 / 24382-20 / 601，
+        // 八个回库取 anc（500 在 inst_relate 没有行，第二遍按 in 到 tubi_relate 取到，两行只算一次）；三次库读各自计了时
         // （毫秒数不断言——`mem://` 上是 0 或 1）。成员那一路的计时在 `affected_roots` 里填，这一半是 0。
-        assert_eq!(affected.durable_ancestor_lookups, 7);
+        assert_eq!(affected.durable_ancestor_lookups, 8);
         assert_eq!(
             affected.durable_timing(),
             format!(
-                "库上管身范围查 {}ms、回库取祖先链 7 个 {}ms、面板现存成员 0 块 0ms",
+                "库上管身范围查 {}ms、回库取祖先链 8 个 {}ms、面板现存成员 0 块 0ms",
                 affected.durable_tube_ms, affected.durable_ancestor_ms
             )
         );
@@ -978,7 +1001,7 @@ mod tests {
                 members_only.tube_hits,
                 members_only.member_hits
             ),
-            (0, 0, 4)
+            (0, 0, 5)
         );
         assert_eq!(
             members_only.foreign,

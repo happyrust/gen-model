@@ -375,6 +375,21 @@ jobs:
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
 
+      # hh 口径的同一层总闸。上面那条只覆盖 `project_hd`，而
+      # `resource/surreal/fn_query_room_code_hh.surql` 的语义差异（读
+      # `fn::room_num_of`、带 `$uda_room` 标记、房间码不拼前缀）只有在
+      # **不带** `project_hd` 的构建里才真正生效——`EMBEDDED_SURQL` 按文件名
+      # 升序灌入，`_hh` 排在后面覆盖 hd 版，`project_hd` 再重放 hd 把覆盖翻回来。
+      # 少了这一步，hh 版在 CI 上完全没有回归保护（2026-10-30 修 hh 版
+      # `fn::room_code` 的整行对象崩溃时发现）。
+      - name: Run the unit-test layer under project_hh
+        shell: pwsh
+        run: >-
+          cargo test --locked --lib
+          --no-default-features
+          --features ws,gen_model,manifold,project_hh
+          -- --nocapture
+
   # PyO3 绑定（python/）：建 abi3 wheel + 跑离线档 pytest。
   #
   # 只跑 `-m offline` 那一档——它不连 SurrealDB、不碰 E3D 装机、不扫项目目录，
