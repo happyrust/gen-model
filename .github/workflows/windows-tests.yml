@@ -37,7 +37,11 @@ name: Windows tests
 
 on:
   push:
-    branches: [gen-model-refactor, main, e3d-direct]
+    # `refactor` 是本地/日常主线的分支名（远端同名分支落后于 `gen-model-refactor`）。
+    # 之前只列了 `gen-model-refactor`，往 `refactor` 推不会触发 CI——2026-10-29 之前
+    # 这个 workflow 从来没在这个分支上跑过，四道门（--locked、rg、BOM、vendor 联接）
+    # 全坏着也没人发现。两个名字都留着，谁推都跑。
+    branches: [refactor, gen-model-refactor, main, e3d-direct]
   pull_request:
   workflow_dispatch:
 
@@ -502,6 +506,15 @@ jobs:
           Expand-Archive $archive $root
           "PROTOC=$root\bin\protoc.exe" >> $env:GITHUB_ENV
 
+      # key 里**不带 run_id**：早先为了「失败轮也存进度、重试从断点继续」把 run_id 拼进了
+      # key，代价是每跑一次就多一份独立的 2.3 GB 缓存，永不互相淘汰。Free plan 的
+      # Actions 存储额度是 10 GB，且 **cache 与 artifact 共用同一份额度**——三轮之后
+      # python-bindings 的 3 份缓存（6.9 GB）+ tests 的 2.8 GB = 10.4 GB 直接撑爆，
+      # `Upload wheel` 报 `Artifact storage quota has been hit`（2026-10-29 实测）。
+      #
+      # 改成与 tests job 同一种「按 Cargo.lock 哈希」的稳定 key：同依赖不重复存，
+      # 依赖一变新 key 自然替换旧 key。失败轮仍能续跑——restore-keys 的前缀回退会
+      # 命中上一轮的同类缓存。
       - name: Restore cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v4
@@ -510,9 +523,8 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}
           restore-keys: |
-            cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-
             cargo-python-bindings-
 
       - name: Install maturin and pytest
@@ -524,16 +536,16 @@ jobs:
         working-directory: gen-model/python
         run: maturin build --locked --out "$env:CARGO_TARGET_DIR\wheels"
 
-      # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
+      # 只在命中缓存失败时保存，避免每次运行都重写同一份大缓存（写也算额度与时长）。
       - name: Save cargo cache
-        if: always() && steps.cargo-cache.outcome == 'success'
+        if: always() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}
 
       - name: Install wheel
         shell: pwsh
@@ -563,4 +575,6 @@ jobs:
           name: aios-db-wheel
           path: ${{ github.workspace }}\target\wheels\*.whl
           if-no-files-found: warn
-          retention-days: 30
+          # 7 天足够取件；30 天会在 Free plan 的 10 GB 账户额度里长期占着 25 MB/轮，
+          # 而这份额度与 cargo 缓存共用（见上面 Restore cargo cache 的注释）。
+          retention-days: 7
