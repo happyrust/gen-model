@@ -1,0 +1,211 @@
+{
+  "generated_at": "2026-10-30T11:04:48.6255506+08:00",
+  "scope": "9 个 DESI 库补 TTY 真值后逐件对拍（件口径，唯一 refno）",
+  "verdict_scale": "exact / chord / reference_artifact / film / off",
+  "binaries": {
+    "gen_ams": {
+      "bytes": 8786432,
+      "sha256": "F406E3ABD43AEA72C2C528B7C0A22ECC5B8DCE695A9195845EDFC5D7D8075DBF"
+    },
+    "rvm_compare": {
+      "bytes": 2074112,
+      "sha256": "1CA50030073BE438FF9C7244E61F9D9809295E9C75DEBB0C0BD39B4CA5E22F0E"
+    }
+  },
+  "fixes": [
+    "OP_REAL: PML 操作码 1011 = REAL()，一元恒等转换（vendor/e3d-io/src/record/catalogue_pml.rs）",
+    "decode_number: 定点数第二字按有符号读（同上文件）"
+  ],
+  "baseline_first_run": {
+    "exact": 216257,
+    "off": 22433,
+    "exact_ratio": 0.906
+  },
+  "final": {
+    "roots": 19,
+    "both": 238690.0,
+    "exact": 230965.0,
+    "off": 7725.0,
+    "only_baseline": 1616.0,
+    "only_generated": 118.0,
+    "kind_match": 238683.0,
+    "kind_differ": 7.0
+  },
+  "final_ratio": {
+    "exact": 0.9676,
+    "kind_match": 0.99997
+  },
+  "clean_dbno": [
+    7352,
+    7331,
+    7332,
+    7354,
+    7326
+  ],
+  "residual_off": [
+    {
+      "dbno": 7333,
+      "noun": "PCLA",
+      "n": 7576,
+      "cause": "局部标架绕 Z 差 90°（profile_frame 的 PAAX/PBAX 取轴）"
+    },
+    {
+      "dbno": 7356,
+      "noun": "SJOI",
+      "n": 26,
+      "cause": "SCTN 端面偏移 109 mm 未计入"
+    },
+    {
+      "dbno": 7356,
+      "noun": "FITT",
+      "n": 18,
+      "cause": "绕 X 轴 90° 旋转"
+    },
+    {
+      "dbno": 7327,
+      "noun": "HELE",
+      "n": 22,
+      "cause": "朝向/截面差，三轴均在 20% 内"
+    },
+    {
+      "dbno": 7999,
+      "noun": "PCLA",
+      "n": 62,
+      "cause": "X 长 42%、Y 短 16%"
+    },
+    {
+      "dbno": 7999,
+      "noun": "HELE",
+      "n": 19,
+      "cause": "仅 Y 变 7.4 倍"
+    },
+    {
+      "dbno": 7999,
+      "noun": "ATTA",
+      "n": 1,
+      "cause": "Y 短 10 mm"
+    },
+    {
+      "dbno": 7999,
+      "noun": "BRAN",
+      "n": 1,
+      "cause": "隐式管 6 vs 7 圆柱"
+    }
+  ],
+  "dbs": [
+    {
+      "dbno": 7326,
+      "roots": 2,
+      "both": 28656.0,
+      "exact": 28656.0,
+      "off": 0.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 28656.0,
+      "kind_differ": 0.0,
+      "clean_roots": 2
+    },
+    {
+      "dbno": 7327,
+      "roots": 2,
+      "both": 34152.0,
+      "exact": 34130.0,
+      "off": 22.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 34152.0,
+      "kind_differ": 0.0,
+      "clean_roots": 0
+    },
+    {
+      "dbno": 7331,
+      "roots": 2,
+      "both": 844.0,
+      "exact": 844.0,
+      "off": 0.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 844.0,
+      "kind_differ": 0.0,
+      "clean_roots": 2
+    },
+    {
+      "dbno": 7332,
+      "roots": 2,
+      "both": 844.0,
+      "exact": 844.0,
+      "off": 0.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 844.0,
+      "kind_differ": 0.0,
+      "clean_roots": 2
+    },
+    {
+      "dbno": 7333,
+      "roots": 2,
+      "both": 158818.0,
+      "exact": 151242.0,
+      "off": 7576.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 158818.0,
+      "kind_differ": 0.0,
+      "clean_roots": 0
+    },
+    {
+      "dbno": 7352,
+      "roots": 2,
+      "both": 48.0,
+      "exact": 48.0,
+      "off": 0.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 48.0,
+      "kind_differ": 0.0,
+      "clean_roots": 2
+    },
+    {
+      "dbno": 7354,
+      "roots": 2,
+      "both": 760.0,
+      "exact": 760.0,
+      "off": 0.0,
+      "only_baseline": 0.0,
+      "only_generated": 0.0,
+      "kind_match": 760.0,
+      "kind_differ": 0.0,
+      "clean_roots": 2
+    },
+    {
+      "dbno": 7356,
+      "roots": 1,
+      "both": 894.0,
+      "exact": 850.0,
+      "off": 44.0,
+      "only_baseline": 141.0,
+      "only_generated": 0.0,
+      "kind_match": 894.0,
+      "kind_differ": 0.0,
+      "clean_roots": 0
+    },
+    {
+      "dbno": 7999,
+      "roots": 4,
+      "both": 13674.0,
+      "exact": 13591.0,
+      "off": 83.0,
+      "only_baseline": 1475.0,
+      "only_generated": 118.0,
+      "kind_match": 13667.0,
+      "kind_differ": 7.0,
+      "clean_roots": 1
+    }
+  ],
+  "notes": [
+    "chord / reference_artifact / film 三档全为 0",
+    "APPLDW 也是几何根，SITE 与 APPLDW 件集合交集为 0",
+    "判据是唯一 refno 集合，不是记录条数（7999 整库 15845 条 / 13715 个 refno）",
+    "两处修复尚未提交：vendor/e3d-io/src/record/catalogue_pml.rs（99 insertions / 2 deletions）"
+  ]
+}
