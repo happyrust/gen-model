@@ -187,6 +187,12 @@ define function fn::b_next_type($pe:record,$type:string) {
 };
 
 // 将已知的desp / para 数字转为 word
+// 前置 remove（2026-10-30 补）：本文件里其它函数都有 `remove function fn::xxx;`，
+// 只有这一个漏了。缺了它的后果是**重复灌入时报 `The function 'fn::into_str'
+// already exists`**，而语句级错误按惯例被吞掉（`embedded_surql` 的文档注释写明
+// 「语句级错误吞掉」），于是第一次之后的所有修改都静默不生效。
+// 现在与同文件其它函数一致，重复灌入是幂等的。
+remove function fn::into_str;
 DEFINE FUNCTION fn::into_str($desp: float) {
     return if $desp == 788296 {
         'DIAM'

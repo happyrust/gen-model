@@ -458,4 +458,176 @@ mod tests {
         );
     }
 
+    /// 跨两房构件的 `room_height` / `room_top_height` 必须是**确定性**顺序。
+    ///
+    /// 2026-10-30 真库实测：`pe:15516_104` 回 `[-280.0, -20.0]`，而同样落在这两间房的
+    /// `pe:15516_15` / `pe:15516_4` 回 `[-20.0, -280.0]`。原因是旧实现用
+    /// `array::distinct(...)` 收集面板标高，而 `array::distinct` **不排序**——只按元素
+    /// 第一次出现的顺序去重。消费方 `fn::room_height(id)[0]`（core
+    /// `aios_mgr.rs:91` 的 `query_own_room_panel_elevations`）因此取到哪间房全凭运气；
+    /// bottom 与 top 又各自独立 distinct，顺序还可能不同步，拼出根本不存在的净高。
+    ///
+    /// 这里钉两件事：（1）多房间时数组顺序由面板记录 id 决定，与写入顺序无关；
+    /// （2）`bottom[i]` 与 `top[i]` 来自同一块面板（净高配对）。
+    #[tokio::test]
+    async fn multi_room_elevations_are_ordered_by_panel_not_by_storage() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_multi_room_order")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        // 两块面板：pe:⟨7_1⟩ 底 -20 / 顶 2705（低房间），pe:⟨7_2⟩ 底 -280 / 顶 3500。
+        // 边的写入顺序刻意让「先写 id 大的面板（7_2）」，与记录 id 序相反：
+        // 若 `fn::room_panels_of` 退化成按存储序，结果会是 [7_2, 7_1]。
+        //
+        // 直接测 `fn::room_panels_of` 而不是 `room_height`：后者要先按
+        // `$pe.refno.TYPE` 选分支，而 mem 引擎上 `CREATE` 出来的 `refno` 表记录
+        // 读不到 `TYPE`（真库 rocksdb 上正常），会让测试落进 else 分支而测不到多值。
+        // 排序逻辑本体在 room_panels_of 里，room_height/top_height 只是把它的输出
+        // 各自映射一次，所以这里钉住 room_panels_of 就钉住了顺序契约。
+        db.query(
+            "CREATE pe:⟨7_1⟩ SET noun = 'PANE', name = '';
+             CREATE pe:⟨7_2⟩ SET noun = 'PANE', name = '';
+             CREATE pe:⟨7_301⟩ SET noun = 'TUBI', refno = TUBI:⟨7_301⟩;
+             CREATE pe:⟨7_302⟩ SET noun = 'TUBI', refno = TUBI:⟨7_302⟩;
+             CREATE inst_relate:⟨7_1⟩ SET in = pe:⟨7_1⟩,
+                 aabb_d = { mins: [0.0, 0.0, -20.0], maxs: [6000.0, 4000.0, 2705.0] };
+             CREATE inst_relate:⟨7_2⟩ SET in = pe:⟨7_2⟩,
+                 aabb_d = { mins: [0.0, 0.0, -280.0], maxs: [6000.0, 4000.0, 3500.0] };
+             -- 先写 id 大的面板（pe:7_2，高房间）挂到 7_302，再写 id 小的
+             -- （pe:7_1，低房间）挂到 7_301
+             RELATE pe:⟨7_2⟩->room_relate->pe:⟨7_302⟩ SET room_num = 'R201', inside_count = 8, center_dist = 2053.8074;
+             RELATE pe:⟨7_1⟩->room_relate->pe:⟨7_301⟩ SET room_num = 'R301', inside_count = 8, center_dist = 1081.1567;",
+        )
+        .await
+        .expect("fixture reaches db")
+        .check()
+        .expect("fixture rows created");
+
+        // `fn::room_panels_of` 回的是 record 数组，SDK 解成 `Thing` 而非 String，
+        // 用 `type::string` 在库侧转成字符串再解码。
+        let panels: Vec<String> = db
+            .query("RETURN array::map(fn::room_panels_of([pe:⟨7_301⟩, pe:⟨7_302⟩]), |$p| type::string($p));")
+            .await
+            .expect("panel names reach db")
+            .check()
+            .expect("panel names execute")
+            .take(0)
+            .expect("decode panel names");
+        assert_eq!(
+            panels,
+            vec!["pe:7_1".to_string(), "pe:7_2".to_string()],
+            "面板按记录 id 升序，与边的写入顺序无关（写入是 7_2 在前）"
+        );
+
+        // 配对校验：把面板按 room_panels_of 的顺序映射成标高，bottom[i] 与 top[i]
+        // 必须来自同一块面板，净高必须是真实房间高度（2725 / 3780），
+        // 不能出现跨面板拼出来的假值。
+        let mut response = db
+            .query(
+                "RETURN array::map(fn::room_panels_of([pe:⟨7_301⟩, pe:⟨7_302⟩]),
+                    |$p| type::thing('inst_relate', record::id($p)).aabb_d.mins[2]);
+                 RETURN array::map(fn::room_panels_of([pe:⟨7_301⟩, pe:⟨7_302⟩]),
+                    |$p| type::thing('inst_relate', record::id($p)).aabb_d.maxs[2]);",
+            )
+            .await
+            .expect("elevation probes reach db")
+            .check()
+            .expect("elevation probes execute");
+        let bottom: Vec<f32> = response.take(0).expect("decode bottom");
+        let top: Vec<f32> = response.take(1).expect("decode top");
+        assert_eq!(
+            bottom,
+            vec![-20.0, -280.0],
+            "底标高顺序跟随面板 id 序：7_1(-20) 在前，7_2(-280) 在后"
+        );
+        assert_eq!(
+            top,
+            vec![2705.0, 3500.0],
+            "顶标高与底标高同序，bottom[i] 与 top[i] 是同一块面板"
+        );
+        for (i, (b, t)) in bottom.iter().zip(top.iter()).enumerate() {
+            let clear = t - b;
+            assert!(
+                (clear - 2725.0).abs() < 0.01 || (clear - 3780.0).abs() < 0.01,
+                "第 {i} 对净高 {clear} 不是任一房间的真实净高（2725 / 3780），说明 bottom 与 top 配错了面板"
+            );
+        }
+    }
+
+    /// 已删除构件（`pe.deleted = true`）的 `room_relate` 边不算房间归属。
+    ///
+    /// 2026-10-30 真库实测：库里 164 行 `deleted = true`，其中 196 条 `room_relate`
+    /// 边的 `out` 端就是这些已删件（BEND 44 / FTUB 152），且它们都没有 `inst_relate`
+    /// 几何。旧 `fn::room_relate_of` 不过滤 `deleted`，这些边会以「房间成员」身份被
+    /// 读到，成员数虚高、标高取不到。过滤条件写成 `out.deleted != true` 而不是
+    /// `!out.deleted`：大量老边的 `deleted` 是 NONE，`!NONE` 在 mem 引擎上不是 true。
+    #[tokio::test]
+    async fn deleted_members_do_not_count_as_room_occupancy() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_deleted_member")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        db.query(
+            "CREATE pe:⟨6_1⟩ SET noun = 'PANE', name = '';
+             -- 活件：只有 deleted = false 的老记录形态（真库里多数行就是 false）
+             CREATE pe:⟨6_100⟩ SET noun = 'TUBI', refno = TUBI:⟨6_100⟩, deleted = false;
+             -- 已删件：deleted = true，且没有 inst_relate 几何
+             CREATE pe:⟨6_200⟩ SET noun = 'BEND', refno = BEND:⟨6_200⟩, deleted = true;
+             -- 老边形态：deleted 字段压根不存在（NONE）
+             CREATE pe:⟨6_300⟩ SET noun = 'TUBI', refno = TUBI:⟨6_300⟩;
+             RELATE pe:⟨6_1⟩->room_relate->pe:⟨6_100⟩ SET room_num = 'R301', inside_count = 8, center_dist = 1081.1567;
+             RELATE pe:⟨6_1⟩->room_relate->pe:⟨6_200⟩ SET room_num = 'R301', inside_count = 8, center_dist = 1100.0;
+             RELATE pe:⟨6_1⟩->room_relate->pe:⟨6_300⟩ SET room_num = 'R301', inside_count = 8, center_dist = 1120.0;",
+        )
+        .await
+        .expect("fixture reaches db")
+        .check()
+        .expect("fixture rows created");
+
+        let mut response = db
+            .query(
+                "RETURN fn::room_relate_of(pe:⟨6_100⟩).room_num;
+                 RETURN fn::room_relate_of(pe:⟨6_200⟩);
+                 RETURN fn::room_num_of(pe:⟨6_200⟩);
+                 RETURN fn::room_relate_of(pe:⟨6_300⟩).room_num;",
+            )
+            .await
+            .expect("deleted probes reach db")
+            .check()
+            .expect("deleted probes execute");
+        let alive: Option<String> = response.take(0).expect("decode alive member");
+        let deleted_edge: Option<serde_json::Value> = response.take(1).expect("decode deleted edge");
+        let deleted_num: Option<String> = response.take(2).expect("decode deleted room_num");
+        let legacy: Option<String> = response.take(3).expect("decode legacy member");
+
+        assert_eq!(alive.as_deref(), Some("R301"), "活件照常取到房间");
+        assert!(
+            deleted_edge.is_none(),
+            "已删件（deleted = true）不再有房间归属，实际: {deleted_edge:?}"
+        );
+        assert!(
+            deleted_num.is_none(),
+            "已删件的 room_num_of 也必须是 NONE，实际: {deleted_num:?}"
+        );
+        assert_eq!(
+            legacy.as_deref(),
+            Some("R301"),
+            "deleted 字段为 NONE 的老记录不能被一起滤掉（`!deleted` 会误杀）"
+        );
+    }
+
 }

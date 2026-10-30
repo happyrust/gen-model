@@ -714,8 +714,15 @@ REMOVE FUNCTION fn::room_relate_of;
 -- 排序键由 save_room_relate 写入：inside_count 是元素 AABB 八顶点落在面板内的个数，
 -- center_dist 是元素中心到面板中心的距离。第三级 room_num 保证全序，
 -- 使旧数据（缺前两个字段）也有确定结果。
+--
+-- `and out.deleted != true`（2026-10-30 修）：构件被删后 `pe` 行会留 `deleted=true`
+-- 而 `room_relate` 边不清，真库实测有 196 条这样的脏边（BEND 44 / FTUB 152），
+-- 其 out 端既已删除又没有 `inst_relate` 几何。不过滤的话这些边会以「房间成员」
+-- 身份进入枚举，成员数虚高且取不到标高。写成 `!= true` 而不是 `!deleted`：
+-- 大量老边的 `deleted` 字段是 NONE，`!NONE` 在 mem 引擎上不是 true。
 DEFINE FUNCTION fn::room_relate_of($pe: record) {
     return (select * from $pe<-room_relate
+            where out.deleted != true
             order by inside_count desc, center_dist asc, room_num asc
             limit 1)[0];
 };
