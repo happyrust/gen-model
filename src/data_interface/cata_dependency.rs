@@ -1931,6 +1931,23 @@ mod tests {
             "coverage.reconcile.catalogue_dependency_refresh = catalogue_dependency_refresh;",
             "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };",
         ] {
+            // 旧钉要求 `catalogue_cascade,` 的下一行就是 `catalogue_dependency_refresh,` 并且再下一行
+            // 是 `};`。现在这两行仍然相邻（startup_reconcile.rs:648-649），但后面还有
+            // `generator_stale_dbnums`，所以带 `};` 的整段对不上。判据改成两者都在、且
+            // dependency_refresh 在 cascade 之后：要钉的是两个出口都带上这份账，不是它是不是最后一格。
+            if probe == "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };" {
+                let cascade = both
+                    .find("        catalogue_cascade,\n")
+                    .expect("运行期出口要带上目录级联那一格");
+                let refresh = both
+                    .find("        catalogue_dependency_refresh,\n")
+                    .expect("两个出口都要带上这份账：找不到 catalogue_dependency_refresh");
+                assert!(
+                    cascade < refresh,
+                    "依赖行账排在目录级联之后：cascade={cascade} refresh={refresh}"
+                );
+                continue;
+            }
             assert!(
                 both.contains(probe),
                 "两个出口都要带上这份账：找不到 {probe:?}"
