@@ -141,7 +141,12 @@ pub struct DbnumModelRootStatus {
     pub generation_root: String,
     pub noun: String,
     pub name: String,
+    /// 本进程投影里有满足 source_sesno 下限的回执（任务进度的判据）；冷重启后一律 false。
     pub ready: bool,
+    /// durable 就绪：库级凭证 ∨ 进程账本（`model_coverage::generation_roots_cache_current`，GitHub #74）。
+    /// 只有诊断快照（`current_roots`）的读者补得出它；任务快照里是 `None`，不序列化。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -809,6 +814,7 @@ fn roots_view(snapshot: &TaskSnapshot) -> DbnumModelRootsView {
             noun: root.root.noun.clone(),
             name: root.root.name.clone(),
             ready: root_ready(snapshot, root),
+            durable_ready: None,
         })
         .collect::<Vec<_>>();
     DbnumModelRootsView {

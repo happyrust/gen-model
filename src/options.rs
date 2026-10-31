@@ -260,7 +260,7 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_structural_connection_cascade: Option<bool>,
 
-    /// 电缆端点 / 路由反向级联（联动对齐计划 C8 同库版，默认关闭）：窗口里改了 `EQUI` / `ELCONN` /
+    /// 电缆端点 / 路由反向级联（联动对齐计划 C8 同库版，**默认开**，2026-10-17 翻）：窗口里改了 `EQUI` / `ELCONN` /
     /// `CWBRAN` 时，到本库 `STAREF` / `ENDREF` 反向表点查引用它的电缆，把电缆的生成根一起重算。
     /// 详见 [`model_cable_endpoint_cascade`]。
     #[serde(default)]
@@ -2347,8 +2347,9 @@ fn effective_model_transform_cheap_path(
 /// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
 pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 
-/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-080 D9，
-/// 2026-09-16）。
+/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认开**，ADR-080 D9，
+/// 2026-10-14 翻成默认开；2026-09-16 首版时为关）。缺键 / 环境变量未设时走
+/// `effective_default_on_switch`，缺省为 `true`；只有显式 `false` 才关。
 ///
 /// 开着时 DESI 窗口规划器在计划上带出本窗的基线 S（`ModelUpdatePlan::unit_publish_base_sesno`），
 /// dbnum Task 里的 regen 单元先交给单元级执行体（`E3dModelService::republish_roots_by_unit_delta_from_window`）：
@@ -2511,8 +2512,9 @@ pub const MODEL_ELEMENT_CACHE_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE";
 /// 跑出 **537 万次点查、264 s**，占生成 CPU 的 85%；开着之后点查 4.6 万次、生成 71.0 → 3.84 s。
 /// 7997 是 18.2 → 7.19 s，1112 是 2.4 → 1.45 s。
 ///
-/// **代价是内存**：缓存不淘汰，随这一轮真读到的元素数增长（7997 峰值 768 MB → 1.55 GB）。
-/// 整库生成一轮是有界的，所以默认开；长驻进程按库全量读不是，真撞上内存墙就用
+/// **代价是内存**：缓存**满则整张清**（上限见 [`model_element_cache_max_entries`]，默认 200,000 条），
+/// 清空后下一次读再从文件装、那一小段重新变冷；产物逐字不变。整库生成一轮是有界的，所以默认开；
+/// 长驻进程按库全量读不是，真撞上内存墙就用
 /// [`MODEL_ELEMENT_CACHE_ENV`]`=false` 关掉它——关掉只是慢回去，产物逐字不变
 /// （三个库的 `READBACK` 六项开关两态逐字相同）。
 pub fn model_element_cache() -> bool {

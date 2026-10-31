@@ -1363,8 +1363,12 @@ pub(crate) struct InitialSliceProjection {
     pub source_sesno: u32,
     /// 成功折出来的根：`(根, 提交, 这一根的账)`。零几何的根也在这里（回执 `geometry_count = 0`）。
     pub commits: Vec<(RefNo, ProjectionCommit, E3dPersistReport)>,
-    /// 死信：生产端硬错 + 有失败元素的根。
+    /// 死信：生产端硬错（整根没算出来）。
     pub failures: Vec<(RefNo, String)>,
+    /// 有失败元素、却按冷根口径发布了幸存件的根（GitHub #74，`incomplete_root_policy(false, false)` = `Publish`）：
+    /// 它们的提交也在 `commits` 里；这里记的是「哪几件没算出来」那句话，供回执点名。初始化前库里没有旧行、
+    /// 也没有回执，丢掉整根只会「保住」一个空快照（与 SLYK `21491/17101` 同一形状），所以不再当死信。
+    pub partial: Vec<(RefNo, String)>,
     /// 每个成功根 e3d-model DFS 访问到的子树元素名单（观测用，初始化不写透）。
     pub visited_by_root: HashMap<RefNo, Vec<RefNo>>,
 }
@@ -2489,8 +2493,10 @@ impl E3dModelService {
     /// 不读任何回执——初始化前库里没有旧行，也没有上一轮可比。渲成 SQL、交模型 lane 是
     /// `model_initial_persist` 与 `dbnum_initialize` 的事。
     ///
-    /// 与 [`Self::generate_refs`] 同一套死信口径：单根有失败元素 / 生产端硬错 = 该根死信，
-    /// 不拦同片的其他根（`BestEffortFallback`）；`Required` 才整片报错。
+    /// 死信口径：生产端硬错 = 该根死信，不拦同片的其他根（`BestEffortFallback`）；`Required` 才整片报错。
+    /// 有失败元素的根**不是死信**（GitHub #74，2026-10-27）：初始化是冷根，按 `incomplete_root_policy` 的 `Publish`
+    /// 判决发布幸存件、把没算出来的那几件记进 [`InitialSliceProjection::partial`]——与 [`Self::persist_roots_with`]
+    /// 对冷根的处置同一口径。
     pub(crate) fn project_slice_for_initialization(
         &self,
         batch: GeneratedMemoryBatch,
@@ -2512,6 +2518,7 @@ impl E3dModelService {
             source_sesno,
             commits: Vec::with_capacity(snapshots.len()),
             failures,
+            partial: Vec::new(),
             visited_by_root: HashMap::new(),
         };
         for (root, snapshot) in snapshots {
@@ -2520,18 +2527,20 @@ impl E3dModelService {
                 if matches!(failure_policy, GeometryFailurePolicy::Required) {
                     bail!("e3d-model root {root} has {root_failed} failed element(s)");
                 }
-                log::error!(
-                    "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)): {:?}",
-                    snapshot.report.failed
-                );
-                projection.failures.push((
-                    root,
-                    crate::data_interface::mdb_route_directory::explain_unregistered_dbs(&format!(
+                // GitHub #74：初始化是冷根（没有回执、没有旧行），`incomplete_root_policy(false, false)` 的判决是
+                // `Publish`——幸存件照发，没算出来的那几件记在 `partial` 里点名。此前这里把整根当死信丢掉，
+                // 一只零长 SCTN 名下的 SJOI 就让同框好杆件一并消失（ams7330 四根 → 整库 lagging）。
+                let failure = crate::data_interface::mdb_route_directory::explain_unregistered_dbs(
+                    &format!(
                         "{root_failed} geometry element(s) failed: {:?}",
                         snapshot.report.failed
-                    )),
-                ));
-                continue;
+                    ),
+                );
+                log::warn!(
+                    "e3d-model root {root} publishing {} element(s) of an incomplete candidate at initialization; {root_failed} did not evaluate: {failure}",
+                    snapshot.elements.len()
+                );
+                projection.partial.push((root, failure));
             }
             let publication = RootPublication {
                 root,
@@ -2553,6 +2562,7 @@ impl E3dModelService {
                 root, point_sets,
             ));
             report.skipped += snapshot.report.skipped.len();
+            report.failed += root_failed;
             report.generation_report = serde_json::to_value(&snapshot.report)?;
             projection.visited_by_root.insert(root, snapshot.visited);
             projection.commits.push((root, commit, report));
@@ -2745,7 +2755,7 @@ impl E3dModelService {
     /// 执行体与 `produce`（`plan_update` / `execute_plan` / 烘焙）都是同步的 CPU 活，在 [`run_blocking`]
     /// 里跑：多线程运行时让出当前 tokio 工作线程，锁照握着（同一把 `db_generation_lock` 下只有这一个
     /// 写者，让出线程不放锁）。生产调用点是 `batch_worker::run_unit_publish_units`（开关
-    /// `model_unit_level_publish`，D9，默认关）。
+    /// `model_unit_level_publish`，D9，2026-10-14 起默认开；2026-09-16 首版时为关）。
     pub(crate) async fn republish_roots_by_unit_delta(
         &self,
         dbnum: u32,
@@ -3490,7 +3500,8 @@ impl E3dModelService {
         // 同一批目录件反复查索引反复解析（AMS 7999 实测：15,968 个元素跑出 537 万次点查、
         // 264 s，占生成 CPU 的 85%；开着之后生成 71.0 → 3.84 s）。关掉只是慢回去，
         // 落下去的行逐字不变——它换的是内存（7997 峰值 768 MB → 1.55 GB），所以留了关位。
-        // 元素数上限（[`crate::options::model_element_cache_max_entries`]，d-149，默认 0 = 不限）：
+        // 元素数上限（[`crate::options::model_element_cache_max_entries`]，d-149，
+        // 默认 200,000；**写 0 才是不限**）：
         // 满了整张清、下一次读再从文件装——产物仍逐字不变，只是清空之后那一小段重新变冷。
         let set = if crate::options::model_element_cache() {
             set.with_element_cache_limit(crate::options::model_element_cache_max_entries())

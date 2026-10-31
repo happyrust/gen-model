@@ -3340,7 +3340,10 @@ fn query_flag(value: Option<&str>) -> bool {
 }
 
 /// GET /api/v1/dbnums/{dbnum}/model/roots — 返回任务冻结根集合，或（未给 task_id 时）
-/// 当前文件的诊断快照。`ready` 与任务进度共用 source_sesno 有下限的投影回执判据。
+/// 当前文件的诊断快照。`ready` 与任务进度共用 source_sesno 有下限的投影回执判据——它是**本进程**的投影，
+/// 冷重启后一律 false（`ready_source = process_projection`）。诊断快照另给 `durable_ready` / `durable_ready_total`：
+/// 库级凭证 ∨ 进程账本（`model_coverage::generation_roots_cache_current`，ADR-079）——「0 ready」到底是没生成过
+/// 还是只是重启了，看这一格（GitHub #74）。
 pub async fn dbnum_model_roots(
     State(state): State<AppState>,
     Path(dbnum): Path<u32>,
@@ -3359,9 +3362,31 @@ pub async fn dbnum_model_roots(
             .map_err(ApiError::from_domain)?,
     };
     let only_ready = query_flag(query.ready.as_deref());
+    // GitHub #74：诊断快照（没给 task_id）再按库级凭证 ∨ 进程账本判一次 durable 就绪；任务快照只说本任务的进度，不补。
+    let durable_ready = if query.task_id.is_none() {
+        let refnos = view
+            .roots
+            .iter()
+            .map(|root| root.generation_root.clone())
+            .collect::<Vec<_>>();
+        Some(
+            crate::data_interface::model_coverage::generation_roots_cache_current(&refnos)
+                .await
+                .map_err(ApiError::from_domain)?,
+        )
+    } else {
+        None
+    };
+    let durable_ready_total = durable_ready.as_ref().map(|covered| covered.len());
     let roots = view
         .roots
         .into_iter()
+        .map(|mut root| {
+            if let Some(covered) = &durable_ready {
+                root.durable_ready = Some(covered.contains(&root.generation_root));
+            }
+            root
+        })
         .filter(|root| !only_ready || root.ready)
         .collect::<Vec<_>>();
     Ok(Json(json!({
@@ -3372,6 +3397,8 @@ pub async fn dbnum_model_roots(
         "source_file": view.source_file,
         "total": view.total,
         "ready_total": view.ready_total,
+        "ready_source": "process_projection",
+        "durable_ready_total": durable_ready_total,
         "only_ready": only_ready,
         "roots": roots,
     })))

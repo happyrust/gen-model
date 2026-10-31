@@ -18,7 +18,7 @@
 > 第九节为准，全文修订随服务端 5–9 项（暂停端点 / health / dbnums 扩展）一并做：
 > ① `/update/execute` 不再 409/422，一律 202 返回入队回执
 > `{scanned, enqueued:[{task_id,dbnum,position,…}], merged, already_covered, blocked, up_to_date, warnings}`；
-> ② `TaskState` 新增 `queued`，kind 由 `manual_update` 改为 `data_batch` / `room_recalc`，
+> ② `TaskState` 新增 `queued`，kind 由 `manual_update` 改为 `data_batch` / `room_recalc`（`room_recalc` 其后已退役，ADR-073 D1，见 §6），
 > `TaskEntry` 增加 `dbnum / db_type / start_sesno / end_sesno / started_at / units_done / total_units`；
 > ③ `increments` 主题与 `incr_applied` 事件已删除（从未有过消费者），
 > 任务注册表搬至 feature 无关层（`data_interface/task_registry.rs`），容量 1000、分层保留。
@@ -91,7 +91,7 @@
 
 > 旧的通用 409 `conflict` 与「`sync_live=true` 拒手动」的 422 随 ADR-011 §12 退役：数据批次
 > 由派发器统一出队（默认单 worker 串行，ADR-011 2026-08-09 修订），执行请求一律 202 入队
-> （见 §4.3）。`model/ensure` 的
+> （见 §4.3）。`model/generate`（旧名 `model/ensure`，§4.5）的
 > 422 `container` / `precondition` 以及归属不变量被破坏时的
 > `409 ref0_affiliation_conflict` 不受影响。
 
@@ -113,6 +113,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 ```json
 { "status": "ok", "project": "HD", "version": "0.1.22",
   "build_id": "0.1.22+patch.1",
+  "e3d_model_build_id": "0.1.52@gdbe3d76a1b2c",
   "started_at": "2026-07-27T21:02:11+08:00",
   "capabilities": {
     "dbnum_model_ensure": true,
@@ -201,7 +202,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   "reason_ref": "db-…", "message": "读取增量数据失败: …" }`。
   `dbnum` 为 `null` 表示这条阻断本来就指不出某一个库（目录清单不可读、整轮重扫
   失败），消费者不得替它挑一个。`reason_ref` 非空时，该 task 的全文原因可经
-  `GET /api/v1/batch-failures?dbnum=<dbnum>` 从磁盘取回（重启后仍在）；为 `null`
+  `GET /api/v1/batch-failures?dbnum=<dbnum>`（§4.8.2）从磁盘取回（重启后仍在）；为 `null`
   表示这条阻断没有对应的落盘失败记录，`message` 就是全部原因。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
@@ -241,11 +242,6 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
     }],
     "anomaly": null, "blocked": false
   }],
-  "pending_model_retries": [{
-    "action": "regen_root", "target_refno": "24381/100817", "dbnum": 7997,
-    "revision": 4, "noun": "BRAN", "source_dbnum": 7997, "source_end_sesno": 81,
-    "attempts": 2, "last_error": "..."
-  }],
   "shadowed": [{
     "project": "ZDJ", "dbnum": 7001, "file_path": "...",
     "selected_project": "AvevaCatalogue"
@@ -255,8 +251,18 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 }
 ```
 
+> **已退役格 `pending_model_retries`（ADR-072 D5）**：pending 表整表退役，预览回执不再带这一格；`src/` 里只剩读透形态那一支为兼容恒回
+> `[]`（`src/web_service/handlers.rs:2016-2030`），新客户端不要读它。原元素形状
+> `{action, target_refno, dbnum, revision, noun, source_dbnum, source_end_sesno, attempts, last_error}` 仅供追溯。
+
 `version` 是发布线；`build_id` 定位该发布线内的一次具体构建。生成二进制 patch 时
-同时记录 `build_id` 与 EXE SHA-256，真正的准入判据是后者。
+同时记录 `build_id` 与 EXE SHA-256，真正的准入判据是后者。`e3d_model_build_id`（2026-10-27，GitHub #73）是
+编进这次构建的 e3d-model vendor 身份（`<crate 版本>@g<提交号>`，工作树脏 / 没有 git 时补源码哈希；
+`unknown` = 构建时找不到 vendor 目录），部署后核「换了哪一版 vendor」看它；它也是模型回执里生成器指纹的
+`e3d-model:` 段。`/health.generator_reconcile`（同日）是运行期生成器身份核对的最近一次回执（`/update/execute`
+触发；启动那一次在 `initialization.startup.reconcile.generator_stale_dbnums`）：`stale` 是库级生成器落款
+（`dbnum_watermark.model_generator`）与本进程不一致的库，`enqueued` 是已排整库重排（`ModelOnly` 起点 0）的那几个；
+开关 `model_rebuild_on_generator_change`（默认开）关着时只点名。`null` = 本进程还没跑过。
 - 错误：500（项目目录不存在等）。`sync_live=true` 时同样可用（ADR-011 §12 合流：
   预览与数据批次并发时「待应用」可能偏大——正在被应用的会话也会算进去，界面按
   队列快照里的运行中批次数标注「N 个库正在应用，数字可能偏大」。
@@ -322,7 +328,8 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   之前是「模型与文件轮次发布之后」——文件轮次退役了）；`model_caught_up_at` 只在
   `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。回执里文件轮次 /
   pending / drain / publish 那一族格随 ADR-072 一并消失，逐条见 §4.7.1。
-- 模型持久工作由正式消费者 `kind = "model_drain"` 分页认领（每页至多 16 根）。状态为
+- **已退役（ADR-072 D5）**：pending 表退役后不再创建 `model_drain` 新行，常量仅供兼容既有事件 / 测试（`src/data_interface/task_registry.rs:20-21`）；
+  模型随数据任务同步生成（§4.7.1）。以下原描述仅供追溯——模型持久工作由正式消费者 `kind = "model_drain"`（已退役）分页认领（每页至多 16 根）。状态为
   `running -> succeeded|partial|failed|yielded`；`yielded` 表示初始化门或数据优先级要求让位，
   是本次进程内任务的终态，但未执行的 durable pending 行、revision 与 attempts 均保持原值。
   `detail` 带 `epoch_id` 和 `roots[] { dbnum, source_end_sesno, target_refno, action, revision }`，
@@ -332,7 +339,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 ### 4.4 `GET /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`
 - 列表支持 `?state=running&kind=data_batch&limit=50`（`limit` 夹到 160）。注册表本身仍是进程内的 UI 视图
   （durable 状态以应用 / 模型水位为准），但 **2026-10-24 起终态行落盘**：收口那一刻按行的同一形状追加到
-  `logs/task-history-YYYY-MM-DD.jsonl`（除 `model_drain`），进程内归档首次访问时从最近 30 天预热（上限 5000 条），
+  `logs/task-history-YYYY-MM-DD.jsonl`（除已退役的 `model_drain`，ADR-072 D5），进程内归档首次访问时从最近 30 天预热（上限 5000 条），
   所以重启后这个列表照样列得出重启前收口的批次。一页 = 注册表里的（含未收口的）⊕ 归档里注册表已经没有的，
   按 `created_at` 倒序截 `limit`；还在进程里的行以注册表为准。
 - 翻页：`?before=<RFC3339>`（入队时刻上界，不含）——把上一页最老那条的 `created_at` 传回来就是下一页。响应
@@ -343,8 +350,11 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   `"supersedes": ["<task_id>", ...]`。只在服务端自己排出后继时写，不按时间猜；一条失败批次只被认领一次；
   `partial`（数据已应用、单元失败）不进链。两格缺席不序列化，老客户端不认也不坏。
 - 单元的房间前后（2026-10-24）：`result.units[]` 每条可带 `rooms_before` / `rooms_after`，形状
-  `[{"room_num":"R113","panel_refno":"24381_1204","members":2}]`——这根（根 + 子树全部构件）开工前 / 收尾后按
-  房间 × 面板有几个构件被判在里面（读 `room_relate` 边，开工前那一份在落库事务删边之前拍）。两格同生共死：
+  `[{"room_num":"R113","panel_refno":"24381_1204","members":2}]`——这根（根 + 子树全部构件）开工前 / **durable ACK + 房间重算之后**按
+  房间 × 面板有几个构件被判在里面（读 `room_relate` 边，开工前那一份在落库事务删边之前拍；「后」那一份在任务等到 durable ACK、
+  房间重算跑完之后、收尾那一笔之前拍：`await_units_durable` → `run_room_recompute` → `snapshot_rooms_after` → `commit_task_end_on`，
+  `src/data_interface/batch_worker.rs:1657` / `:1691` / `:1732` / `:1742`，先后顺序有源码钉 `:7188-7194`；`run_unit_worklist`
+  收尾那一刻库上还是旧边、只许拍「前」，`:7159`）。两格同生共死：
   缺席 = 没拍（读透形态 / 本进程算不了房间 / 一批超过 64 根（初始化、整库重建）/ 读失败）；`[]` = 拍了、不属于任何房间。
 - 单元的几何前后（2026-10-24）：`result.units[]` 每条可带 `geometry_before` / `geometry_after`（形状
   `{"records": 9, "aabb": [min_x, min_y, min_z, max_x, max_y, max_z]}`：这根名下模型行数与全部行的并集世界包围盒，一行都没有就没有 `aabb`）
@@ -433,8 +443,13 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
   - `Generated` — 这次跑了生成，拿到了画得出来的实例；
   - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
-- HTTP 等待预算为 120 秒；超时返回 `504 timeout`，但后台生成不取消。客户端稍后以
-  `force=false` 重查，命中已经落下的投影回执时直接复用。
+- 两档等待，**分开读**（都不回 `202`）：
+  - **逐根飞行等待 110 秒**（`src/data_interface/on_demand_model.rs:397-398`）：等一根的生成超过 110 秒即映射为
+    `ModelGenerationInProgress` → **`409 conflict`**；那一根的生成照跑、不取消。多根范围里它按下文「逐根记错」进
+    `failed_roots`，全部失败才按首错整次回（`on_demand_model.rs:744-819`）。
+  - **HTTP 等待 120 秒**（`src/web_service/handlers.rs:2979`，`await_background_without_cancelling`，`:2892-2912`）：
+    整次请求 120 秒内没完成回 **`504 timeout`**（消息「按需生成超时(120s)，后台继续执行…」，`:3015-3021`），后台生成不取消。
+  - 两种情形客户端都稍后以 `force=false` 重查，命中已经落下的投影回执时直接复用。
 - `force` 只给「人明确要求重生成」用（S4-C 的重试；plant-ui 右键「重新生成模型」）：
   **先删后生成**（2026-10-10 定）——解完根、逐根加锁之前，先把请求子树下已发布的产物全部
   清掉（范围与 §4.5.1 相同：按祖先链取记录，含根已解不出来的孤儿产物；受影响根的回执作废），
@@ -464,17 +479,20 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   `model_scope_regen`。
 - 按需边界使用一个最小领域错误枚举完成以下分型，不把所有 `anyhow::Error` 压成
   `not_found` 或 `internal`，也不扩建全局错误框架：
-  - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
+  - `422 container` — **子树无生成根才 422 container**：粗层级容器（`COARSE_HIERARCHY_NOUNS` = WORL / WORLD / SITE / ZONE，
+    `src/data_interface/generation_root.rs:35`）本身恒不做生成根；请求它时先在子树里解生成根，**子树有生成根就照常逐根生成、回 200**；
+    子树里一根都解不出、向上也解不出时才回 `422 container`（`on_demand_model.rs:992-1040`）。**这不是失败**：客户端应展开一层，
+    对子节点逐个 generate（ADR-0009）。
   - `404 not_found` — 依赖查询成功，并确认库里没有这个 refno；只有该情形允许负缓存。
-  - `422 precondition` — 构件在、也不是容器，但向上找不到任何合法生成根。
+  - `422 precondition` — 构件在、不是粗层级容器，但子树里与向上都找不到任何合法生成根（`on_demand_model.rs:992-1040`）。
   - `503 ref0_affiliation_unavailable` — refno 合法，但当前缺少 `Ref0 → dbnum` 库归属；客户端不得按 404 负缓存，可稍后重试。
   - `409 ref0_affiliation_conflict` — 同一 Ref0 同时出现在多个 `dbnum`；需先纠正项目文件。
   - `503 model_dependency_unavailable` — SurrealDB 查询、项目文件读取或 locator 暂时失败；
     客户端可重试，不得负缓存。
   - `500 generation_failed` — 确定性的解析、数据损坏或生成失败；不写成功回执。
   - `400 bad_request` — refno 连格式都不对。
-- 单根生成通常秒级，同步等待即可；HTTP 层等待预算为 120s，耗尽后按上述 202 契约返回，
-  不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
+- 单根生成通常秒级，同步等待即可；HTTP 层等待预算为 120s，耗尽回 `504 timeout`（见上「两档等待」），
+  不取消后台生成；本端点不回 `202`。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
   客户端自身超时不能设得比它更短。
 
 ### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树（plant-ui 右键「清理模型」）
@@ -532,7 +550,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 成功返回 `202 Accepted`：
 
 ```json
-{"task_id":"model-rebuild-7997-...","dbnum":7997,"expected_roots":2720,"state":"queued"}
+{"task_id":"model-rebuild-7997-...","dbnum":7997,"expected_roots":2720,"state":"new"}
 ```
 
 `state` = `new`（新排一行）或 `merged`（并进该库已排队的行，名单取并集）。相同 dbnum 已有活动重建时
@@ -595,18 +613,24 @@ rebuild、不推进应用/模型水位。
 - ready 的判据：候选几何回执不早于任务冻结源、记录数与回执相符；若发布策略是
   `ProcessStore`，还必须有同源的 `RootPublicationAck`。`room_membership=true` 时 ACK 还须匹配
   任务冻结的 resident generation。几何候选可用于诊断预览，但数据库/房间事务失败时不得冒充 ready。
+- `ready` 是**本进程投影**的判据（`ready_source = process_projection`，2026-10-27，GitHub #74）：冷重启后一律
+  false，不是丢数据。不带 `task_id` 的诊断快照另给 `durable_ready_total` 与每根的 `durable_ready`：库级凭证 ∨
+  进程账本（`model_coverage::generation_roots_cache_current`，ADR-079）——「0 ready」到底是没生成过还是只是
+  重启了，看这两格。任务快照（带 `task_id`）不补这两格（`durable_ready_total = null`，根上没有 `durable_ready`）。
 
 ```json
 {
   "source": "direct",
-  "task_id": "dbnum-model-ensure-7997-...",
+  "task_id": null,
   "dbnum": 7997,
   "source_sesno": 264,
   "total": 2720,
-  "ready_total": 128,
-  "only_ready": true,
+  "ready_total": 0,
+  "ready_source": "process_projection",
+  "durable_ready_total": 2720,
+  "only_ready": false,
   "roots": [
-    {"generation_root":"24381/100677","noun":"BRAN","name":"/B1","ready":true}
+    {"generation_root":"24381/100677","noun":"BRAN","name":"/B1","ready":false,"durable_ready":true}
   ]
 }
 ```
@@ -704,6 +728,10 @@ rebuild、不推进应用/模型水位。
   `dbnum` / `model_source` / `model_source_reason` / `durable` 四格见 §4.12。
   `complete` 表示这些记录对应的完整根发布已提交；`model-memory` 可在数据库/房间事务失败后仍返回
   候选几何供诊断，此时 `complete=false` 且 `incomplete_roots` 点名根，绝不能把候选 receipt 当成功。
+  **`model_source_reason = model_lagging` 时按根回读**（2026-10-27，GitHub #74）：投影里没有任何回执的根（冷重启、
+  初始化直写不留投影）改从库里模型水位 S 时刻的那份回读，而不是回空；这时 `source = "model-memory+rocksdb-fallback"`，
+  `durable_fallback_roots` 点名哪几根是回读的（请求里的写法），`durable` 仍为 false。其它 memory 理由（读透 / 基线未落 /
+  任务在飞 / 水位缺席或倒挂）不回读，`durable_fallback_roots` 恒空。
 - **`tube`**（2026-09-22，plant3d-web 方案 B T2；实现 `model_record_reader::model_records_of_root` / `ModelRecord`）：隐式管身的记录
   （`generic = TUBI`、`insts[0].is_tubi = true`，挂在容器 BRAN 自己的 refno 上）在**记录一级**多一格
   `"tube": {"ordinal": 0, "from": "24381_100678", "to": "24381_100679"}`——两端管件的 `a_b` 与同 `(from, to)` 内的序号，
@@ -753,10 +781,14 @@ plant-ui 的单根调用零影响。
   `curl -X POST :8022/api/v1/model/records -d '{"generation_roots":["24381/145018","24381/145052"],"limit":5}'`
   应回 `generation_roots` + `roots[]` + 平铺 `items`，单根请求回执与之前逐字段相同。
 
-### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
+### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元（已退役，ADR-072 D5）
+
+> **已退役（ADR-072 D5）**：pending 表整表退役，本节与 §4.6.1 两条路由已从路由表卸下（`src/web_service/mod.rs:541`
+> 注释）；服务端不再注册这两个路径，现在请求它们得到什么**未核**。以下为原描述，仅供追溯。
+
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。
 
-### 4.6.1 `POST /api/v1/update/pending-units/retry` — 显式复活一个待重试单元
+### 4.6.1 `POST /api/v1/update/pending-units/retry` — 显式复活一个待重试单元（已退役，ADR-072 D5）
 
 - 请求：`{ "action": "regen_root", "target_refno": "24381/100677" }`。
 - 只允许操作已经存在的 `(action, target_refno)` pending；不存在返回 `404 not_found`，
@@ -858,17 +890,50 @@ plant-ui 的单根调用零影响。
   自己算库号用。骨架没预热过的形态下**整格不写**——不写空数组，空数组读起来是
   「这个库一个 Ref0 都没有」，那是另一句话。
 
-- `anomaly` 五种（spec §文件异常）：`rollback` / `path_migrated` / `type_changed` /
-  `duplicate`（带 `paths[]` 交给人挑）/ `missing`。`path_migrated` 不阻断；`rollback`
-  自 ADR-021（2026-08-13）起也不再表现为阻断——它转成整库重建（见下），`anomaly`
+- `anomaly` 七种（`FileAnomaly`，`src/data_interface/dbnum_state.rs:552-617`，按 `kind` 标签序列化；spec §文件异常；逐词见下「异常与换代词表」）：`rollback` / `path_migrated` / `type_changed` /
+  `duplicate`（带 `paths[]` 交给人挑）/ `missing` / `name_changed` / `foreign_project`。`path_migrated` 不阻断；
+  `rollback` 自 ADR-021（2026-08-13）起也不再表现为阻断——它转成整库重建（见下），`anomaly`
   证据（判据两端与两端保存时刻）照带，界面据此把它与普通新库区分开。
+- `name_changed`（2026-10-27）：同一个 dbnum，现场文件名与登记的不同。库的身份是 dbnum + 约定文件名
+  （`<三位前缀><库号>[_<四位序号>]`、`<前缀>sys/com/mis/glb`），只换目录、或母库换成它自己的 extract
+  （`ams7355` → `ams7355_0001`，ADR-028）才算 `path_migrated`；其余一律当作另一份文件**跳过**：不入队、
+  不清库、不改登记、连观察值也不写，`old_path` / `new_path` 随 `anomaly` 带出。它先于回退判——不拿另一份
+  文件的会话号去判回退、转整库重建。
 - `blocked`：阻断的库压根不入队，队列面板没有它们的行——这里是「这个库的水位为
   什么一直不动」的唯一出处。`excluded`：不在本期执行范围，即**当前 MDB 没有声明
   这个 DESI**（2026-08-06 起范围只由 MDB 定，`manual_db_nums` 一类手写名单不再参与），
   与阻断不是一回事，界面上不许合成一行。
 - `rollback` 的库在下一轮扫描/执行时按首次导入入队（窗口 `1..file_latest`），由 worker
-  冻结点复核后整库清空重建，不再长期停留在 `blocked: true`；其余四种异常照旧阻断。
+  冻结点复核后整库清空重建，不再长期停留在 `blocked: true`；其余五种异常照旧阻断：`name_changed`（跳过该文件）/ `type_changed` / `duplicate` /
+  `missing` / `foreign_project`（`FileAnomaly::blocks()` = 除 `path_migrated` 外全阻断，`dbnum_state.rs:627-629`；回退在查 `blocks()`
+  之前已转整库重建，`blocks()` 只兜清库失败那一种，`:620-626`）。
   原 `watermark_realign` 档位与单库对齐端点（曾为 §4.9）随 ADR-021 移除。
+
+**异常与换代词表**（两套词不是一回事：`anomaly.kind` 来自 `FileAnomaly`，`src/data_interface/dbnum_state.rs:552-617`；
+`GenerationChange` 是两次观察之间发生了什么，`src/data_interface/db_generation.rs:117-140`，三种互斥、会话号为先、身份只在会话号不变时说话）：
+
+| 词 | 所属枚举 | 判据 | 处置 |
+|---|---|---|---|
+| `rollback` | `FileAnomaly` | `file_latest_sesno < applied_sesno`：文件回退或被换成旧备份；带判据两端与两端保存时刻 | 转整库重建（ADR-021）；只有清库失败才停在阻断 |
+| `path_migrated` | `FileAnomaly` | 同 dbnum、同库类型，路径变了、水位没退、文件身份没变：只换了目录，或母库挪到它自己的 extract 叶（`ams7355` → `ams7355_0001`，ADR-028） | **不阻断**；登记路径可自动更新 |
+| `name_changed` | `FileAnomaly` | 同 dbnum，现场文件名不是登记的那一个（不是只换目录，也不是母库换成它自己的 extract）；库的身份是 dbnum + 约定文件名 | 阻断：跳过该文件——不入队、不清库、不改登记，连观察值也不写，等人处理 |
+| `type_changed` | `FileAnomaly` | 同 dbnum 观察到不同的库类型 | 阻断；永不自动覆盖登记身份 |
+| `duplicate` | `FileAnomaly` | 项目里多个文件同 dbnum（带 `paths[]`；由项目扫描器给出） | 阻断，不替人挑 |
+| `missing` | `FileAnomaly` | 登记的文件不在登记路径上了（由项目扫描器给出） | 阻断 |
+| `foreign_project` | `FileAnomaly` | 这个 dbnum 的登记行归另一个项目所有（带 `stored_project` / `observed_project`） | 阻断；连观察值都不许写 |
+| `session_advanced` | `GenerationChange` | 会话号变大，且新会话不是踩在比上次更旧的会话上：正常 `SAVEWORK`（文件身份通常也变，但不是判据） | 正常增量 |
+| `rolled_back` | `GenerationChange` | 内容回到更旧的会话：会话号变小（整份恢复 / 换成旧备份），或会话号变大但新页 `BASESN` 低于上次观察到的会话号（BACKTRACK 后 SAVEWORK） | 已生成的 roots 全部按新会话重生成，不能拿旧凭证当覆盖 |
+| `file_replaced` | `GenerationChange` | 会话号不变、文件身份变了：路径上换了另一个文件 | 冻住的 `sesno` 从此指向另一个文件里的同号会话，清空该 dbnum 的一切缓存与 pin |
+
+`name_changed` 与 `file_replaced` 分列，不可混读：
+
+| | `name_changed` | `file_replaced` |
+|---|---|---|
+| 所属 | `FileAnomaly`（`anomaly.kind`） | `GenerationChange` |
+| 看什么 | 文件**名**不是登记的那一个 | 名字没变、会话号不变，文件**身份**变了 |
+| 处置 | 跳过该文件，等人处理 | 清空该 dbnum 一切缓存与 pin |
+
+`rollback`（水位比较）与 `rolled_back`（两次观察的会话比较）同理不可互换。`GenerationChange` 的三个值是否经 HTTP / WS 对外出现：未核。
 - `model_source` / `model_source_reason`：这个库的模型现在该从哪儿读（§4.12）。
 - `dependency_rows` / `dependency_sesno`（2026-09-06，plan §3 D6/D7）：**目录库才有**——按 DESI 依赖入库的
   CATA 行数与它们按哪一版目录文件渲染（`cata_dependency_state:{dbnum}`，不是水位、不进 `applied_sesno`）。
@@ -887,7 +952,7 @@ plant-ui 的单根调用零影响。
 |---|---|---|
 | `file_round` / `file_round_status`（`collecting` / `pending` / `done`）、`published_version`、`published_input_manifest` | 任务回执、`/dbnums` | 屏障退役：同库单写者同步写，没有「让三条异步路看到同一版本」这回事。想知道「这一次写完没有」看 `write_state.status` |
 | `model_pending` / `model_pending_status` / `model_pending_phase`、`abandoned`、`attempts` / `MAX_ATTEMPTS` 那一族 | `/dbnums`、`web/ops.html` | `model_update_pending` 整表退役。任务的单元清单就是真值；「已放弃」改由镜像的失败根集回答 |
-| `model_drain_*`（`telemetry` / `page_starved` / `starved_pages`）、`drain_report`、`drain_page_progress` | `/dbnums`、WS `task_started` / `task_finished` 的 `model_drain` 分支 | 没有 drain 了：模型随任务同步生成 |
+| `model_drain_*`（`telemetry` / `page_starved` / `starved_pages`）、`drain_report`、`drain_page_progress` | `/dbnums`、WS `task_started` / `task_finished` 的 `model_drain` 分支 | 没有 drain 了（`model_drain` 已退役，ADR-072 D5）：模型随任务同步生成 |
 | `spatial_pending` / `spatial_reconcile_*` / `published_spatial_version` | `/dbnums`、`/health` | 空间树随 `persist_roots_batched` 就地收敛，不再留意图行 |
 | `room_published_*`（`room_published_version` / `room_topology_source`） | 房间查询面 | `room_published_inst` / `room_published_topology` / `room_topology_source` 三表退役。当时的替身是 `room_sesno`，而 `room_sesno` 本身随房间流程一并退役（§4.7.2）——整条房间查询面不再有「已发布到哪一版」这个问题 |
 
@@ -906,7 +971,7 @@ plant-ui 的单根调用零影响。
 | 端点 · 格 | 定义点 / 消费点（grep 得到） | 数据来源 | 退役依据 | plant-ui / ops 侧处置 |
 |---|---|---|---|---|
 | `/health` · `model_update_pending`、`model_update_pending_observation` | `handlers.rs:771`（`sampled_model_pending_status`，:528）、`:979`、`:581` | `model_update_pending::model_pending_status()` | ADR-072 D5（整表退）；计划 C.1 第 2 行 | 整格删；「欠什么」看两枚水位 |
-| `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了） | 整格删；`blocking_conditions` 少一档 |
+| `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了，`model_drain` 已退役） | 整格删；`blocking_conditions` 少一档 |
 | `/health` · `spatial_reconcile` | `handlers.rs:755`–`:764`、`:974`；`ops.html:1390`（`m.h.spatial_reconcile`） | `SideEffectCompensator::spatial_reconcile_status()` | ADR-072 D4（空间树随 `persist_roots_batched` 就地收敛）；计划 C.2 第 4 行 | 整格删；树是否落后看下面那两格 |
 | `/health` · `spatial_tree.pending` / `published_version` / `published_input_files` / `published_input_sha256` | 已落 —— 提交 `f2bdaa21c` | 发布输入 manifest（`published_file_input`） | ADR-072 D4；计划 C.2 第 3 行 | **已退**；换成同一节新增的 `snapshot_watermarks` / `db_watermarks` 两格（快照头记的各库 `(applied, model)` 数对 vs 库里现值，不等即重建） |
 | `/health` · `window_blocks` | 已落 —— 提交 `0025edaa4`（`handlers.rs` 取数与回执键）与 `588e71915`（`ops.html` 的「窗口阻断」卡、`renderStaging` 与三处读取整块删） | `staging::attempts::load_window_blocks()`（`increment_update_attempt` 的 `kind = 'window_block'` 行） | 计划 §5 R4（`staging/attempts.rs` 整文件退，`increment_update_attempt` `REMOVE TABLE`） | **已退**：ops 那三处随 R4 一起删了；写了一半的库看 `/dbnums` 每行的 `write_state`（ops.html KPI「写入中 / 未写完」） |
@@ -950,6 +1015,31 @@ ready 判据有两层，先进程后库上（ADR-073 D14，2026-09-16）：
 
 plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，本服务仍不实现。
 
+### 4.7.3 `POST /api/v1/rooms/rebuild` — 重新生成房间（全库）
+
+出处：路由 `src/web_service/mod.rs:611-613`（注释：清掉两张房间边表 + 换代常驻参照模型 + 逐库整库重算，202 立即返回，进度看
+`/health.room_build.resident.progress`）；handler `rooms_rebuild`（`src/web_service/handlers.rs:690-739`）。
+
+- 请求：无请求体、不校验身份。
+- 走与启动同一条 `rebuild_resident_model` 路径，阶段 `source-snapshot` → `mesh-warm` → `edge-recompute`；边在参照模型 `Ready` 之前清掉，
+  逐 dbnum 重算在 `Ready` 下跑，某库失败不盖 `model_room_generation` 章。逐库产生 `kind = room_rebuild` 任务（`trigger = rooms_rebuild`，见 §4.4）。
+
+| 响应 202 字段 | 类型 | 说明 |
+|---|---|---|
+| `status` | string | `"accepted"` |
+| `phase` | string | 起步阶段，恒 `"source-snapshot"` |
+| `progress_in` | string | `"/api/v1/health -> room_build.resident"`：进度去这里看 |
+
+| HTTP | `code` | 何时 |
+|---|---|---|
+| 409 | `unsupported` | 本进程没有房间体制（`spatial_compute` 关着 / `project_hd`·`project_hh` 特性不在） |
+| 409 | `unsupported` | 房间归属被关（「{原因}，没有可重建的参照模型」） |
+| 409 | `updating` | 房间参照模型正在装载或重建中（`try_begin_rebuild` 拿不到），「等它翻篇再试」 |
+
+```json
+{ "status": "accepted", "phase": "source-snapshot", "progress_in": "/api/v1/health -> room_build.resident" }
+```
+
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
   "blockers": [], "shadowed": [], "rows": [{ "task_id": "db-…", "dbnum": 7997,
@@ -958,6 +1048,11 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   "start_sesno": 85, "end_sesno": 92 }, …] }`：
   队列快照，行按队列序（运行中在前），经 `task_id` 与 §4.4 的任务行对得上。
   `intent` 取值同 §4.3；`reinitialize` 明示该行冻结点仍需复核回退后才清库。
+- 行的 `state` 三种（`QueueRow.state`，`src/data_interface/batch_scheduler.rs:299-318`，映射 `:1097-1103`）：`running`（正在跑）/
+  `queued`（排着，派发器按序取走）/ **`held`（挂起）**——`startup_autorun` 关着时重扫排出来的积压行，**不会自己往前走**：
+  派发器跳过它（`batch_queue.rs:343`），等这个 dbnum 真的来一次增量、并进同一行时才清掉挂起标志照常派发
+  （`batch_queue.rs:63-72` / `:116-120` / `:145-147`）。单列一态而不混进 `queued`：显示成排队会让人以为消费者卡住了，
+  而那是完全不同的故障（`batch_scheduler.rs:1097-1103` 注释）。
 - 行上的 `blocked_by_phase` 只说得出「这行在等哪一相」。挡住那一相的是谁，在顶层
   `blockers` 里——与 §4.1 `initialization.blocked_by` 同一份结构化清单，同相取第一条
   带 `dbnum` 的那条即肇事库。带在这里是为了让「读队列」和「找肇事者」不必分两趟
@@ -969,6 +1064,139 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 - `POST /queue/resume` → `{ "paused": false }`：恢复出队并立即唤醒 worker。
 - 没有单条取消：队列是派生态，从队里移掉一行不会推水位，下一轮轮询照样把它发现
   回来——那是个会自己撤销的按钮（ADR-011 §9）。
+
+行字段（`QueueRow`，`src/data_interface/batch_scheduler.rs:299-318`，`#[derive(Serialize)]` 原样）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `task_id` | string | 任务 id（§6），与 §4.4 任务行对得上 |
+| `dbnum` | number | 库号 |
+| `db_type` | string | 库类型（`DESI` / `CATA` / …） |
+| `phase` | string | 该行所属的初始化相（与 `blocked_by_phase` 同一套相名，如 `design` / `catalogue`） |
+| `epoch_id` | number | 初始化纪元 |
+| `blocked_by_phase` | string \| null | 这行在等哪一相；不等时为 `null`（不省略） |
+| `intent` | string | 取值同 §4.3（如 `apply_window` / `reinitialize`） |
+| `reinit_trigger` | string，可缺席 | 只有 `intent = "reinitialize"` 的行才有：`manual`（人工重新解析）/ `rollback`（回退检出）；其余行不序列化（`batch_scheduler.rs:154-162`，契约 C4） |
+| `model_start_sesno` | number \| null | 这条任务须从哪一枚模型完成水位起恢复；意图合并时独立于数据窗口（`batch_queue.rs:44-46`）；没有时为 `null`（不省略） |
+| `state` | string | `running` / `queued` / `held`，见上 |
+| `start_sesno` / `end_sesno` | number | 数据窗口两端 |
+
+示例（三种 `state` 各一行；顶层其余字段同上，取值仅示意）：
+
+```json
+{ "paused": false, "epoch_id": 7, "rows": [
+  { "task_id": "db-20261027-101500-000041", "dbnum": 7997, "db_type": "DESI", "phase": "design", "epoch_id": 7,
+    "blocked_by_phase": null, "intent": "apply_window", "model_start_sesno": 85, "state": "running",
+    "start_sesno": 85, "end_sesno": 92 },
+  { "task_id": "db-20261027-101502-000042", "dbnum": 8001, "db_type": "DESI", "phase": "design", "epoch_id": 7,
+    "blocked_by_phase": null, "intent": "reinitialize", "reinit_trigger": "manual", "model_start_sesno": null,
+    "state": "queued", "start_sesno": 1, "end_sesno": 40 },
+  { "task_id": "db-20261027-101503-000043", "dbnum": 8002, "db_type": "DESI", "phase": "design", "epoch_id": 7,
+    "blocked_by_phase": null, "intent": "apply_window", "model_start_sesno": null, "state": "held",
+    "start_sesno": 12, "end_sesno": 15 }
+] }
+```
+
+### 4.8.1 `/health.batch_failures` — 数据批次连败账（进程内）
+
+出处：`src/data_interface/batch_worker.rs:47-51`、`:412-434`、`:548-573`；`/health` 在 `handlers.rs:1000` / `:1189` 带出。
+
+- 数据批次**不自动重试**：`DATA_BATCH_PARK_AFTER = 1`（`batch_worker.rs:51`），失败一次即 park。新会话（文件右端 `end_sesno` 前进）、
+  人工执行（`POST /api/v1/update/execute`）或重启进程（账本在进程内）才清账；清账不治病因，先修 §4.8.2 里那句 `reason`。
+- 账为空时整格为 `null`；否则按 dbnum（字符串键）一项：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `streak` | number | 同右端连续失败次数；成功 / 右端前进 / 人工执行清零 |
+| **`parked`** | bool | `streak >= DATA_BATCH_PARK_AFTER`（`:430-434`）：不再自动重跑，等清账 |
+| `end_sesno` | number | 失败那批的窗口右端；不前进 = 没人往这个库里存新会话 |
+| `reason` | string | 最近一次失败的一句话（`warnings.last()` 口径，`batch_failure_log.rs:16-24`；全文看 §4.8.2 的 `batch_failure` 记录） |
+| `first_at` / `last_at` | string | 本轮连败首次 / 最近一次失败时刻；右端前进时 `first_at` 重置（`:465-492`；时间格式未核） |
+
+```json
+"batch_failures": {
+  "7997": { "streak": 1, "parked": true, "end_sesno": 92, "reason": "读取增量数据失败: …",
+            "first_at": "2026-10-27T10:15:00+08:00", "last_at": "2026-10-27T10:15:00+08:00" }
+}
+```
+
+### 4.8.2 `GET /api/v1/batch-failures` — 数据批次失败的落盘记录
+
+出处：路由 `mod.rs:690`（与 `GET /api/v1/error-log`，`:691`，共用一个查询结构）；handler `handlers.rs:1320-1336`；读盘
+`src/data_interface/batch_failure_log.rs:344-421`。只回本族（`batch_failure` / `batch_park`）；队列停摆 `queue_stall` 只并进 `/error-log`
+（`mod.rs:688-689`、`handlers.rs:1320-1324`）。
+
+| 参数（`ErrorLogQuery`，`handlers.rs:1296-1318`） | 类型 | 说明 |
+|---|---|---|
+| `dbnum` | number，可选 | 只看这个库 |
+| `limit` | number，可选 | 缺省 20，夹到 200；`0` = 不截断 |
+| `project` | string，可选 | 缺省 = 本服务项目；`all` = 不按项目滤；不带 `project` 字段的老记录不被滤掉（`batch_failure_log.rs:357-358`） |
+| `kind` | string，可选 | 本端点忽略（只 `/error-log` 用） |
+
+| 响应 200 字段（`read_recent`，`batch_failure_log.rs:363-421`） | 类型 | 说明 |
+|---|---|---|
+| `records[]` | array | 按 `at` 倒序；每条是一行 JSONL 原样（`batch_failure` 或 `batch_park`，见下两表） |
+| `sources` | array | 扫了哪些文件族（`batch-failures-*.jsonl` 与 `queue-stalls-*.jsonl` 都列；`records` 只留本族） |
+| `project_filter` | string \| null | 实际生效的项目过滤；`all` 时为 `null` |
+| `error` | string，可缺席 | 部分文件读失败的原因（`; ` 拼接）；日志目录整个读不开时回 `{records: [], sources, error}`，没有 `project_filter` |
+
+- 落盘：`logs/batch-failures-*.jsonl`（按日，`batch_failure_log.rs:35-38`），重启后仍在；每次最多扫最近 14 个日文件
+  （`MAX_FILES_SCANNED = 7` × 两个文件族，`:40-41`、`:391-395`）；解析不了的行跳过（`:443-446`）。
+
+`batch_failure` 记录（一批失败一条，`BatchFailure` / `to_record`，`batch_failure_log.rs:47-90`、`:282-315`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `event` | string | `"batch_failure"` |
+| `at` | string | 记录时刻（RFC3339） |
+| `task_id` / `project` / `dbnum` / `db_type` / `phase` / `epoch_id` | | 任务身份 |
+| `state` | string | 任务终态：`failed` / `partial` |
+| `start_sesno` / `end_sesno` | number | 数据窗口 |
+| `save_time` | string \| null | 窗口右端那次保存在 E3D 里的时刻（回答「这批对应我哪次 SAVEWORK」） |
+| `file_path` | string \| null | |
+| `died_at` | string \| null | 死在哪一步（`TaskEntry::current_stage`） |
+| `reason` / `reason_from` | string | 权威失败原因及其来源 |
+| `warnings` | array | **不截断** |
+| `streak` | number \| null | 同右端连败第几次；数据窗口已收口、失败只在模型侧时为 `null` |
+| `max_attempts` | number | `DATA_BATCH_PARK_AFTER`（= 1） |
+| **`parked`** | bool | `streak >= max_attempts`；`streak` 为 `null` 时为 `false` |
+| `auto_retry_left` | number \| null | `max_attempts - streak`（不小于 0）；`streak` 为 `null` 时为 `null` |
+| `elapsed_ms` | number | |
+| `staging` | array | 该 dbnum 名下还挂着的暂存窗口，与 `/health` 的 `staging_windows` 同形；空 = 记录时已无窗口，非空 = 残留 |
+| `steps` | array | 每阶段一行 `{name, at, ms, ok}`；空 = 从没报过阶段；字段缺席 = 老版本记录 |
+| `steps_dropped` | number | 被环形上限（32 步）挤掉的更早步数；0 = 账是全的 |
+
+`batch_park` 记录（每次 park 一条、去重，`BatchPark` / `to_park_record`，`batch_failure_log.rs:98-166`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `event` | string | `"batch_park"` |
+| `at` | string | RFC3339 |
+| `dbnum` / `db_type` / `project` / `phase` | | |
+| `streak` / `max_attempts` | number | |
+| `end_sesno` | number | 它不前进，就说明没人往这个库里存新会话 |
+| `file_path` | string \| null | |
+| `last_reason` | string | `warnings.last()` 口径；权威那句在同 dbnum 的 `batch_failure` 记录里 |
+| `first_at` / `last_at` | string | |
+| `auto_retry` | bool | 恒 `false` |
+| `unblock` | array | 三条解法：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」 |
+| `unblock_note` | string | 「三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。」 |
+
+```json
+{ "records": [
+    { "event": "batch_park", "at": "2026-10-27T10:15:01+08:00", "dbnum": 7997, "db_type": "DESI", "project": "HD",
+      "phase": "design", "streak": 1, "max_attempts": 1, "end_sesno": 92, "file_path": "...",
+      "last_reason": "读取增量数据失败: …", "first_at": "...", "last_at": "...", "auto_retry": false,
+      "unblock": ["文件长出新会话（右端 sesno 前进）", "POST /api/v1/update/execute（显式重试，立即清零）", "重启进程（账本在进程内）"],
+      "unblock_note": "三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。" },
+    { "event": "batch_failure", "at": "2026-10-27T10:15:00+08:00", "task_id": "db-20261027-101500-000041",
+      "project": "HD", "dbnum": 7997, "db_type": "DESI", "phase": "design", "epoch_id": 7, "state": "failed",
+      "start_sesno": 85, "end_sesno": 92, "save_time": "2026-10-27T10:14:40+08:00", "file_path": "...",
+      "died_at": "...", "reason": "读取增量数据失败: …", "reason_from": "...", "warnings": ["..."],
+      "streak": 1, "max_attempts": 1, "parked": true, "auto_retry_left": 0, "elapsed_ms": 5300,
+      "staging": [], "steps": [ { "name": "...", "at": "...", "ms": 120, "ok": true } ], "steps_dropped": 0 } ],
+  "sources": ["logs/batch-failures-*.jsonl", "logs/queue-stalls-*.jsonl"], "project_filter": "HD" }
+```
 
 ### 4.9 `POST /api/v1/dbnums/{dbnum}/realign` — 已移除（2026-08-13，ADR-021）
 - 2026-08-12 引入、次日随 ADR-021 退役：回退的处置改为默认自动化——扫描/手动入队
@@ -1158,13 +1386,35 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 - **判据只有一处**（`model_read_route::route`）：`database` ⇔ 数据面是 `ingest` ∧ 该库
   `applied_sesno > 0` ∧ 该库没有数据批次任务在跑（`task_registry`）∧ `model_sesno == applied_sesno`
   （ADR-071 D8 原文是「三水位相等」；第三枚 `room_sesno` 随房间流程退役后只剩两枚，仍是同一次
-  读进程内镜像）；其余 `memory`，理由四选一、按此优先序只报最靠前的一条：
+  读进程内镜像）；其余 `memory`，理由**六选一**、按此优先序只报最靠前的一条（`MemoryReason`，`src/data_interface/model_read_route.rs:80-107`；逐条判据见下表）：
   `read-through` / `data_watermark_unestablished`（基线未落）/
   `initialization_publishing`（基线落了、该库的 dbnum 任务在飞；字面值沿用，含义 = 「这个库正在被写」）/
-  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）。
+  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）/
+  `watermarks_inconsistent`（模型水位跑到数据前面：水位超前 = 不一致，见下）/
+  `model_watermark_unavailable`（读不到模型水位：缺席不是相等，见下）。
   `room_lagging` 随房间流程退役（§4.7.2），不再作为理由出现。
-  模型水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
-- **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列。ingest 的临时
+  原文「模型水位跑到数据前面不算落后（那是 M2 违反，另有对账管）」作废，以下表与「水位超前 = 不一致」一条为准。
+
+| 序 | `model_source_reason` | `MemoryReason` | 判据（`src/data_interface/model_read_route.rs`） |
+|---|---|---|---|
+| 1 | `read-through` | `ReadThrough` | 数据面是读透形态 |
+| 2 | `data_watermark_unestablished` | `DataWatermarkUnestablished` | `applied_sesno <= 0`：基线未落 |
+| 3 | `initialization_publishing` | `InitializationPublishing` | 该库的 dbnum 任务在飞（「这个库正在被写」） |
+| 4 | `model_lagging` | `ModelLagging` | `model_sesno < applied_sesno` |
+| 5 | `watermarks_inconsistent` | `WatermarksInconsistent` | `model_sesno > applied_sesno`：模型水位**超前**（`:206-207`） |
+| 6 | `model_watermark_unavailable` | `ModelWatermarkUnavailable` | 读不到模型水位（`None`）：1–3 照常先判，命中不了就报这条，取代 4 / 5（`route_with_optional_model_watermark`，`:222-259`） |
+
+判定次序见 `route`（`:186-220`）；字面值见 `MemoryReason::as_str`（`:97-107`）；路由结果 `{dbnum, source, reason}`（`ModelReadRoute`，`:110-117`）
+经 `columns()` 落成 `model_source` / `model_source_reason` 两列（`:133-138`）。
+
+- **水位超前 = 不一致**（`model_read_route.rs:190`：「两枚水位必须严格相等；模型水位落后或异常超前时，持久层都不能冒充权威读源」）：
+  模型水位跑到数据前面报 `watermarks_inconsistent`、走 `memory`，不再按「不算落后」放行读库。模型水位缺席同理
+  fail closed 到内存读源（「缺席不是相等」，`:222-259`），报 `model_watermark_unavailable`。
+- **按根回读 durable 只给 `model_lagging`**（`ModelReadRoute::allows_durable_fallback`，`:124-130`，GitHub #74，2026-10-27）：
+  数据到了 T、模型水位停在 S < T 时，库里那份是 S 时刻整库落过的完整旧快照，投影里没有回执的根（冷重启、初始化直写
+  不留投影）读它比读空集对。其余五档不许：读透的库从来不是权威；基线没落库里没有行；任务在飞时行可能写到一半；
+  水位缺席 / 倒挂说明库行不可信。
+- **`memory` 库上的 `POST /model/generate`（旧名 `/model/ensure`）**：不等初始化队列、不进 durable 队列。ingest 的临时
   memory 路由只写进程内投影；read-through 则把同一候选投影逐根事务发布到 spawned/embedded
   kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
@@ -1173,11 +1423,13 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   投影里它名下盖过章的生成根逐根取；一根都没有回 `200` 空数组（ADR-086，2026-10-09 起；此前是 409
   `not_generated:`，客户端先 ensure 再查的顺序已随 plant-ui ADR-0030 取消）。
 - **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
-  `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
+  `generate`（旧名 `ensure`）落库后读库。一次 `records` 请求是单根、或一批同库的根（`generation_roots`，跨库 400，§4.5.2），
+  只落在一个库上，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
 - **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7），喂给判据的是行上自己的
   `applied_sesno` / `model_sesno`；没有模型判决列的行（非 DESI 库、这一次
-  普查失败）**不判落后**——「不知道」不写成 `model_lagging`。读透形态的冷行恒 `memory` / `read-through`。
+  普查失败）**不判落后**——「不知道」不写成 `model_lagging`。读透形态的冷行恒 `memory` / `read-through`。读不到模型水位的行前三档照常先判，其余报
+  `memory` / `model_watermark_unavailable`（`handlers.rs:3869` 调 `route_with_optional_model_watermark`），不按相等放行。
 - **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把两枚水位盖齐）→ `database`；回退重建清库 →
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
@@ -1711,6 +1963,298 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
   `from >= to`、数字参数非数字）、422 `identity_mismatch`（§3）；
   库读不到按 §3 统一信封。
 
+### 4.15 版本视图与历史投影（ADR-081）
+
+路由在 `src/web_service/mod.rs:565-602`。4.15.1–4.15.6 是从 dabacon 会话链**按需算**的只读派生量（e3d-io 索引差分 × 单元子树归属 ×
+元素级模型影响，`handlers.rs:2395-2428` 注释）：只进进程内缓存、不落库、不碰生产模型。要看 A / B 两个会话的几何走 4.15.7 的
+`model/history/*`（`mod.rs:578`、`:1174`）。
+
+公共约定：
+
+- 方法 `GET`、参数走查询串（ADR-081：版本表只许 GET，`mod.rs:1174`）；4.15.4 / 4.15.6 的方法未逐条核。身份字段同 §3。
+- 缓存：4.15.1 / 4.15.2 / 4.15.3 / 4.15.5 各自进程内最多 64 张表（`CACHE_CAPACITY`：`unit_versions.rs:41`、`element_versions.rs:42`、
+  `attribute_history.rs:36`、`node_versions.rs:43`），满了整体清空，重启即失，命中时 `cached: true`；4.15.4 / 4.15.6 不缓存。
+- 冷算上限 300 秒（`COMPUTE_BUDGET`，`unit_versions.rs:39`），超时回 `504 COMPUTATION_TIMEOUT`（检查点：`unit_versions.rs:500-508`、
+  `element_versions.rs:447-454`、`attribute_history.rs:423-429`、`node_versions.rs:387-393`、`node_diff_summary.rs:334-340`）；4.15.4 没有预算。
+  计算线程 join 失败回 `500 internal`。
+- 分页：`limit` 缺省 500、上限 5000（`unit_versions.rs:35-37`）；`since_sesno` 只取比它新的会话；超出 `limit` 时 `truncated: true`。
+  版本按会话**由旧到新**排。
+- 影响五态（`impact_kind` / `impact` / `*_impact`，沿用 legacy 词表，`unit_versions.rs:45-54`）：`mesh`（要重出网格）/ `placement`（只动方位）/
+  `delivery` / `noop`（无影响）/ `tombstone`；`delivery` 与 `tombstone` 的精确判据未核。
+- `session_time`：RFC3339 本地时间，读不出为 `null`。`warnings` 至多 20 条（`MAX_WARNINGS`，`unit_versions.rs:43`），空时不序列化。
+
+错误（`unit_versions_error`，`handlers.rs:2379-2393`；信封同 §3）：
+
+| HTTP | `code` | 何时 |
+|---|---|---|
+| 400 | `INVALID_REFNO` / `INVALID_VERSION_PAIR` | `refno` 解不出 / `a`、`b` 不合法（须 `a < b`） |
+| 404 | `REFNO_NOT_FOUND` / `SESSION_NOT_FOUND` | 元素不在 / 会话号不在链上 |
+| 422 | `NOT_A_DELIVERY_UNIT_ROOT` | 4.15.1 的 `refno` 不是交付单元根；`detail = {noun, delivery_unit_types}`（`unit_versions.rs:709-719`） |
+| 503 | `SOURCE_NOT_FOUND` / `SESSION_TIME_UNAVAILABLE` | 源库文件不在 / 会话时间读不出 |
+| 504 | `COMPUTATION_TIMEOUT` | 超 300 秒 |
+| 500 | 其余 | |
+
+「何时」一列部分按错误码名推断；4.15.2–4.15.6 是否全走这张映射未逐条核。
+
+### 4.15.1 `GET /api/v1/model/versions` — 交付单元的版本表
+
+路由 `mod.rs:577-579`（`ModelVersionSource.listVersions` 吃它，`:578`），handler `model_versions`（`handlers.rs:2395-2428`），算法
+`src/fast_model/unit_versions.rs`。单元根合法性由服务端按项目 `delivery_unit_types` 判。
+
+| 参数（`ModelVersionsReq`，`handlers.rs:2364-2377`） | 类型 | 说明 |
+|---|---|---|
+| 身份字段 | string | 同 §3 |
+| `dbnum` | number | 库号 |
+| `refno` | string | 交付单元根 |
+| `since_sesno` | number，可选 | 只取比它新的会话 |
+| `limit` | number，可选 | 缺省 500，上限 5000 |
+
+| 响应字段（`UnitVersionsReport`，`unit_versions.rs:102-118`） | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `unit_refno` / `unit_noun` | number / string / string | 单元根 |
+| `file_latest_sesno` | number | 源文件最新会话号 |
+| `truncated` | bool | 超出 `limit` |
+| `versions[]` | array | `{sesno, session_time, impact_kind}`，由旧到新 |
+| `cached` | bool | 命中进程内缓存（键 `(dbnum, unit_refno, 指纹)`） |
+| `elapsed_ms` | number | 本次耗时 |
+| `stats` | object | `{sessions, windows_with_changes, candidates, membership_checks, members_hit, sets_built, index_diff_ms, set_build_ms, membership_ms}` |
+| `warnings` | array，可缺席 | 见公共约定 |
+
+```json
+{ "dbnum": 7997, "unit_refno": "24381/100677", "unit_noun": "PIPE", "file_latest_sesno": 92, "truncated": false,
+  "versions": [ { "sesno": 81, "session_time": "2026-10-20T09:12:03+08:00", "impact_kind": "mesh" },
+                { "sesno": 88, "session_time": "2026-10-24T15:40:11+08:00", "impact_kind": "placement" } ],
+  "cached": false, "elapsed_ms": 412,
+  "stats": { "sessions": 92, "windows_with_changes": 14, "candidates": 37, "membership_checks": 37, "members_hit": 2,
+             "sets_built": 14, "index_diff_ms": 120, "set_build_ms": 230, "membership_ms": 18 } }
+```
+
+### 4.15.2 `GET /api/v1/element/versions` — 任意元素的版本表（自身列 + 所属单元列）
+
+路由 `mod.rs:580-582`，handler `element_versions`（`handlers.rs:2430-2463`），算法 `src/fast_model/element_versions.rs`。参数同 4.15.1，
+`refno` 可以是任意元素（请求类型未逐字段核）。向上最多找 64 层所属交付单元根（`MAX_OWNER_DEPTH`）；找不到时只出自身列。
+
+| 响应字段 | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `refno` / `noun` | number / string / string | 元素 |
+| `unit_root` / `unit_noun` | string \| null | 所属交付单元根；找不到为 `null` |
+| `file_latest_sesno` / `truncated` / `cached` / `elapsed_ms` / `warnings` | | 同 4.15.1 |
+| `versions[]` | array | `{sesno, session_time, element_impact, unit_impact}`；两列影响各自可为 `null`，无单元根时 `unit_impact` 恒 `null` |
+| `stats` | object | `{sessions, windows_with_changes, candidates, self_hits, sets_built, index_diff_ms, set_build_ms, unit_table_ms, unit_versions}` |
+
+```json
+{ "dbnum": 7997, "refno": "24381/100690", "noun": "ELBO", "unit_root": "24381/100677", "unit_noun": "PIPE",
+  "file_latest_sesno": 92, "truncated": false,
+  "versions": [ { "sesno": 88, "session_time": "2026-10-24T15:40:11+08:00", "element_impact": "placement", "unit_impact": "placement" },
+                { "sesno": 90, "session_time": null, "element_impact": null, "unit_impact": "mesh" } ],
+  "cached": true, "elapsed_ms": 3,
+  "stats": { "sessions": 92, "windows_with_changes": 14, "candidates": 21, "self_hits": 1, "sets_built": 14,
+             "index_diff_ms": 0, "set_build_ms": 0, "unit_table_ms": 0, "unit_versions": 2 } }
+```
+
+### 4.15.3 `GET /api/v1/element/attribute-history` — 元素的属性变更史
+
+路由 `mod.rs:583-589`，handler `element_attribute_history`（`handlers.rs:2465-2509`，属性取自 `state.element_attributes`），算法
+`src/fast_model/attribute_history.rs`。参数同 4.15.2（未逐字段核）。
+
+| 响应字段 | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `refno` / `noun` / `unit_root` / `unit_noun` / `file_latest_sesno` / `truncated` / `cached` / `elapsed_ms` / `warnings` | | 同 4.15.2 |
+| `entries[]` | array | 每个改到它的会话一条，见下表 |
+| `stats` | object | `{sessions, windows_with_changes, candidates, self_hits, sets_built, index_diff_ms, set_build_ms, render_ms}` |
+
+| `entries[]` 字段 | 类型 | 说明 |
+|---|---|---|
+| `sesno` / `session_time` | number / string \| null | |
+| `user` / `comment` | string | 该会话的保存人 / 注释（可空性未核） |
+| `kind` | string | `created` / `modified` / `deleted` |
+| `impact` | string | 影响五态 |
+| `changed_count` | number | 改了几个属性 |
+| `changes[]` | array | `{name, value_type, before, after, stamp}` |
+| `members` | object，可缺席 | `{added, removed, reordered}` |
+| `owner` | array，可缺席 | `[before, after]`：换了父 |
+| `attributes_unavailable` | 可缺席 | 属性读不出时出现（类型未核） |
+
+```json
+{ "dbnum": 7997, "refno": "24381/100690", "noun": "ELBO", "unit_root": "24381/100677", "unit_noun": "PIPE",
+  "file_latest_sesno": 92, "truncated": false,
+  "entries": [ { "sesno": 88, "session_time": "2026-10-24T15:40:11+08:00", "user": "SYSTEM", "comment": "",
+                 "kind": "modified", "impact": "placement", "changed_count": 1,
+                 "changes": [ { "name": "POS", "value_type": "...", "before": "...", "after": "...", "stamp": "..." } ] } ],
+  "cached": false, "elapsed_ms": 95,
+  "stats": { "sessions": 92, "windows_with_changes": 14, "candidates": 21, "self_hits": 1, "sets_built": 14,
+             "index_diff_ms": 40, "set_build_ms": 50, "render_ms": 5 } }
+```
+
+### 4.15.4 `GET /api/v1/element/attribute-diff` — 元素在两个会话间的属性差
+
+路由 `mod.rs:590-595`，handler `element_attribute_diff`（`handlers.rs:2525-2561`）。不缓存、没有 300 秒预算。
+
+| 参数（`ElementAttributeDiffReq`，`handlers.rs:2511-2523`） | 类型 | 说明 |
+|---|---|---|
+| 身份字段 / `dbnum` / `refno` | | 同 4.15.2 |
+| `a` / `b` | number，必填 | 两个会话号，须 `a < b` |
+
+A 时不存在 → `kind: "created"`；B 时不存在 → `"deleted"`；两头都不存在 → `404`。
+
+| 响应字段 | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `refno` / `noun` / `unit_root` / `unit_noun` / `file_latest_sesno` | | 同 4.15.2 |
+| `a` / `b` | number | 回显 |
+| `kind` | string | `created` / `modified` / `deleted` / `unchanged` |
+| `impact` | string \| null | 影响五态；`unchanged` 时为 `null` |
+| `changed_count` / `changes[]` / `members` / `attributes_unavailable` | | 同 4.15.3 `entries[]`（后两个可缺席） |
+| `owner` | array，可缺席 | `[A 时, B 时]` |
+| `elapsed_ms` / `warnings` | | |
+| `stats` | object | `{sets_built, set_build_ms, render_ms, impact_ms}` |
+
+```json
+{ "dbnum": 7997, "refno": "24381/100690", "noun": "ELBO", "unit_root": "24381/100677", "unit_noun": "PIPE",
+  "file_latest_sesno": 92, "a": 81, "b": 88, "kind": "modified", "impact": "placement", "changed_count": 1,
+  "changes": [ { "name": "POS", "value_type": "...", "before": "...", "after": "...", "stamp": "..." } ],
+  "elapsed_ms": 61, "stats": { "sets_built": 2, "set_build_ms": 40, "render_ms": 4, "impact_ms": 9 } }
+```
+
+### 4.15.5 `GET /api/v1/node/versions` — 任意节点（含容器）的版本表
+
+路由 `mod.rs:600-602`，handler `node_versions`（`handlers.rs:2633-2670`，参数 `NodeVersionsReq` `:2614-2631`），算法
+`src/fast_model/node_versions.rs`。参数：身份字段、`dbnum`、`refno`、`scope`（同 4.15.6）、`since_sesno`、`limit`（逐字段未核）。
+缓存键 `(dbnum, refno, scope, 指纹)`。
+
+| 响应字段 | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `refno` / `noun` / `scope` | | |
+| `unit_root` / `unit_noun` | string \| null | 容器节点为 `null` |
+| `file_latest_sesno` / `truncated` / `cached` / `elapsed_ms` / `warnings` | | 同 4.15.1 |
+| `versions[]` | array | `{sesno, session_time, impact, self_impact, units_changed, units_touched}`；`self_impact` 可为 `null` |
+| `stats` | object | `{sessions, windows_with_changes, candidates, in_scope, sets_built, index_diff_ms, set_build_ms, scope_ms, classify_ms, head_subtree_elements}` |
+
+```json
+{ "dbnum": 7997, "refno": "24381/2", "noun": "SITE", "scope": "subtree", "unit_root": null, "unit_noun": null,
+  "file_latest_sesno": 92, "truncated": false,
+  "versions": [ { "sesno": 88, "session_time": "2026-10-24T15:40:11+08:00", "impact": "mesh", "self_impact": null,
+                  "units_changed": 3, "units_touched": 5 } ],
+  "cached": false, "elapsed_ms": 1840,
+  "stats": { "sessions": 92, "windows_with_changes": 14, "candidates": 420, "in_scope": 61, "sets_built": 14,
+             "index_diff_ms": 300, "set_build_ms": 900, "scope_ms": 120, "classify_ms": 80, "head_subtree_elements": 15230 } }
+```
+
+### 4.15.6 `GET /api/v1/node/diff-summary` — 节点在两个会话间的差异摘要
+
+路由 `mod.rs:596-599`，handler `node_diff_summary`（`handlers.rs:2579-2612`，参数 `NodeDiffSummaryReq` `:2563-2577`），算法
+`src/fast_model/node_diff_summary.rs`。不缓存。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| 身份字段 / `dbnum` / `refno` | | 同 4.15.5 |
+| `a` / `b` | number，必填 | 两个会话号，须 `a < b` |
+| `scope` | string，可选 | `subtree`（缺省）/ `self`（别名 `self_only`）（`node_diff_summary.rs:41-51`） |
+
+- 上限：子树最多走 200 000 个元素（`MAX_SUBTREE_WALK`），每组最多 500 行（`MAX_ROWS_PER_GROUP`），超出 `rows_truncated: true`（`:32-39`）。
+- 行状态（`status_of`，`:179-185`）：要重出网格 → `modified` / `mesh`；只动方位 → `modified` / `placement`；跳过 → `noop` / `noop`；另有 `added` / `deleted`。
+- 重算确认：`needs_confirm = 阈值 > 0 且 units.changed > 阈值`；阈值取环境变量 `MODEL_HISTORY_CONFIRM_UNITS`（缺省 20，0 = 永不要求确认，
+  `:165-177`），回显在 `confirm_threshold_units`；`estimated_projections = units.changed × 2`。
+
+| 响应字段 | 类型 | 说明 |
+|---|---|---|
+| `dbnum` / `refno` / `noun` / `scope` / `a` / `b` | | `noun` 可缺席 |
+| `units` | object | `{changed, unchanged, total, complete}` |
+| `elements` | object | 元素计数（形状未核） |
+| `groups[]` | array | `{unit_root?, unit_noun?, unit_name?, counts{added, deleted, modified, noop}, geometry_changed, rows[], rows_truncated}` |
+| `groups[].rows[]` | array | `{refno, noun?, status, impact, is_node}` |
+| `needs_confirm` / `estimated_projections` / `confirm_threshold_units` | bool / number / number | 见上 |
+| `elapsed_ms` / `warnings` | | |
+| `stats` | object | `{candidates, in_scope, sets_built, index_diff_ms, scope_ms, classify_ms, subtree_walk_ms, subtree_elements}` |
+
+```json
+{ "dbnum": 7997, "refno": "24381/2", "noun": "SITE", "scope": "subtree", "a": 81, "b": 88,
+  "units": { "changed": 3, "unchanged": 58, "total": 61, "complete": true }, "elements": { "...": "..." },
+  "groups": [ { "unit_root": "24381/100677", "unit_noun": "PIPE", "unit_name": "/P-100",
+                "counts": { "added": 0, "deleted": 0, "modified": 2, "noop": 1 }, "geometry_changed": true,
+                "rows": [ { "refno": "24381/100690", "noun": "ELBO", "status": "modified", "impact": "placement", "is_node": false } ],
+                "rows_truncated": false } ],
+  "needs_confirm": false, "estimated_projections": 6, "confirm_threshold_units": 20, "elapsed_ms": 930,
+  "stats": { "candidates": 420, "in_scope": 61, "sets_built": 2, "index_diff_ms": 300, "scope_ms": 120, "classify_ms": 80,
+             "subtree_walk_ms": 210, "subtree_elements": 15230 } }
+```
+
+### 4.15.7 `model/history/*` — 历史投影（A / B 几何）
+
+路由 `mod.rs:565-576`：`POST /api/v1/model/history/generate`、`POST /api/v1/model/history/query`、`GET` / `DELETE /api/v1/model/history/{snapshot_key}`。
+实现 `src/fast_model/historical_model.rs`：把某个历史会话的一棵子树重建进**专用历史 kv-mem 命名空间**，永不进生产模型、永不落库（`:1-6`）。
+
+**生成** `POST /model/history/generate`（`model_history_generate`，`handlers.rs:2308-2362`）：
+
+| 参数（`HistoricalGenerateReq`，`handlers.rs:2269-2279`） | 类型 | 说明 |
+|---|---|---|
+| 身份字段 | string | 同 §3 |
+| `dbnum` / `refno` | number / string | 子树根；`refno` 解不出 → `400 bad_request` |
+| `sesno` | number，可选 | 指定会话 |
+| `time` | string，可选 | RFC3339；取不晚于它的最近会话，比最老会话还早 → `TIME_BEFORE_OLDEST_SESSION`（`historical_model.rs:740-751`） |
+
+- `sesno` 与 `time` 互斥（都给 → `400 INVALID_SELECTOR`），都不给 = 最新会话（`historical_model.rs:813-828`）。
+- 回 `202 {"task_id": "model-history-…"}`，后台跑一条 `kind = model_history` 任务（`running -> succeeded | failed`，`task_registry.rs:728-746`），
+  经 §4.4 `GET /tasks/{id}` 取结果：成功时 `result` 为下表报告；失败时 `result = {code, message}`；300 秒没做完（`handlers.rs:2336`）记失败，
+  `{"code":"GENERATION_CANCELLED","message":"historical generation exceeded 300 seconds"}`。子树超过 100 000 个元素（`MAX_HISTORY_ELEMENTS`，
+  `historical_model.rs:32`）→ `GENERATION_LIMIT_EXCEEDED`。
+- 容量：最多留 `model_historical_snapshots_max` 份（`options.rs:1160`，缺省 16，0 = 不限），超出按最近一次生成时间淘汰最老的
+  （`historical_model.rs:110-123`）；`/health.model_cache.historical = {snapshots, max_snapshots, evicted_total}`（`:125-134`）。
+
+| 报告字段（`historical_model.rs:56-77`） | 类型 | 说明 |
+|---|---|---|
+| `snapshot_key` | string | `{refno 第一段}_{第二段}@{sesno}`（`:569-572`）；只许 ASCII 数字、`_`、`@`（`:802-811`） |
+| `dbnum` / `refno` | number / string | |
+| `resolved_session` | object | `{requested, sesno, session_time}`；`requested` 的形状未核 |
+| `source_file` / `source_fingerprint` | string | 源库文件与指纹 |
+| `visited` / `generated` / `failed` / `skipped` / `upserted` | number | 遍历 / 生成 / 失败 / 跳过 / 写入的元素数 |
+| `shared_instances` / `baked_instances` | number | 共享实例 / 烘焙实例数 |
+| `mesh_written` / `mesh_reused` / `mesh_repaired` / `unique_meshes` | number | 网格计数 |
+| `elapsed_ms` | number | |
+
+**取报告** `GET /model/history/{snapshot_key}`（`handlers.rs:2672-2683`）：回上表报告；不存在 → `404 not_found`「snapshot 不存在: {key}」。不校验身份。
+
+**查询** `POST /model/history/query`（`handlers.rs:2685-2726`；`HistoricalQueryReq` `:2281-2287`）：请求 `{snapshot_key, tool, arguments}`
+（`arguments` 缺省为空），不校验身份，原样回：
+
+| `tool` | 回什么（`historical_model.rs`） |
+|---|---|
+| `snapshot` | 报告，或 `null` |
+| `instances` | 数组：`{id, snapshot_key, dbnum, generic, solid, anc, source_refno, mesh_id, world_bounds{mins, maxs}, world_transform, direct_model{source:"e3d-model", format, sesno, geometry_id, mesh_id}}`；`format = "canonical-primitive-v1"` 的行另带 `booled:false, primitive_key, local_transform, local_bounds`，`"baked-v2"` 的行另带 `booled:true, booled_id`（`:460-508`） |
+| `tubes` | 数组：`{id, snapshot_key, dbnum, container_refno, source_refno, leave_refno, arrive_refno, route_ordinal, bore_size:0, invalid:false, anc, mesh_id, world_bounds, world_transform, direct_model}`（`:510-529`） |
+| `geometry` | 数组：`{id, mesh:"<id>.mesh", meshed, visible, bad, direct_model{source, format}}`（`:531-543`） |
+| `attributes` | 须带 `arguments.refno`，缺 → `400 INVALID_REFNO`「tool=attributes 需要 arguments.refno（a/b）」；回 `{snapshot_key, dbnum, sesno, refno, exists, noun, complete, attributes, diagnostics, elapsed_ms}`，该会话里不存在的元素 `exists:false, noun:null, attributes:[]`；`refno` 不在快照子树内 → `422 REFNO_OUTSIDE_SNAPSHOT`（`:229-373`） |
+
+其余 `tool` → `500`（"expected snapshot/instances/tubes/geometry/attributes"，`:194-227`）。
+
+**删除** `DELETE /model/history/{snapshot_key}`（`handlers.rs:2728-2742`）→ `{"snapshot_key": "…", "status": "deleted"}`；键不存在不算错；
+共享网格留给 GC（`historical_model.rs:152-166`）。
+
+错误（`historical_error`，`handlers.rs:2289-2306`）：
+
+| HTTP | `code` |
+|---|---|
+| 400 | `INVALID_SELECTOR` / `INVALID_REFNO` |
+| 404 | `SESSION_NOT_FOUND` / `REFNO_NOT_FOUND_AT_SESSION` / `SNAPSHOT_NOT_FOUND` |
+| 408 | `GENERATION_CANCELLED` |
+| 413 | `GENERATION_LIMIT_EXCEEDED` |
+| 422 | `TIME_BEFORE_OLDEST_SESSION` / `REFNO_OUTSIDE_SNAPSHOT` |
+| 503 | `SESSION_TIME_UNAVAILABLE` / `SOURCE_NOT_FOUND` / `SOURCE_CHANGED` |
+| 500 | 其余（含 `SNAPSHOT_COMMIT_FAILED`） |
+
+生成是 202 + 任务：选择器解析错误同步回（上表状态），生成期的错误码落在任务 `result.code` 里。
+
+```json
+{ "task_id": "model-history-20261027-101530-000044" }
+```
+
+```json
+{ "snapshot_key": "24381_100677@81", "dbnum": 7997, "refno": "24381/100677",
+  "resolved_session": { "requested": "...", "sesno": 81, "session_time": "2026-10-20T09:12:03+08:00" },
+  "source_file": "...", "source_fingerprint": "...", "visited": 412, "generated": 380, "failed": 0, "skipped": 32,
+  "upserted": 380, "shared_instances": 120, "baked_instances": 6, "mesh_written": 40, "mesh_reused": 300,
+  "mesh_repaired": 0, "unique_meshes": 52, "elapsed_ms": 8120 }
+```
+
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
 ### 5.1 信封
@@ -1734,9 +2278,9 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
 
 | type | 主题 | payload |
 | --- | --- | --- |
-| `task_started` | tasks | `{ task_id, kind, project }`；`kind = "model_drain"`（一页模型消化被认领）时另带 `total_units`（本页根数）与 `detail`（认领时的 `epoch_id / queue_total / roots[] / root_samples_truncated`，`roots[].target_refno` 为 `a/b`；`roots` 最多 10 条样本，与 `GET /tasks/{id}` 里的同一份） |
+| `task_started` | tasks | `{ task_id, kind, project }`；`kind = "model_drain"`（已退役，ADR-072 D5，不再产生；原义：一页模型消化被认领）时另带 `total_units`（本页根数）与 `detail`（认领时的 `epoch_id / queue_total / roots[] / root_samples_truncated`，`roots[].target_refno` 为 `a/b`；`roots` 最多 10 条样本，与 `GET /tasks/{id}` 里的同一份） |
 | `task_progress` | tasks | `ManualUpdateEvent` 原样（`kind: data_batch_started / data_batch_finished / model_unit_started / model_unit_finished`，两阶段、无百分比，与规格一致）|
-| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }`；`model_drain` 页收口时另带 `kind: "model_drain"`、`project` 与收口时刻的 `detail`（同上），`result` 为 `{ completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures }`。**客户端据此重载**：`detail.roots[].target_refno` ∩ 自己已加载的生成根 → 重载那几根；`root_samples_truncated > 0` 时样本不全，按 `roots[].dbnum` 整库对齐或退回 REST 轮询。2026-09-08 起发（此前 drain 页在 WS 上一声不响，浏览器端只能 15 s 轮询 `GET /tasks?kind=model_drain`）；发送点在 `task_registry` 的 `insert_running_model_drain` / `finish`，不在 `model_update_pending` 的调用点——drain 的认领与收口只经这两个口。（plant3d-web：2026-09-09 起不再被动重载场景（收口计划 §12）；2026-10-26 起改为「轻量联动」——订阅全部任务的 `task_finished`，落在已装入库 / 已装入生成根上的 DESI 数据批次（`result.batch` + `result.units[].root_refno`）只在状态栏提示「有更新，点此重载」，人点了才按最新记录替换那几根，并刷新按库水位表；仍不自动换场景。见 plant3d-web `docs/verification/incremental-linkage-2026-10-26`） |
+| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }`；`model_drain` 页（已退役，ADR-072 D5）收口时另带 `kind: "model_drain"`、`project` 与收口时刻的 `detail`（同上），`result` 为 `{ completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures }`。**客户端据此重载**：`detail.roots[].target_refno` ∩ 自己已加载的生成根 → 重载那几根；`root_samples_truncated > 0` 时样本不全，按 `roots[].dbnum` 整库对齐或退回 REST 轮询。2026-09-08 起发（此前 drain 页在 WS 上一声不响，浏览器端只能 15 s 轮询 `GET /tasks?kind=model_drain`）；发送点在 `task_registry` 的 `insert_running_model_drain` / `finish`，不在 `model_update_pending` 的调用点——drain 的认领与收口只经这两个口。（plant3d-web：2026-09-09 起不再被动重载场景（收口计划 §12）；2026-10-26 起改为「轻量联动」——订阅全部任务的 `task_finished`，落在已装入库 / 已装入生成根上的 DESI 数据批次（`result.batch` + `result.units[].root_refno`）只在状态栏提示「有更新，点此重载」，人点了才按最新记录替换那几根，并刷新按库水位表；仍不自动换场景。见 plant3d-web `docs/verification/incremental-linkage-2026-10-26`） |
 | `model_source_changed` | tasks | `{ dbnum, model_source }`（`memory` / `database`，§4.12）；`task_id` 为空。初始化发布 run 收口 → `database`，回退重建清库 → `memory`。客户端只刷 `/dbnums` 那一行的来源格，不重载场景；字面值认不出当没收到，下一拍 `/dbnums` 带回真值 |
 | ~~`incr_applied`~~ | ~~increments~~ | **已删（ADR-011 合流）**：自动路径的批次与手动同走 tasks 主题的 `task_started / task_progress / task_finished` |
 | `pong` | 无 | `{}` |
@@ -1753,20 +2297,27 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
   events_seen, detail?, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
   「已排」与「已用」是两个起点。
 - 状态机：数据任务为 `queued -> running -> succeeded | partial | failed`；模型消费页为
-  `running -> succeeded | partial | failed | yielded`。kind 三种：
+  `running -> succeeded | partial | failed | yielded`（随 `model_drain` 已退役）。kind 三种（原文；现行 kind 见本条末）：
   `data_batch`（一行 = 一个数据批次；同一 dbnum 至多两行——运行中一行 + 排队中一行）、
-  `model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
+  `model_drain`（持久模型工作的一页进程内观察；已退役，ADR-072 D5，`task_registry.rs:20-21`，不再产生新行）、`manual_update`（已退役，
   不再产生新行）。`room_recalc`（曾是队列跑空时收的一轮房间收敛）随房间流程退役
-  （§4.7.2）：不再产生新行，`GET /tasks?kind=room_recalc` 恒回空列表。
-- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/
-  `model-…`（模型消费页）。`room-…`（房间轮）随 `room_recalc` 一并退役，不再产生。
+  （§4.7.2，ADR-073 D1，`task_registry.rs:32-34`）：不再产生新行，`GET /tasks?kind=room_recalc` 恒回空列表。
+  **现行 kind**（`src/data_interface/task_registry.rs:19-31`）：`data_batch`、`model_rebuild`（人工触发的指定 dbnum 全量模型重建，§4.5.1A）、
+  `dbnum_model_ensure`（读透 / memory-routed 库的整库即时生成，只写进程内投影、不进 durable 队列，§4.5.1B）、
+  `model_history`（只读源会话重建进专用历史 kv-mem，§4.15.7）、`room_rebuild`（「重新生成房间」，§4.4 / §4.7.3；
+  它不是退役的 `room_recalc`）；各自的状态见所在节。
+- TaskId 由 `new_task_id(prefix)` 生成，格式 `{prefix}-{yyyyMMdd-HHmmss}-{6位进程内序号}`（`task_registry.rs:394-401`；原文写的
+  `db-{yyyyMMdd-HHmmss}-{4位随机hex}` 与实现不符）：`db-…`（数据批次，`batch_scheduler.rs:593`）/
+  `dbnum-model-ensure-{dbnum}-…`（`model_dbnum_ensure.rs:448`）/ `model-history-…`（`handlers.rs:2319`）/
+  `room-…`（`room_recompute.rs:1573` 仍在用，归哪种 kind 未核）。`model-…`（模型消费页）随 `model_drain` 一并退役，不再产生；
+  原文「`room-…`（房间轮）随 `room_recalc` 一并退役，不再产生」与上一条实现对不上，以实现为准。
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。
 - 并发约束汇总：数据批次由**一个派发器**统一出队（默认单 worker 串行；ADR-011
   2026-08-09 修订允许至多 `data_batch_workers` 个在飞批次、上限 8，同 dbnum 恒串行、
   非 DESI 与基线批次独占；互斥是调度器的性质，HTTP 层不再有 409 预检）；所有生成入口
-  共享 durable pending、生成执行器和 per-生成根锁，同一根不会由按需与批次路径并发生成。
+  共享生成执行器和 per-生成根锁（原文的「durable pending」已随 pending 表退役，ADR-072 D5），同一根不会由按需与批次路径并发生成。
 
 ## 7. 配置与依赖
 
@@ -1806,7 +2357,7 @@ tokio/serde/serde_json 均已存在，无其他新增。
 | --- | --- | --- |
 | M1 | 脚手架：`web_service` 模块、AppState、`/health`、`/update/preview`、`/dbnums` | curl 全通，`http_api` 关闭时零影响 |
 | M2 | `/update/execute` + TaskRegistry + WS（subscribe/进度/finished） | 前端可见两阶段进度直至 `ManualUpdateResult` |
-| M3 | `/model/ensure`、`/update/pending-units` 查询/单项重试、统一 worker 事件桥接 | 按需生成幂等；watch 与手动提交产生相同 tasks 事件 |
+| M3 | `/model/ensure`（现名 `/model/generate`，§4.5）、`/update/pending-units` 查询/单项重试（已退役，ADR-072 D5，§4.6）、统一 worker 事件桥接 | 按需生成幂等；watch 与手动提交产生相同 tasks 事件 |
 | M4 | CORS/超时/日志（tower-http trace 接入现有 tracing）、联调收尾 | 前端跨域可用，异常路径错误码符合第 3 节 |
 
 ## 9. 评审决议（2026-07-26）
@@ -1814,7 +2365,8 @@ tokio/serde/serde_json 均已存在，无其他新增。
 1. **监听地址与端口**：`0.0.0.0:8020`，供局域网前端访问（已写入 `DbOption.toml`）。
 2. **鉴权**：本期不做；前端部署到共享环境前可追加最简 token 头校验。
 3. **`incr_applied` 已退役**：自动与手动批次统一发布 tasks 主题事件。
-4. **任务历史持久化**：仅内存分层保留最多 1000 条（durable 语义由水位 + pending 表承担），不做持久化。
+4. **任务历史持久化**：仅内存分层保留最多 1000 条（durable 语义由水位 + pending 表承担；pending 表已退役（ADR-072 D5），
+   现由应用 / 模型水位与写入状态承担，`task_registry.rs:7-8`），不做持久化（2026-10-24 起终态行另落盘，见 §4.4）。
 
 ## 10. 给 plant-ui 的一句话（ADR-072，2026-09-10）
 
@@ -1843,7 +2395,7 @@ tokio/serde/serde_json 均已存在，无其他新增。
 1. **plant3d-web：不必改。** 你那八条 `/api/room/*` 与 `/api/room-tree/*` 打的本来就是
    另一套旧后端，本服务从没实现过它们——退役前后都是 404，行为一个字不变。
 2. **plant-ui：**
-   - 任务面板的**房间泳道**（`task_queue.rs` 的 `KIND_ROOM_RECALC`）：`room_recalc` 任务
+   - 任务面板的**房间泳道**（`task_queue.rs` 的 `KIND_ROOM_RECALC`）：`room_recalc` 任务（已退役，ADR-073 D1）
      不再产生，泳道会恒空。请把它摘掉，而不是留一条永远「距上一轮 ∞」的空泳道。
    - `q room` / `q e3d.room.lookup` 命令继续可用；必须消费 `calculation_status`，只有
      `ready_empty` 才能把空 `memberships` 显示成“不属于任何房间”。2026-09-16 起
