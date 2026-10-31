@@ -74,7 +74,6 @@ pub(crate) fn test_hook_var(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-
 /// 测试钩：`AIOS_TEST_FAIL_ROOTS=24384/24776,24384/23257`。
 /// 名单里的根不进入生成器，回执记成失败。没设变量就是空名单；release 构建还要
 /// `AIOS_ALLOW_TEST_HOOKS=1` 才生效（见 [`test_hook_var`]）。

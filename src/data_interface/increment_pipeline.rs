@@ -774,10 +774,16 @@ fn reconcile_plan_with_live_set(
 }
 
 /// 测试钩：`AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY="<sesno>:<ms>"`（或 `"*:<ms>"`）——窗口右端等于 `<sesno>` 时，在冻结源复核前
-/// 睡 `<ms>` 毫秒。生产环境不设此变量，这里只是一次 `env::var`。只拉长时间、不改任何判据：复核本身还是
+/// 睡 `<ms>` 毫秒。只拉长时间、不改任何判据：复核本身还是
 /// [`verify_frozen_source`] 那一道门，夹具在这段时间里写进下一个会话，门就该像真机上那样回「anchor 已改变」。
+///
+/// 生产保护（T-O-5 同口径，2026-10-28 补齐）：默认 profile 照旧只看变量本身；release 构建还要显式设
+/// `AIOS_ALLOW_TEST_HOOKS=1`，否则一律当没设。闸在
+/// [`crate::data_interface::model_refresh::test_hook_var`]。
 async fn delay_before_frozen_verify(end_sesno: u32) {
-    let Ok(spec) = std::env::var("AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY") else {
+    let Some(spec) =
+        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY")
+    else {
         return;
     };
     let Some((which, millis)) = spec.split_once(':') else {

@@ -1043,7 +1043,6 @@ async fn delay_before_registry_finish(dbnum: u32, end_sesno: i32) {
     }
 }
 
-
 /// 执行一个冻结批次：数据应用 → SYST 派生入账 → 副作用补偿 → 本批交付单元生成。
 ///
 /// 所有**预期内**的失败都折进任务终态，单个批次的失败不影响队列里的下一条（与

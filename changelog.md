@@ -1,5 +1,11 @@
 ## 2026-10-31
 
+### 测试钩子生产保护补齐：`delay_before_frozen_verify` 也走 `test_hook_var`（T-O-5 残余，ADR-094 D4）
+
+- **为什么**：`4fa7ef4ab` 把 `AIOS_TEST_FAIL_DATA_ENDS` / `AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH` 收进 `model_refresh::test_hook_var`（release 构建要 `AIOS_ALLOW_TEST_HOOKS=1` 才生效），`increment_pipeline.rs` 里的 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 漏了，仍是裸 `env::var`：生产 release 只要环境里有这个变量就会在冻结复核前睡。
+- **改**：`delay_before_frozen_verify` 改读 `test_hook_var`，注释写明生产保护口径；顺带删 `batch_worker.rs` / `model_refresh.rs` 各一行多余空行。
+- **验证**：编译 + 全量 2694 / 0 / 116；harness（`tests/increment_replay/harness.rs`）起服务时设 `AIOS_ALLOW_TEST_HOOKS=1`，回放钩子不受影响。
+
 ### 等距：调整焊的附加长度 `:PIPE-ADLONGTH` 读进 `BranchQuery`（与增量无关）
 
 - **为什么**：调整焊（`WELD` 带 `:PIPE-ADLONGTH` UDA，isoadjustweld.pmlobj L187-193，mm）的附加长度宿主侧读不到，求解器只能套缺省 50。
