@@ -1024,6 +1024,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_scope_regen": crate::data_interface::model_scope_regen::health_snapshot(),
             "version": crate::build_info::VERSION,
             "build_id": crate::build_info::BUILD_ID,
+            "e3d_model_build_id": crate::build_info::E3D_MODEL_BUILD_ID,
             "started_at": crate::data_interface::task_registry::process_started_at(),
             "capabilities": model_capabilities(),
             "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
@@ -1176,6 +1177,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "read_through": read_through,
         "version": crate::build_info::VERSION,
         "build_id": crate::build_info::BUILD_ID,
+        // GitHub #73：部署后核「换了哪一版 e3d-model」看这一格；它也是生成器指纹的 `e3d-model:` 段。
+        "e3d_model_build_id": crate::build_info::E3D_MODEL_BUILD_ID,
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "capabilities": model_capabilities(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
@@ -1237,6 +1240,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // （启动那一次在 `initialization.startup.reconcile`）；`stale_catalogue_dbnums` 非空
         // 且 `catalogue_cascade_degraded` 为真 = 前移了却没能精确反查，看 `catalogue_cascade`。
         "catalogue_reconcile": crate::data_interface::model_coverage::catalogue_reconcile_snapshot(),
+        // 运行期生成器身份核对的最近一次回执（GitHub #73；`/update/execute` 触发，启动那一次在
+        // `initialization.startup.reconcile.generator_stale_dbnums`）。`null` = 本进程还没跑过；`stale` 非空 =
+        // 有库的几何是别的版本 e3d-model 算的，`enqueued` 是已排整库重排的那几个。
+        "generator_reconcile": crate::data_interface::generator_reconcile::snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
         // tokio 调度延迟（specs/033 T003）：定时器「该醒」与「真醒」的差。CPU 密集段
@@ -2147,6 +2154,16 @@ pub async fn update_execute(
     receipt.warnings.push(
         "目录版本核对已随本次执行另起任务（目录库不进数据批次，前移只触发模型面重算引用它的根）：\
          结果见 /health.catalogue_reconcile"
+            .to_string(),
+    );
+    // GitHub #73：生成器身份核对与目录核对对称——显式执行时也核一次「这个库的几何是哪一版生成器算的」，
+    // 库级落款与本进程不一致的库整库排 ModelOnly 起点 0。不在这里等它：要读登记表与水位行。
+    tokio::spawn(async {
+        crate::data_interface::generator_reconcile::reconcile_generator_now("update-execute").await;
+    });
+    receipt.warnings.push(
+        "生成器身份核对已随本次执行另起任务（库级生成器落款与本进程不一致的库整库重排）：\
+         结果见 /health.generator_reconcile"
             .to_string(),
     );
     receipt.project.clone_from(&identity.project);

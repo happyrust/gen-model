@@ -224,6 +224,10 @@ pub struct StartupReconcile {
     /// 不为它们收窗 / 反查 / 排工，`stale_catalogue_dbnums` 里也没有它们的目录库——只点名，不参与 `result`
     /// 取重。没限定时恒空。
     pub catalogue_behind_out_of_scope: Vec<u32>,
+    /// 库级生成器落款（`dbnum_watermark.model_generator`）与本进程指纹不一致的 DESI 库，升序（GitHub #73）：
+    /// 开关 `model_rebuild_on_generator_change` 开着时已各排一条 `ModelOnly` 起点 0（整库重排，理由
+    /// `model_generator_changed`），关着时只点名。落款读不到的那一轮恒空。
+    pub generator_stale_dbnums: Vec<u32>,
 }
 
 impl Default for StartupReconcile {
@@ -243,6 +247,7 @@ impl Default for StartupReconcile {
             catalogue_cascade: None,
             catalogue_dependency_refresh: Default::default(),
             catalogue_behind_out_of_scope: Vec::new(),
+            generator_stale_dbnums: Vec::new(),
         }
     }
 }

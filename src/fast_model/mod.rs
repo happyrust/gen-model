@@ -1,5 +1,7 @@
 pub mod e3d_mesh_store;
 pub mod e3d_model_service;
+/// 生成器身份（GitHub #73）：逐根回执的 `generator_fingerprint` 与水位行库级落款 `model_generator` 共用的那一串。
+pub mod generator_identity;
 #[cfg(feature = "legacy_model")]
 pub(crate) mod gen_model;
 pub mod historical_model;

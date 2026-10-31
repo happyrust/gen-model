@@ -85,6 +85,21 @@
 - **上线（计划 W6）**：部署后 20 库低峰**串行** `POST /api/v1/dbnums/{dbnum}/model/rebuild`（每库重建期间按 #74 该库不可见）；重建前老根的长度函数回 0。以后 `PTSET_EVAL_VERSION` 加一也走同一条 SOP，行上的 `generator` 让巡检分得清哪些库还没跑。
 - **没动**：模型行的块字节与回执（ADR-071，ptset 语句只追在同一事务里）；`POST /api/v1/element/ptset` 直读端点与前端 P 点来源；三处老投影 `out.ptset.d.pt AS pts`（恒 NONE，`gy_common.surql` 头注释写明 `pe_ptset` 是唯一权威）；没有任何后台补写 / 启动补扫 / `AIOS_PTSET_BACKFILL` 开关。
 
+
+### 换了 e3d-model 旧行不重算：生成器指纹进 vendor 构建身份，水位行加库级生成器落款，启动 / execute 不一致就整库重排（GitHub #73）
+
+- **为什么**：服务器换了几版 e3d-model，1112 / 7997 / 7999 / 7329 初始化回执全 `generated`，行却还是 09-15 之前的旧 vendor 算的（墙上 FIXING 偏 19–64 m），强制 `model/rebuild` 才对上。根因两层：① `ModelTarget.generator_fingerprint` 的 `e3d-model:` 槽填的是本仓自己的 `CARGO_PKG_VERSION`，vendor 提交根本不在里面；② 库级水位 `model_sesno == 文件最新` 的库在启动 / `update/execute` 时一根都不进批次（ADR-079），逐根指纹再准也拦不住；水位行里没有生成器身份。
+- **改**：
+  - `build.rs`：读 `../vendor/e3d-model`（可用 `E3D_MODEL_VENDOR_DIR` 指到别处）的 crate 版本与 `git rev-parse --short=12 HEAD`，注入 `E3D_MODEL_VERSION` / `E3D_MODEL_BUILD_ID`（`<版本>@g<提交>`；工作树脏或没有 git 时补 `src/**/*.rs` + Cargo.toml 的 FNV 内容哈希；找不到目录 `unknown` 并 `cargo:warning`）。`build_info` 多一格 `e3d_model_build_id`，`/health` 两个分支都露。
+  - `fast_model/generator_identity.rs`（新）：指纹只有这一份——`e3d-model:<vendor 构建身份>;aios-database:<本仓版本>;<规则标签>`；`model_target` 改读它。旧回执的指纹从此全部对不上：每根下一次进批次整根重算一次（换 vendor 本该付的那一次）。
+  - `task_end.rs`：模型水位盖章那一句多写 `model_generator = '<指纹>'`（随 `model_sesno` 同一笔，模型没成不写）。
+  - `data_interface/generator_reconcile.rs`（新）：`generator_stale` / `generator_recovery_plan`（纯函数）、`stamped_generators`（只读 `dbnum, model_generator` 两列，不经水位镜像）、`reconcile_generator_now`（运行期入口）、`snapshot`（`/health.generator_reconcile`）。不一致（含旧行没有落款）的 DESI 库排 `ModelOnly` 起点 0，与 `model_rebuild::start` 同一条任务形状。
+  - `startup_reconcile.rs`：模型水位核对的循环里，生成器判决（起点 0，`reason=model_generator_changed`）压过「只欠一窗」的水位判决；落款读不到那一轮不按生成器排（不许一次库抖动把每个库都排一遍）；`StartupReconcile.generator_stale_dbnums` 点名。`update_execute` 与目录核对对称地另起 `reconcile_generator_now("update-execute")`，回执 warnings 指向 `/health.generator_reconcile`。
+  - `options.rs`：新开关 `model_rebuild_on_generator_change`（默认开，环境变量 `AIOS_MODEL_REBUILD_ON_GENERATOR_CHANGE`）；关着只点名不排工。
+- **上线要知道**：第一次带着这条启动会把每个盖过模型水位的库都排一条整库重排（旧行没有 `model_generator`）——AMS 20 个 DESI 库在单消费者队列里依次跑，与今天换 vendor 后手打 20 次 `model/rebuild` 同量；不想这样就先 `model_rebuild_on_generator_change = false`，看 `/health` 点名再按库打。
+- **没动**：逐根复用路（`cached_root_target_matches` 本来就比整个 `model_target`）、凭证判据 `root_credential_covers`（库级承诺不看生成器：重排在队里，按需显示不必每根重算）、水位镜像 `DbnumState`（落款不进镜像）。
+- **验证**：全量 `cargo test --lib` **2694 passed / 0 failed / 116 ignored**（2026-10-31，HEAD `5191a60b9` + 本批工作树）。单测（全绿）：`generator_identity::the_fingerprint_carries_the_vendor_build_identity_and_the_rule_tags`、`generator_reconcile::{a_library_is_stale_when_its_stamp_is_missing_or_differs_from_the_running_generator, a_changed_generator_rebuilds_the_whole_library_unless_the_switch_is_off, the_reconcile_only_enqueues_model_only_tasks_and_never_mutates_the_database}`、`task_end::the_model_stamp_carries_the_generator_fingerprint`、`options::rebuild_on_generator_change_is_on_by_default_and_can_be_shut`、`build_info::build_identity_names_the_product_and_release`。真机：换 vendor 重部署后 `/health.core.e3d_model_build_id` 变；启动日志 `[model-completion] dbnum=… reason=model_generator_changed` + `生成器核对：N 个库…`；`/health.initialization.startup.reconcile.generator_stale_dbnums` 点名；跑完后 `SELECT dbnum, model_generator FROM dbnum_watermark` 全部等于当前指纹，再重启一次不再排。
+
 ### 只改 NAME 一类的候选不再做闭包种子：它所在的根按 `advance` 走，不整根重算（GitHub #76）
 
 - **为什么**：元数据门放行的候选（`NAME` / `DESC` 一类，或字典 DCHC=0 且生成器不读的属性）只决定它不上卷、不级联（账本去向 `no_model`）；它照旧做 e3d-model `affected_closure` 的种子，所在的根整根进 `regen`，重算出来的几何与 S 端逐字相同、只有回执前移。夹具 `data`（EQUI `24382/1074` 只改 `NAME` 再改回）因此每窗白算一根 342 ms，还顺带写出一条基线没有的 `geo_relate`（`Pos`，`pe:24382_1075`），把整套夹具挡在第一例（#76 / #77）。D10 本可把这种根收成只推回执的空 `Partial`，但 D10 的前置「三条级联都开」在默认配置下（C2 `model_structural_connection_cascade` 默认关，#34）永远不成立。

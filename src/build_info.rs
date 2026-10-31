@@ -16,6 +16,11 @@ pub const GIT_DIRTY_TEXT: &str = env!("AIOS_GIT_DIRTY");
 pub const TARGET: &str = env!("AIOS_BUILD_TARGET");
 pub const PROFILE: &str = env!("AIOS_BUILD_PROFILE");
 pub const RUSTC: &str = env!("AIOS_RUSTC_VERSION");
+/// e3d-model vendor 的 crate 版本（`../vendor/e3d-model/Cargo.toml`，`build.rs` 读出）。
+pub const E3D_MODEL_VERSION: &str = env!("E3D_MODEL_VERSION");
+/// e3d-model vendor 的构建身份（GitHub #73）：`<版本>@g<提交号>`，工作树脏或没有 git 时补源码内容哈希；
+/// vendor 目录找不到时 `unknown`。生成器指纹（`fast_model::generator_identity`）的 `e3d-model:` 槽填的就是它。
+pub const E3D_MODEL_BUILD_ID: &str = env!("E3D_MODEL_BUILD_ID");
 
 /// Format the embedded build timestamp, never the process startup time.
 pub fn build_time() -> &'static str {
@@ -45,6 +50,8 @@ pub struct BuildInfo {
     pub target: &'static str,
     pub profile: &'static str,
     pub rustc: &'static str,
+    /// e3d-model vendor 的构建身份（[`E3D_MODEL_BUILD_ID`]）：部署后核「换了哪一版 vendor」看这一格。
+    pub e3d_model_build_id: &'static str,
 }
 
 pub fn current() -> BuildInfo {
@@ -59,6 +66,7 @@ pub fn current() -> BuildInfo {
         target: TARGET,
         profile: PROFILE,
         rustc: RUSTC,
+        e3d_model_build_id: E3D_MODEL_BUILD_ID,
     }
 }
 
@@ -77,5 +85,7 @@ mod tests {
         let parsed = chrono::DateTime::parse_from_str(info.build_time, "%Y-%m-%d %H:%M:%S %:z").unwrap();
         assert_eq!(parsed.timestamp().to_string(), BUILD_EPOCH);
         assert!(display_version().starts_with(&format!("{VERSION} (built ")));
+        assert_eq!(info.e3d_model_build_id, E3D_MODEL_BUILD_ID);
+        assert!(!info.e3d_model_build_id.is_empty());
     }
 }

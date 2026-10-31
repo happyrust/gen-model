@@ -3406,11 +3406,10 @@ impl E3dModelService {
                 &self.schema.template_dir().join("attlib.dat"),
                 0,
             )?,
-            generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-pml-uda-key-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_VERSION")
-            ),
+            // GitHub #73：指纹只有 `generator_identity` 那一份——`e3d-model:` 槽是 vendor 的构建身份（版本@提交），
+            // 不再是本仓自己的版本号；水位行的库级落款写的也是同一串。
+            generator_fingerprint: crate::fast_model::generator_identity::generator_fingerprint()
+                .to_string(),
             tessellation_profile: "e3d-default-v1".to_string(),
         })
     }

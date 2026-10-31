@@ -161,6 +161,12 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 "model_sesno = math::max([model_sesno ?: 0, {target_sesno}])"
             ));
             sets.push("model_settled_at = time::now()".to_owned());
+            // GitHub #73：库级生成器落款随 `model_sesno` 同一笔盖——「这个库的几何是哪一版 e3d-model 算的」。
+            // 启动 / `update/execute` 拿它与本进程的指纹比，不一致整库重排（`generator_reconcile`）。
+            sets.push(format!(
+                "model_generator = '{}'",
+                escape_surql_str(crate::fast_model::generator_identity::generator_fingerprint())
+            ));
             // 数据库架构版本（`storage_version:current`）**不在这里写**：它是整库一条记录，
             // 只在全新空库初始化完成或全部库升级完成时由 `storage_upgrade` 写。
             // 单库水位盖章不代表整个数据库已经换成新架构。
@@ -1116,6 +1122,26 @@ mod tests {
         assert_eq!(vanished.count, Some(0), "快照里没有的 Ref0 清零留行");
     }
 
+    /// GitHub #73：库级生成器落款随 `model_sesno` 同一笔盖，写的就是本进程的指纹（逐字相同，启动核对直接比）；
+    /// 模型没成一个字不写。
+    #[test]
+    fn the_model_stamp_carries_the_generator_fingerprint() {
+        let sql = render_task_end_tail(&end());
+        let fingerprint = crate::fast_model::generator_identity::generator_fingerprint();
+        assert!(
+            sql.contains(&format!("model_generator = '{fingerprint}'")),
+            "{sql}"
+        );
+        let stamp = sql.find("model_sesno = math::max").expect("model stamp");
+        let generator = sql.find("model_generator = '").expect("generator stamp");
+        assert!(stamp < generator, "落款跟在水位之后、同一句 UPDATE 里: {sql}");
+
+        let mut failed = end();
+        failed.model.as_mut().expect("model outcome").all_roots_ok = false;
+        let sql = render_task_end_tail(&failed);
+        assert!(!sql.contains("model_generator"), "模型没成不盖落款: {sql}");
+    }
+
     /// ADR-076 D5（增量路计划 S2）：增量任务收尾只有这一笔——`model_sesno`、写入标记 `finished`、
     /// Ref0 统计落在**同一个** `state_revision` 上；中途那笔 Ref0 事务并进来之后，`state_revision`
     /// 一个任务只前进一格。
@@ -1299,7 +1325,8 @@ mod tests {
         let mut end = end();
         end.info = None;
         let sql = render_task_end_tail(&end);
-        // 判据是「语句分隔符」——`;` 后面紧跟换行或串尾，不裸数 `';'`（内容里本来就有分号）。
+        // 2026-10-28：`model_generator` 那一格是 `;` 分隔的 capability 清单（`route-…;catalogue-…;…`），
+        // 裸数 `';'` 会被它带偏（实测 23 个）。判据改成「语句分隔符」——`;` 后面紧跟换行或串尾。
         // 这一笔现在是四句：BEGIN / write_state / UPDATE 水位 / COMMIT。版本记录已迁到升级流程。
         let statements = sql
             .match_indices(';')

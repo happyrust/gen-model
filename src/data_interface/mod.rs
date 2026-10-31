@@ -261,6 +261,9 @@ pub mod startup_reconcile;
 pub mod model_concurrency;
 
 pub mod model_rebuild;
+/// 生成器身份核对（GitHub #73）：水位行的库级落款 `model_generator` 与本进程指纹不一致就整库排
+/// `ModelOnly` 起点 0（启动复核与 `update/execute` 两个入口）。
+pub mod generator_reconcile;
 
 /// 数据库架构版本核对：库里 `storage_version:current.version` 与本进程
 /// `aios_core::model_storage::MODEL_STORAGE_VERSION` 不一致时只点名、不自动升级。

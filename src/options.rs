@@ -228,6 +228,11 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_entry_drop_no_geometry: Option<bool>,
 
+    /// 生成器变了就整库重排（**默认开**，GitHub #73，2026-10-27）：启动 / `update/execute` 把水位行的库级生成器落款
+    /// 与本进程指纹比，不一致的库各排一条 `ModelOnly` 起点 0。关着只点名。见 [`model_rebuild_on_generator_change`]。
+    #[serde(default)]
+    pub model_rebuild_on_generator_change: Option<bool>,
+
     /// direct 窗口规划器的元数据门（**默认开**，2026-09-08）：一个元素这一窗只改了元数据属性
     /// （现行判据是两票：字典 DCHC=0 **且** 生成器不读，见 [`model_skip_metadata_only_changes`]；
     /// 2026-09 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）
@@ -552,6 +557,7 @@ impl From<DbOption> for DbOptionExt {
             model_xgeometry_gate: None,
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
+            model_rebuild_on_generator_change: None,
             model_skip_metadata_only_changes: None,
             model_transform_cheap_path: None,
             model_unit_level_publish: None,
@@ -660,6 +666,8 @@ struct DbOptionExtFields {
     model_significant_over_point: Option<bool>,
     #[serde(default)]
     model_entry_drop_no_geometry: Option<bool>,
+    #[serde(default)]
+    model_rebuild_on_generator_change: Option<bool>,
     #[serde(default)]
     model_skip_metadata_only_changes: Option<bool>,
     #[serde(default)]
@@ -971,6 +979,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
+        model_rebuild_on_generator_change: ext.model_rebuild_on_generator_change,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
         model_transform_cheap_path: ext.model_transform_cheap_path,
         model_unit_level_publish: ext.model_unit_level_publish,
@@ -2264,6 +2273,39 @@ fn effective_model_skip_metadata_only_changes(
         .unwrap_or(true)
 }
 
+/// 环境变量名：一次性覆盖 [`model_rebuild_on_generator_change`]，不必改配置文件。
+pub const MODEL_REBUILD_ON_GENERATOR_CHANGE_ENV: &str = "AIOS_MODEL_REBUILD_ON_GENERATOR_CHANGE";
+
+/// 生成器变了就整库重排（`DbOption.toml` 的 `model_rebuild_on_generator_change`，**默认 true**，GitHub #73，
+/// 2026-10-27）。
+///
+/// 开着时启动复核（`startup_reconcile`）与 `update/execute`（`generator_reconcile::reconcile_generator_now`）把水位行的
+/// 库级生成器落款（`dbnum_watermark.model_generator`，任务收尾随 `model_sesno` 同盖）与本进程的生成器指纹
+/// （`fast_model::generator_identity`：e3d-model vendor 构建身份 + 本仓版本 + 画法规则标签）比：不一致（含旧行没有
+/// 落款）的 DESI 库各排一条 `ModelOnly` 起点 0——与 `POST /api/v1/dbnums/{dbnum}/model/rebuild` 同一条任务，由 worker
+/// 照常跑。关着时只在 `/health` 点名（`initialization.startup.reconcile.generator_stale_dbnums`、
+/// `generator_reconcile.stale`），重算仍靠人手打 rebuild。第一次带着这条上线会把每个盖过模型水位的库都排一遍：
+/// 那正是换过 vendor 却从没按新口径整库算过的库（#73 的 1112 / 7997 / 7999 / 7329）。环境变量
+/// [`MODEL_REBUILD_ON_GENERATOR_CHANGE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_rebuild_on_generator_change() -> bool {
+    effective_model_rebuild_on_generator_change(
+        load_ext_fields().model_rebuild_on_generator_change,
+        std::env::var(MODEL_REBUILD_ON_GENERATOR_CHANGE_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn effective_model_rebuild_on_generator_change(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(true)
+}
+
 /// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
 pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PATH";
 
@@ -3499,6 +3541,16 @@ mod tests {
             Some(false),
             Some("maybe")
         ));
+    }
+
+    /// 生成器变了就整库重排默认开（GitHub #73）；配置能关、环境变量两个方向都能压，拼错的值退回配置值。
+    #[test]
+    fn rebuild_on_generator_change_is_on_by_default_and_can_be_shut() {
+        assert!(effective_model_rebuild_on_generator_change(None, None));
+        assert!(!effective_model_rebuild_on_generator_change(Some(false), None));
+        assert!(!effective_model_rebuild_on_generator_change(Some(true), Some("0")));
+        assert!(effective_model_rebuild_on_generator_change(Some(false), Some("on")));
+        assert!(!effective_model_rebuild_on_generator_change(Some(false), Some("maybe")));
     }
 
     /// 刚体前移便宜路径**默认开**（ADR-066 D7，2026-10-14 翻默认，Issue #36），配置能关、环境变量

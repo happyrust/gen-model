@@ -261,7 +261,7 @@ fn retired_from_mdb_banner(retired: &[u32]) -> Option<String> {
     ))
 }
 
-async fn current_mdb_design_dbnums() -> anyhow::Result<BTreeSet<u32>> {
+pub(crate) async fn current_mdb_design_dbnums() -> anyhow::Result<BTreeSet<u32>> {
     tokio::task::spawn_blocking(crate::data_interface::model_source::mdb_design_dbnums)
         .await
         .map_err(|error| anyhow::anyhow!("读取 MDB 成员的阻塞任务异常: {error}"))?
@@ -441,6 +441,21 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         return coverage;
     }
 
+    // GitHub #73：库级生成器落款。读不到（`None`）这一轮不按生成器排——不许一次库抖动把每个库都排一遍。
+    let generator = crate::data_interface::generator_reconcile::current_generator();
+    let generator_rebuild_enabled = crate::options::model_rebuild_on_generator_change();
+    let stamped_generators =
+        match crate::data_interface::generator_reconcile::stamped_generators().await {
+            Ok(map) => Some(map),
+            Err(error) => {
+                println!(
+                    "生成器核对：读不到水位行的生成器落款，本次启动不按生成器排重算: {error:#}"
+                );
+                None
+            }
+        };
+    let mut generator_stale: Vec<u32> = Vec::new();
+
     let mut examined = 0usize;
     let mut windows = 0usize;
     let mut enqueued = 0usize;
@@ -459,9 +474,32 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         if !state.db_type.eq_ignore_ascii_case("DESI") || state.applied_sesno <= 0 {
             continue;
         }
+        // GitHub #73：生成器变了的库整库重排（起点 0），压过「只欠一窗」的水位判决——那一窗的根也在整库里。
+        // 落款读不到时这一轮不按生成器排；开关关着只点名（`generator_stale_dbnums`）。
+        let stamped_generator = stamped_generators
+            .as_ref()
+            .map(|stamped| stamped.get(&dbnum).and_then(|stamped| stamped.as_deref()));
+        if let Some(stamped_generator) = stamped_generator
+            && crate::data_interface::generator_reconcile::generator_stale(
+                state.model_sesno,
+                stamped_generator,
+                generator,
+            )
+        {
+            generator_stale.push(dbnum);
+        }
+        let generator_plan = stamped_generator.and_then(|stamped_generator| {
+            crate::data_interface::generator_reconcile::generator_recovery_plan(
+                state.model_sesno,
+                stamped_generator,
+                generator,
+                generator_rebuild_enabled,
+            )
+        });
         // 一级过滤：两枚水位决定要不要排 ModelOnly（ADR-079）。这个纯决策也由真实停机重启测试
         // 直接调用，避免生产规则与测试里的手写判据漂移。
-        let Some(recovery) = startup_model_recovery_plan(state.applied_sesno, state.model_sesno)
+        let Some(recovery) = generator_plan
+            .or_else(|| startup_model_recovery_plan(state.applied_sesno, state.model_sesno))
         else {
             continue;
         };
@@ -568,6 +606,18 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
             if not_in_mdb.len() > 12 { " …" } else { "" }
         );
     }
+    if !generator_stale.is_empty() {
+        println!(
+            "生成器核对：{} 个库的库级生成器落款与本进程不一致 dbnum={generator_stale:?}（e3d-model {}）；{}",
+            generator_stale.len(),
+            crate::build_info::E3D_MODEL_BUILD_ID,
+            if generator_rebuild_enabled {
+                "已按整库重排处理（ModelOnly 起点 0，reason=model_generator_changed）"
+            } else {
+                "开关 model_rebuild_on_generator_change 关着，只点名；要重算请 POST /api/v1/dbnums/{dbnum}/model/rebuild"
+            }
+        );
+    }
     println!(
         "模型水位核对完成：核对 {examined} 库，落后 {windows} 库，排队 {enqueued} 项，\
          取不到文件最新 {unreadable} 库，不在当前 MDB {} 库",
@@ -594,6 +644,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         catalogue_behind_out_of_scope,
         catalogue_cascade,
         catalogue_dependency_refresh,
+        generator_stale_dbnums: generator_stale,
     };
     coverage
 }
