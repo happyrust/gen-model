@@ -375,6 +375,13 @@ fn parse_record_id(id: &str) -> Option<RefU64> {
 }
 
 /// 摄入 / 落盘形态：`room_relate` 边里 `in ∈ 所选面板` 的 `out`，连同 `in` 一起取，好知道每个成员挂在哪几间房下。
+///
+/// **必须滤掉 `out.deleted = true`**：构件被删后 `pe` 行还在（`deleted` 置位）、`room_relate`
+/// 边也还在，不滤就会把已删构件算成房间成员。真库实测两块跨房面板各多算 98 个成员
+/// （`pe:24381_35186` 2466 → 2368，`pe:24381_855` 1558 → 1460），全库 196 条这样的脏边。
+///
+/// 写成 `out.deleted != true` 而不是 `!out.deleted`：老边的 `deleted` 字段是 NONE，
+/// `!NONE` 在 mem 引擎上不是 true，会误杀正常边。
 async fn resolve_members_durable(panels: &PanelRooms) -> anyhow::Result<Members> {
     if panels.is_empty() {
         return Ok(Members {
@@ -385,10 +392,24 @@ async fn resolve_members_durable(panels: &PanelRooms) -> anyhow::Result<Members>
     }
     let mut keys = panels.keys().map(|panel| panel.to_pe_key()).collect::<Vec<_>>();
     keys.sort();
-    let sql = format!(
-        "SELECT record::id(in) AS panel, record::id(out) AS member FROM room_relate WHERE in IN [{}];",
-        keys.join(", ")
-    );
+    // 每个面板走一次图遍历，再 `array::flatten` 拼成一批，**不要**写成
+    // `FROM room_relate WHERE in IN [...]`：后者是全表扫，真库两块面板实测
+    // 1102ms，图遍历形态只要 213ms（5.2 倍），行数完全一致（3828）。
+    //
+    // 每个面板的子查询要各自先 `array::flatten` 一层：`RETURN` 的顶层会自动扁平化，
+    // 但数组字面量内部不会，不套这一层拿到的就是「数组的数组」。
+    // 数组字面量里也不能用 `UNION ALL`（SurrealDB 报 parse error）。
+    let per_panel = keys
+        .iter()
+        .map(|key| {
+            format!(
+                "array::flatten([(SELECT record::id(in) AS panel, record::id(out) AS member \
+                 FROM {key}->room_relate WHERE out.deleted != true)])"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("RETURN array::flatten([{per_panel}]);");
     #[derive(serde::Deserialize)]
     struct Row {
         panel: String,
@@ -856,5 +877,49 @@ mod tests {
                 .expect("refno parses");
             assert_eq!(parsed, refno(5));
         }
+    }
+
+    /// 落盘形态必须滤掉已删构件的边。
+    ///
+    /// 构件被删后 `pe` 行还在（`deleted` 置位）、`room_relate` 边也还在。不滤就会把
+    /// 已删构件算成房间成员：真库两块跨房面板各多算 98 个（`pe:24381_35186`
+    /// 2466 → 2368、`pe:24381_855` 1558 → 1460），全库 196 条这样的脏边。
+    ///
+    /// 用源码钉而不是夹具：`resolve_members_durable` 硬编码 `SUL_DB`，没法在 `mem://`
+    /// 上搭一套等价夹具；而这条查询的口径就是它的全部内容，钉住文本足够。
+    #[test]
+    fn durable_members_filter_soft_deleted_parts() {
+        let source = include_str!("spatial_rooms.rs");
+        // 切到下一个 `\nasync fn ` / `\nfn ` / `\n/// ` 之前，避免被函数体内第一个 `}` 截断。
+        let body = source
+            .split_once("async fn resolve_members_durable(")
+            .expect("resolve_members_durable 必须存在")
+            .1;
+        let end = ["\nasync fn ", "\nfn ", "\n/// "]
+            .iter()
+            .filter_map(|marker| body.find(marker))
+            .min()
+            .expect("函数之后必须还有别的内容");
+        let body = &body[..end];
+        // 只看代码，不看注释：注释里会提到被否决的写法。
+        let code: String = body
+            .lines()
+            .map(|line| line.trim_start())
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("out.deleted != true"),
+            "落盘形态必须滤掉已删构件（写成 != true 而不是 !out.deleted：\
+             老边的 deleted 是 NONE，!NONE 在 mem 引擎上不是 true，会误杀正常边）:\n{body}"
+        );
+        assert!(
+            !code.contains("FROM room_relate WHERE in IN"),
+            "不许退回全表扫描形态：真库两块面板实测 1102ms，图遍历只要 213ms（5.2 倍）:\n{body}"
+        );
+        assert!(
+            code.contains("->room_relate"),
+            "必须走图遍历（{{panel}}->room_relate），它才吃索引:\n{body}"
+        );
     }
 }
