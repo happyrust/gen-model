@@ -1369,6 +1369,19 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
+        // 本用例的前提是「启动自动执行关闭」——那样首次导入窗口才会以 held 形态出现。
+        // 前提不满足就跳过，而不是把断言改成迁就当前配置：`queued` 与 `held` 是两种
+        // 不同的启动行为，改断言等于让这条测试不再测它要测的东西。
+        //
+        // 要跑它：`AIOS_STARTUP_AUTORUN=off cargo test ... -- --ignored`（`DbOption.toml`
+        // 里 `startup_autorun = true`，环境变量能双向压过配置）。
+        if crate::options::startup_autorun() {
+            eprintln!(
+                "skip live_startup_sweep_repairs_a_caught_up_ghost_watermark: \
+                 startup_autorun 当前为开，本用例要的是关（AIOS_STARTUP_AUTORUN=off）"
+            );
+            return;
+        }
         let project = crate::test_support::manual_update_project().await;
         let dbnum = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
             .map(|value| value.parse::<u32>().expect("dbnum must be u32"))
@@ -5629,118 +5642,6 @@ mod transform_subtree_tests {
 #[cfg(test)]
 mod staged_transform_write_routing_tests {
     use super::*;
-    use crate::data_interface::staging::ResourceThresholds;
-    use crate::data_interface::staging::lifecycle::create_window_on;
-    use surrealdb::engine::any::connect;
-
-    /// 与仓内其它夹具同一保留段（4000000001），序号避开 issue10 与 room_fixture
-    /// 的 1..30 段——`GLOBAL_AABB_TREE` 是进程级共享，撞号会污染「树上首次见到」
-    /// 的判定基线。
-    fn refu(n: u64) -> RefU64 {
-        RefU64((4000000001u64 << 32) | n)
-    }
-
-    /// 暂存 Transform 的三条断言（修复前本用例必红）：
-    ///
-    /// 1. **journal**：trans 记录 INSERT 与 world_trans 指针 UPDATE 都必须进
-    ///    journal（`ExecMode::Both`），暂存行改指新 trans 记录且新指针可解引用
-    ///    （D9 不悬空）；
-    /// 2. **零落盘**：本用例刻意不连接 `SUL_DB`（与
-    ///    `staging_context_routes_reads_and_never_touches_sul_db` 同一负向对照）——
-    ///    修复前指针 UPDATE 直打未初始化的全局句柄、当场报错；函数成功本身就是
-    ///    「窗口计算期间持久层零写入」的证明；
-    /// 3. **房间触发**：位姿位移导致包围盒变化时，房间重算意图必须寄存进窗口
-    ///    （D1 不复活）。
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn staged_transform_routes_pointer_updates_through_the_journal() {
-        let root = RefnoEnum::from(refu(777001));
-        let equi = RefnoEnum::from(refu(777002));
-        let root_pe = root.to_pe_key();
-        let equi_pe = equi.to_pe_key();
-        let equi_inst = equi.to_inst_relate_key();
-        let root_id = root_pe.trim_start_matches("pe:");
-        let equi_id = equi_pe.trim_start_matches("pe:");
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7986, 2, 2, ResourceThresholds::default())
-            .await
-            .expect("create window");
-
-        // 窗口内已解析的暂存世界：EQUI 的名词表行带新 POS（解析写入后的形态），
-        // inst_relate 仍指旧 trans 记录——Transform 工作项拿到的正是这个状态。
-        // 几何侧一条 geo_relate → inst_geo（带 aabb 与 trans），让 AABB 刷新
-        // 有东西可算。
-        window
-            .staging_db()
-            .query(format!(
-                "UPSERT {root_pe} CONTENT {{ noun: 'SITE', deleted: false, refno: SITE:⟨{root_id}⟩ }};\
-                 UPSERT SITE:⟨{root_id}⟩ CONTENT {{ TYPE: 'SITE', NAME: '/ZZTR-ROOT' }};\
-                 UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: {root_pe}, refno: EQUI:⟨{equi_id}⟩ }};\
-                 UPSERT EQUI:⟨{equi_id}⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZTR-EQUI', POS: [1000.0, 0.0, 0.0] }};\
-                 CREATE trans:zztr_old SET d = {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }};\
-                 CREATE aabb:zztr_geo SET d = {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }};\
-                 CREATE inst_info:zztr_geo;\
-                 CREATE inst_geo:zztr_geo SET meshed = true, visible = true, aabb = aabb:zztr_geo;\
-                 RELATE inst_info:zztr_geo->geo_relate->inst_geo:zztr_geo \
-                     SET trans = trans:zztr_old, geo_type = 'Pos', visible = true;\
-                 RELATE {equi_pe}->{equi_inst}->inst_info:zztr_geo \
-                     SET world_trans = trans:zztr_old, aabb = aabb:zztr_geo, solid = true, generic = 'EQUI';"
-            ))
-            .await
-            .expect("plant staged fixture")
-            .check()
-            .expect("staged fixture applied");
-
-        let db_option = DbOption::default();
-
-        window
-            .scope(refresh_world_transform_products(&db_option, &[equi]))
-            .await
-            .expect("暂存 Transform 必须全程只写暂存与 journal（SUL_DB 未连接，直写即错）");
-
-        // 1. journal：两笔写都在场。
-        let journal = window.journal().await;
-        let journal_sqls = journal.iter().map(|entry| &entry.sql).collect::<Vec<_>>();
-        assert!(
-            journal_sqls
-                .iter()
-                .any(|sql| sql.contains("INSERT IGNORE INTO trans")),
-            "trans 记录必须随 journal 写回: {journal_sqls:#?}"
-        );
-        let pointer_marker = format!("UPDATE {equi_inst} SET world_trans = trans:");
-        assert!(
-            journal_sqls.iter().any(|sql| sql.contains(&pointer_marker)),
-            "world_trans 指针 UPDATE 必须进 journal（修复前它直写持久层、journal 缺位）: \
-             {journal_sqls:#?}"
-        );
-
-        // 2. 暂存行改指新 trans 记录，且新指针在暂存世界可解引用。
-        let mut response = window
-            .staging_db()
-            .query(format!(
-                "RETURN record::id({equi_inst}.world_trans);\
-                 RETURN {equi_inst}.world_trans.d != NONE;"
-            ))
-            .await
-            .expect("read staged pointer")
-            .check()
-            .expect("valid staged pointer query");
-        let trans_id: Option<String> = response.take(0).expect("take trans id");
-        let resolvable: Option<bool> = response.take(1).expect("take resolvable");
-        let trans_id = trans_id.expect("staged inst_relate 必须有 world_trans 指针");
-        assert_ne!(trans_id, "zztr_old", "指针必须改指重算出的新 trans 记录");
-        assert_eq!(
-            resolvable,
-            Some(true),
-            "新指针必须指向暂存里存在的 trans 记录（D9 不悬空）"
-        );
-
-        // 3.（原先这里断言「位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口」；房间轮随
-        //    房间流程退役，房间归属在生成根落库时就地算，ADR-073 D1——窗口不再寄存房间变更。）
-
-        window.drop_database().await.expect("cleanup");
-    }
 
     /// 「回退即红」源码钉：变换产物刷新的函数体内不得出现 SUL_DB 直连，指针
     /// 批量 UPDATE 必须经 execute_model_write 路由。函数嵌着窗口设施与实库

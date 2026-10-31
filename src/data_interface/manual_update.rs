@@ -7236,11 +7236,18 @@ mod tests {
 
         let dbnum = 999_999_021u32;
         let ref0 = 4_000_000_021u64;
+        // `dbnum_info_table` 的 id 必须是纯数字 Ref0（`fast_delete::resolve_ref0_ranges`
+        // 逐字校验，见 `fast_delete.rs:156`），所以不能写成
+        // `CREATE dbnum_info_table SET ...`——那样 SurrealDB 会生成随机字符串 id
+        // （`c1eulircy6b5zg40vaov` 这种），整库清理在解析范围时当场 bail。
+        // 取一个不与真库冲突的数字段（真库现用 9304 / 13292 / 14194 …）。
+        let info_id = 9_999_999_021u64;
         let cleanup = format!(
             "DELETE pe:{ref0}_1; DELETE pe:{ref0}_2; \
              DELETE ZZWM:{ref0}_1; DELETE ZZWM:{ref0}_2; \
              DELETE inst_relate:{ref0}_2; \
              DELETE dbnum_watermark:{dbnum}; \
+             DELETE dbnum_info_table:{info_id}; \
              DELETE dbnum_info_table WHERE dbnum = {dbnum};"
         );
         SUL_DB
@@ -7261,7 +7268,7 @@ mod tests {
                  name = '/zz-realign-ghost'; \
                  CREATE ZZWM:{ref0}_2 SET dbnum = {dbnum}; \
                  CREATE inst_relate:{ref0}_2 SET dbnum = {dbnum}; \
-                 CREATE dbnum_info_table SET dbnum = {dbnum}, sesno = 40, count = 1;"
+                 CREATE dbnum_info_table:{info_id} SET dbnum = {dbnum}, sesno = 40, count = 1;"
             ))
             .await
             .expect("seed fixture")
@@ -9660,10 +9667,18 @@ mod live_tests {
             "receipt = {}",
             serde_json::to_string_pretty(&receipt).expect("serialize receipt")
         );
+        // `watch_dbnums` 限定模式会带一条**告知性** warning（「只处理 watch_dbnums
+        // 里的库，这是被显式收窄的范围」）。它说的是配置事实，不是失败信号——原来
+        // 用 `warnings.is_empty()` 一并当红，会让任何收窄了范围的部署都跑不过。
+        // 真正要防的是别的 warning，所以按内容放行这一条。
+        let unexpected: Vec<&String> = receipt
+            .warnings
+            .iter()
+            .filter(|warning| !warning.contains("watch_dbnums"))
+            .collect();
         assert!(
-            receipt.warnings.is_empty(),
-            "enqueue warnings: {:?}",
-            receipt.warnings
+            unexpected.is_empty(),
+            "enqueue 出现预期外的 warning（watch_dbnums 限定模式那条是告知性的，已放行）: {unexpected:?}"
         );
 
         let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
@@ -9691,8 +9706,8 @@ mod live_tests {
     /// 幕一（回退默认整库重建）：把库侧水位抬到文件之上 → 手动入队。断言三件事：
     /// 回执不 blocked、warnings 点名「整库重建」、**入队阶段不删数据**（清库归
     /// worker）。随后 worker 消费：冻结点复核仍判回退 → `wipe_dbnum_for_reinit` →
-    /// 首次导入基线，终态水位 == 文件水位、批次 warnings 带「回退重建：已整库清空」、
-    /// batch.message 是「首次按需初始化完成」。
+    /// 首次导入基线，终态水位 == 文件水位、批次 warnings 带「检测到回退」与
+    /// 「已整库清空」、batch.message 是「首次按需初始化完成」。
     ///
     /// 幕二（水位非零而库里零行）：删光该库 pe 行、把水位压到文件之下（有增量窗口
     /// 可走的形状）→ 旧判据会走增量把 `1..applied` 永远漏掉；新判据（数据支撑）
@@ -9817,7 +9832,11 @@ mod live_tests {
             dbnum,
             file_latest,
             &receipt.enqueued[0].task_id,
-            &["回退重建：已整库清空", "首次按需初始化完成"],
+            // 断言的是实现实际产出的证据片段：回退判定（`ReinitWipeDecision::Wipe`
+            // 的文案是「检测到回退（…）」）加上清库动作（「已整库清空 N 行 PE」）。
+            // 原先这里写「回退重建：已整库清空」——那是更早的措辞，实现改过之后
+            // 这条断言再没跟上来，一直红着。
+            &["检测到回退", "已整库清空", "首次按需初始化完成"],
         )
         .await;
 
