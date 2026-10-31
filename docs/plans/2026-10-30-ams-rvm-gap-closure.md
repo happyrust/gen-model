@@ -367,6 +367,38 @@ SEXT `23704/782469` 的 `PAAX=[2,1]`（`-X`）、`PBAX=[1,3]`（`+Z`）、`PHEI=
 生成恒为 `−54.500000`；Z 上基准 `−0.500005`、生成 `0`。代表
 `/MDS/FT09/14-V1/S1/IJOINT1`（`23740/1191`）。
 
+**两轮试验都失败，源码已回退。** 用 `examples/sext_axis_probe.rs`
+（commit `2149461`）取证后试了两种 `profile_frame` 改法：
+
+| 改法 | 7356 exact | off |
+| --- | --- | --- |
+| 原样 | **1 015** | **47** |
+| `x = PBAX`、`z = PAAX`（`PAAX` 当挤出轴） | 830 | 234 |
+| `x = PAAX × PBAX`、`z = −PAAX` | 830 | 234 |
+
+失败原因不是改法不够巧，而是**根因不在这**。普查 7356 的 202 件 SJOI：
+
+```
+  10  SEXT:[1,1]/[2,3]      36  SEXT:[1,3]/[1,2]      30  SEXT:[2,1]/[1,2]
+  88  SEXT:[2,1]/[1,3]      34  SEXT:[2,1]/[1,3]×2     4  SEXT:[2,3]/[2,1]×2
+```
+
+`[2,1]/[1,3]` 共 122 件，**off 只有 24 件**。同一轴组合下大多数件是对的，
+所以错的不在 `PAAX`/`PBAX` 的取法。
+
+off 的 `23740/1550` 与 exact 的 `23740/335` 轴组合完全相同，差别在 `PHEI`：
+
+| | `23740/1550`（off） | `23740/335`（exact） |
+| --- | --- | --- |
+| `PHEI` 原值 | `RawWords([40,1,3,0])` | `Text("( ATTRIB PARA[3 ] )")` |
+| `PHEI` 求值 | `4.0`，`form: Tuple` | `6.0`，`form: Pml` |
+| 轮廓 PX 跨 | 140.0 | 50.0 |
+| 轮廓 PY 跨 | 90.0 | 94.0 |
+
+**继续需要的证据**：Core 的 `ORTHOG` 反编译（`QSSEXT` `0x103B7FCC` 之后轮廓
+PX/PY 与 `PHEI` 各落在哪根轴），或一条 TTY 逐属性真值钉住 `[40,1,3,0]` 这个
+Tuple 形式取 `PARA[2]` 还是 `PARA[3]`。在此之前这一族不动。
+
 #### 4.2.2 7999 剩余 21 件的构成
 
 | 根 | noun | off | 偏差 | 形态 |
@@ -483,6 +515,11 @@ Z 两侧一致（±30），同一个系。X 多 238.5，Y 中心偏 −180、跨
 | #84 TUBI 重复 | **不是缺陷**。7999 三根的 2 855 根 TUBI 按 `geometry_id` 去重后重复 0 | `elements.json` 的 `geometry_id` 全量比对 |
 | #85 7356 SJOI 24 件 | 目录件轴分配错位，不是「负体没切」也不是「转置」 | 基准 `bbox_record_m` 对 `local_aabb`，SEXT 的 `PAAX`/`PBAX`/`PHEI` |
 | #85 7999 HELE 19 件 | 中心偏 −180 + X 跨多 238.5，不是「沿 Y 拉长 7.4 倍」 | 基准 `bbox_record_m` 对 `local_aabb` |
+| #85 7356 SJOI 两轮试验 | 两种 `profile_frame` 改法都让 exact 1015→830，**已回退** | 7356 单库回归 + `sext_axis_probe` 普查 |
+
+新增只读工具 `examples/sext_axis_probe.rs`（commit `2149461`）：`catalogue_probe`
+的 `follow_to_scom` 只认 `SPRE → CATR`，遇到 `SPRE` 直接指向 `JOIN` 的目录链会停在
+「SPRE 链未到 SCOM」，问不到 `PHEI`。这个探针补那一段，并普查 SEXT/SREV 的轴组合分布。
 
 **本轮无 CT 窗口可用**（`ct_windows` 返回 `count: 0`），`profile_frame` 的取轴问题
 按 skill 的降级规则由本会话取证，**未经 CT 定夺**。下一轮若要动 `profile_frame`，
