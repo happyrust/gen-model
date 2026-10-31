@@ -474,8 +474,37 @@ FacetGroup 的 bbox_record = -45, -4, -96.1, 45, 0, 43.9        → X 跨 90 / Y
 | SJOI | 17 | 12 件 `/48-BAR-1` 族已修好；剩 5 件 0.5 mm 残差（基准 `−54.500376` 对生成 `−54.500000`）+ 12 件其他族 |
 | FITT | 18 | 绕 X 90°，基准 `94×50×94` ↔ 生成 `94×94×50` |
 
-`FITT` 那 18 件的形态与刚修好的 SJOI 族相似（差一个 90° 轴置换），
-下一轮可以拿同一套 `BANG`/`CUTP` 判据去查 `FITT` 的 `FITI`/`SJUS`。
+#### FITT 18 件：定位到 `radial_angle`，两次试验都没复现基准
+
+用新探针 `examples/fitt_frame_probe.rs`（commit `d9cd2b2`）查清四条：
+
+1. **偏差全是 47 mm**，局部 Y/Z 互换（绕 X 90°）。
+2. **基准记录帧是单位阵。** 5 个 `Box` 的 `transform_cols_m` 全是
+   `0.001,0,0, 0,0.001,0, 0,0,0.001`，只有平移不同。**E3D 对这 18 件没做标架旋转。**
+3. **两族唯一差异是 `POSL`/`ZDIS`/`BANG`**：off 的 18 件 `DRNE`/`0`/`0`，
+   exact 的 14 件 `NA`/`8`/`90`；两族属主的 `PSTR` **完全相同**（15 条同名 `PLIN`）。
+4. **根因在 `section.rs` 的 `radial_angle`。** `POSL = DRNE` 时 `find("DRNE")` 查不到
+   （`PSTR` 里没有 `DRNE`/`DRNS`），退回 `NA` 兜底，`radial_angle` 被赋成 π/2，
+   于是 `fitting_mount_frame` 里 `y=(0,0,1)`、`radial=(0,1,0)`、`z=(0,1,0)`、
+   `rotation = ((-1,0,0),(0,0,1),(0,1,0))`——正是生成侧那个 90°。
+
+**两次改动都失败，已回退**：
+
+| 改动 | 结果 |
+| --- | --- |
+| `POSL = DRNE`/`DRNS` 跳过 `NA` 兜底 | `placement` 不变 |
+| 同上 + 强制 `radial_angle = 0` | 变成 `X=(0,1,0) Y=(0,0,1) Z=(1,0,0)`，仍不是单位阵 |
+
+第二次 `X` 从 `(-1,0,0)` 变成 `(0,1,0)`，方向对了但还差一步：基准要 `Y=(0,1,0)`，
+说明 `line` 该沿 **Y**，而 `fitting_mount_frame` 拿到的 `line` 沿宿主轴 Z。
+`line` 在 `PSTR` 分支里被设成 `rotation * (DX, DY, |axis|)`，但
+`optional_number(mount, "DX")`/`"DY"` 读不到——`PLIN` 上没这两个属性
+（`member_frame` 读的是 `PX`/`PY`/`PLAX`）。
+
+**继续需要**：`PLIN` 的安装线方向该怎么求。`POSL = DRNE` 时基准要 `line` 沿 Y，
+但 `DRNE`/`DRNS` 都是 Z 向，两者矛盾——这一档还有一层没读到的语义
+（可能是 `PLIN` 上另一个属性，或 `SCTN` 的 `GTYP`/`DESP` 参与）。
+拿到 `PLIN` 属性表全量或一条 TTY 逐属性真值才能定。在此之前这一族不动。
 
 ### 反编译这条路本机走不通（留档，下一族若需仍适用）
 
