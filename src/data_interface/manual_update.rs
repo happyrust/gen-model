@@ -7230,7 +7230,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_rollback_wipe_clears_the_dbnum_for_reinit() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 
@@ -9590,7 +9590,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live: initialize real design-db baselines"]
     async fn live_manual_baseline_all_design_dbnums() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project =
@@ -9637,7 +9637,7 @@ mod live_tests {
     async fn live_manual_update_project() {
         use crate::data_interface::task_registry::{TASK_KIND_DATA_BATCH, TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project =
@@ -9712,7 +9712,7 @@ mod live_tests {
     async fn live_rollback_and_ghost_watermark_reinit_end_to_end() {
         use crate::data_interface::task_registry::{TASK_KIND_DATA_BATCH, TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project =
@@ -9904,7 +9904,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live: verify ref_rev round-trips against local Surreal"]
     async fn live_ref_rev_roundtrip_selfcheck() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 
@@ -9960,7 +9960,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live: rebuild complete ref_rev from current Surreal data"]
     async fn live_rebuild_ref_rev_covers_shared_spco_consumers() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 
@@ -10022,7 +10022,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live: verify shared SPCO expands to real generation roots"]
     async fn live_shared_spco_expands_to_generation_roots() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 

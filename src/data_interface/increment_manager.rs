@@ -1366,7 +1366,7 @@ mod tests {
         use crate::data_interface::manual_update::dbnum_has_any_pe_row;
         use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
@@ -1466,7 +1466,7 @@ mod tests {
         use crate::data_interface::manual_update::dbnum_has_any_pe_row;
         use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
@@ -1753,7 +1753,7 @@ mod tests {
         use crate::data_interface::manual_update::dbnum_has_any_pe_row;
         use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
@@ -1899,7 +1899,7 @@ mod tests {
         use crate::data_interface::mdb_membership::{self, RebindReason};
         use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
@@ -5600,7 +5600,7 @@ mod transform_subtree_tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured AvevaMarineSample Surreal database"]
     async fn live_transform_branch_includes_known_model_child() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let manager = AiosDBManager::init_form_config()

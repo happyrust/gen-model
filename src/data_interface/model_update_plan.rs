@@ -2063,7 +2063,7 @@ mod tests {
         use crate::data_interface::model_refresh::ModelRefreshPolicy;
         use crate::data_interface::tidb_manager::AiosDBManager;
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let manager = AiosDBManager::init_form_config()
@@ -2139,7 +2139,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: reads the real /1WCC1135/B1 owner chain from the configured project"]
     async fn live_issue5_moving_the_reported_cap_plans_a_branch_regeneration() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 
@@ -2181,7 +2181,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: reads the real /1WCC-PIPE-RX zone from the configured project"]
     async fn live_issue5_moving_a_container_regenerates_the_branches_beneath_it() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 
@@ -2267,7 +2267,7 @@ mod tests {
         use crate::data_interface::tidb_manager::AiosDBManager;
         use std::path::PathBuf;
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let manager = AiosDBManager::init_form_config()
@@ -2349,7 +2349,7 @@ mod tests {
         use crate::data_interface::model_refresh::ModelRefreshPolicy;
         use crate::data_interface::tidb_manager::AiosDBManager;
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let manager = AiosDBManager::init_form_config()

@@ -420,7 +420,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "需要本地已解析 AMS 的 SurrealDB（配置目标；精确数断言由 AIOS_EXPECT_DESI_COUNT 门控）"]
     async fn resolves_the_real_mdb_declaration() {
-        aios_core::init_test_surreal().await;
+        let _ = crate::test_support::init_test_db().await;
         let scope = UpdateScope::resolve("ALL").await.expect("解出 /ALL 的范围");
 
         assert_eq!(scope.mdb(), "/ALL", "名字要补上前导斜杠");
@@ -468,7 +468,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "需要一个没有 MDB 表的空 SurrealDB 命名空间"]
     async fn an_unparsed_project_bootstraps_instead_of_deadlocking() {
-        aios_core::init_test_surreal().await;
+        let _ = crate::test_support::init_test_db().await;
         let scope = UpdateScope::resolve("ALL").await.expect("不该 bail");
         assert_eq!(scope.declared_desi().count(), 0);
         assert!(

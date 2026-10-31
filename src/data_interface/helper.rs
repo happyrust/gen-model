@@ -630,7 +630,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured AvevaMarineSample Surreal database"]
     async fn live_deleted_branch_subtree_includes_known_damp_child() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let branch = RefnoEnum::from("24381/100817");
@@ -645,7 +645,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_shared_inst_info_is_deleted_only_after_last_reference() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let first = RefnoEnum::from("4000000000/1");
@@ -726,7 +726,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "temp probe: run ad-hoc SQL from AIOS_PROBE_SQL"]
     async fn probe_live_sql() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let batch = std::env::var("AIOS_PROBE_SQL").expect("set AIOS_PROBE_SQL");
@@ -748,7 +748,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_inst_info_without_geo_relate_is_reclaimed() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let orphan = RefnoEnum::from("4000000000/3");
@@ -804,7 +804,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_soft_deleted_subtree_removes_all_model_nodes() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let root = RefnoEnum::from("4000000000/10");
@@ -899,7 +899,7 @@ mod tests {
     async fn live_direct_delete_crash_before_persist_recovers_by_rebuild() {
         use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         // 本用例自己灌树（幽灵构件）、不走启动装载：按状态机的测试装载模式显式

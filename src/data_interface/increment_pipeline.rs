@@ -4250,7 +4250,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live incr against local Surreal/E3D"]
     async fn force_init_watcher_incr_once() {
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
         let mgr = std::sync::Arc::new(AiosDBManager::init_form_config().await.expect("init mgr"));
@@ -4274,7 +4274,7 @@ mod live_tests {
         use crate::data_interface::ele_data::EleData;
         use aios_core::NamedAttrValue;
 
-        aios_core::init_test_surreal()
+        crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
 

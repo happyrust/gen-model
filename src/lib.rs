@@ -584,6 +584,10 @@ pub mod mbd;
 
 pub mod surreal_retry;
 
+/// 测试侧一次性初始化入口（幂等的 `init_test_surreal`）。见模块文档。
+#[cfg(test)]
+pub mod test_support;
+
 pub mod versioned_db;
 
 pub mod mqtt_service;
