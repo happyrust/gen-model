@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|arg| arg.parse::<u32>().map(|dbnum| vec![dbnum]))
         .transpose()?;
 
-    aios_core::init_test_surreal().await?;
+    aios_database::attach_store_connected().await?;
     let manager = Arc::new(AiosDBManager::init_form_config().await?);
 
     let receipt = manager

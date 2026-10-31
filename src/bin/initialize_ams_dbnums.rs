@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         simplelog::ColorChoice::Never,
     );
 
-    aios_core::init_test_surreal().await?;
+    aios_database::attach_store_connected().await?;
     // 与 `run_cli` 的 schema 段同一套 DEFINE（函数 + 索引）：空店上没有它们，基线的计数与
     // 统计重算就是全表扫。
     aios_database::data_interface::table_parity::init_schema_on(&aios_core::SUL_DB).await?;

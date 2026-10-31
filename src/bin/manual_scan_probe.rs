@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("usage: manual_scan_probe <project> [sessions]"))?;
 
-    aios_core::init_test_surreal().await?;
+    aios_database::attach_store_connected().await?;
     let mut option = aios_core::get_db_option().clone();
     option.project_name = project.clone();
     if args.get(1).is_some_and(|value| value == "sessions") {

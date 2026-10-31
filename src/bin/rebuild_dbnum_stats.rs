@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .collect::<Result<Vec<_>, _>>()?;
     anyhow::ensure!(!dbnums.is_empty(), "usage: rebuild_dbnum_stats <dbnum>...");
 
-    aios_core::init_test_surreal().await?;
+    aios_database::attach_store_connected().await?;
     aios_database::versioned_db::database::retire_dbnum_event().await?;
 
     let mut failures = 0usize;
