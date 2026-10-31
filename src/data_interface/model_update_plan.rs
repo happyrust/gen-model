@@ -2286,6 +2286,26 @@ mod tests {
             ("24384/25743", "24384/25742", "24384/25725"),
             ("24384/25923", "24384/25887", "24384/25872"),
         ];
+        // 这两个 refno 来自 2026-09-04 那版设计文件里的 sesno 21。设计文件随建模推进，
+        // sesno 21 的内容会变——语料漂移后这批 Add 就找不到了。前提不满足即跳过，
+        // 不改成「找不到就跳过断言」（那样这条测试只剩一个空壳）。
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(element, _, _)| {
+                let refno = RefnoEnum::from(*element);
+                !operations
+                    .iter()
+                    .any(|operation| RefnoEnum::from(operation.refno) == refno)
+            })
+            .map(|(element, _, _)| *element)
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "skip live_projams_nested_created_routes_and_generates_delivery_roots: \
+                 设计文件当前的 sesno 21 里没有 {missing:?}（语料漂移，用例要的是 2026-09-04 那版）"
+            );
+            return;
+        }
         let mut selected = Vec::new();
         for (element, direct_owner, delivery_root) in expected {
             let refno = RefnoEnum::from(element);
@@ -2352,6 +2372,24 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
+        // 前提：真库里这条 NCYL 负几何已经被生成过（`pe:24381_100680->neg_relate` 有边）。
+        // 负几何边由 `pdms_inst::build_save_sql` 写入，构件没生成过就一条都没有——
+        // 那时本用例测的「改 DIAM 后重生成所属 EQUI」根本无从谈起。前提不满足即跳过，
+        // 不改成「空就当作通过」（那样它连一次生成都没验过）。
+        let mut probe = SUL_DB
+            .query("RETURN count(SELECT * FROM pe:24381_100680->neg_relate);")
+            .await
+            .expect("probe existing negative geometry")
+            .check()
+            .expect("valid negative-geometry probe");
+        let existing_neg: Option<usize> = probe.take(0).expect("decode negative-geometry probe");
+        if existing_neg.unwrap_or(0) == 0 {
+            eprintln!(
+                "skip live_projams_negative_geometry_change_regenerates_owning_equi: \
+                 pe:24381_100680 还没有 neg_relate 边（NCYL 负几何未生成过）"
+            );
+            return;
+        }
         let manager = AiosDBManager::init_form_config()
             .await
             .expect("init manager");

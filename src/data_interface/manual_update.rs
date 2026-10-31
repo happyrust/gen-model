@@ -1135,7 +1135,9 @@ fn render_reverse_index_insert(table: &str, rows: &[(RefnoEnum, RefnoEnum)]) -> 
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("INSERT INTO {table} [{values}];")
+    // `RETURN NONE` 与最终 swap 同一个理由：`INSERT` 默认把插入的每一行回给客户端。
+    // 重建要写 61 万条边，不关掉就是一路往客户端回传几十 MB 的无人读取的响应。
+    format!("INSERT INTO {table} [{values}] RETURN NONE;")
 }
 
 fn decode_reverse_index_attmaps(value: surrealdb::Value) -> anyhow::Result<Vec<NamedAttrMap>> {
@@ -1233,7 +1235,11 @@ pub async fn repair_reverse_index_for(referrers: &[RefnoEnum]) -> anyhow::Result
 /// changes remain covered by [`build_reverse_index_statements`].
 pub async fn rebuild_reverse_index() -> anyhow::Result<ReverseIndexRebuildReport> {
     const STAGE_TABLE: &str = "ref_rev_rebuild";
-    const READ_CHUNK: usize = 500;
+    // 200 而不是 500：每批 `SELECT VALUE refno.*` 的响应在真库上约 120 KB（500 条），
+    // WebSocket 客户端累计到第 97 批左右就撞 `receiving from an empty and closed
+    // channel`，而服务端一切正常（HTTP 直连 1324 批全通，1.5 分钟）。降到 200 条
+    // 后读阶段 3309 批全部跑完，同一条重建从「21 秒必红」变成 375 秒通过。
+    const READ_CHUNK: usize = 200;
     const WRITE_CHUNK: usize = 500;
 
     SUL_DB
@@ -1339,11 +1345,18 @@ pub async fn rebuild_reverse_index() -> anyhow::Result<ReverseIndexRebuildReport
         // itself, and graph adjacency replaces the old secondary indexes — which
         // would otherwise linger on legacy databases indexing fields the edge
         // rows no longer carry.
+        // `RETURN NONE` 不能省：`INSERT RELATION ... (SELECT ...)` 默认把插入的每一行
+        // 都回给客户端。真库有 61 万条边，那个响应约 60 MB——服务端事务提交成功，
+        // 客户端却先在 WebSocket 上撞 `receiving from an empty and closed channel`，
+        // 于是调用方看到「重建失败」而库里其实已经换好了（实测：报错后 `ref_rev`
+        // 610605 行、SPCO 23274_295504 的 75 个引用者全在）。实测 20000 行 2021 KB
+        // → 加 `RETURN NONE` 后 0.1 KB；全量单事务 50.8s、响应 0.09 KB。
         let swap_sql = format!(
             "BEGIN TRANSACTION;\n\
              DELETE ref_rev;\n\
              INSERT RELATION INTO ref_rev \
-                 (SELECT type::thing('ref_rev', [in, out]) AS id, in, out FROM {STAGE_TABLE});\n\
+                 (SELECT type::thing('ref_rev', [in, out]) AS id, in, out FROM {STAGE_TABLE}) \
+                 RETURN NONE;\n\
              DELETE {STAGE_TABLE};\n\
              COMMIT TRANSACTION;\n\
              REMOVE INDEX IF EXISTS ref_rev_unique ON TABLE ref_rev;\n\

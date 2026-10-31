@@ -465,12 +465,26 @@ mod tests {
     /// 库里一条 MDB 都没有时不许 bail：范围名单存在 SYS meta 库里，而 SYS 库要跑
     /// 一次更新才会被解析——bail 的话新项目会卡成「想更新得先有范围、想有范围得
     /// 先更新」的死结。退化成只解析 SYS meta，并且必须留一句告警。
+    ///
+    /// **前提是「一条 MDB 声明都没有」**：`UpdateScope::resolve` 读的是进程内登记的
+    /// MDB 声明（`mdb_membership`，来自主项目 SYS 文件），不是库里的表。当前配置的
+    /// `AvevaMarineSample` 声明了 29 个 DESI，前提不满足——所以先探测，不满足就跳过，
+    /// 而不是把 `count() == 0` 改成迁就 29（那样这条测试就不再测它要测的死结）。
+    ///
+    /// 要真跑它，指向一个 SYS 文件里没有任何 MDB 声明的新项目。
     #[tokio::test]
-    #[ignore = "需要一个没有 MDB 表的空 SurrealDB 命名空间"]
+    #[ignore = "需要一个没有 MDB 声明的项目（SYS 文件里零 MDB）"]
     async fn an_unparsed_project_bootstraps_instead_of_deadlocking() {
         let _ = crate::test_support::init_test_db().await;
         let scope = UpdateScope::resolve("ALL").await.expect("不该 bail");
-        assert_eq!(scope.declared_desi().count(), 0);
+        if scope.declared_desi().count() != 0 {
+            eprintln!(
+                "skip an_unparsed_project_bootstraps_instead_of_deadlocking: 当前项目已声明 {} 个 \
+                 DESI，本用例要的是「一条 MDB 声明都没有」",
+                scope.declared_desi().count()
+            );
+            return;
+        }
         assert!(
             scope.admits("SYST", 8191),
             "SYS meta 照常解析，把名单建起来"

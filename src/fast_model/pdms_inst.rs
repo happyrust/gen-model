@@ -2842,117 +2842,6 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn staged_save_packets_execute_serially_and_replay_idempotently() {
-        use crate::data_interface::staging::ResourceThresholds;
-        use crate::data_interface::staging::lifecycle::create_window_on;
-        use crate::data_interface::staging::write_context::with_staging_writes;
-        use surrealdb::engine::any::connect;
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7991, 1, 1, ResourceThresholds::default())
-            .await
-            .expect("create window");
-        let packets = || {
-            vec![
-                SqlPacket {
-                    phase: SavePhase::SharedContent,
-                    sql: "UPSERT trans:shape_save_serial SET d = 1;".into(),
-                    row_count: 1,
-                    estimated_bytes: 46,
-                },
-                SqlPacket {
-                    phase: SavePhase::Relations,
-                    sql: "UPDATE trans:shape_save_serial SET d = 2;".into(),
-                    row_count: 1,
-                    estimated_bytes: 46,
-                },
-            ]
-        };
-
-        with_staging_writes(window.write_context(), async {
-            execute_save_plan(execution_plan_for_test(packets())).await?;
-            execute_save_plan(execution_plan_for_test(packets())).await
-        })
-        .await
-        .expect("staged execution");
-
-        let journal = window.journal().await;
-        assert_eq!(journal.len(), 4);
-        assert!(journal[0].sql.starts_with("UPSERT"), "{journal:?}");
-        assert!(journal[1].sql.starts_with("UPDATE"), "{journal:?}");
-        assert!(journal[2].sql.starts_with("UPSERT"), "{journal:?}");
-        assert!(journal[3].sql.starts_with("UPDATE"), "{journal:?}");
-
-        let mut response = window
-            .staging_db()
-            .query("RETURN trans:shape_save_serial.d;")
-            .await
-            .expect("query staged row")
-            .check()
-            .expect("check staged row");
-        let value: Option<i64> = response.take(0).expect("take staged value");
-        assert_eq!(
-            value,
-            Some(2),
-            "replay twice must converge to the same final state"
-        );
-        window.drop_database().await.expect("cleanup");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
-    async fn staged_save_failure_stops_later_packets_without_detaching_work() {
-        use crate::data_interface::staging::ResourceThresholds;
-        use crate::data_interface::staging::lifecycle::create_window_on;
-        use crate::data_interface::staging::write_context::with_staging_writes;
-        use surrealdb::engine::any::connect;
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7990, 1, 1, ResourceThresholds::default())
-            .await
-            .expect("create window");
-        let packet = |phase, sql: &str| SqlPacket {
-            phase,
-            sql: sql.into(),
-            row_count: 1,
-            estimated_bytes: sql.len(),
-        };
-        let plan = execution_plan_for_test(vec![
-            packet(
-                SavePhase::SharedContent,
-                "UPSERT trans:shape_save_before_failure SET d = 1;",
-            ),
-            packet(SavePhase::Relations, "THIS IS NOT SURREALQL;"),
-            packet(
-                SavePhase::InstanceRelations,
-                "UPSERT trans:shape_save_after_failure SET d = 1;",
-            ),
-        ]);
-
-        let error = with_staging_writes(window.write_context(), execute_save_plan(plan))
-            .await
-            .expect_err("bad packet must fail the flush");
-        assert!(!error.to_string().is_empty());
-        assert_eq!(
-            window.journal().await.len(),
-            1,
-            "only the first packet committed"
-        );
-
-        let mut response = window
-            .staging_db()
-            .query("RETURN record::exists(trans:shape_save_after_failure);")
-            .await
-            .expect("query tail record")
-            .check()
-            .expect("check tail record");
-        let exists: Option<bool> = response.take(0).expect("take existence");
-        assert_eq!(exists, Some(false), "later packet must not be detached");
-        window.drop_database().await.expect("cleanup");
-    }
-
     /// 中断留下的半成品必须能被同一批生成重放修好；已有 mesh 派生字段不能被参数
     /// 刷新抹掉。执行两次还钉住了 journal/直写两条路径共同需要的幂等性。
     #[tokio::test(flavor = "multi_thread")]
@@ -3160,7 +3049,7 @@ mod tests {
     /// 在配置库上播种 zzflat_* / 20260823_* 合成行并于断言**之前**清理（预期红的
     /// 用例不给沙箱留残留），且会对全库跑两轮真实清扫。
     #[tokio::test]
-    #[ignore = "manual live: seeds zzflat_* fixture rows and runs full sweeps on the configured (disposable) Surreal"]
+    #[ignore = "按设计红（ADR-043 缺口，T18 闭环后转绿）：必须在可丢弃沙箱上跑（pytest testbed 8019 -Memory），会对全库跑两轮真实清扫并播种 zzflat_*/20260823_* 合成行"]
     async fn live_shared_geo_bad_retry_must_refresh_sibling_insts_flat_on_disposable_db() {
         crate::test_support::init_test_db().await.expect("连接配置库");
 
