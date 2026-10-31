@@ -1,0 +1,31 @@
+-- L2 回放链 ams8000-equi-rotate-chain：EQUI /1-LNR-Q005-PJ (=24384/24776, dbnum 8000) 绕自身原点、绕 U 轴转 +90°——只动方位，POS 不变（刚体路的转动那一半）。
+-- 基线方位 Y is N 5 W and Z is D（2026-10-24 TTY 实测）；本腿写整份终态 Y is W 5 S and Z is D，不写反向增量。
+-- 子 BOX =24384/24777 转前转后各取一次世界位姿：它跟着根转，回执的 geometry_diff.moved 数的就是它。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件（真快照 → 字节补丁，见 equi_apply.mac）。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_rotate_apply.log" OVER
+$P REPLAY-ROTATE-APPLY-ALIVE
+=24384/24777
+Q REF
+Q POS
+Q POS WRT /*
+Q ORI WRT /*
+Q XLEN
+Q YLEN
+Q ZLEN
+=24384/24776
+Q NAME
+Q REF
+Q POS
+Q ORI
+ORI Y IS W 5 S AND Z IS D
+Q POS
+Q ORI
+=24384/24777
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'replay chain ams8000-equi-rotate-chain: EQUI =24384/24776 rotate +90 about U through its own origin'
+$P REPLAY-ROTATE-APPLY-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-rotate\ams8000_0001.after-apply-save"'
+$P REPLAY-ROTATE-APPLY-DONE
+ALPHA LOG END

@@ -1756,13 +1756,25 @@ impl WindowRootSources {
     /// 哪怕一根既被闭包直接命中（如所在 ZONE 挪位或自身纯位姿变动）、又是某条级联的对端，
     /// 也必须算进 `expanded` 而一律不走便宜路（D1 规则 5）。
     /// `settled` = `roots_S` 里已发布且安定的根（[`settled_base_roots`]：S 端根集减去账本里还欠着的）。
-    /// 开关关着时 `self.rigid.enabled == false`，返回默认值。
+    /// 开关关着时 `self.rigid.enabled == false`，返回默认值；P4 关着时（[`Self::rigid_motion_cascade_off`]）
+    /// 整窗不分桶，被波及的根都带着原因留在 `regen`。
     pub(crate) fn rigid_motion(
         &self,
         roots_s: &[PersistedRoot],
         settled: &BTreeSet<RefnoEnum>,
         impact: &WindowImpact,
     ) -> TransformClassification {
+        if let Some(reason) = self.rigid_motion_cascade_off() {
+            return TransformClassification {
+                transform: BTreeMap::new(),
+                rejected: self
+                    .roots_t
+                    .iter()
+                    .filter(|root| impact.touched.contains(&root.root))
+                    .map(|root| (root.root, reason.clone()))
+                    .collect(),
+            };
+        }
         let direct = self.directly_touched(roots_s);
         let expanded: BTreeSet<RefnoEnum> = impact
             .touched
@@ -1780,6 +1792,18 @@ impl WindowRootSources {
             &self.rigid.candidates,
             self.rigid.enabled,
         )
+    }
+
+    /// 刚体前移的级联前置：P4（设计引用级联）要开着。同一根里靠 `POSREF` 一类引用定位、却不在锚点子树里的
+    /// 元素，E3D 只给它盖戳（账本去向 `no_model`），D1 规则 2 不数它；能把那根挡回 `regen` 的只有 P4 的
+    /// 目标集（[`Self::cascaded_roots`]）。C2 / C8 不在此列：跨锚点边界的 GENSEC 关节由 `anchor_subtree_exclusion`
+    /// 单独挡，电缆自成一根、不会与锚点同根。刚体开关本身关着时回 `None`——没有这条路，谈不上前置。
+    pub(crate) fn rigid_motion_cascade_off(&self) -> Option<String> {
+        (self.rigid.enabled && !self.design_reference.enabled).then(|| {
+            "cascade off: model_design_reference_cascade (P4) — a same-root element positioned by \
+             reference to the anchor is only stamped, so nothing would send this root back to regen"
+                .to_string()
+        })
     }
 
     /// 三条级联扩展（C2 / C8 / P4）各自要并进 `touched` 的根——**按各自的目标集取**，不是 `touched \ direct`：
@@ -3864,6 +3888,12 @@ mod tests {
             },
             removed_units: Vec::new(),
         };
+        // 刚体前移要 P4 开着（`rigid_motion_cascade_off`）。这里只看级联的**目标集**，所以 P4 一律开着、目标集默认空。
+        let make_sources = || {
+            let mut sources = make_sources();
+            sources.design_reference.enabled = true;
+            sources
+        };
 
         // 基线：没有级联命中时，ZONE 1 名下直接命中的两个根 10、20 都走刚体前移。
         let baseline = make_sources();
@@ -3917,6 +3947,24 @@ mod tests {
                 out.rejected
             );
         }
+
+        // P4 关着：整窗不分桶，被波及的两根都带着 P4 的原因留在 regen（同根靠引用定位的元素只被盖戳，挡不回去）。
+        let mut p4_off = make_sources();
+        p4_off.design_reference.enabled = false;
+        let impact = p4_off.impact(&roots_s);
+        let out = p4_off.rigid_motion(&roots_s, &settled, &impact);
+        assert!(out.transform.is_empty(), "{:?}", out.transform);
+        assert_eq!(
+            out.rejected.iter().map(|(root, _)| *root).collect::<Vec<_>>(),
+            vec![r(10), r(20)]
+        );
+        assert!(
+            out.rejected
+                .iter()
+                .all(|(_, reason)| reason.contains("model_design_reference_cascade")),
+            "{:?}",
+            out.rejected
+        );
     }
 
     /// ADR-080 实施约束 9 的守卫：`model_unit_level_publish` 关着时行为必须**逐位**等于今天——计划上没有基线、

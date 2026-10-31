@@ -1,0 +1,16 @@
+{
+  "name": "ams8000-equi-rotate-chain",
+  "registry": ["INC-A06", "INC-C08", "INC-D01", "INC-G01"],
+  "rebuild_edges_equal": ["24384/24776"],
+  "rebuild_records_equal": ["24384/24776"],
+  "_doc": "2026-10-27 在隔离副本上用 E3D 3.1 TTY 录的转动链（tests/fixtures/sessions/ams8000-equi-rotate-chain，每个会话时刻都拷了真文件，夹具带字节补丁；宏 scripts/e3d/replay/equi_rotate_{apply,restore}.mac）：735 基线（= ams8000-equi-room-cross 的终稿；EQUI =24384/24776 在 W 2821 N 8004 U 1400，方位 Y is N 5 W and Z is D；根下唯一的几何是 BOX =24384/24777，居中在根原点，310 × 590 × 550）→ 736 SAVEWORK：ORI Y IS W 5 S AND Z IS D（绕自身原点、绕 U 转 +90°，POS 不变）→ 737 QUIT 尾会话 → 738 SAVEWORK：转回 Y is N 5 W and Z is D → 739 QUIT 尾会话。只动方位的那一半刚体路（ADR-066）：736 必须走 transform；BOX 中心不动，世界包围盒的东西 / 南北半宽对调（约 180 ↔ 307 mm），所以 geometry_diff.moved == 1；不是平移，不写 aabb_shift。737 只含 DBMDAT：未触根仍 AlreadyAvailable，整条不得出现 [模型目标核对]。链尾停在转后的 737 打一枪整库全量重建，对拍根的 /model/records（rebuild_records_equal，四元数不分符号）与房间边（rebuild_edges_equal）：便宜路左乘 Δ 出来的矩阵与盒，要和从文件整根重算的一致。用例刻意不走 738 / 739：转回基线以后再对拍，来回两窗 Δ 的同一种错可能互相抵消、看不出来；738 / 739 留在夹具里（隔离副本也因此回到原方位），等 harness 能在链中途对拍时再接上。容差用默认 0.5：没转或转错角度会在包围盒上差出几十到上百毫米；+90° 与 −90° 对居中的 BOX 包围盒相同，靠四元数分量区分（两者差约 1.4，远大于 0.5）。两个方位都是半圈型（Z is D，w ≈ 0），四元数取 p − q 与 p + q 里小的那边比，不按分量定符号。房间号没钉：转后 BOX 东西向每边多伸出约 127 mm，是否跨房要看回放实测。未挂预算门：基线里没有这条链的样本。登记表条目 INC-C08（部分，跑绿后翻「有」）。录完未跑回放。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-rotate-chain",
+  "start": 735,
+  "init": { "to": 735, "records_present": ["24384/24776"], "generate_prime": ["24384/24776"] },
+  "steps": [
+    { "to": 736, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
+    { "to": 737, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776"], "generate_budget_ms": 250, "log_must_not_contain": ["[模型目标核对]"] }
+  ]
+}

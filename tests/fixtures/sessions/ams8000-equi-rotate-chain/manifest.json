@@ -1,0 +1,188 @@
+{
+  "format": "aios-session-fixture-v1",
+  "dbnum": 8000,
+  "baseline_sesno": 735,
+  "archive": {
+    "path": "db8000-sesno735-739.zip",
+    "bytes": 4632804,
+    "sha256": "950860bb3c2d7a95110f9c586b7019af418e354e5cc2e6bedd1afddba556e99a",
+    "compression": "zip-deflate-level-9",
+    "max_bytes": 6291456
+  },
+  "final": {
+    "path": "final/ams8000_0001",
+    "sesno": 739,
+    "bytes": 37412864,
+    "sha256": "2d4e08dae3a4dc9824a24589bfb075dad60c12f58ebb214b9a6d1d320182f261"
+  },
+  "session_snapshots": [
+    {
+      "sesno": 735,
+      "bytes": 37265408,
+      "sha256": "8b979e21f34a1d8fbea3611d33cfe8c0af0d3937503b03b69d4bab92b4a4e34e",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "59",
+          "real_hex": "57"
+        },
+        {
+          "page": 18193,
+          "offset": 23,
+          "final_hex": "14",
+          "real_hex": "13"
+        },
+        {
+          "page": 18194,
+          "offset": 790,
+          "final_hex": "4714",
+          "real_hex": "46fe"
+        }
+      ]
+    },
+    {
+      "sesno": 736,
+      "bytes": 37292032,
+      "sha256": "8c3c21611d48ee4eded2ae03a5f1d4bb02b6f14b70f765ec537b05df3ba69c27",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "59",
+          "real_hex": "58"
+        },
+        {
+          "page": 18208,
+          "offset": 23,
+          "final_hex": "23",
+          "real_hex": "20"
+        },
+        {
+          "page": 18208,
+          "offset": 39,
+          "final_hex": "21",
+          "real_hex": "1f"
+        }
+      ]
+    },
+    {
+      "sesno": 737,
+      "bytes": 37339136,
+      "sha256": "4c567a0c4ebe53e2f0f9303488908d28f3ffd4cdf4ae527dcec132eb1e165826",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "59",
+          "real_hex": "58"
+        },
+        {
+          "page": 18229,
+          "offset": 23,
+          "final_hex": "38",
+          "real_hex": "37"
+        },
+        {
+          "page": 18230,
+          "offset": 791,
+          "final_hex": "38",
+          "real_hex": "22"
+        }
+      ]
+    },
+    {
+      "sesno": 738,
+      "bytes": 37365760,
+      "sha256": "3339ec7d03ea7439381ed4fc0f740b8c6032399ee80fef5c4d5eae8f7df73293",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 18244,
+          "offset": 23,
+          "final_hex": "47",
+          "real_hex": "44"
+        },
+        {
+          "page": 18244,
+          "offset": 39,
+          "final_hex": "45",
+          "real_hex": "43"
+        }
+      ]
+    },
+    {
+      "sesno": 739,
+      "bytes": 37412864,
+      "sha256": "2d4e08dae3a4dc9824a24589bfb075dad60c12f58ebb214b9a6d1d320182f261"
+    }
+  ],
+  "cases": [
+    {
+      "id": "equi-rotate",
+      "apply_sesno": 736,
+      "restore_sesno": 738,
+      "refs": {
+        "box": "24384/24777",
+        "equi": "24384/24776"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        },
+        {
+          "refno": "24384/24777",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected": {
+        "net_window": [
+          {
+            "refno": "24384/24776",
+            "net": "modified"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quit-tail",
+      "apply_sesno": 739,
+      "refs": {
+        "box": "24384/24777",
+        "equi": "24384/24776"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true
+        },
+        {
+          "refno": "24384/24777",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true
+        }
+      ]
+    }
+  ]
+}

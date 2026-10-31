@@ -2267,8 +2267,8 @@ fn effective_model_skip_metadata_only_changes(
 /// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
 pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PATH";
 
-/// 刚体前移便宜路径开不开（`DbOption.toml` 的 `model_transform_cheap_path`，**默认 false**，
-/// ADR-066，2026-09-08）。
+/// 刚体前移便宜路径开不开（`DbOption.toml` 的 `model_transform_cheap_path`，ADR-066，2026-09-08；
+/// **默认开**，2026-10-14 起，见下）。
 ///
 /// 开着时窗口规划器多一个 `transform` 桶：一窗里只动了 `POS / ORI`（e3d-model
 /// `ElementDiff::is_placement_only`）、且不在路由容器 / 点容器 / `CWBRAN` 之内的锚点，其名下
@@ -2280,6 +2280,9 @@ pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PAT
 /// live #2 真机链验证清单与验收 3 性能测试方案已备好（`docs/evidence/2026-10-14-adr066-live2-*.md`），
 /// 用户拍板先翻默认、跑验证、不通过再回退。环境变量 [`MODEL_TRANSFORM_CHEAP_PATH_ENV`] 压过配置，
 /// 取值规则同 [`startup_autorun`]。与元数据门 [`model_skip_metadata_only_changes`] 彼此独立。
+///
+/// 开着也要 P4（[`model_design_reference_cascade`]）开着才分桶：同一根里靠引用定位、却不在锚点子树里的元素
+/// 只会被 E3D 盖戳，能把那根挡回 `regen` 的只有 P4 的目标集（`WindowRootSources::rigid_motion_cascade_off`）。
 pub fn model_transform_cheap_path() -> bool {
     effective_model_transform_cheap_path(
         load_ext_fields().model_transform_cheap_path,

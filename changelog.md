@@ -92,6 +92,15 @@
 - **没动**：账本、变化清单（W3）的 `no_model` 三档计数、D10 分桶、刚体分桶、房间结构触发（`collect_room_structural_triggers` 读的是操作清单不是闭包）。门关着（`model_skip_metadata_only_changes=false`）逐位回到老路。
 - **验证**：全量 `cargo test --lib` 2694 / 0 / 116（2026-10-31）；单测 `only_unstamped_metadata_only_changes_stop_seeding_the_closure`（真值表）绿；源码钉 `the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch` 的形状保住（谓词闭包只多记一张「不做种子」的表，判词原样返回）。夹具 `l3_suite --fixture-manifest` 的 `data` 例**未跑**（收口计划 WP-F / T-J-2），预期从「判定 no_model、仍整根重算、多一条 Pos」变成 `regen=0`、几何与关系都不动。**另一半没修**：整根重算路对 `24382/1075` 写出基线没有的 `Pos` 几何关系，是 regen 产物与初始化产物不一致，本次只是不再触发它，要单独查。
 
+### 刚体前移（只动方位的便宜路）要 P4 开着才分桶
+
+- **为什么**：刚体前移分桶时不数去向 `no_model` 的候选（ADR-066 D1 规则 2，2026-09-17 修订），而 E3D 给引用者盖的戳（只变 `CACHID`）正落在这一档。同一根里靠 `POSREF` 一类引用定位、却不在锚点子树里的元素，于是挡不住这根走便宜路，挪完它还停在原处、没有任何报错。今天靠 P4（`model_design_reference_cascade`，默认开）把这根列进级联扩展送回 `regen`，P4 一关就没人挡。单元级发布 D10 为同一个理由要求级联开着才分桶。
+- **改**（`window_root_plan.rs`）：新增 `WindowRootSources::rigid_motion_cascade_off`；`rigid_motion` 在 P4 关着时整窗不分桶，被波及的根都带着原因（`cascade off: model_design_reference_cascade (P4) …`）留在 `regen`。只要 P4、不要 C2 / C8：跨锚点边界的 GENSEC 关节由 `anchor_subtree_exclusion` 单独挡，电缆自成一根；C2 默认是关的，三条都要会让便宜路在默认配置下整个失效。`options.rs` 里 `model_transform_cheap_path` 的注释改正（首句还写着「默认 false」，代码 2026-10-14 起默认开），并写明这条前置。
+- **没动**：默认配置（P4 开）下的分桶结果不变。
+- **对拍**：回放夹具新增 `Case::rebuild_records_equal`：链尾同一次 `model/rebuild` 之后，逐条对拍这些根的 `/model/records`（容差默认同补常驻那一档 0.5）。挂在 `ams8000-equi-room-cross`（732 / 734 两窗走刚体前移）和新录的 `ams8000-equi-rotate-chain` 上。记录比较对四元数不分符号（`q` 与 `−q` 是同一个旋转，便宜路与整根重算各自分解矩阵，符号可以不同）：取 `p − q` 与 `p + q` 里分量差小的那边，不给单个四元数定符号——半圈型方位（`Z is D`，`w ≈ 0`）的 `w` 只剩浮点噪声，按分量定符号两边会各取各的、误报。这一条对冷重启和回退对拍同样成立；单测 `records_compare_rotations_up_to_sign` 不要回放环境。
+- **转动链**（夹具 `tests/fixtures/sessions/ams8000-equi-rotate-chain`，用例 `cases/ams8000-equi-rotate-chain.json`，宏 `scripts/e3d/replay/equi_rotate_{apply,restore}.mac`）：在隔离副本上用 E3D 3.1 TTY 录，735 基线（= `ams8000-equi-room-cross` 终稿）→ 736 EQUI `=24384/24776` `ORI Y IS W 5 S AND Z IS D`（绕自身原点、绕 U 转 +90°，POS 不变）→ 737 尾会话 → 738 转回 `Y is N 5 W` → 739 尾会话。用例只走到 737：736 要 `transform`、`geometry_diff.moved == 1`（居中的 BOX 310 × 590，包围盒东西 / 南北半宽对调），链尾在转后的状态做整库重建对拍（记录 + 房间边）。738 / 739 只留在夹具里：转回以后再对拍，来回两窗 Δ 的同一种错可能互相抵消。登记表新增 INC-C08（部分，P2）指向这条用例，跑绿后翻「有」。
+- **验证**：全量 `cargo test --lib` 2694 / 0 / 116（2026-10-31）；`rigid_motion_excludes_cascaded_roots_even_when_also_directly_touched` 的夹具改为 P4 开着，并补了 P4 关着时整窗不分桶的断言（绿）；`records_compare_rotations_up_to_sign`（`tests/increment_replay/main.rs`，不要回放环境）绿（1 passed，2026-10-31）。转动链：两条腿各推 sesno +2（735 → 737 → 739），宏日志 POS 始终 W 2821 N 8004 U 1400、ORI N 5 W → W 5 S → N 5 W；`db_session_fixture pack` / `verify` 通过（735–738 各带 3–4 字节补丁）；回放用例 `ams8000-equi-rotate-chain` 未跑（收口计划 WP-F F-1）。
+
 ## 2026-10-26
 
 ### 发布包出厂改 rocksdb：`Start-AMS.ps1` 不给档时回填 rocksdb，本机端口上没库就用包内 surreal 起一台

@@ -1,0 +1,21 @@
+-- L2 回放链 ams8000-equi-rotate-chain：EQUI /1-LNR-Q005-PJ (=24384/24776) 转回基线方位 Y is N 5 W and Z is D（整份终态，不写反向增量）。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_rotate_restore.log" OVER
+$P REPLAY-ROTATE-RESTORE-ALIVE
+=24384/24776
+Q NAME
+Q REF
+Q POS
+Q ORI
+ORI Y IS N 5 W AND Z IS D
+Q POS
+Q ORI
+=24384/24777
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'replay chain ams8000-equi-rotate-chain: EQUI =24384/24776 rotate back to Y is N 5 W and Z is D (restore)'
+$P REPLAY-ROTATE-RESTORE-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-rotate\ams8000_0001.after-restore-save"'
+$P REPLAY-ROTATE-RESTORE-DONE
+ALPHA LOG END

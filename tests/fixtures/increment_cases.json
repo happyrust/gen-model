@@ -27,6 +27,7 @@
     { "id": "INC-C05", "group": "C", "layer": "L3", "title": "整条 PIPE 位移 → 刚体路按设计拒（HPOS / TPOS 变）→ regen，几何仍正确", "oracle": ["O3", "O1"], "status": "todo", "stage": "P3", "tests": [] },
     { "id": "INC-C06", "group": "C", "layer": "L3", "title": "带 NOZZ 的 EQUI 位移走 transform；字典项（会话 0）按最新锚比", "oracle": ["O3"], "status": "todo", "stage": "P3", "tests": [], "adrs": ["ADR-089"] },
     { "id": "INC-C07", "group": "C", "layer": "L4", "title": "读目录 ∧ 刚体路的根：目录项摘要跨登录不漂", "oracle": ["O3"], "status": "corpus", "stage": "P5", "tests": [], "adrs": ["ADR-089"] },
+    { "id": "INC-C08", "group": "C", "layer": "L2", "title": "整根只动方位（EQUI 绕自身原点转 90°、POS 不变）→ kind=transform；转后与同数据整库重建逐条相等（/model/records，四元数不分符号）、房间边逐边相等。夹具与用例 2026-10-27 已录好、尚未跑，所以仍是部分", "oracle": ["O3", "O2"], "status": "partial", "stage": "P2", "tests": ["replay:ams8000-equi-rotate-chain"], "adrs": ["ADR-066"] },
 
     { "id": "INC-D01", "group": "D", "layer": "L2", "title": "只登录不改 → 未触根 /model/generate 仍 AlreadyAvailable（回放预算 250 ms，debug 实测 50–80 ms），整链无 [模型目标核对]", "oracle": ["O3"], "status": "has", "tests": ["replay:ams8000-equi-move-chain"], "issues": ["#65"], "adrs": ["ADR-089"] },
     { "id": "INC-D02", "group": "D", "layer": "L0", "title": "文件身份锚：追加 + mtime 改写身份不变；原子替换身份变；超过最新会话报错（真文件，ignored）", "oracle": ["O3"], "status": "has", "tests": ["lib:model_file_identity_survives_header_rewrites_and_appends_but_not_replacement"], "adrs": ["ADR-089"] },
