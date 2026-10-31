@@ -88,3 +88,23 @@ pub async fn init_test_db_or_panic(context: &str) -> DbOption {
         Err(err) => panic!("{context}: {err:?}"),
     }
 }
+
+/// 手动更新类 live 测试要打的靶项目。
+///
+/// 原来这些测试都写 `std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect(...)`，不配
+/// 环境变量就直接 panic。而同一个测试里 `AIOS_MANUAL_UPDATE_DBNUM` 早就有默认值
+/// （`unwrap_or(7998)`）——同一组参数一半有默认一半没有，只是历史遗留，不是设计。
+///
+/// 默认值取配置里的 `project_name`（`DbOption.toml` 的那一项），也就是这套测试一直
+/// 在用的那个项目。显式配了环境变量仍然优先，跨项目调试照旧能覆盖。
+///
+/// 连库失败会 panic 并把原因带出来——调用方都紧跟在 [`init_test_db`] 之后，那里已经
+/// 成功过一次，这里再失败就是配置真坏了，不该静默兜底。
+pub async fn manual_update_project() -> String {
+    if let Ok(value) = std::env::var("AIOS_MANUAL_UPDATE_PROJECT") {
+        return value;
+    }
+    let option = init_test_db_or_panic("读取项目名以推导 AIOS_MANUAL_UPDATE_PROJECT 默认值")
+        .await;
+    option.project_name
+}

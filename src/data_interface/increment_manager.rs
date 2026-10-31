@@ -1369,7 +1369,7 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let project = crate::test_support::manual_update_project().await;
         let dbnum = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
             .map(|value| value.parse::<u32>().expect("dbnum must be u32"))
             .unwrap_or(7998);
@@ -1469,7 +1469,7 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let project = crate::test_support::manual_update_project().await;
         let dbnum = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
             .map(|value| value.parse::<u32>().expect("dbnum must be u32"))
             .unwrap_or(7998);
@@ -1756,7 +1756,7 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let project = crate::test_support::manual_update_project().await;
         let applied_dbnum = env_dbnum("AIOS_STARTUP_APPLIED_DBNUM", 8000);
         let new_dbnum = env_dbnum("AIOS_STARTUP_NEW_DBNUM", 7998);
         assert_ne!(applied_dbnum, new_dbnum, "存量库与新库必须是两个不同的库");
@@ -1902,7 +1902,7 @@ mod tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let project = crate::test_support::manual_update_project().await;
         let applied_dbnum = env_dbnum("AIOS_STARTUP_APPLIED_DBNUM", 8000);
         let new_dbnum = env_dbnum("AIOS_STARTUP_NEW_DBNUM", 7998);
         assert_ne!(applied_dbnum, new_dbnum, "存量库与新库必须是两个不同的库");

@@ -9593,8 +9593,7 @@ mod live_tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project =
-            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let project = crate::test_support::manual_update_project().await;
         let mgr = AiosDBManager::init_form_config()
             .await
             .expect("init manager");
@@ -9640,8 +9639,7 @@ mod live_tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project =
-            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let project = crate::test_support::manual_update_project().await;
         let mgr = Arc::new(
             AiosDBManager::init_form_config()
                 .await
@@ -9715,8 +9713,7 @@ mod live_tests {
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let project =
-            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let project = crate::test_support::manual_update_project().await;
         let dbnum: u32 = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
             .map(|value| value.parse().expect("AIOS_MANUAL_UPDATE_DBNUM must be u32"))
             .unwrap_or(7998);
