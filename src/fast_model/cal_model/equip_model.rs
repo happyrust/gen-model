@@ -58,14 +58,23 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
 
     let mut equip_sql = String::new();
     for equip in equips {
+        // 2026-11-01 修：`->inst_relate` 是**错的边写法**。`inst_relate` 是普通表
+        // （`inst_relate:⟨ref0_ref1⟩`），不是从 `pe` 出去的边，所以
+        // `<-pe_owner<-pe->inst_relate` 恒为空——真库实测该 EQUI 的 13 个子件
+        // aabb 一条都取不到（原写法返回 0 条，修后 13 条）。同一个坑
+        // `fn::get_world_pos` 在 2026-10-29 已经修过，这里是漏掉的一处。
+        //
+        // 读法改成 `array::map(... |$c| type::thing('inst_relate', record::id($c)).aabb.d)`：
+        // 一层是子件、两层是孙件，与原来那两段子查询的范围一致。
         let sql = format!(
             r#"
-            (select value array::flatten([(select value aabb.d from <-pe_owner<-pe<-pe_owner<-pe->inst_relate),
-                (select value aabb.d from <-pe_owner<-pe->inst_relate)]) from {} where array::len(->nearest_relate)=0)[0]
+            (select value array::flatten([
+                array::map((select value in from {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
+                array::map((select value in from {e}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
+            ]) from {e} where array::len(->nearest_relate)=0)[0]
             "#,
-            equip.to_pe_key()
+            e = equip.to_pe_key()
         );
-        // dbg!(&sql);
         let mut response = SUL_DB.query(sql).await?;
         let Ok(aabbs) = response.take::<Vec<Aabb>>(0) else {
             continue;

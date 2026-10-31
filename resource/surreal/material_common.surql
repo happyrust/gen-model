@@ -86,9 +86,19 @@ DEFINE FUNCTION fn::get_world_pos($pe:record) {
     // 形状保持 `[[x,y,z]]`：消费方是 `fn::get_world_pos(id)[0]` 再取下标
     // （rs-server/src/datacenter/read_excel.rs:246）。
     // 缺几何的件回 `[[]]`（不是 NONE），与旧写法形状一致，下游按空数组处理。
+    //
+    // EQUI 分支（2026-11-01 修）：原来读 `cal_equi` 这张缓存表，而**那张表从没被填过**
+    // ——写它的 `update_cal_equip_wtrans` 全仓零调用点，所以 1165 个 EQUI 一律拿到空数组
+    // （真库实测 fn::get_world_pos(pe:24381_100677) = []）。EQUI 是容器，自身没有
+    // inst_relate（995 个 EQUI 一个都没有），几何在子件上：一层子件的 world_trans_d
+    // 全部非空（实测 13/13）。取第一个子件的平移量作为该设备的代表位置，
+    // 形状仍是 `[[x,y,z]]`，缺几何时回 `[[]]`。
     return
     if $noun == 'EQUI' {
-        return select value world_trans.d.translation from type::thing('cal_equi',record::id($pe))
+        return [array::map([$pe], |$p| (
+            array::first(array::map((select value in from $p<-pe_owner),
+                |$c| type::thing('inst_relate', record::id($c)).world_trans_d.translation))
+        ) ?: [])[0]]
     } else {
         return [array::map([$pe], |$p| type::thing('inst_relate', record::id($p)).world_trans_d.translation ?: [])[0]]
     }
