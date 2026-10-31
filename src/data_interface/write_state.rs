@@ -325,6 +325,27 @@ mod tests {
         );
     }
 
+    /// T-A-5：`writing` 标记不管原本是哪一种 intent，重启后一律折成 `Reinitialize`
+    /// （ADR-073 D3「恢复不猜局部完整性」）。数据尾已成功、kill 落在 `task_end` 之前时，
+    /// 这一条保证那个库不会带着半截模型面继续跑。
+    #[test]
+    fn a_writing_marker_of_any_intent_recovers_as_a_whole_dbnum_reinitialize() {
+        use crate::data_interface::batch_queue::BatchIntent;
+        for intent in [
+            WriteIntent::Initialize,
+            WriteIntent::Reinitialize,
+            WriteIntent::ApplyWindow,
+            WriteIntent::ModelOnly,
+            WriteIntent::RoomOnly,
+        ] {
+            assert_eq!(
+                recovery_batch_intent(intent),
+                BatchIntent::Reinitialize,
+                "{intent:?} 必须折成整库重建"
+            );
+        }
+    }
+
     #[test]
     fn the_intent_decides_whether_the_rollback_wipes_and_which_batch_it_requeues() {
         use crate::data_interface::batch_queue::BatchIntent;

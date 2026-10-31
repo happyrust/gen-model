@@ -1,5 +1,11 @@
 ## 2026-10-31
 
+### T-A-5：`writing` 标记不管原 intent，重启一律折 `Reinitialize`——补一条钉子
+
+- **为什么**：数据尾成功、`task_end` 之前被杀时，库上只有 `writing` 标记；ADR-073 D3「恢复不猜局部完整性」要求这种库重启后整库重建，`recovery_batch_intent` 一直是这么做的，但没有测试钉住，改坏了没人知道。
+- **改**：`write_state.rs` 单测 `a_writing_marker_of_any_intent_recovers_as_a_whole_dbnum_reinitialize`：五种 `WriteIntent` 全部折成 `BatchIntent::Reinitialize`。生产代码零改动。
+- **验证**：该单测绿；全量 2694 / 0 / 116。
+
 ### 测试钩子生产保护补齐：`delay_before_frozen_verify` 也走 `test_hook_var`（T-O-5 残余，ADR-094 D4）
 
 - **为什么**：`4fa7ef4ab` 把 `AIOS_TEST_FAIL_DATA_ENDS` / `AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH` 收进 `model_refresh::test_hook_var`（release 构建要 `AIOS_ALLOW_TEST_HOOKS=1` 才生效），`increment_pipeline.rs` 里的 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 漏了，仍是裸 `env::var`：生产 release 只要环境里有这个变量就会在冻结复核前睡。
