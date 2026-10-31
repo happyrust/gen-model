@@ -723,13 +723,23 @@ mod tests {
     }
 
     /// 临时探针：从 `AIOS_PROBE_SQL` 读 `;;` 分隔的查询并打印截断结果，用完即删。
+    ///
+    /// **没配 SQL 就跳过，不给默认值**：这条测试的语义是「跑我给的这几条查询」，
+    /// 没有查询就没有要跑的东西。编一个假默认 SQL 会让一次「跳过」伪装成一次
+    /// 「跑过」，比缺省更坏。要跑就显式设 `AIOS_PROBE_SQL`。
     #[tokio::test]
     #[ignore = "temp probe: run ad-hoc SQL from AIOS_PROBE_SQL"]
     async fn probe_live_sql() {
+        let Ok(batch) = std::env::var("AIOS_PROBE_SQL") else {
+            eprintln!(
+                "skip probe_live_sql: 未设置 AIOS_PROBE_SQL——这条探针没有要跑的查询，\
+                 显式设置该环境变量后才会执行"
+            );
+            return;
+        };
         crate::test_support::init_test_db()
             .await
             .expect("connect surreal");
-        let batch = std::env::var("AIOS_PROBE_SQL").expect("set AIOS_PROBE_SQL");
         for sql in batch.split(";;").map(str::trim).filter(|s| !s.is_empty()) {
             let mut response = SUL_DB
                 .query(sql)
