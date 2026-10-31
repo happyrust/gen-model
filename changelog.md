@@ -1,3 +1,11 @@
+## 2026-10-31
+
+### 等距：调整焊的附加长度 `:PIPE-ADLONGTH` 读进 `BranchQuery`（与增量无关）
+
+- **为什么**：调整焊（`WELD` 带 `:PIPE-ADLONGTH` UDA，isoadjustweld.pmlobj L187-193，mm）的附加长度宿主侧读不到，求解器只能套缺省 50。
+- **改**（`src/mbd/branch_query.rs`）：`WELD` 件多读 `adjust_len = optional_double(":PIPE-ADLONGTH")`——字典里没有该 UDA（`UnknownAttribute`）或没写都算没有，非有限值丢弃，读库出错照常上抛；缺省不由宿主补（`plant_mbd::adjust_weld::effective_adjust_len`）。隐含管段 `adjust_len: None`。
+- **验证**：全量 `cargo test --lib` 2694 / 0 / 116（含 `mbd` 既有单测）。
+
 ## 2026-10-29
 
 ### 数据库架构版本只在启动核对，升级收成「一键清库重建」；读点集不再做版本判断

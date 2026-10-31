@@ -319,13 +319,16 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
         let ppoints = catalogue_ppoints(&member, &resolver)?;
         // 焊缝：DTXR 含 SHOP 为车间焊（isobran.getwelds L4211-4216）；编号是项目 UDA :ZD_WLDN（L4665），
         // 字典里没有这个 UDA 就当没有。
-        let (dtxr, weld_number) = if noun == "WELD" {
+        // 调整焊的附加长度是另一个 UDA `:PIPE-ADLONGTH`（isoadjustweld.pmlobj L187-193，mm）；
+        // 缺省 50 由求解器套，宿主只给库里存的原值（UDA 未定义与「值就是 50」在这里不可区分）。
+        let (dtxr, weld_number, adjust_len) = if noun == "WELD" {
             (
                 optional_text(&member, "DTXR")?,
                 optional_text(&member, ":ZD_WLDN")?,
+                optional_double(&member, ":PIPE-ADLONGTH")?,
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
         // 位号标签（isoTag / isobran.gettags，plant-mbd ADR-0009）要的文本：库里存的 NAME 原文；ATTA 的 STEX
         // （SITE 名含 INST 的是仪表支架，PML 走支撑 :ZD_BZBM 那条路，未迁、不给）；TEE / OLET 支管口 CREF 连到的对象。
@@ -387,6 +390,7 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             arrive_ppoint,
             leave_ppoint,
             dtxr,
+            adjust_len,
             weld_number,
             name,
             stext,
@@ -743,6 +747,7 @@ fn push_implied_tube(
         arrive_ppoint: None,
         leave_ppoint: None,
         dtxr: None,
+        adjust_len: None,
         weld_number: None,
         name: None,
         stext: None,
@@ -759,6 +764,21 @@ fn optional_text(
         Ok(value) => Ok(value
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty())),
+        Err(DbElementError::UnknownAttribute { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 可选的数值属性：字典里没有（UDA 未定义）或没写都算没有；读库出错照常上抛。
+///
+/// 调整焊附加长度（`:PIPE-ADLONGTH`）走这条；缺省值（PML 的 50）不由宿主补，
+/// 见 `plant_mbd::adjust_weld::effective_adjust_len`。
+fn optional_double(
+    member: &e3d_io::db_element::DbElement,
+    name: &str,
+) -> Result<Option<f64>, BranchQueryError> {
+    match member.get_double(name) {
+        Ok(value) => Ok(value.filter(|number| number.is_finite())),
         Err(DbElementError::UnknownAttribute { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }
