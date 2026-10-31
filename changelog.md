@@ -85,6 +85,13 @@
 - **上线（计划 W6）**：部署后 20 库低峰**串行** `POST /api/v1/dbnums/{dbnum}/model/rebuild`（每库重建期间按 #74 该库不可见）；重建前老根的长度函数回 0。以后 `PTSET_EVAL_VERSION` 加一也走同一条 SOP，行上的 `generator` 让巡检分得清哪些库还没跑。
 - **没动**：模型行的块字节与回执（ADR-071，ptset 语句只追在同一事务里）；`POST /api/v1/element/ptset` 直读端点与前端 P 点来源；三处老投影 `out.ptset.d.pt AS pts`（恒 NONE，`gy_common.surql` 头注释写明 `pe_ptset` 是唯一权威）；没有任何后台补写 / 启动补扫 / `AIOS_PTSET_BACKFILL` 开关。
 
+### 只改 NAME 一类的候选不再做闭包种子：它所在的根按 `advance` 走，不整根重算（GitHub #76）
+
+- **为什么**：元数据门放行的候选（`NAME` / `DESC` 一类，或字典 DCHC=0 且生成器不读的属性）只决定它不上卷、不级联（账本去向 `no_model`）；它照旧做 e3d-model `affected_closure` 的种子，所在的根整根进 `regen`，重算出来的几何与 S 端逐字相同、只有回执前移。夹具 `data`（EQUI `24382/1074` 只改 `NAME` 再改回）因此每窗白算一根 342 ms，还顺带写出一条基线没有的 `geo_relate`（`Pos`，`pe:24382_1075`），把整套夹具挡在第一例（#76 / #77）。D10 本可把这种根收成只推回执的空 `Partial`，但 D10 的前置「三条级联都开」在默认配置下（C2 `model_structural_connection_cascade` 默认关，#34）永远不成立。
+- **改**（`window_root_plan.rs`）：新增 `metadata_only_change_seeds_no_root(diff)`——门放行、档位是 `MetadataOnly` / `UnreadAttribute`、且变了的属性里**没有戳**（`CACHID` / `SPAMAP`，名单只有 e3d-model 那一份）的候选，`collect` 不再把它交给 `affected_closure` 做种子（走 `affected_closure_filtering_ledger`，与 `model_entry_drop_no_geometry` 的过滤合在同一个闭包里；删除 / 换类型照旧保留）。它所在的根于是不进 `touched` / `regen`，按 `advance` 走——库级承诺到 T（ADR-079 D3 / ADR-089 D1）。只有戳跳了（`CacheStamp`）或放行属性里夹着戳的照旧做种子：级联关着时只有戳能把「引用者只被盖戳」的根留在 `regen`，用户 2026-09-17 拍板的那条前置不碰。`options.rs` 里 `model_skip_metadata_only_changes` 的注释同步（原文写「闭包种子照收」）。
+- **没动**：账本、变化清单（W3）的 `no_model` 三档计数、D10 分桶、刚体分桶、房间结构触发（`collect_room_structural_triggers` 读的是操作清单不是闭包）。门关着（`model_skip_metadata_only_changes=false`）逐位回到老路。
+- **验证**：全量 `cargo test --lib` 2694 / 0 / 116（2026-10-31）；单测 `only_unstamped_metadata_only_changes_stop_seeding_the_closure`（真值表）绿；源码钉 `the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch` 的形状保住（谓词闭包只多记一张「不做种子」的表，判词原样返回）。夹具 `l3_suite --fixture-manifest` 的 `data` 例**未跑**（收口计划 WP-F / T-J-2），预期从「判定 no_model、仍整根重算、多一条 Pos」变成 `regen=0`、几何与关系都不动。**另一半没修**：整根重算路对 `24382/1075` 写出基线没有的 `Pos` 几何关系，是 regen 产物与初始化产物不一致，本次只是不再触发它，要单独查。
+
 ## 2026-10-26
 
 ### 发布包出厂改 rocksdb：`Start-AMS.ps1` 不给档时回填 rocksdb，本机端口上没库就用包内 surreal 起一台

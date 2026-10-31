@@ -377,6 +377,32 @@ pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
     change_metadata_tier(diff).is_some()
 }
 
+/// GitHub #76：元数据门放行的候选要不要做祖先闭包的**种子**。
+///
+/// 门放行（[`change_metadata_tier`] 回 `Some`）只决定它不上卷、不级联（账本去向 `no_model`）；它照旧做 e3d-model
+/// `affected_closure` 的种子，于是它所在的根整根进 `regen`，重算出来的几何与 S 端逐字相同、只有回执前移——夹具 `data`
+/// （EQUI 只改名再改回）就是这样每窗白算一根，还顺带写出一条基线没有的几何关系。D10 本可把它收成只推回执的空 `Partial`，
+/// 但 D10 的前置「三条级联都开」在默认配置（C2 关，GitHub #34）下永远不成立。
+///
+/// 按**档**分：
+/// - 老名单 / 生成器不读的属性（[`NoModelTier::MetadataOnly`] / [`NoModelTier::UnreadAttribute`]）且变了的属性里
+///   **没有戳**——两票已证几何不读它，E3D 也没给它盖戳，根不因它而变：不做种子，它所在的根照 `advance` 走
+///   （库级承诺到 T，ADR-079 D3 / ADR-089 D1）；
+/// - 只有戳跳了（[`NoModelTier::CacheStamp`]），或放行属性里夹着戳：照旧做种子。戳是「引用者的图形被重建过」的
+///   唯一信号，级联关着时只有它能把引用者的根留在 `regen`（用户 2026-09-17 拍板的那条前置，这里不碰）。
+///
+/// `None`（门没放行）不归这里管——那样的候选本就该做种子。戳的名单只有 e3d-model 那一份
+/// （[`crate::data_interface::model_impact::attribute_is_cache_stamp`]），这里不点名。
+pub(crate) fn metadata_only_change_seeds_no_root(diff: &ElementDiff) -> bool {
+    match change_metadata_tier(diff) {
+        Some(NoModelTier::MetadataOnly) | Some(NoModelTier::UnreadAttribute) => !diff
+            .attributes
+            .iter()
+            .any(|name| crate::data_interface::model_impact::attribute_is_cache_stamp(name)),
+        Some(NoModelTier::CacheStamp) | None => false,
+    }
+}
+
 /// GitHub #68：同一文件连续窗口之间复用的根集——上一窗的 `roots_T` 就是下一窗的 `roots_S`
 /// （dabacon 只追加，钉住会话的 `DbSet` 不变；枚举只读本文件的 TYPE / NAME / members，不碰目录）。
 /// 认同一份的条件：文件 + 会话 + 交付单元口径 + 索引形状（键数与顶层根）全相等；认不出照旧全枚举。
@@ -1436,6 +1462,9 @@ impl WindowRootSources {
         // 门对每个候选的判词顺手记下来（refno → 档）：变化清单（W3）要说得出 `no_model` 是哪一档放行的，
         // 而账本只记去向不记档；门关着就是空表。判词本身一字不改。
         let tiers = std::cell::RefCell::new(BTreeMap::<(u32, u32), NoModelTier>::new());
+        // GitHub #76：放行的候选里，变了的属性**不带戳**的那些不做祖先闭包的种子（`metadata_only_change_seeds_no_root`）
+        // ——它所在的根不再因它进 `regen`，按 `advance` 走。带戳的照旧做种子（2026-09-17 那条前置不碰）。
+        let unseeded = std::cell::RefCell::new(BTreeSet::<(u32, u32)>::new());
         let plan = if crate::options::model_skip_metadata_only_changes() {
             plan_update_with(
                 base,
@@ -1449,6 +1478,9 @@ impl WindowRootSources {
                         crate::data_interface::task_change_list::parse_refno_key(&diff.refno),
                     ) {
                         tiers.borrow_mut().insert(key, tier);
+                        if metadata_only_change_seeds_no_root(diff) {
+                            unseeded.borrow_mut().insert(key);
+                        }
                     }
                     tier
                 },
@@ -1457,14 +1489,23 @@ impl WindowRootSources {
             plan_update(base, target, &window)
         };
         let tiers = tiers.into_inner();
+        let unseeded = unseeded.into_inner();
         timings.ledger = lap(&mut tick);
-        let closure = if crate::options::model_entry_drop_no_geometry() {
+        let drop_no_geometry = crate::options::model_entry_drop_no_geometry();
+        let closure = if drop_no_geometry || !unseeded.is_empty() {
             plan.affected_closure_filtering_ledger(base, target, |entry| {
                 // 删除与类型变化可能需要清旧几何；即便账本有 noun 也保守保留。
-                matches!(entry.kind, ChangeKind::Deleted | ChangeKind::TypeChanged)
-                    || !crate::data_interface::model_impact::noun_is_no_geometry_model_entry(
+                if matches!(entry.kind, ChangeKind::Deleted | ChangeKind::TypeChanged) {
+                    return true;
+                }
+                // GitHub #76：门放行且不带戳的候选不做种子——几何不读它、E3D 也没给它盖戳，它的根不因它而变。
+                if unseeded.contains(&(entry.refno.word0, entry.refno.word1)) {
+                    return false;
+                }
+                !(drop_no_geometry
+                    && crate::data_interface::model_impact::noun_is_no_geometry_model_entry(
                         &entry.noun,
-                    )
+                    ))
             })
         } else {
             plan.affected_closure(base, target)
@@ -5241,6 +5282,65 @@ mod tests {
         let mut opaque = diff(&["NAME"]);
         opaque.opaque = true;
         assert!(change_metadata_tier(&opaque).is_none());
+    }
+
+    /// GitHub #76：门放行的候选里，只有**不带戳**的老名单 / 不读属性档不做闭包种子；戳（单独跳、或夹在放行属性里）
+    /// 照旧做种子（2026-09-17「级联关着 ⇒ 靠戳把引用者的根留在 regen」那条前置不动）；门没放行的本就要做种子。
+    #[test]
+    fn only_unstamped_metadata_only_changes_stop_seeding_the_closure() {
+        use e3d_model::element_diff::MemberDelta;
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24382/1074".into(),
+            noun: "EQUI".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        // 老名单档、不读属性档：不做种子。
+        assert!(metadata_only_change_seeds_no_root(&diff(&["NAME"])));
+        assert!(metadata_only_change_seeds_no_root(&diff(&["NAME", "DESC"])));
+        assert!(metadata_only_change_seeds_no_root(&diff(&["DUTY"])));
+        assert!(metadata_only_change_seeds_no_root(&diff(&["NAME", "DUTY"])));
+        // 戳：单独跳是第三档，夹在放行属性里也照旧做种子。名单只有 e3d-model 那一份。
+        for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+            .iter()
+            .copied()
+        {
+            assert!(!metadata_only_change_seeds_no_root(&diff(&[stamp])), "{stamp}");
+            assert!(
+                !metadata_only_change_seeds_no_root(&diff(&["NAME", stamp])),
+                "{stamp}"
+            );
+            assert!(
+                !metadata_only_change_seeds_no_root(&diff(&["DUTY", stamp])),
+                "{stamp}"
+            );
+        }
+        // 门没放行的（几何 / 摆放 / 读得到的属性 / UDA / 没有属性变化）本就要做种子。
+        assert!(!metadata_only_change_seeds_no_root(&diff(&["DIAM"])));
+        assert!(!metadata_only_change_seeds_no_root(&diff(&["POS"])));
+        assert!(!metadata_only_change_seeds_no_root(&diff(&["NAME", "DIR"])));
+        assert!(!metadata_only_change_seeds_no_root(&diff(&["UDA:42"])));
+        assert!(!metadata_only_change_seeds_no_root(&diff(&[])));
+        // 结构四条任一动了，哪怕属性只有 NAME 也照旧做种子。
+        let mut typed = diff(&["NAME"]);
+        typed.type_changed = Some(("EQUI".into(), "SUBE".into()));
+        assert!(!metadata_only_change_seeds_no_root(&typed));
+        let mut reparented = diff(&["NAME"]);
+        reparented.owner_changed = Some((Some("24382/1".into()), Some("24382/2".into())));
+        assert!(!metadata_only_change_seeds_no_root(&reparented));
+        let mut members = diff(&["NAME"]);
+        members.members = Some(MemberDelta {
+            added: vec![],
+            removed: vec![],
+            reordered: true,
+        });
+        assert!(!metadata_only_change_seeds_no_root(&members));
+        let mut opaque = diff(&["NAME"]);
+        opaque.opaque = true;
+        assert!(!metadata_only_change_seeds_no_root(&opaque));
     }
 
     /// 档位是**整个元素**的一句话（S6）：全落老名单才算老档，有一个靠新档过关这一笔就记进

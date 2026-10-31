@@ -228,8 +228,10 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_entry_drop_no_geometry: Option<bool>,
 
-    /// direct 窗口规划器的元数据门（**默认开**，2026-09-08）：一个元素这一窗只改了
-    /// `NAME / DESC / PURP / FUNC / LCHKDA`（效果表 DataOnly ∧ 字典 DCHC=0）且成员 / 属主 / 类型都没动，
+    /// direct 窗口规划器的元数据门（**默认开**，2026-09-08）：一个元素这一窗只改了元数据属性
+    /// （现行判据是两票：字典 DCHC=0 **且** 生成器不读，见 [`model_skip_metadata_only_changes`]；
+    /// 2026-09 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）
+    /// 且成员 / 属主 / 类型都没动，
     /// 不上卷成单元、不让它的根重算；账本与闭包种子照收。`false` = 回到「任何属性变了就整根算」。
     /// 详见 [`model_skip_metadata_only_changes`]。
     #[serde(default)]
@@ -2233,10 +2235,13 @@ pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA
 /// 属主 / 类型 / opaque 都没动
 /// → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute` 新档 / `cache_stamp` 只戳三个计数）、
 /// 不上卷、不级联；它的根不因它进 `regen`；`cache_stamp` 那一档还从凭证前移比例护栏的分子里净掉
-/// （`window_root_plan::WindowImpact::cache_stamp`，2026-09-19——整库戳扫写不再把窗顶成退化）。账本照记、闭包种子照收（候选与它的祖先
-/// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
-/// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
-/// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
+/// （`window_root_plan::WindowImpact::cache_stamp`，2026-09-19——整库戳扫写不再把窗顶成退化）。账本照记；闭包种子按戳分
+/// （GitHub #76，2026-10-27，`window_root_plan::metadata_only_change_seeds_no_root`）：放行属性里**不带戳**的候选不再做
+/// 祖先闭包的种子，它的根不因它进 `regen`、按 `advance` 走（库级承诺到 T）；只有戳跳了、或放行属性里夹着戳的照旧做种子
+/// （级联关着时只有戳能把引用者的根留在 `regen`，2026-09-17 那条前置不碰）。房间结构触发（改名进 `RoomRecalcPanel`，读的是操作清单
+/// 不是闭包）与设计引用级联都不受影响。此前（2026-09-08 → 2026-10-27）放行候选照做种子，它的根整根重算、几何逐字不变只推回执
+/// （夹具 `data` 只改 EQUI 的 NAME 就是 342 ms 白算一根）；更早 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME
+/// 就是它的 BRAN 整根重算。
 ///
 /// 这是「少算」方向的开关，所以留着关的位置：关上就逐位回到 2026-09-08 之前。环境变量
 /// [`MODEL_SKIP_METADATA_ONLY_CHANGES_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
