@@ -7014,8 +7014,11 @@ mod tests {
 
     // Feature: model-version-timeline-scrub, Property 32: 两条路由的时间解析一致。
     //
-    // 实时几何路由的 `time` 选择器与 `node/versions/resolve`（`scope=self`）共用
-    // `resolve_at_rows`；这里钉住「同一张表 + 同一时间点 → 同一个 sesno，失败时同一个错误码」。
+    // 实时几何路由的 `time` 选择器与 `node/versions/resolve` 共用 `resolve_at_rows`；
+    // 这里钉住「同一张表 + 同一时间点 → 同一个 sesno，失败时同一个错误码」。
+    // 与 `scope` 口径无关：`time` 选择器吃 `unit_versions`（单元子树折叠），
+    // 与它同表的是 `scope=subtree`，不是 `scope=self`（见 Requirement 8.10 与
+    // docs/verification/model-version-timeline-scrub/finding-r6-3-vs-r8-10.md）。
     mod prop_two_routes_agree {
         use proptest::prelude::*;
 
