@@ -603,14 +603,41 @@ async fn nearest_floor_among(points: &[Vec3]) -> Option<(RefnoEnum, f32)> {
     best
 }
 
+/// 全量路径的设备枚举口径：与增量路径同源（`pe` + 未软删）。
+///
+/// 这里曾经写成 `select value record::id(id) from EQUI where
+/// type::thing("cal_equi", record::id(id)) != none`。两处都有问题：
+///
+/// 1. **`type::thing(...) != none` 是恒真谓词，什么都没过滤。** `type::thing` 只
+///    按表名 + id 构造一个 `Thing`（记录指针），不查这条记录是否存在；真库实测
+///    `type::thing('cal_equi', '999999_999999') != none` 返回 `true`。所以这行读起来
+///    像「只处理已经有 `cal_equi` 行的设备」，实际等价于裸的 `FROM EQUI`——判断
+///    存在性要用 `record::exists()`。这段误导性的谓词留着只会让人以为这里有过滤。
+/// 2. **它按 `EQUI` 类型表枚举，且没有 `deleted` 过滤。** `EQUI` 类型表根本没有
+///    `deleted` 字段（真库 1165 行全为 NONE），软删状态只记在 `pe` 上；而
+///    `read_through` 形态的软删只写 `UPDATE pe:{id} SET deleted = true`、不删类型行
+///    （`src/data_interface/read_through.rs:228`），于是软删设备会被当成活设备重写
+///    `world_trans`，把增量路径刚清掉的派生行又建回来。
+///
+/// 改成 `pe` 口径后两条一起修掉：`pe` 是权威来源，`deleted` 字段在那里，软删判断
+/// 与增量路径的 `EquipScan::absorb` 同一条规则。
+///
+/// 真库实测（2026-11-02）：`pe` 里 `noun = 'EQUI' AND deleted != true` 恰好 1165 台，
+/// 与旧的 `FROM EQUI` 口径条数相同——当前数据下两者等价（软删的 8 台类型行已清），
+/// 差异在语义正确性与将来分叉时的行为。
+async fn enumerate_live_equips() -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut response = SUL_DB
+        .query("SELECT VALUE record::id(id) FROM pe WHERE noun = 'EQUI' AND deleted != true;")
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
+}
+
 //将equip的 world transform 这些放到cal_equip 这张表里，存储一些需要计算的缓存数据
 //这样可以减少查询次数，提高性能
 //这个表的数据是在equip的数据变更时，由equip的数据变更触发的
 pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
-    let mut response = SUL_DB
-        .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
-        .await?;
-    let equips: Vec<RefnoEnum> = response.take(0)?;
+    let equips = enumerate_live_equips().await?;
     if equips.is_empty() {
         return Ok(());
     }
@@ -647,10 +674,7 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
 
 //取得设备下的所有aabb，然后取下面的点到楼板的最近距离
 pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
-    let mut response = SUL_DB
-        .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
-        .await?;
-    let equips: Vec<RefnoEnum> = response.take(0)?;
+    let equips = enumerate_live_equips().await?;
     if equips.is_empty() {
         return Ok(());
     }
