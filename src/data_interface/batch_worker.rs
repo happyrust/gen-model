@@ -2000,12 +2000,15 @@ async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
     let started = Instant::now();
     match crate::fast_model::cal_model::equip_model::update_cal_equip_for_roots(&roots).await {
         Ok(outcome) => {
-            if outcome.refreshed + outcome.failed > 0 {
+            if outcome.refreshed + outcome.valves_refreshed + outcome.failed > 0 {
                 println!(
-                    "[设备派生量] 根={} 重算 {} 台 / 挂楼板 {} / 失败 {}{} {}ms",
+                    "[设备派生量] 根={} 重算 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 {} / 失败 {}{} {}ms",
                     roots.len(),
                     outcome.refreshed,
                     outcome.floors_linked,
+                    outcome.valves_refreshed,
+                    outcome.valves_linked,
+                    outcome.via_floors,
                     outcome.failed,
                     if outcome.floors_skipped {
                         "（空间树未就绪，楼板边未动）"
@@ -2017,7 +2020,7 @@ async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
             }
             if outcome.failed > 0 {
                 result.warnings.push(format!(
-                    "设备派生量有 {} 台重算失败（旧值保留，可由手动重算回补）",
+                    "设备 / 阀门派生量有 {} 个重算失败（旧值保留，可由手动重算回补）",
                     outcome.failed
                 ));
             }

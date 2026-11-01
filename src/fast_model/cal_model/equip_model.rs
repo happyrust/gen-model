@@ -17,13 +17,19 @@ pub async fn update_cal_equip() -> anyhow::Result<()> {
 /// [`update_cal_equip_for_roots`] 的结果，给调用方记日志用。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EquipRefreshOutcome {
-    /// 重写了 `cal_equi` 的设备台数。
+    /// 重写了 `cal_equi` 的设备台数（含因楼板变化被牵连的）。
     pub refreshed: usize,
     /// 重算后挂着 `nearest_relate` 的台数（树已就绪却打不中楼板的，旧边删掉、不计）。
     pub floors_linked: usize,
-    /// 重算失败的台数（已逐台 `warn!`，旧值原样保留）。
+    /// 重算了楼板边的阀门个数（含因楼板变化被牵连的）。
+    pub valves_refreshed: usize,
+    /// 重算后挂着 `nearest_relate` 的阀门个数。
+    pub valves_linked: usize,
+    /// 因为所挂楼板在这批根里（或已软删）而被拉进来重算的设备 + 阀门数。
+    pub via_floors: usize,
+    /// 重算失败的设备 + 阀门数（已逐个 `warn!`，旧值原样保留）。
     pub failed: usize,
-    /// 空间树没就绪：`nearest_relate` 一条没动。
+    /// 空间树没就绪：`nearest_relate` 一条没动（阀门与楼板牵连也一并跳过）。
     pub floors_skipped: bool,
 }
 
@@ -52,6 +58,19 @@ const EQUIP_EXPAND_DEPTH: usize = 4;
 ///   留着，而 `query()` 不检查语句级错误——不 `.check()` 就是静默不更新。
 /// - 旧边用图写法 `DELETE pe:x->nearest_relate` 删，和新边放在同一个事务里换。
 ///
+/// ## 阀门
+///
+/// 根下的 VALV（PIPE → BRAN → VALV）与设备同一趟收集，只重算楼板边：射线起点、方向与启动全量
+/// [`aios_core::spatial::pipe::cal_valve_nearest_floor`] 同口径（阀门原点向 -Z）。
+///
+/// ## 楼板变化
+///
+/// 根下的 FLOOR 自己不算，但**此刻挂在它上面**的设备 / 阀门要重算：楼板挪了、改厚了，旧距离甚至旧
+/// 归属都可能不再成立。软删的楼板从根下找不到（`pe_owner` 已断），所以同一条查询顺带把挂在软删
+/// 楼板上的也拉进来。只看现有边，不做空间反查：楼板挪到另一台原本没挂它（或挂着别的楼板）的设备
+/// 下面，那台设备不会被重算，要等它自己的根变化或手动全量重算。代价是一条走 `out` 的查询
+/// （真库 2 块楼板 20 个牵连，约 150ms）。
+///
 /// ## 空间树没就绪时不碰楼板边
 ///
 /// 射线查询在树空 / 未装载时一律返回 `None`，与「脚下真的没有楼板」分不开。这时删旧边就是把
@@ -78,10 +97,17 @@ pub async fn update_cal_equip_for_roots(
         .await?
         .check()?;
 
-    let equips = collect_live_equips(roots).await?;
+    let mut scan = collect_live_targets(roots).await?;
     let link_floors = crate::fast_model::spatial_state::current_state().is_ready();
-    outcome.floors_skipped = !link_floors && !equips.is_empty();
-    for equip in equips {
+    outcome.floors_skipped = !link_floors
+        && !(scan.live.is_empty() && scan.valves.is_empty() && scan.floors.is_empty());
+    if link_floors {
+        let before = scan.live.len() + scan.valves.len();
+        scan.absorb(fetch_nodes(floor_dependents_sql(&scan.floors)).await?);
+        outcome.via_floors = scan.live.len() + scan.valves.len() - before;
+    }
+
+    for equip in scan.live {
         match refresh_one_equip(equip, link_floors).await {
             Ok(linked) => {
                 outcome.refreshed += 1;
@@ -93,7 +119,35 @@ pub async fn update_cal_equip_for_roots(
             }
         }
     }
+    if !link_floors {
+        return Ok(outcome);
+    }
+    for valve in scan.valves {
+        match refresh_one_valve(valve).await {
+            Ok(linked) => {
+                outcome.valves_refreshed += 1;
+                outcome.valves_linked += usize::from(linked);
+            }
+            Err(error) => {
+                tracing::warn!(valve = ?valve, error = %error, "阀门楼板边重算失败，旧边保留");
+                outcome.failed += 1;
+            }
+        }
+    }
     Ok(outcome)
+}
+
+/// 挂在这些楼板上、或挂在已软删楼板上的 `nearest_relate` 起点（设备 / 阀门）。
+fn floor_dependents_sql(floors: &[RefnoEnum]) -> String {
+    let floors = floors
+        .iter()
+        .map(|floor| floor.to_table_key("FLOOR"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "SELECT in AS id, in.noun AS noun, in.deleted AS deleted FROM nearest_relate \
+         WHERE out IN [{floors}] OR type::thing('pe', record::id(out)).deleted = true;"
+    )
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -103,10 +157,12 @@ struct PeNode {
     deleted: Option<bool>,
 }
 
-/// 「根 → 设备」逐层分拣的状态，抽成纯逻辑好离线钉住。
+/// 「根 → 设备 / 阀门 / 楼板」逐层分拣的状态，抽成纯逻辑好离线钉住。
 #[derive(Default)]
 struct EquipScan {
     live: Vec<RefnoEnum>,
+    valves: Vec<RefnoEnum>,
+    floors: Vec<RefnoEnum>,
     // 根不能预先放进 `seen`：先放的话「根本身就是 EQUI」再 insert 返回 false，
     // 它自己就收不进 `live`（2026-11-01 live 测试实测：以设备为根展开出 0 台）。
     seen: std::collections::HashSet<RefnoEnum>,
@@ -120,10 +176,12 @@ impl EquipScan {
             if deleted || !self.seen.insert(refno) {
                 continue;
             }
-            if noun.as_deref() == Some("EQUI") {
-                self.live.push(refno);
-            } else {
-                frontier.push(refno);
+            // 三者都不再往下展开：设备的子件是零件，阀门是叶子，楼板下是 PLOO / 开孔。
+            match noun.as_deref() {
+                Some("EQUI") => self.live.push(refno),
+                Some("VALV") => self.valves.push(refno),
+                Some("FLOOR") => self.floors.push(refno),
+                _ => frontier.push(refno),
             }
         }
         frontier
@@ -150,7 +208,7 @@ async fn fetch_nodes(sql: String) -> anyhow::Result<Vec<(RefnoEnum, Option<Strin
         .collect())
 }
 
-async fn collect_live_equips(roots: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+async fn collect_live_targets(roots: &[RefnoEnum]) -> anyhow::Result<EquipScan> {
     let mut scan = EquipScan::default();
     let mut nodes = fetch_nodes(format!(
         "SELECT id, noun, deleted FROM [{}];",
@@ -168,7 +226,7 @@ async fn collect_live_equips(roots: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnu
         ))
         .await?;
     }
-    Ok(scan.live)
+    Ok(scan)
 }
 
 /// 重算单台设备：`cal_equi` 照写；`link_floors` 时再换 `nearest_relate`。
@@ -217,6 +275,22 @@ async fn refresh_one_equip(equip: RefnoEnum, link_floors: bool) -> anyhow::Resul
         ),
         // 树已就绪仍打不中：脚下确实没有楼板（或设备已无几何），旧边已过期。
         None => format!("DELETE {e}->nearest_relate;"),
+    };
+    SUL_DB.query(sql).await?.check()?;
+    Ok(nearest.is_some())
+}
+
+/// 重算单个阀门的楼板边（调用方保证树已就绪）。返回重算后是否挂着楼板边。
+async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
+    let nearest = query_neareast_along_axis(valve, Vec3::NEG_Z, "FLOOR").await?;
+    let v = valve.to_pe_key();
+    let sql = match nearest {
+        Some((floor, dist)) => format!(
+            "BEGIN TRANSACTION; DELETE {v}->nearest_relate; \
+             RELATE {v}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
+            floor.to_table_key("FLOOR")
+        ),
+        None => format!("DELETE {v}->nearest_relate;"),
     };
     SUL_DB.query(sql).await?.check()?;
     Ok(nearest.is_some())
@@ -578,6 +652,44 @@ mod equip_scan_tests {
         assert_eq!(scan.live, vec![r(2)]);
         assert!(frontier.is_empty(), "已经见过的节点不再进前沿（防环）");
     }
+
+    #[test]
+    fn valves_and_floors_are_collected_without_expanding() {
+        let mut scan = EquipScan::default();
+        let frontier = scan.absorb(vec![
+            node(1, "VALV", false),
+            node(2, "FLOOR", false),
+            node(3, "BRAN", false),
+            node(4, "VALV", true),
+        ]);
+        assert_eq!(scan.valves, vec![r(1)]);
+        assert_eq!(scan.floors, vec![r(2)]);
+        assert_eq!(frontier, vec![r(3)], "阀门、楼板都不再往下展开");
+    }
+
+    /// 楼板牵连进来的设备 / 阀门与根下已收的去重，软删的不收。
+    #[test]
+    fn floor_dependents_merge_without_duplicates() {
+        let mut scan = EquipScan::default();
+        scan.absorb(vec![node(1, "EQUI", false), node(2, "FLOOR", false)]);
+        scan.absorb(vec![
+            node(1, "EQUI", false),
+            node(5, "EQUI", false),
+            node(6, "VALV", false),
+            node(7, "VALV", true),
+        ]);
+        assert_eq!(scan.live, vec![r(1), r(5)]);
+        assert_eq!(scan.valves, vec![r(6)]);
+    }
+
+    #[test]
+    fn floor_dependents_sql_names_the_floor_table_and_soft_deleted_floors() {
+        let sql = floor_dependents_sql(&[r(2), r(3)]);
+        assert!(sql.contains("out IN [FLOOR:24381_2,FLOOR:24381_3]"), "{sql}");
+        assert!(sql.contains("record::id(out)).deleted = true"), "{sql}");
+        let empty = floor_dependents_sql(&[]);
+        assert!(empty.contains("out IN []"), "空名单仍要能跑，只剩软删楼板那一半: {empty}");
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +702,7 @@ mod incremental_live_tests {
     //! ```text
     //! cargo test --lib container_root_refreshes_every_equip_and_relinks_floors -- --ignored --test-threads=1
     //! cargo test --lib equip_root_overwrites_stale_world_trans_and_keeps_edges_without_tree -- --ignored --test-threads=1
+    //! cargo test --lib floor_root_relinks_what_hangs_on_its_floors -- --ignored --test-threads=1
     //! ```
 
     use super::*;
@@ -632,10 +745,13 @@ mod incremental_live_tests {
     }
 
     /// 这些设备的楼板边，`设备->楼板` 形式、排好序。
+    ///
+    /// 不能写 `WHERE in IN [..]`：表上有 `(in, out)` 唯一索引，SurrealDB 2.1.4 走索引后一行都不回
+    /// （真库实测 1 / 41 个起点都是 0 行），`[..] CONTAINS in` 不走索引、结果正确。
     async fn floor_edges(equips: &[RefnoEnum]) -> anyhow::Result<Vec<String>> {
         let mut r = SUL_DB
             .query(format!(
-                "SELECT VALUE record::id(in) + '->' + record::id(out) FROM nearest_relate WHERE in IN [{}];",
+                "SELECT VALUE record::id(in) + '->' + record::id(out) FROM nearest_relate WHERE [{}] CONTAINS in;",
                 pe_keys(equips)
             ))
             .await?
@@ -680,6 +796,67 @@ mod incremental_live_tests {
         let second = update_cal_equip_for_roots(&[root]).await?;
         assert_eq!(second, first, "同一个根重跑，结果应一致");
         assert_eq!(floor_edges(&equips).await?, edges, "重跑不能堆边或换边");
+        Ok(())
+    }
+
+    /// 楼板所在的根变了：挂在这些楼板上的设备与阀门全部重算，重跑结果与边都不变。
+    #[tokio::test]
+    #[ignore = "live: 需要真库 8009；会装载空间树并重写挂在一组楼板上的 nearest_relate；必须单跑"]
+    async fn floor_root_relinks_what_hangs_on_its_floors() -> anyhow::Result<()> {
+        attach_store_connected().await?;
+        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
+
+        // 楼板的生成根是它的 CFLOOR（generation_root.rs），取一个下面有楼板被挂着的。
+        let mut r = SUL_DB
+            .query(
+                "SELECT VALUE type::thing('pe', record::id(out)).owner FROM nearest_relate \
+                 WHERE type::thing('pe', record::id(out)).owner.noun = 'CFLOOR' LIMIT 1;",
+            )
+            .await?
+            .check()?;
+        let found: Vec<surrealdb::sql::Thing> = r.take(0)?;
+        let root = pe_thing_to_refno(
+            found
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("库里没有挂着设备 / 阀门的 CFLOOR 楼板"))?,
+        )?;
+        let mut r = SUL_DB
+            .query(format!(
+                "SELECT VALUE in FROM nearest_relate WHERE \
+                 type::thing('pe', record::id(out)).owner = {} AND in.deleted != true;",
+                root.to_pe_key()
+            ))
+            .await?
+            .check()?;
+        let dependents = r
+            .take::<Vec<surrealdb::sql::Thing>>(0)?
+            .into_iter()
+            .map(pe_thing_to_refno)
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let first = update_cal_equip_for_roots(&[root]).await?;
+        eprintln!(
+            "根 {}（{} 个挂在其楼板上）→ {first:?}",
+            root.to_pe_key(),
+            dependents.len()
+        );
+        assert_eq!(first.via_floors, dependents.len(), "挂在这些楼板上的都要拉进来");
+        assert_eq!(first.refreshed + first.valves_refreshed, dependents.len());
+        assert_eq!(first.failed, 0);
+        assert!(!first.floors_skipped);
+        let edges = floor_edges(&dependents).await?;
+        assert_eq!(
+            edges.len(),
+            first.floors_linked + first.valves_linked,
+            "挂楼板的恰好一条边: {edges:?}"
+        );
+
+        let second = update_cal_equip_for_roots(&[root]).await?;
+        assert_eq!(floor_edges(&dependents).await?, edges, "重跑不能堆边或换边");
+        assert_eq!(second.failed, 0);
         Ok(())
     }
 
