@@ -498,7 +498,36 @@ async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
     Ok(nearest.is_some())
 }
 
-/// 合并子件 aabb，从底面四角向 -Z 打射线，取第一个打中的楼板。
+/// 每个子件盒底面的四个角，按 0.1mm 去重。环形 / 管状布置的设备合并盒四角常常落在空处，
+/// 只能逐子件打（真库 24381_57646：合并盒四角全空，逐子件 236 个点全部命中）。
+fn bottom_corners(aabbs: &[Aabb]) -> Vec<Vec3> {
+    let mut seen = std::collections::HashSet::new();
+    let mut points = Vec::new();
+    for aabb in aabbs {
+        for corner in &aabb.vertices()[..4] {
+            let pt: Vec3 = (*corner).into();
+            let key = (
+                (pt.x * 10.0).round() as i64,
+                (pt.y * 10.0).round() as i64,
+                (pt.z * 10.0).round() as i64,
+            );
+            if seen.insert(key) {
+                points.push(pt);
+            }
+        }
+    }
+    points
+}
+
+/// 逐子件底角向 -Z 打射线，取最近的那块楼板。
+///
+/// 两级：先打**合并盒**的四个角（4 条射线，绝大多数设备这一级就命中）；一条都不中时再退到
+/// **逐子件**底角。合并盒是外接矩形，环形 / 管状布置的设备四角落在空处，一条都打不中——真库
+/// 2026-11-02 实测 24381_57646 / 57737 / 57828 三台四角全落空，逐子件却有 200+ 个点命中。
+/// 只做逐子件会把全量重算从 21 秒推到 320 秒（真库实测），所以合并盒那级不能省。
+///
+/// 两级都取**最小距离**而不是第一个命中：子件分散在多层时，第一个命中取决于遍历顺序，
+/// 不是「最近」。
 async fn nearest_floor_below(aabbs: &[Aabb]) -> Option<(RefnoEnum, f32)> {
     if aabbs.is_empty() {
         return None;
@@ -507,13 +536,33 @@ async fn nearest_floor_below(aabbs: &[Aabb]) -> Option<(RefnoEnum, f32)> {
     for aabb in aabbs {
         merged.merge(aabb);
     }
-    for corner in &merged.vertices()[..4] {
-        let pt: Vec3 = (*corner).into();
-        if let Ok(Some(hit)) = query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR").await {
-            return Some(hit);
+    let merged_corners = merged.vertices()[..4]
+        .iter()
+        .map(|corner| Vec3::from(*corner))
+        .collect::<Vec<_>>();
+    if let Some(hit) = nearest_floor_among(&merged_corners).await {
+        return Some(hit);
+    }
+    nearest_floor_among(&bottom_corners(aabbs)).await
+}
+
+/// 这一批点上向 -Z 打射线，返回最近的一块楼板（0 距离直接返回）。
+async fn nearest_floor_among(points: &[Vec3]) -> Option<(RefnoEnum, f32)> {
+    let mut best: Option<(RefnoEnum, f32)> = None;
+    for pt in points {
+        let Ok(Some((floor, dist))) = query_neareast_by_pos_dir(*pt, Vec3::NEG_Z, "FLOOR").await
+        else {
+            continue;
+        };
+        // 贴面（0 距离）已经是最优，不用再打。
+        if dist <= f32::EPSILON {
+            return Some((floor, dist));
+        }
+        if best.is_none_or(|(_, d)| dist < d) {
+            best = Some((floor, dist));
         }
     }
-    None
+    best
 }
 
 //将equip的 world transform 这些放到cal_equip 这张表里，存储一些需要计算的缓存数据
@@ -609,26 +658,14 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
             tracing::debug!(equip = ?equip, "设备无子件 aabb，跳过");
             continue;
         }
-        let mut final_aabb = Aabb::new_invalid();
-        for aabb in aabbs {
-            final_aabb.merge(&aabb);
-        }
-        //得到底部的中心点，去计算最近的楼板
-        let btm_pts = &final_aabb.vertices()[..4];
-        for btm_pt in btm_pts {
-            let pt: Vec3 = (*btm_pt).into();
-            if let Ok(Some((nearest, dist))) =
-                query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR").await
-            {
-                // dbg!((btm_pt, nearest, dist));
-                equip_sql.push_str(&format!(
-                    "relate {}->nearest_relate->FLOOR:{} set dist={};",
-                    equip.to_pe_key(),
-                    nearest.to_string(),
-                    dist
-                ));
-                break;
-            }
+        // 逐子件底角打射线，取最近的一块楼板（合并盒四角见 `nearest_floor_below` 的说明）。
+        if let Some((nearest, dist)) = nearest_floor_below(&aabbs).await {
+            equip_sql.push_str(&format!(
+                "relate {}->nearest_relate->FLOOR:{} set dist={};",
+                equip.to_pe_key(),
+                nearest.to_string(),
+                dist
+            ));
         }
     }
     if !equip_sql.is_empty() {
@@ -915,6 +952,31 @@ mod equip_scan_tests {
             !source.contains(&doubled),
             "本文件不许再出现两跳之间不经 pe 的写法"
         );
+    }
+
+    /// 合并盒四角打不中时要退到逐子件：环形 / 管状布置的设备四角落在空处。
+    #[test]
+    fn bottom_corners_cover_every_child_and_dedupe() {
+        let far = Aabb::new(
+            parry3d::math::Point::new(0.0, 0.0, 0.0),
+            parry3d::math::Point::new(10.0, 10.0, 10.0),
+        );
+        let near = Aabb::new(
+            parry3d::math::Point::new(100.0, 100.0, 0.0),
+            parry3d::math::Point::new(110.0, 110.0, 10.0),
+        );
+        let points = bottom_corners(&[far, near, far]);
+        assert_eq!(points.len(), 8, "两个不同子件各四个底角，重复的不再计: {points:?}");
+        assert!(
+            points.iter().all(|p| (p.z - 0.0).abs() < 1e-6),
+            "只取底面（z 最小）的四个角: {points:?}"
+        );
+        assert!(
+            points.iter().any(|p| (p.x - 100.0).abs() < 1e-6)
+                && points.iter().any(|p| (p.x - 110.0).abs() < 1e-6),
+            "每个子件自己的角都要在，不能用合并盒的四角代替: {points:?}"
+        );
+        assert!(bottom_corners(&[]).is_empty());
     }
 
     #[test]
