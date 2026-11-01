@@ -458,6 +458,32 @@ async fn rewrite_world_trans(equip: RefnoEnum) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 记一次「设备 / 阀门挂不上楼板」：射线打不中不是错误，但必须能查出来为什么。
+///
+/// 三处调用点以前都是静默放弃（`tracing::debug!` 在生产没有日志后端，一个字都落不到
+/// 文件里），排查时只能靠外部脚本反查。记进 `geom_error` 那本账后，
+/// `SELECT * FROM geom_error WHERE kind = 'equip_floor_miss'` 就是完整清单。
+async fn note_floor_miss(target: &str, noun: &str, reason: &str) {
+    println!("楼板未挂: {target} ({noun}) {reason}");
+    let id = format!(
+        "geom_error:['equip_floor_miss', '{}']",
+        crate::data_interface::dbnum_state::escape_surql_str(target)
+    );
+    let sql = format!(
+        "UPSERT {id} SET kind = 'equip_floor_miss', target = '{t}', noun = '{n}', \
+         occurrences = (occurrences?:0) + 1, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{r}';",
+        t = crate::data_interface::dbnum_state::escape_surql_str(target),
+        n = crate::data_interface::dbnum_state::escape_surql_str(noun),
+        r = crate::data_interface::dbnum_state::escape_surql_str(reason),
+    );
+    // 记账失败只 warn：跳过这件事已经定了，不能因为账本写不进去又把它变回硬错误。
+    if let Err(error) = SUL_DB.query(sql).await.and_then(|r| r.check()) {
+        log::warn!("[geom_error] 楼板未挂记录落库失败 target={target}: {error}");
+    }
+}
+
 /// 换一台设备的楼板边（调用方保证树已就绪）。返回重算后是否挂着楼板边。
 async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
     let e = equip.to_pe_key();
@@ -476,7 +502,16 @@ async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
             floor.to_table_key("FLOOR")
         ),
         // 树已就绪仍打不中：脚下确实没有楼板（或设备已无几何），旧边已过期。
-        None => format!("DELETE {e}->nearest_relate;"),
+        None => {
+            // 「没有子件几何」与「有几何但射线打不中」是两回事，分开记，排查不用猜。
+            let reason = if aabbs.is_empty() {
+                "no_child_geometry"
+            } else {
+                "no_floor_below"
+            };
+            note_floor_miss(&e, "EQUI", reason).await;
+            format!("DELETE {e}->nearest_relate;")
+        }
     };
     SUL_DB.query(sql).await?.check()?;
     Ok(nearest.is_some())
@@ -492,7 +527,10 @@ async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
              RELATE {v}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
             floor.to_table_key("FLOOR")
         ),
-        None => format!("DELETE {v}->nearest_relate;"),
+        None => {
+            note_floor_miss(&v, "VALV", "no_floor_below").await;
+            format!("DELETE {v}->nearest_relate;")
+        }
     };
     SUL_DB.query(sql).await?.check()?;
     Ok(nearest.is_some())
@@ -656,16 +694,18 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         };
         if aabbs.is_empty() {
             tracing::debug!(equip = ?equip, "设备无子件 aabb，跳过");
+            note_floor_miss(&e, "EQUI", "no_child_geometry").await;
             continue;
         }
         // 逐子件底角打射线，取最近的一块楼板（合并盒四角见 `nearest_floor_below` 的说明）。
-        if let Some((nearest, dist)) = nearest_floor_below(&aabbs).await {
-            equip_sql.push_str(&format!(
+        match nearest_floor_below(&aabbs).await {
+            Some((nearest, dist)) => equip_sql.push_str(&format!(
                 "relate {}->nearest_relate->FLOOR:{} set dist={};",
                 equip.to_pe_key(),
                 nearest.to_string(),
                 dist
-            ));
+            )),
+            None => note_floor_miss(&e, "EQUI", "no_floor_below").await,
         }
     }
     if !equip_sql.is_empty() {
@@ -767,15 +807,17 @@ mod nearest_floor_live_tests {
     /// 之后查明「483 台子件全是 SUBE、没有几何」是**查询写错**而不是数据缺口：孙件那一跳写成
     /// 连写两次 `<-pe_owner`，第二跳从边记录出发恒为空；SUBE 下的零件其实都有 `inst_relate`。
     /// 改成 `<-pe_owner<-pe<-pe_owner` 后（`child_aabbs_raw_expr`），489 台没挂边的设备里 484 台
-    /// 取得到盒（合并盒 xy 跨度中位 563mm、p90 3.8m）。修后全量 1143/1173（97.4%，2026-11-01）。
+    /// 取得到盒（合并盒 xy 跨度中位 563mm、p90 3.8m）。修后全量 1147/1165（98.45%，分母已排除 8 台软删 EQUI，2026-11-02）。
     /// 射线本身（网格读取、坐标变换、solid 标志）没有查出问题。
     #[tokio::test]
     #[ignore = "live: 需要真库 8009，会清空并重写 nearest_relate；必须单跑，见模块注释"]
     async fn coverage_does_not_regress() -> anyhow::Result<()> {
         attach_store_connected().await?;
 
+        // 分母口径与生产对齐：生产按 EQUI 类型表 + cal_equi 行枚举（真库 1165 台、无软删），
+        // pe 里那 8 台 deleted = true 的 EQUI 生产本来就不碰，不该算进「未覆盖」。
         let mut r = SUL_DB
-            .query("RETURN count(SELECT * FROM pe WHERE noun = 'EQUI');")
+            .query("RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND deleted != true);")
             .await?;
         let total: Option<i64> = r.take(0)?;
         let total = total.unwrap_or(0);
@@ -793,7 +835,7 @@ mod nearest_floor_live_tests {
 
         let mut r = SUL_DB
             .query(
-                "RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND array::len(->nearest_relate) > 0);",
+                "RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND deleted != true AND array::len(->nearest_relate) > 0);",
             )
             .await?;
         let covered: Option<i64> = r.take(0)?;
@@ -801,10 +843,10 @@ mod nearest_floor_live_tests {
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("EQUI 覆盖 {covered}/{total} = {pct:.1}%");
 
-        // 修后 97.4%。门槛设在 90%：孙件路径、射线候选集、NONE 过滤任何一项回退都会掉到 60% 以下。
+        // 修后 98.45%（分母已排除软删）。门槛设在 96%：孙件路径、射线候选集、NONE 过滤任何一项回退都会掉到 60% 以下。
         assert!(
-            pct >= 90.0,
-            "覆盖率 {pct:.1}% 低于 90%，孙件路径 / 射线候选集 / NONE 过滤可能回退了（修后 97.4%）"
+            pct >= 96.0,
+            "覆盖率 {pct:.1}% 低于 96%，孙件路径 / 射线候选集 / NONE 过滤可能回退了（修后 98.45%）"
         );
 
         Ok(())
