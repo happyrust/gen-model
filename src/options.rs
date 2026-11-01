@@ -1875,13 +1875,33 @@ pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 /// 余下是逐台读子件 aabb 的查询开销），而它是可事后重建的派生量，不该挡住启动。
 /// 关掉后仍可用 [`crate::fast_model::cal_model::update_cal_equip`] 手动回补。
 ///
-/// 已知缺口：增量更新**不会**重算这两张表，模型变了要等下次启动。彻底解决得把
-/// 调用挂到 `mark_model_ready` 那一侧，见 docs 里的待办。
+/// 增量更新那一侧见 [`INCREMENTAL_CAL_EQUIP_ENV`]。启动这一轮的 `nearest_relate` 只给还没有边的
+/// 设备补，已有的边靠增量那一侧保持新鲜。
 pub const STARTUP_CAL_EQUIP_ENV: &str = "AIOS_STARTUP_CAL_EQUIP";
 
 /// 启动时是否重算设备派生量。缺省开，见 [`STARTUP_CAL_EQUIP_ENV`]。
 pub fn startup_cal_equip_enabled() -> bool {
     std::env::var(STARTUP_CAL_EQUIP_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_flag)
+        .unwrap_or(true)
+}
+
+/// 增量更新后是否重算受影响设备的派生量（`cal_equi` 的 world transform 与
+/// `nearest_relate` 的最近楼板）。
+///
+/// 缺省**开**：不重算就是正确性缺口——模型改了这两张表还是旧值，而启动段只给没有边的设备补边。
+/// 开关只为极端情形留退路（例如目录级联一次重排整库，派生量开销盖过生成本身）。
+///
+/// 时机：durable 刷盘之后、任务收尾之前（`batch_worker::execute_frozen_batch`），只算本任务
+/// `Generated` 的根下的设备，不是全量。空间树未就绪时只重写 `cal_equi`，楼板边原样保留。
+/// 代价实测：ZONE 24381_100676 下 4 台设备 1.07 秒（含楼板射线）。
+pub const INCREMENTAL_CAL_EQUIP_ENV: &str = "AIOS_INCREMENTAL_CAL_EQUIP";
+
+/// 增量更新后是否重算设备派生量。缺省开，见 [`INCREMENTAL_CAL_EQUIP_ENV`]。
+pub fn incremental_cal_equip_enabled() -> bool {
+    std::env::var(INCREMENTAL_CAL_EQUIP_ENV)
         .ok()
         .as_deref()
         .and_then(parse_bool_flag)

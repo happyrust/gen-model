@@ -14,6 +14,232 @@ pub async fn update_cal_equip() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// [`update_cal_equip_for_roots`] 的结果，给调用方记日志用。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EquipRefreshOutcome {
+    /// 重写了 `cal_equi` 的设备台数。
+    pub refreshed: usize,
+    /// 重算后挂着 `nearest_relate` 的台数（树已就绪却打不中楼板的，旧边删掉、不计）。
+    pub floors_linked: usize,
+    /// 重算失败的台数（已逐台 `warn!`，旧值原样保留）。
+    pub failed: usize,
+    /// 空间树没就绪：`nearest_relate` 一条没动。
+    pub floors_skipped: bool,
+}
+
+/// 根往下找设备的最大层数。真库 EQUI 最深在 SITE → ZONE → EQUI 这一级，再深是零件；
+/// 上限防异常数据把展开拖成全树扫。
+const EQUIP_EXPAND_DEPTH: usize = 4;
+
+/// 增量版：只重算**指定生成根**影响到的设备派生量。
+///
+/// ## 为什么需要它
+///
+/// `update_cal_equip` 是全量版，只挂在启动序列上（`lib.rs` 的 `cal-equip` 段），而且
+/// `nearest_relate` 那一半只给**还没有边**的设备补。增量更新路径此前完全不碰这两张表——
+/// 模型改了以后 `cal_equi` 的 world transform 和 `nearest_relate` 的最近楼板都还是旧的。
+///
+/// ## 根 → 设备
+///
+/// 设备子件的生成根归到所在的 EQUI（`generation_root.rs` U-E2：EQUI 自成交付单元），所以根
+/// 要么就是 EQUI，要么是 ZONE / SITE 这类容器。从根沿 `<-pe_owner`（`in` = 子、`out` = 父）
+/// 逐层往下，`noun = 'EQUI'` 的收下且不再往里走（它的子件是零件），其余未删节点作下一层。
+///
+/// ## 写法（真库 python 探针逐条验过，SurrealDB 2.1.4）
+///
+/// - 一层一条查询：`SELECT id, noun, deleted FROM array::flatten((SELECT VALUE <-pe_owner.in FROM [..]))`。
+/// - `cal_equi` 用 `UPSERT`：`CREATE` 撞上已有 id 报 `Database record already exists`、旧值原样
+///   留着，而 `query()` 不检查语句级错误——不 `.check()` 就是静默不更新。
+/// - 旧边用图写法 `DELETE pe:x->nearest_relate` 删，和新边放在同一个事务里换。
+///
+/// ## 空间树没就绪时不碰楼板边
+///
+/// 射线查询在树空 / 未装载时一律返回 `None`，与「脚下真的没有楼板」分不开。这时删旧边就是把
+/// 正确数据抹掉（2026-11-01 实测：没装树跑了一遍，4 台设备的边被删光）。所以树不是
+/// `Ready` / `ReadyEmpty` 时只重写 `cal_equi`，`nearest_relate` 原样保留并在结果里标出。
+///
+/// ## 已删设备
+///
+/// 软删的 EQUI 会断开 `pe_owner`（实测父边为空），从父根往下找不到它们；所以每次顺手把
+/// `deleted = true` 的设备的两类派生行清掉（两张表各千行量级，实测各扫一遍 40～60ms）。
+pub async fn update_cal_equip_for_roots(
+    roots: &[RefnoEnum],
+) -> anyhow::Result<EquipRefreshOutcome> {
+    let mut outcome = EquipRefreshOutcome::default();
+    if roots.is_empty() {
+        return Ok(outcome);
+    }
+
+    SUL_DB
+        .query(
+            "DELETE nearest_relate WHERE in.deleted = true; \
+             DELETE cal_equi WHERE type::thing('pe', record::id(id)).deleted = true;",
+        )
+        .await?
+        .check()?;
+
+    let equips = collect_live_equips(roots).await?;
+    let link_floors = crate::fast_model::spatial_state::current_state().is_ready();
+    outcome.floors_skipped = !link_floors && !equips.is_empty();
+    for equip in equips {
+        match refresh_one_equip(equip, link_floors).await {
+            Ok(linked) => {
+                outcome.refreshed += 1;
+                outcome.floors_linked += usize::from(linked);
+            }
+            Err(error) => {
+                tracing::warn!(equip = ?equip, error = %error, "设备派生量重算失败，旧值保留");
+                outcome.failed += 1;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PeNode {
+    id: surrealdb::sql::Thing,
+    noun: Option<String>,
+    deleted: Option<bool>,
+}
+
+/// 「根 → 设备」逐层分拣的状态，抽成纯逻辑好离线钉住。
+#[derive(Default)]
+struct EquipScan {
+    live: Vec<RefnoEnum>,
+    // 根不能预先放进 `seen`：先放的话「根本身就是 EQUI」再 insert 返回 false，
+    // 它自己就收不进 `live`（2026-11-01 live 测试实测：以设备为根展开出 0 台）。
+    seen: std::collections::HashSet<RefnoEnum>,
+}
+
+impl EquipScan {
+    /// 分拣一层节点，返回下一层要展开的前沿。
+    fn absorb(&mut self, nodes: Vec<(RefnoEnum, Option<String>, bool)>) -> Vec<RefnoEnum> {
+        let mut frontier = Vec::new();
+        for (refno, noun, deleted) in nodes {
+            if deleted || !self.seen.insert(refno) {
+                continue;
+            }
+            if noun.as_deref() == Some("EQUI") {
+                self.live.push(refno);
+            } else {
+                frontier.push(refno);
+            }
+        }
+        frontier
+    }
+}
+
+fn pe_keys(refnos: &[RefnoEnum]) -> String {
+    refnos
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+async fn fetch_nodes(sql: String) -> anyhow::Result<Vec<(RefnoEnum, Option<String>, bool)>> {
+    let mut response = SUL_DB.query(sql).await?.check()?;
+    let rows: Vec<PeNode> = response.take(0)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let refno = crate::data_interface::helper::pe_thing_to_refno(row.id).ok()?;
+            Some((refno, row.noun, row.deleted.unwrap_or(false)))
+        })
+        .collect())
+}
+
+async fn collect_live_equips(roots: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut scan = EquipScan::default();
+    let mut nodes = fetch_nodes(format!(
+        "SELECT id, noun, deleted FROM [{}];",
+        pe_keys(roots)
+    ))
+    .await?;
+    for depth in 0..=EQUIP_EXPAND_DEPTH {
+        let frontier = scan.absorb(std::mem::take(&mut nodes));
+        if frontier.is_empty() || depth == EQUIP_EXPAND_DEPTH {
+            break;
+        }
+        nodes = fetch_nodes(format!(
+            "SELECT id, noun, deleted FROM array::flatten((SELECT VALUE <-pe_owner.in FROM [{}]));",
+            pe_keys(&frontier)
+        ))
+        .await?;
+    }
+    Ok(scan.live)
+}
+
+/// 重算单台设备：`cal_equi` 照写；`link_floors` 时再换 `nearest_relate`。
+/// 返回重算后这台设备是否挂着楼板边。
+async fn refresh_one_equip(equip: RefnoEnum, link_floors: bool) -> anyhow::Result<bool> {
+    let world_trans = aios_core::get_world_transform(equip)
+        .await?
+        .unwrap_or_default();
+    let transform_hash = gen_bytes_hash::<_, 64>(&world_trans);
+    let mut transform_map: HashMap<u64, String> = HashMap::new();
+    transform_map.insert(transform_hash, serde_json::to_string(&world_trans)?);
+    save_transforms_to_surreal(&transform_map).await?;
+    SUL_DB
+        .query(format!(
+            "UPSERT {} SET world_trans = trans:⟨{transform_hash}⟩;",
+            equip.to_table_key("cal_equi")
+        ))
+        .await?
+        .check()?;
+
+    if !link_floors {
+        return Ok(false);
+    }
+
+    let e = equip.to_pe_key();
+    let mut response = SUL_DB
+        .query(format!(
+            r#"
+            SELECT VALUE array::filter(array::flatten([
+                array::map((SELECT VALUE in FROM {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
+                array::map((SELECT VALUE in FROM {e}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
+            ]), |$v| $v != NONE) FROM ONLY {e};
+            "#
+        ))
+        .await?
+        .check()?;
+    // 读不出来是数据异常，不是「脚下没有楼板」：上抛，旧边原样留着。
+    let aabbs: Vec<Aabb> = response.take(0)?;
+    let nearest = nearest_floor_below(&aabbs).await;
+
+    let sql = match nearest {
+        Some((floor, dist)) => format!(
+            "BEGIN TRANSACTION; DELETE {e}->nearest_relate; \
+             RELATE {e}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
+            floor.to_table_key("FLOOR")
+        ),
+        // 树已就绪仍打不中：脚下确实没有楼板（或设备已无几何），旧边已过期。
+        None => format!("DELETE {e}->nearest_relate;"),
+    };
+    SUL_DB.query(sql).await?.check()?;
+    Ok(nearest.is_some())
+}
+
+/// 合并子件 aabb，从底面四角向 -Z 打射线，取第一个打中的楼板。
+async fn nearest_floor_below(aabbs: &[Aabb]) -> Option<(RefnoEnum, f32)> {
+    if aabbs.is_empty() {
+        return None;
+    }
+    let mut merged = Aabb::new_invalid();
+    for aabb in aabbs {
+        merged.merge(aabb);
+    }
+    for corner in &merged.vertices()[..4] {
+        let pt: Vec3 = (*corner).into();
+        if let Ok(Some(hit)) = query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR").await {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 //将equip的 world transform 这些放到cal_equip 这张表里，存储一些需要计算的缓存数据
 //这样可以减少查询次数，提高性能
 //这个表的数据是在equip的数据变更时，由equip的数据变更触发的
@@ -36,8 +262,10 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
         if !transform_map.contains_key(&transform_hash) {
             transform_map.insert(transform_hash, serde_json::to_string(&world_trans).unwrap());
         }
+        // `UPSERT` 不是 `CREATE`：`CREATE` 撞上已有 id 报错、旧值原样留着，第二次启动起
+        // world transform 就再也不更新了（真库实测 SurrealDB 2.1.4）。
         sql.push_str(&format!(
-            "create cal_equi:{refno} SET world_trans=trans:⟨{}⟩;",
+            "UPSERT cal_equi:{refno} SET world_trans=trans:⟨{}⟩;",
             transform_hash
         ));
     }
@@ -49,6 +277,7 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
     SUL_DB
         .query(sql)
         .await
+        .and_then(|response| response.check())
         .map_err(|error| anyhow::anyhow!("写入 cal_equi 的 world_trans 失败: {error}"))?;
     Ok(())
 }
@@ -135,6 +364,7 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         SUL_DB
             .query(equip_sql)
             .await
+            .and_then(|response| response.check())
             .map_err(|error| anyhow::anyhow!("写入 nearest_relate 失败: {error}"))?;
     }
     Ok(())
@@ -285,6 +515,228 @@ mod nearest_floor_live_tests {
             "覆盖率 {pct:.1}% 低于 50%，射线候选集或 NONE 过滤可能回退了（修前 31.5%）"
         );
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod equip_scan_tests {
+    //! 「根 → 设备」分拣的离线钉，不需要真库。
+    use super::*;
+
+    fn r(n: u32) -> RefnoEnum {
+        RefnoEnum::from(format!("24381/{n}").as_str())
+    }
+
+    fn node(n: u32, noun: &str, deleted: bool) -> (RefnoEnum, Option<String>, bool) {
+        (r(n), Some(noun.to_string()), deleted)
+    }
+
+    /// 生成根本身就是设备（EQUI 自成交付单元，这是常态）时要把它自己收下，且不再往下展开。
+    #[test]
+    fn equip_root_collects_itself() {
+        let mut scan = EquipScan::default();
+        let frontier = scan.absorb(vec![node(1, "EQUI", false)]);
+        assert_eq!(scan.live, vec![r(1)]);
+        assert!(frontier.is_empty(), "设备的子件是零件，不再往下展开");
+    }
+
+    #[test]
+    fn container_root_expands_to_child_equips() {
+        let mut scan = EquipScan::default();
+        let frontier = scan.absorb(vec![node(1, "ZONE", false)]);
+        assert_eq!(frontier, vec![r(1)]);
+        assert!(scan.live.is_empty());
+
+        let frontier = scan.absorb(vec![
+            node(2, "EQUI", false),
+            node(3, "EQUI", false),
+            node(4, "STRU", false),
+        ]);
+        assert_eq!(scan.live, vec![r(2), r(3)]);
+        assert_eq!(frontier, vec![r(4)]);
+    }
+
+    #[test]
+    fn deleted_nodes_are_neither_collected_nor_expanded() {
+        let mut scan = EquipScan::default();
+        let frontier = scan.absorb(vec![node(1, "EQUI", true), node(2, "ZONE", true)]);
+        assert!(scan.live.is_empty());
+        assert!(frontier.is_empty());
+    }
+
+    #[test]
+    fn repeated_nodes_are_taken_once() {
+        let mut scan = EquipScan::default();
+        scan.absorb(vec![node(1, "ZONE", false), node(2, "EQUI", false)]);
+        let frontier = scan.absorb(vec![node(1, "ZONE", false), node(2, "EQUI", false)]);
+        assert_eq!(scan.live, vec![r(2)]);
+        assert!(frontier.is_empty(), "已经见过的节点不再进前沿（防环）");
+    }
+}
+
+#[cfg(test)]
+mod incremental_live_tests {
+    //! `update_cal_equip_for_roots` 的 live 钉，需要真库 8009。
+    //!
+    //! **必须逐条单跑**：`SUL_DB` 是进程级全局连接，空间树状态也是进程级的；第二条要求
+    //! 进程里**没有**装过空间树。
+    //!
+    //! ```text
+    //! cargo test --lib container_root_refreshes_every_equip_and_relinks_floors -- --ignored --test-threads=1
+    //! cargo test --lib equip_root_overwrites_stale_world_trans_and_keeps_edges_without_tree -- --ignored --test-threads=1
+    //! ```
+
+    use super::*;
+    use crate::attach_store_connected;
+    use crate::data_interface::helper::pe_thing_to_refno;
+    use crate::fast_model::spatial_state;
+
+    /// 一个下挂 >= `min_equips` 台未删 EQUI 的 ZONE，连同这些 EQUI。
+    async fn zone_root_with_equips(
+        min_equips: usize,
+    ) -> anyhow::Result<(RefnoEnum, Vec<RefnoEnum>)> {
+        let mut r = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM pe WHERE noun = 'ZONE' \
+                 AND array::len(<-pe_owner[WHERE in.noun = 'EQUI']) >= {min_equips} LIMIT 1;"
+            ))
+            .await?
+            .check()?;
+        let found: Vec<surrealdb::sql::Thing> = r.take(0)?;
+        let root = pe_thing_to_refno(
+            found
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("库里没有下挂 >= {min_equips} 台 EQUI 的 ZONE"))?,
+        )?;
+
+        let mut r = SUL_DB
+            .query(format!(
+                "SELECT VALUE in FROM {}<-pe_owner WHERE in.noun = 'EQUI' AND in.deleted != true;",
+                root.to_pe_key()
+            ))
+            .await?
+            .check()?;
+        let things: Vec<surrealdb::sql::Thing> = r.take(0)?;
+        let equips = things
+            .into_iter()
+            .map(pe_thing_to_refno)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((root, equips))
+    }
+
+    /// 这些设备的楼板边，`设备->楼板` 形式、排好序。
+    async fn floor_edges(equips: &[RefnoEnum]) -> anyhow::Result<Vec<String>> {
+        let mut r = SUL_DB
+            .query(format!(
+                "SELECT VALUE record::id(in) + '->' + record::id(out) FROM nearest_relate WHERE in IN [{}];",
+                pe_keys(equips)
+            ))
+            .await?
+            .check()?;
+        let mut edges: Vec<String> = r.take(0)?;
+        edges.sort();
+        Ok(edges)
+    }
+
+    /// 容器根要重算它下面每一台设备；树已就绪时楼板边按「一台一条」换新，重跑不堆边。
+    #[tokio::test]
+    #[ignore = "live: 需要真库 8009；会装载空间树并重写这些设备的 cal_equi / nearest_relate；必须单跑"]
+    async fn container_root_refreshes_every_equip_and_relinks_floors() -> anyhow::Result<()> {
+        attach_store_connected().await?;
+        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
+        assert!(
+            spatial_state::current_state().is_ready(),
+            "装载后空间树应就绪，实际 {}",
+            spatial_state::current_state().as_str()
+        );
+
+        let (root, equips) = zone_root_with_equips(2).await?;
+        let started = std::time::Instant::now();
+        let first = update_cal_equip_for_roots(&[root]).await?;
+        eprintln!(
+            "根 {}（{} 台 EQUI）→ {first:?}，{}ms",
+            root.to_pe_key(),
+            equips.len(),
+            started.elapsed().as_millis()
+        );
+        assert_eq!(first.refreshed, equips.len(), "每台 EQUI 子件都要重算");
+        assert_eq!(first.failed, 0);
+        assert!(!first.floors_skipped, "树已就绪，不该跳过楼板边");
+        assert!(first.floors_linked >= 1, "树已就绪，至少一台该打中楼板");
+        let edges = floor_edges(&equips).await?;
+        assert_eq!(
+            edges.len(),
+            first.floors_linked,
+            "挂楼板的设备恰好一条边: {edges:?}"
+        );
+
+        let second = update_cal_equip_for_roots(&[root]).await?;
+        assert_eq!(second, first, "同一个根重跑，结果应一致");
+        assert_eq!(floor_edges(&equips).await?, edges, "重跑不能堆边或换边");
+        Ok(())
+    }
+
+    /// 根本身是设备时要把它自己算进去；`cal_equi` 已有旧值也必须被覆盖；树没装时旧楼板边原样保留。
+    #[tokio::test]
+    #[ignore = "live: 需要真库 8009；会改写一台设备的 cal_equi；必须单跑（进程里不能装过空间树）"]
+    async fn equip_root_overwrites_stale_world_trans_and_keeps_edges_without_tree()
+    -> anyhow::Result<()> {
+        attach_store_connected().await?;
+        assert!(
+            !spatial_state::current_state().is_ready(),
+            "本测试要求进程里没装过空间树，实际 {}",
+            spatial_state::current_state().as_str()
+        );
+
+        let mut r = SUL_DB
+            .query(
+                "SELECT VALUE in FROM nearest_relate WHERE in.noun = 'EQUI' AND in.deleted != true LIMIT 1;",
+            )
+            .await?
+            .check()?;
+        let found: Vec<surrealdb::sql::Thing> = r.take(0)?;
+        let equip = pe_thing_to_refno(
+            found
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("库里没有挂着楼板边的 EQUI"))?,
+        )?;
+        let edges_before = floor_edges(&[equip]).await?;
+
+        let cal_key = equip.to_table_key("cal_equi");
+        SUL_DB
+            .query(format!("UPSERT {cal_key} SET world_trans = trans:⟨stale_sentinel⟩;"))
+            .await?
+            .check()?;
+
+        let outcome = update_cal_equip_for_roots(&[equip]).await?;
+        eprintln!("根 {}（本身是设备）→ {outcome:?}", equip.to_pe_key());
+        assert_eq!(outcome.refreshed, 1, "根本身是设备时要把它自己算进去");
+        assert!(outcome.floors_skipped, "树没就绪必须跳过楼板边");
+
+        let mut r = SUL_DB
+            .query(format!("RETURN record::id({cal_key}.world_trans);"))
+            .await?
+            .check()?;
+        let trans_id: Option<String> = r.take(0)?;
+        let expected = gen_bytes_hash::<_, 64>(
+            &aios_core::get_world_transform(equip)
+                .await?
+                .unwrap_or_default(),
+        )
+        .to_string();
+        assert_eq!(
+            trans_id.as_deref(),
+            Some(expected.as_str()),
+            "cal_equi 必须被覆盖成当前 world transform（CREATE 撞已有 id 会静默失败）"
+        );
+        assert_eq!(
+            floor_edges(&[equip]).await?,
+            edges_before,
+            "树没就绪时旧楼板边必须原样保留"
+        );
         Ok(())
     }
 }

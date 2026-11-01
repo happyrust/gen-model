@@ -1782,6 +1782,14 @@ async fn execute_frozen_batch(
     // 没等栅栏的任务（非 DESI / 初始化编排）单元清单里本来就没有 `rooms_before`，这里空转。
     snapshot_rooms_after(&mut result.units).await;
 
+    // 设备派生量（`cal_equi` 的 world transform、`nearest_relate` 的最近楼板）跟房间「后」同一个理由放在
+    // 栅栏之后：子件 aabb 随模型行由 write-behind 刷盘，`run_unit_worklist` 收尾那一刻库上还是旧值。按全部
+    // `Generated` 单元算——刚体前移、单元级发布也会挪设备，不只整根重算那一路；刷盘被放弃的根此刻已改记
+    // `Failed`，不会混进来。没等栅栏（非 DESI / 初始化编排）不算：库里的模型行未必是这一版。
+    if flush.is_some() && crate::options::incremental_cal_equip_enabled() {
+        refresh_equip_derived(&mut result).await;
+    }
+
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
     // 一个写者、一笔事务。`applied_sesno` 不在这里——它由数据尾事务在模型阶段之前盖（ADR-056 D1 /
     // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。这一窗没追平（截断窗口，余量还在
@@ -1975,6 +1983,49 @@ async fn snapshot_rooms_after(units: &mut [ModelUnitResult]) {
         started.elapsed().as_millis(),
         rooms_after.len()
     );
+}
+
+/// 本任务成功的根 → 受影响设备的派生量重算。失败只进 `warnings`：派生量是可重建的缓存，不该让任务失败，
+/// 与启动段的降级姿态一致。
+async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
+    let roots = result
+        .units
+        .iter()
+        .filter(|unit| unit.status == UnitGenStatus::Generated)
+        .map(|unit| crate::RefnoEnum::from(unit.root_refno.as_str()))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    match crate::fast_model::cal_model::equip_model::update_cal_equip_for_roots(&roots).await {
+        Ok(outcome) => {
+            if outcome.refreshed + outcome.failed > 0 {
+                println!(
+                    "[设备派生量] 根={} 重算 {} 台 / 挂楼板 {} / 失败 {}{} {}ms",
+                    roots.len(),
+                    outcome.refreshed,
+                    outcome.floors_linked,
+                    outcome.failed,
+                    if outcome.floors_skipped {
+                        "（空间树未就绪，楼板边未动）"
+                    } else {
+                        ""
+                    },
+                    started.elapsed().as_millis()
+                );
+            }
+            if outcome.failed > 0 {
+                result.warnings.push(format!(
+                    "设备派生量有 {} 台重算失败（旧值保留，可由手动重算回补）",
+                    outcome.failed
+                ));
+            }
+        }
+        Err(error) => result.warnings.push(format!(
+            "设备派生量重算未完成（旧值保留，可由手动重算回补）: {error:#}"
+        )),
+    }
 }
 
 /// 增量路计划 D3：预算用尽 / 判死的根的处置，四件一起——从 write-behind 队列摘掉（不再原地无限重试）、
