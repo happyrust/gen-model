@@ -42,7 +42,14 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
         ));
     }
     save_transforms_to_surreal(&transform_map).await?;
-    SUL_DB.query(sql).await.unwrap();
+    // 2026-11-01 修：这里原来是 `.unwrap()`。1165 条 `create` 挤在一个请求里，
+    // 一旦超时或服务端拒绝就 panic；而这个函数现在挂在启动序列上
+    // （`lib.rs` 的 `cal-equip` 段），panic 会直接带走整个进程——
+    // 派生的缓存数据没写成功不该是启动杀手。
+    SUL_DB
+        .query(sql)
+        .await
+        .map_err(|error| anyhow::anyhow!("写入 cal_equi 的 world_trans 失败: {error}"))?;
     Ok(())
 }
 
@@ -124,7 +131,11 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         }
     }
     if !equip_sql.is_empty() {
-        SUL_DB.query(equip_sql).await.unwrap();
+        // 同上：`unwrap()` 在启动序列里等于「一条边写不进去就杀进程」。
+        SUL_DB
+            .query(equip_sql)
+            .await
+            .map_err(|error| anyhow::anyhow!("写入 nearest_relate 失败: {error}"))?;
     }
     Ok(())
 }

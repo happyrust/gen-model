@@ -1864,6 +1864,30 @@ fn probe_geometry_workers_config(configured: Option<OsString>) -> Result<Option<
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
+/// 环境变量名：启动时要不要重算设备派生量（`cal_equi` 的 world transform 与
+/// `nearest_relate` 最近楼板）。
+///
+/// 默认**开**：这两张表此前因为调用被误删（`a8c0f9cb7`）一直是空的，先让它在
+/// 每次启动时自愈一轮。取值规则同 [`STARTUP_AUTORUN_ENV`]（认
+/// `1/true/yes/on` 与 `0/false/no/off`，认不出的值当没设）。
+///
+/// 关掉的理由：全量跑一轮实测 56 秒（`nearest_relate` 18 秒 + `cal_equi` 0.3 秒，
+/// 余下是逐台读子件 aabb 的查询开销），而它是可事后重建的派生量，不该挡住启动。
+/// 关掉后仍可用 [`crate::fast_model::cal_model::update_cal_equip`] 手动回补。
+///
+/// 已知缺口：增量更新**不会**重算这两张表，模型变了要等下次启动。彻底解决得把
+/// 调用挂到 `mark_model_ready` 那一侧，见 docs 里的待办。
+pub const STARTUP_CAL_EQUIP_ENV: &str = "AIOS_STARTUP_CAL_EQUIP";
+
+/// 启动时是否重算设备派生量。缺省开，见 [`STARTUP_CAL_EQUIP_ENV`]。
+pub fn startup_cal_equip_enabled() -> bool {
+    std::env::var(STARTUP_CAL_EQUIP_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_flag)
+        .unwrap_or(true)
+}
+
 pub const AUTO_INITIALIZE_NEW_DBNUMS_ENV: &str = "AIOS_AUTO_INITIALIZE_NEW_DBNUMS";
 
 static AUTO_INITIALIZE_NEW_DBNUMS_CLI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3148,6 +3172,24 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(0)), 1);
         assert_eq!(effective_data_batch_workers(Some(4)), 4);
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
+    }
+
+    /// `AIOS_STARTUP_CAL_EQUIP` 缺省必须是**开**——这两张表此前因为调用被误删
+    /// （`a8c0f9cb7`）一直是空的，缺省关掉的话新库永远补不上。
+    ///
+    /// 这里只钉 `parse_bool_flag` 的解析口径，不去改进程环境（`set_var` 在
+    /// 2024 edition 是数据竞争，同 [`AutoInitializeNewDbnumsOverride`] 的理由）。
+    #[test]
+    fn startup_cal_equip_flag_parses_the_documented_spellings() {
+        for on in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert_eq!(parse_bool_flag(on), Some(true), "{on} 该被认成开");
+        }
+        for off in ["0", "false", "FALSE", "no", "off", " off "] {
+            assert_eq!(parse_bool_flag(off), Some(false), "{off} 该被认成关");
+        }
+        for junk in ["", "2", "maybe", "enable"] {
+            assert_eq!(parse_bool_flag(junk), None, "{junk} 该被当成没设");
+        }
     }
 
     #[test]

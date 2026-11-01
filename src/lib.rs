@@ -1294,7 +1294,15 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     //
     // 姿态与原设计一致：派生量是可事后重建的缓存，失败只告警，不阻断启动。
     // `run_app` 走 2650 行的 `run_cli(db_option).await` 也会经过这里，不必重复挂。
-    {
+    //
+    // 开关 `AIOS_STARTUP_CAL_EQUIP`（缺省开）：全量一轮实测 56 秒，纯派生量不该
+    // 无条件挡启动。关掉后可用 `update_cal_equip` 手动回补。
+    if !crate::options::startup_cal_equip_enabled() {
+        startup_step_skip(
+            "cal-equip",
+            "AIOS_STARTUP_CAL_EQUIP 关闭：跳过设备派生量重算（可用 update_cal_equip 手动回补）",
+        );
+    } else {
         let stage = startup_step_begin(
             "cal-equip",
             "重算设备派生量（cal_equi world transform / nearest_relate 最近楼板）",
