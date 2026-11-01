@@ -66,20 +66,39 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         //
         // 读法改成 `array::map(... |$c| type::thing('inst_relate', record::id($c)).aabb.d)`：
         // 一层是子件、两层是孙件，与原来那两段子查询的范围一致。
+        //
+        // 2026-11-01 修：最外层必须 `array::filter(..., |$v| $v != NONE)`。
+        // `parry3d::Aabb` 的 `Deserialize` 是严格的对象结构体，数组里混进一个
+        // `NONE` 就会让**整个** `Vec<Aabb>` 反序列化失败（实测：
+        // `[{mins,..},{mins,..}]` 成功 2 个；`[{mins,..}, NONE, {mins,..}]` 直接
+        // `expected an object-like struct named Aabb, found None`）。
+        //
+        // 而设备子件里缺 aabb 是常态（没有几何的 SUBE/NOZZ 子件、只存在于历史
+        // 数据里的构件）。原来 `let Ok(aabbs) = ... else { continue }` 会把这台
+        // 设备整个静默跳过——真库实测 1165 台里 525 台是这样被丢掉的，它们
+        // 子件 aabb 大多齐全（如 pe:24381_100725 的 38 个子件全有），只是其中
+        // 掺了一两个 NONE。过滤掉 NONE 后这些设备就能正常参与计算。
         let sql = format!(
             r#"
-            (select value array::flatten([
+            (select value array::filter(array::flatten([
                 array::map((select value in from {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
                 array::map((select value in from {e}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-            ]) from {e} where array::len(->nearest_relate)=0)[0]
+            ]), |$v| $v != NONE) from {e} where array::len(->nearest_relate)=0)[0]
             "#,
             e = equip.to_pe_key()
         );
         let mut response = SUL_DB.query(sql).await?;
-        let Ok(aabbs) = response.take::<Vec<Aabb>>(0) else {
-            continue;
+        // 不要再静默 `continue`：反序列化失败以前意味着「这台设备被悄悄丢掉」，
+        // 排查时看不到任何线索。现在过滤过 NONE，真失败就是数据异常，得留痕。
+        let aabbs = match response.take::<Vec<Aabb>>(0) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(equip = ?equip, error = %err, "读取设备子件 aabb 失败，跳过");
+                continue;
+            }
         };
         if aabbs.is_empty() {
+            tracing::debug!(equip = ?equip, "设备无子件 aabb，跳过");
             continue;
         }
         let mut final_aabb = Aabb::new_invalid();
