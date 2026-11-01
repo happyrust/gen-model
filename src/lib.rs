@@ -1281,6 +1281,36 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     prepare_room_resident_at_startup(&db_option).await;
     startup_step_done("spatial-room", stage, "");
 
+    // 设备派生量（`cal_equi` 的 world transform + `nearest_relate` 最近楼板）。
+    //
+    // 2026-11-01 修复：这段调用在 `a8c0f9cb7`（删房间独立流程）里被连带删掉了，
+    // 只留下 `use` 和一句指向不存在的「lib.rs 启动段告警继续」的注释，于是
+    // `update_cal_equip_wtrans` / `cal_equip_nearest_floor` 全仓零调用点，
+    // `cal_equi` 一直是空表、`nearest_relate` 一直 0 行。
+    //
+    // 位置：必须排在 `prepare_room_resident_at_startup` **之后**——这两个函数都靠
+    // `GLOBAL_AABB_TREE` 做射线查询，树没装时 `query_neareast_by_pos_dir` 一律返回
+    // None，`nearest_relate` 会一条都写不出（实测覆盖率 0%）。
+    //
+    // 姿态与原设计一致：派生量是可事后重建的缓存，失败只告警，不阻断启动。
+    // `run_app` 走 2650 行的 `run_cli(db_option).await` 也会经过这里，不必重复挂。
+    {
+        let stage = startup_step_begin(
+            "cal-equip",
+            "重算设备派生量（cal_equi world transform / nearest_relate 最近楼板）",
+        );
+        if let Err(error) = update_cal_equip().await {
+            eprintln!("设备派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
+        }
+        // 支管部件派生量（阀门 → 最近楼板，同样写 `nearest_relate`）。这一段在
+        // `a8c0f9cb7` 里跟房间流程一起被删，原注释写的是「全量跑了才顺带算，
+        // 失败只告警」——姿态照旧。
+        if let Err(error) = update_cal_bran_component().await {
+            eprintln!("支管部件派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
+        }
+        startup_step_done("cal-equip", stage, "");
+    }
+
     if crate::options::data_face().is_read_through() {
         startup_step_skip(
             "watcher-init",
