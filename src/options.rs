@@ -1895,8 +1895,10 @@ pub fn startup_cal_equip_enabled() -> bool {
 /// 开关只为极端情形留退路（例如目录级联一次重排整库，派生量开销盖过生成本身）。
 ///
 /// 时机：durable 刷盘之后、任务收尾之前（`batch_worker::execute_frozen_batch`），只算本任务
-/// `Generated` 的根下的设备，不是全量。空间树未就绪时只重写 `cal_equi`，楼板边原样保留。
-/// 代价实测：ZONE 24381_100676 下 4 台设备 1.07 秒（含楼板射线）。
+/// `Generated` 的根下的设备 / 阀门，以及根下楼板牵连的设备 / 阀门，不是全量。空间树未就绪时只重写
+/// `cal_equi`，楼板边原样保留。
+/// 代价实测：ZONE 24381_100676 下 4 台设备 1.07 秒（含楼板射线）。根下有楼板时另加空间反查：
+/// 真库 p90 楼板约 200 个牵连、12～25 秒，最大的一块约 1,550 个、1.5～3 分钟（同步跑，不设上限）。
 pub const INCREMENTAL_CAL_EQUIP_ENV: &str = "AIOS_INCREMENTAL_CAL_EQUIP";
 
 /// 增量更新后是否重算设备派生量。缺省开，见 [`INCREMENTAL_CAL_EQUIP_ENV`]。

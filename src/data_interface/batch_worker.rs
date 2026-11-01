@@ -2000,15 +2000,17 @@ async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
     let started = Instant::now();
     match crate::fast_model::cal_model::equip_model::update_cal_equip_for_roots(&roots).await {
         Ok(outcome) => {
-            if outcome.refreshed + outcome.valves_refreshed + outcome.failed > 0 {
+            if outcome.refreshed + outcome.relinked + outcome.valves_refreshed + outcome.failed > 0 {
                 println!(
-                    "[设备派生量] 根={} 重算 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 {} / 失败 {}{} {}ms",
+                    "[设备派生量] 根={} 重算 {} 台 / 重连 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 边 {} 空间 {} / 失败 {}{} {}ms",
                     roots.len(),
                     outcome.refreshed,
+                    outcome.relinked,
                     outcome.floors_linked,
                     outcome.valves_refreshed,
                     outcome.valves_linked,
                     outcome.via_floors,
+                    outcome.via_floor_space,
                     outcome.failed,
                     if outcome.floors_skipped {
                         "（空间树未就绪，楼板边未动）"

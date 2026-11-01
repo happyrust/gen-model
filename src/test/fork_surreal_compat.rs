@@ -2251,3 +2251,61 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
     assert_eq!(store_b.current_counts(), (0, 0));
     assert!(store_b.roots(ProjectionScope::Current).is_empty());
 }
+
+/// 有 `(in, out)` 唯一索引的边表上，fork 2.1.4 对 `WHERE in IN [字面数组]` 一行都不回（真库 8009，
+/// 2026-11-01，见 `docs/2026-08-05_fork-surreal-compat-findings.md`）。改写成 `[..] CONTAINS in`、
+/// 图遍历或子查询形式。表名单取自当日 `INFO FOR TABLE`；纯源码扫描，不起服务器。
+#[test]
+fn unique_in_out_tables_are_not_queried_with_in_in_literal() {
+    const TABLES: [&str; 5] = [
+        "nearest_relate",
+        "room_relate",
+        "neg_relate",
+        "room_panel_relate",
+        "pe_owner",
+    ];
+    let pattern = regex::Regex::new(&format!(
+        r"(?i)\bFROM\s+({})\b[^;]*?\bWHERE\b[^;]*?\bin\s+IN\s*\[",
+        TABLES.join("|")
+    ))
+    .expect("pattern");
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("src 可读") {
+            let path = entry.expect("目录项可读").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+
+    let mut offenders = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("源码可读");
+        // 注释里允许提到这种写法（正是为了告诫别写），只扫代码行。
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for hit in pattern.find_iter(&code) {
+            offenders.push(format!("{}: {}", path.display(), hit.as_str().replace('\n', " ")));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "这些语句在 (in, out) 唯一索引表上写了 `in IN [..]`，fork 2.1.4 会静默返回 0 行：\n{}",
+        offenders.join("\n")
+    );
+
+    // 拆开拼，免得扫到本文件时把反例自己报出来。
+    let canary = concat!("SELECT * FROM nearest_", "relate WHERE in IN [pe:1_2];");
+    assert!(pattern.is_match(canary), "钉自己要能认出反例");
+    assert!(!pattern.is_match("SELECT * FROM nearest_relate WHERE [pe:1_2] CONTAINS in;"));
+    assert!(!pattern.is_match("SELECT * FROM inst_relate WHERE in IN [pe:1_2];"));
+}

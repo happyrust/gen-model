@@ -6,7 +6,7 @@ use bevy_transform::components::Transform;
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 use parry3d::bounding_volume::BoundingVolume;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub async fn update_cal_equip() -> anyhow::Result<()> {
     update_cal_equip_wtrans().await?;
@@ -17,9 +17,11 @@ pub async fn update_cal_equip() -> anyhow::Result<()> {
 /// [`update_cal_equip_for_roots`] 的结果，给调用方记日志用。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EquipRefreshOutcome {
-    /// 重写了 `cal_equi` 的设备台数（含因楼板变化被牵连的）。
+    /// 根下重写了 `cal_equi` 的设备台数。
     pub refreshed: usize,
-    /// 重算后挂着 `nearest_relate` 的台数（树已就绪却打不中楼板的，旧边删掉、不计）。
+    /// 因楼板变化被牵连、只重算楼板边的设备台数（`cal_equi` 不动：设备本身没变）。
+    pub relinked: usize,
+    /// 重算后挂着 `nearest_relate` 的设备台数（含牵连的；树已就绪却打不中楼板的，旧边删掉、不计）。
     pub floors_linked: usize,
     /// 重算了楼板边的阀门个数（含因楼板变化被牵连的）。
     pub valves_refreshed: usize,
@@ -27,6 +29,8 @@ pub struct EquipRefreshOutcome {
     pub valves_linked: usize,
     /// 因为所挂楼板在这批根里（或已软删）而被拉进来重算的设备 + 阀门数。
     pub via_floors: usize,
+    /// 不挂这批楼板、但落在楼板新位置正上方，由空间反查拉进来的设备 + 阀门数。
+    pub via_floor_space: usize,
     /// 重算失败的设备 + 阀门数（已逐个 `warn!`，旧值原样保留）。
     pub failed: usize,
     /// 空间树没就绪：`nearest_relate` 一条没动（阀门与楼板牵连也一并跳过）。
@@ -65,11 +69,32 @@ const EQUIP_EXPAND_DEPTH: usize = 4;
 ///
 /// ## 楼板变化
 ///
-/// 根下的 FLOOR 自己不算，但**此刻挂在它上面**的设备 / 阀门要重算：楼板挪了、改厚了，旧距离甚至旧
-/// 归属都可能不再成立。软删的楼板从根下找不到（`pe_owner` 已断），所以同一条查询顺带把挂在软删
-/// 楼板上的也拉进来。只看现有边，不做空间反查：楼板挪到另一台原本没挂它（或挂着别的楼板）的设备
-/// 下面，那台设备不会被重算，要等它自己的根变化或手动全量重算。代价是一条走 `out` 的查询
-/// （真库 2 块楼板 20 个牵连，约 150ms）。
+/// 根下的 FLOOR 自己不算，受它影响的设备 / 阀门分两路拉进来，**只重算楼板边**（设备本身没动，
+/// `cal_equi` 不写）：
+///
+/// - **现有边反查**：此刻挂在这些楼板上的（楼板离开了原位置、改厚了，旧距离甚至旧归属都可能不再
+///   成立）。软删的楼板从根下找不到（`pe_owner` 已断），同一条查询顺带把挂在软删楼板上的也拉进来。
+///   一条走 `out` 的查询，真库 2 块楼板 20 个牵连约 150ms。
+/// - **空间反查**：楼板**新位置**正上方的（原来挂在下面别的楼板上、或原来没有边的）。xy 取楼板在
+///   树上的盒、z 从楼板底面到无穷高，取与这根柱子相交的树条目；VALV 直接收，其余按
+///   `owner` / `owner.owner` 归到 EQUI（每批 2000 个）。树上只有子件盒，所以合并盒一角伸到楼板上方、
+///   但没有一个子件落进柱子的设备会漏掉。代价随柱子里的条目数走：真库 p90 楼板约 200 个牵连、
+///   12～25 秒，最大的一块约 1,550 个、1.5～3 分钟。
+///
+/// 两路都读的是楼板的**新**几何：本函数在 `await_units_durable` 之后跑，那时
+/// `converge_tree_after_persist` 已经把树换成新盒、清掉了这些 refno 的网格缓存。
+///
+/// ## 增量覆盖面
+///
+/// | 变化 | 怎么接住 |
+/// |---|---|
+/// | 设备 / 子件变 | 生成根即 EQUI，整台重算 |
+/// | 阀门变 | PIPE / BRAN 根向下展开到 VALV，重连 |
+/// | 楼板离开原位 | 现有边反查 |
+/// | 楼板到了新位 | 空间反查 |
+/// | 楼板软删 | 现有边反查（挂在软删楼板上的） |
+/// | 楼板几何清空、pe 还在 | 树条目已摘，现有边反查 |
+/// | 非 DESI / 初始化编排任务 | 不等刷盘就不算（库里的模型行未必是这一版） |
 ///
 /// ## 空间树没就绪时不碰楼板边
 ///
@@ -102,9 +127,24 @@ pub async fn update_cal_equip_for_roots(
     outcome.floors_skipped = !link_floors
         && !(scan.live.is_empty() && scan.valves.is_empty() && scan.floors.is_empty());
     if link_floors {
-        let before = scan.live.len() + scan.valves.len();
-        scan.absorb(fetch_nodes(floor_dependents_sql(&scan.floors)).await?);
-        outcome.via_floors = scan.live.len() + scan.valves.len() - before;
+        // 牵连名单拿不全只记一笔失败，不拖住根下设备的重算。
+        match fetch_nodes(floor_dependents_sql(&scan.floors)).await {
+            Ok(nodes) => outcome.via_floors = scan.absorb_floor_dependents(nodes),
+            Err(error) => {
+                tracing::warn!(error = %error, "楼板现有边反查失败，挂在这些楼板上的设备 / 阀门本轮不重算");
+                outcome.failed += 1;
+            }
+        }
+        if !scan.floors.is_empty() {
+            let entries = floor_column_entries(&scan.floors).await;
+            match column_dependents(&entries).await {
+                Ok(nodes) => outcome.via_floor_space = scan.absorb_floor_dependents(nodes),
+                Err(error) => {
+                    tracing::warn!(error = %error, "楼板空间反查失败，楼板新位置上方的设备 / 阀门本轮不重算");
+                    outcome.failed += 1;
+                }
+            }
+        }
     }
 
     for equip in scan.live {
@@ -121,6 +161,18 @@ pub async fn update_cal_equip_for_roots(
     }
     if !link_floors {
         return Ok(outcome);
+    }
+    for equip in scan.floor_equips {
+        match relink_floor(equip).await {
+            Ok(linked) => {
+                outcome.relinked += 1;
+                outcome.floors_linked += usize::from(linked);
+            }
+            Err(error) => {
+                tracing::warn!(equip = ?equip, error = %error, "设备楼板边重算失败，旧边保留");
+                outcome.failed += 1;
+            }
+        }
     }
     for valve in scan.valves {
         match refresh_one_valve(valve).await {
@@ -150,6 +202,112 @@ fn floor_dependents_sql(floors: &[RefnoEnum]) -> String {
     )
 }
 
+/// 楼板正上方那根柱子：xy 取楼板盒，z 从楼板底面到无穷高。楼板不在树上（盒无效）时为 `None`。
+fn floor_column(floor: &Aabb) -> Option<Aabb> {
+    let valid = floor.mins.x <= floor.maxs.x
+        && floor.mins.y <= floor.maxs.y
+        && floor.mins.z <= floor.maxs.z;
+    valid.then(|| {
+        Aabb::new(
+            parry3d::math::Point::new(floor.mins.x, floor.mins.y, floor.mins.z),
+            parry3d::math::Point::new(floor.maxs.x, floor.maxs.y, f32::MAX),
+        )
+    })
+}
+
+/// 这些楼板新位置正上方的树条目（楼板自身除外），按 refno 去重。读锁只在这里持有，不跨 await。
+async fn floor_column_entries(floors: &[RefnoEnum]) -> Vec<(RefnoEnum, String)> {
+    let tree = aios_core::room::room::GLOBAL_AABB_TREE.read().await;
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for floor in floors {
+        let mut merged = Aabb::new_invalid();
+        for entry in tree.entries_of(floor.refno()).iter() {
+            merged.merge(&entry.aabb);
+        }
+        let Some(column) = floor_column(&merged) else {
+            continue;
+        };
+        for entry in tree.locate_intersecting_bounds(&column) {
+            if entry.noun == "FLOOR" || !seen.insert(entry.refno) {
+                continue;
+            }
+            entries.push((RefnoEnum::from(entry.refno), entry.noun.clone()));
+        }
+    }
+    entries
+}
+
+/// 归属查询一批的条目数：最大的楼板柱子里有约 11 万条树条目，一条 SQL 点名 2000 个约 30KB。
+const COLUMN_LOOKUP_BATCH: usize = 2000;
+
+#[derive(Debug, serde::Deserialize)]
+struct ColumnRow {
+    id: surrealdb::sql::Thing,
+    noun: Option<String>,
+    deleted: Option<bool>,
+    o1: Option<surrealdb::sql::Thing>,
+    n1: Option<String>,
+    d1: Option<bool>,
+    o2: Option<surrealdb::sql::Thing>,
+    n2: Option<String>,
+    d2: Option<bool>,
+}
+
+type Node = (RefnoEnum, Option<String>, bool);
+
+/// 柱子里一个条目的自身、父、祖父（`None` = 没有这一级）。
+struct ColumnLink {
+    node: Node,
+    parent: Option<Node>,
+    grand: Option<Node>,
+}
+
+/// 条目归到哪个设备 / 阀门：VALV 是它自己；其余看父、祖父里第一个 EQUI（设备子件最深两层，
+/// SUBE 下的零件是祖父那一级）。都不是就与设备 / 阀门无关。
+fn floor_dependent_of(link: ColumnLink) -> Option<Node> {
+    let is = |node: &Node, noun: &str| node.1.as_deref() == Some(noun);
+    if is(&link.node, "VALV") || is(&link.node, "EQUI") {
+        return Some(link.node);
+    }
+    [link.parent, link.grand]
+        .into_iter()
+        .flatten()
+        .find(|node| is(node, "EQUI"))
+}
+
+/// 柱子里的条目 → 设备 / 阀门节点（去重交给 [`EquipScan::absorb_floor_dependents`]）。
+async fn column_dependents(entries: &[(RefnoEnum, String)]) -> anyhow::Result<Vec<Node>> {
+    let to_node = |id: Option<surrealdb::sql::Thing>, noun: Option<String>, deleted: Option<bool>| {
+        let refno = crate::data_interface::helper::pe_thing_to_refno(id?).ok()?;
+        Some((refno, noun, deleted.unwrap_or(false)))
+    };
+    let mut nodes = Vec::new();
+    for batch in entries.chunks(COLUMN_LOOKUP_BATCH) {
+        let keys = batch
+            .iter()
+            .map(|(refno, _)| refno.to_pe_key())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, noun, deleted, owner AS o1, owner.noun AS n1, owner.deleted AS d1, \
+                 owner.owner AS o2, owner.owner.noun AS n2, owner.owner.deleted AS d2 FROM [{keys}];"
+            ))
+            .await?
+            .check()?;
+        let rows: Vec<ColumnRow> = response.take(0)?;
+        nodes.extend(rows.into_iter().filter_map(|row| {
+            floor_dependent_of(ColumnLink {
+                node: to_node(Some(row.id), row.noun, row.deleted)?,
+                parent: to_node(row.o1, row.n1, row.d1),
+                grand: to_node(row.o2, row.n2, row.d2),
+            })
+        }));
+    }
+    Ok(nodes)
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct PeNode {
     id: surrealdb::sql::Thing,
@@ -161,6 +319,8 @@ struct PeNode {
 #[derive(Default)]
 struct EquipScan {
     live: Vec<RefnoEnum>,
+    /// 因楼板变化牵连进来的设备：只重连楼板边，不写 `cal_equi`。
+    floor_equips: Vec<RefnoEnum>,
     valves: Vec<RefnoEnum>,
     floors: Vec<RefnoEnum>,
     // 根不能预先放进 `seen`：先放的话「根本身就是 EQUI」再 insert 返回 false，
@@ -186,6 +346,47 @@ impl EquipScan {
         }
         frontier
     }
+
+    /// 收下楼板牵连进来的设备 / 阀门（软删的、已经收过的跳过），返回新收的个数。
+    /// 根下已收的设备留在 `live`（整台重算本来就会重连楼板边）。
+    fn absorb_floor_dependents(&mut self, nodes: Vec<Node>) -> usize {
+        let mut added = 0;
+        for (refno, noun, deleted) in nodes {
+            let is_equip = match noun.as_deref() {
+                Some("EQUI") => true,
+                Some("VALV") => false,
+                _ => continue,
+            };
+            if deleted || !self.seen.insert(refno) {
+                continue;
+            }
+            if is_equip {
+                self.floor_equips.push(refno);
+            } else {
+                self.valves.push(refno);
+            }
+            added += 1;
+        }
+        added
+    }
+}
+
+/// 设备子件 aabb 的原始数组：一层子件 + 两层孙件，可能夹 `NONE`。
+///
+/// 孙件必须写成 `<-pe_owner<-pe<-pe_owner`：`<-pe_owner` 连写两次时第二跳从**边记录**出发，
+/// 恒为空（真库 2026-11-01：没挂楼板边的 489 台设备里 477 台的盒全在孙件那一层，旧写法一个都取不到）。
+fn child_aabbs_raw_expr(e: &str) -> String {
+    format!(
+        "array::flatten([\
+         array::map((SELECT VALUE in FROM {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d), \
+         array::map((SELECT VALUE in FROM {e}<-pe_owner<-pe<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)\
+         ])"
+    )
+}
+
+/// [`child_aabbs_raw_expr`] 去掉 `NONE`：`parry3d::Aabb` 的反序列化遇到一个 `NONE` 整个数组就失败。
+fn child_aabbs_expr(e: &str) -> String {
+    format!("array::filter({}, |$v| $v != NONE)", child_aabbs_raw_expr(e))
 }
 
 fn pe_keys(refnos: &[RefnoEnum]) -> String {
@@ -232,6 +433,14 @@ async fn collect_live_targets(roots: &[RefnoEnum]) -> anyhow::Result<EquipScan> 
 /// 重算单台设备：`cal_equi` 照写；`link_floors` 时再换 `nearest_relate`。
 /// 返回重算后这台设备是否挂着楼板边。
 async fn refresh_one_equip(equip: RefnoEnum, link_floors: bool) -> anyhow::Result<bool> {
+    rewrite_world_trans(equip).await?;
+    if !link_floors {
+        return Ok(false);
+    }
+    relink_floor(equip).await
+}
+
+async fn rewrite_world_trans(equip: RefnoEnum) -> anyhow::Result<()> {
     let world_trans = aios_core::get_world_transform(equip)
         .await?
         .unwrap_or_default();
@@ -246,21 +455,14 @@ async fn refresh_one_equip(equip: RefnoEnum, link_floors: bool) -> anyhow::Resul
         ))
         .await?
         .check()?;
+    Ok(())
+}
 
-    if !link_floors {
-        return Ok(false);
-    }
-
+/// 换一台设备的楼板边（调用方保证树已就绪）。返回重算后是否挂着楼板边。
+async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
     let e = equip.to_pe_key();
     let mut response = SUL_DB
-        .query(format!(
-            r#"
-            SELECT VALUE array::filter(array::flatten([
-                array::map((SELECT VALUE in FROM {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                array::map((SELECT VALUE in FROM {e}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-            ]), |$v| $v != NONE) FROM ONLY {e};
-            "#
-        ))
+        .query(format!("SELECT VALUE {} FROM ONLY {e};", child_aabbs_expr(&e)))
         .await?
         .check()?;
     // 读不出来是数据异常，不是「脚下没有楼板」：上抛，旧边原样留着。
@@ -375,7 +577,7 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         // `fn::get_world_pos` 在 2026-10-29 已经修过，这里是漏掉的一处。
         //
         // 读法改成 `array::map(... |$c| type::thing('inst_relate', record::id($c)).aabb.d)`：
-        // 一层是子件、两层是孙件，与原来那两段子查询的范围一致。
+        // 一层是子件、两层是孙件，与原来那两段子查询的范围一致（见 `child_aabbs_raw_expr`）。
         //
         // 2026-11-01 修：最外层必须 `array::filter(..., |$v| $v != NONE)`。
         // `parry3d::Aabb` 的 `Deserialize` 是严格的对象结构体，数组里混进一个
@@ -388,14 +590,10 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         // 设备整个静默跳过——真库实测 1165 台里 525 台是这样被丢掉的，它们
         // 子件 aabb 大多齐全（如 pe:24381_100725 的 38 个子件全有），只是其中
         // 掺了一两个 NONE。过滤掉 NONE 后这些设备就能正常参与计算。
+        let e = equip.to_pe_key();
         let sql = format!(
-            r#"
-            (select value array::filter(array::flatten([
-                array::map((select value in from {e}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                array::map((select value in from {e}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-            ]), |$v| $v != NONE) from {e} where array::len(->nearest_relate)=0)[0]
-            "#,
-            e = equip.to_pe_key()
+            "(SELECT VALUE {} FROM {e} WHERE array::len(->nearest_relate) = 0)[0]",
+            child_aabbs_expr(&e)
         );
         let mut response = SUL_DB.query(sql).await?;
         // 不要再静默 `continue`：反序列化失败以前意味着「这台设备被悄悄丢掉」，
@@ -486,25 +684,12 @@ mod nearest_floor_live_tests {
 
         // 找一台「有子件、且子件里确实混了 NONE」的设备。
         let mut r = SUL_DB
-            .query(
-                r#"
-                SELECT VALUE id FROM pe
-                WHERE noun = 'EQUI'
-                  AND array::len(<-pe_owner) > 0
-                  AND array::len(array::flatten([
-                        array::map((SELECT VALUE in FROM $this<-pe_owner),
-                                   |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                        array::map((SELECT VALUE in FROM $this<-pe_owner<-pe_owner),
-                                   |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-                      ])) > array::len(array::filter(array::flatten([
-                        array::map((SELECT VALUE in FROM $this<-pe_owner),
-                                   |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                        array::map((SELECT VALUE in FROM $this<-pe_owner<-pe_owner),
-                                   |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-                      ]), |$v| $v != NONE))
-                LIMIT 1;
-                "#,
-            )
+            .query(format!(
+                "SELECT VALUE id FROM pe WHERE noun = 'EQUI' AND array::len(<-pe_owner) > 0 \
+                 AND array::len({}) > array::len({}) LIMIT 1;",
+                child_aabbs_raw_expr("$this.id"),
+                child_aabbs_expr("$this.id")
+            ))
             .await?;
         let ids: Vec<surrealdb::sql::Thing> = r.take(0)?;
         if ids.is_empty() {
@@ -515,12 +700,7 @@ mod nearest_floor_live_tests {
 
         // 不过滤：必然失败。这是本条钉的立论基础——如果哪天不失败了，说明
         // Aabb 的 Deserialize 放宽了，本模块里的 array::filter 就可以撤。
-        let raw = format!(
-            r#"RETURN array::flatten([
-                array::map((SELECT VALUE in FROM {key}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                array::map((SELECT VALUE in FROM {key}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-            ]);"#
-        );
+        let raw = format!("RETURN {};", child_aabbs_raw_expr(&key));
         let mut resp = SUL_DB.query(raw).await?;
         assert!(
             resp.take::<Vec<Aabb>>(0).is_err(),
@@ -529,12 +709,7 @@ mod nearest_floor_live_tests {
         );
 
         // 过滤后：必须成功且非空。
-        let filtered = format!(
-            r#"RETURN array::filter(array::flatten([
-                array::map((SELECT VALUE in FROM {key}<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d),
-                array::map((SELECT VALUE in FROM {key}<-pe_owner<-pe_owner), |$c| type::thing('inst_relate', record::id($c)).aabb.d)
-            ]), |$v| $v != NONE);"#
-        );
+        let filtered = format!("RETURN {};", child_aabbs_expr(&key));
         let mut resp = SUL_DB.query(filtered).await?;
         let aabbs: Vec<Aabb> = resp.take(0)?;
         assert!(
@@ -552,10 +727,11 @@ mod nearest_floor_live_tests {
     /// 两个缺陷都修掉后是 675 台（57.9%）；射线起点后退修掉「底面贴楼板面」后
     /// 676/1173（57.6%，2026-11-01）。
     ///
-    /// 剩下 497 台的分类（探针逐条射线实测，2026-11-01）：483 台的子件全是没有
-    /// `inst_relate` 行的 SUBE，取不到一个 aabb，这是生成侧的数据缺口；其余 14 台
-    /// 有 aabb，但四个底角正下方都没有 FLOOR 包围盒（楼板覆盖区外 / 开孔），再加 1 台
-    /// 网格可用却打不中。射线本身（网格读取、坐标变换、solid 标志）没有查出问题。
+    /// 之后查明「483 台子件全是 SUBE、没有几何」是**查询写错**而不是数据缺口：孙件那一跳写成
+    /// 连写两次 `<-pe_owner`，第二跳从边记录出发恒为空；SUBE 下的零件其实都有 `inst_relate`。
+    /// 改成 `<-pe_owner<-pe<-pe_owner` 后（`child_aabbs_raw_expr`），489 台没挂边的设备里 484 台
+    /// 取得到盒（合并盒 xy 跨度中位 563mm、p90 3.8m）。修后全量 1143/1173（97.4%，2026-11-01）。
+    /// 射线本身（网格读取、坐标变换、solid 标志）没有查出问题。
     #[tokio::test]
     #[ignore = "live: 需要真库 8009，会清空并重写 nearest_relate；必须单跑，见模块注释"]
     async fn coverage_does_not_regress() -> anyhow::Result<()> {
@@ -588,10 +764,10 @@ mod nearest_floor_live_tests {
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("EQUI 覆盖 {covered}/{total} = {pct:.1}%");
 
-        // 修前 367（31.5%）。门槛设在 50%：既挡住回退，又不因数据小幅变化误红。
+        // 修后 97.4%。门槛设在 90%：孙件路径、射线候选集、NONE 过滤任何一项回退都会掉到 60% 以下。
         assert!(
-            pct >= 50.0,
-            "覆盖率 {pct:.1}% 低于 50%，射线候选集或 NONE 过滤可能回退了（修前 31.5%）"
+            pct >= 90.0,
+            "覆盖率 {pct:.1}% 低于 90%，孙件路径 / 射线候选集 / NONE 过滤可能回退了（修后 97.4%）"
         );
 
         Ok(())
@@ -667,19 +843,78 @@ mod equip_scan_tests {
         assert_eq!(frontier, vec![r(3)], "阀门、楼板都不再往下展开");
     }
 
-    /// 楼板牵连进来的设备 / 阀门与根下已收的去重，软删的不收。
+    /// 楼板牵连进来的设备只进 `floor_equips`（只重连）；与根下已收的去重，软删的、非设备阀门的不收。
     #[test]
     fn floor_dependents_merge_without_duplicates() {
         let mut scan = EquipScan::default();
         scan.absorb(vec![node(1, "EQUI", false), node(2, "FLOOR", false)]);
-        scan.absorb(vec![
+        let added = scan.absorb_floor_dependents(vec![
             node(1, "EQUI", false),
             node(5, "EQUI", false),
             node(6, "VALV", false),
             node(7, "VALV", true),
+            node(8, "BOX", false),
         ]);
-        assert_eq!(scan.live, vec![r(1), r(5)]);
+        assert_eq!(added, 2);
+        assert_eq!(scan.live, vec![r(1)], "根下的设备留在整台重算那一路");
+        assert_eq!(scan.floor_equips, vec![r(5)]);
         assert_eq!(scan.valves, vec![r(6)]);
+
+        let again = scan.absorb_floor_dependents(vec![node(5, "EQUI", false), node(6, "VALV", false)]);
+        assert_eq!(again, 0, "现有边反查与空间反查拉到同一个，只收一次");
+    }
+
+    fn link(own: (u32, &str), parent: Option<(u32, &str, bool)>, grand: Option<(u32, &str, bool)>) -> ColumnLink {
+        ColumnLink {
+            node: node(own.0, own.1, false),
+            parent: parent.map(|(n, noun, d)| node(n, noun, d)),
+            grand: grand.map(|(n, noun, d)| node(n, noun, d)),
+        }
+    }
+
+    #[test]
+    fn column_entries_resolve_to_their_equip_or_valve() {
+        assert_eq!(floor_dependent_of(link((1, "VALV"), Some((2, "BRAN", false)), None)), Some(node(1, "VALV", false)));
+        assert_eq!(floor_dependent_of(link((1, "BOX"), Some((2, "EQUI", false)), None)), Some(node(2, "EQUI", false)));
+        assert_eq!(
+            floor_dependent_of(link((1, "BOX"), Some((2, "SUBE", false)), Some((3, "EQUI", false)))),
+            Some(node(3, "EQUI", false)),
+            "SUBE 下的零件归到祖父那台设备"
+        );
+        assert_eq!(
+            floor_dependent_of(link((1, "BOX"), Some((2, "EQUI", true)), None)),
+            Some(node(2, "EQUI", true)),
+            "软删标记原样带出，由 absorb_floor_dependents 丢掉"
+        );
+        assert_eq!(floor_dependent_of(link((1, "PANE"), Some((2, "STRU", false)), Some((3, "ZONE", false)))), None);
+    }
+
+    #[test]
+    fn floor_column_spans_the_floor_footprint_upward() {
+        let floor = Aabb::new(
+            parry3d::math::Point::new(0.0, 0.0, 100.0),
+            parry3d::math::Point::new(10.0, 20.0, 150.0),
+        );
+        let column = floor_column(&floor).expect("有效楼板盒");
+        assert_eq!(column.mins, floor.mins, "z 从楼板底面起：贴在楼板里的阀门也算");
+        assert_eq!((column.maxs.x, column.maxs.y), (10.0, 20.0));
+        assert_eq!(column.maxs.z, f32::MAX);
+        assert!(floor_column(&Aabb::new_invalid()).is_none(), "楼板不在树上就没有柱子");
+    }
+
+    /// 孙件那一跳必须经过 `pe`：连写两次 `<-pe_owner` 恒为空，曾让 477 台设备取不到盒。
+    #[test]
+    fn child_aabbs_walk_through_pe_to_reach_grandchildren() {
+        let expr = child_aabbs_expr("pe:24381_1");
+        assert!(expr.contains("pe:24381_1<-pe_owner<-pe<-pe_owner"), "{expr}");
+        assert!(expr.starts_with("array::filter("), "最外层要滤掉 NONE: {expr}");
+
+        let source = include_str!("equip_model.rs");
+        let doubled = ["<-pe_owner", "<-pe_owner"].concat();
+        assert!(
+            !source.contains(&doubled),
+            "本文件不许再出现两跳之间不经 pe 的写法"
+        );
     }
 
     #[test]
@@ -703,6 +938,7 @@ mod incremental_live_tests {
     //! cargo test --lib container_root_refreshes_every_equip_and_relinks_floors -- --ignored --test-threads=1
     //! cargo test --lib equip_root_overwrites_stale_world_trans_and_keeps_edges_without_tree -- --ignored --test-threads=1
     //! cargo test --lib floor_root_relinks_what_hangs_on_its_floors -- --ignored --test-threads=1
+    //! cargo test --lib floor_space_finds_equips_that_did_not_link_the_floor -- --ignored --test-threads=1
     //! ```
 
     use super::*;
@@ -844,19 +1080,68 @@ mod incremental_live_tests {
             dependents.len()
         );
         assert_eq!(first.via_floors, dependents.len(), "挂在这些楼板上的都要拉进来");
-        assert_eq!(first.refreshed + first.valves_refreshed, dependents.len());
+        assert_eq!(first.refreshed, 0, "根下没有设备，牵连的只重连、不写 cal_equi");
         assert_eq!(first.failed, 0);
         assert!(!first.floors_skipped);
         let edges = floor_edges(&dependents).await?;
-        assert_eq!(
+        assert!(
+            edges.len() >= dependents.len(),
+            "现有边牵连的应全部还挂着楼板边（空间反查只会多拉）: {} < {}",
             edges.len(),
-            first.floors_linked + first.valves_linked,
-            "挂楼板的恰好一条边: {edges:?}"
+            dependents.len()
         );
 
         let second = update_cal_equip_for_roots(&[root]).await?;
         assert_eq!(floor_edges(&dependents).await?, edges, "重跑不能堆边或换边");
         assert_eq!(second.failed, 0);
+        Ok(())
+    }
+
+    /// 楼板新位置正上方、原来没挂这块楼板（这里模拟成「没有边」）的设备，要靠空间反查拉进来补边。
+    #[tokio::test]
+    #[ignore = "live: 需要真库 8009；会装载空间树并重写一组楼板上方的 nearest_relate；必须单跑"]
+    async fn floor_space_finds_equips_that_did_not_link_the_floor() -> anyhow::Result<()> {
+        attach_store_connected().await?;
+        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
+
+        // 挑一台挂在 CFLOOR 楼板上的设备，记下它的根与边，然后删边：此时现有边反查找不到它。
+        let mut r = SUL_DB
+            .query(
+                "SELECT in AS equip, type::thing('pe', record::id(out)).owner AS root FROM nearest_relate \
+                 WHERE in.noun = 'EQUI' AND in.deleted != true \
+                 AND type::thing('pe', record::id(out)).owner.noun = 'CFLOOR' LIMIT 1;",
+            )
+            .await?
+            .check()?;
+        #[derive(serde::Deserialize)]
+        struct Pick {
+            equip: surrealdb::sql::Thing,
+            root: surrealdb::sql::Thing,
+        }
+        let pick: Option<Pick> = r.take(0)?;
+        let pick = pick.ok_or_else(|| anyhow::anyhow!("库里没有挂在 CFLOOR 楼板上的设备"))?;
+        let equip = pe_thing_to_refno(pick.equip)?;
+        let root = pe_thing_to_refno(pick.root)?;
+        let before = floor_edges(&[equip]).await?;
+        SUL_DB
+            .query(format!("DELETE {}->nearest_relate;", equip.to_pe_key()))
+            .await?
+            .check()?;
+
+        let started = std::time::Instant::now();
+        let outcome = update_cal_equip_for_roots(&[root]).await?;
+        eprintln!(
+            "根 {} 设备 {} → {outcome:?}，{}ms",
+            root.to_pe_key(),
+            equip.to_pe_key(),
+            started.elapsed().as_millis()
+        );
+        assert!(outcome.via_floor_space >= 1, "删了边的设备只能靠空间反查拉进来");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(floor_edges(&[equip]).await?, before, "补回的边应与删之前相同");
+
+        update_cal_equip_for_roots(&[root]).await?;
+        assert_eq!(floor_edges(&[equip]).await?, before, "重跑不能堆边");
         Ok(())
     }
 

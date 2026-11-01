@@ -72,3 +72,12 @@
   生产（`pdms_inst::init_inst_relate_indices`）与暂存
   （`init_staging_schema`）共用常量 `INST_RELATE_ZONE_INDEX_SQL` 一条语句。
   `dual_startup_define_replay_info_parity` 在修复后保持两引擎一字不差。
+
+## 2026-11-01 增补（`(in, out)` 唯一索引上的 `in IN [字面数组]`）
+
+真库 8009（fork 2.1.4）实测：表上有 `DEFINE INDEX … FIELDS in, out UNIQUE` 时，`WHERE in IN [pe:a, pe:b]`
+一行都不回（`nearest_relate` 1 / 41 个起点、`pe_owner` 2 个起点均为 0 行）。同一批起点换成
+`WHERE [..] CONTAINS in`、`WHERE in = pe:a`、`WHERE in IN (SELECT …)` 结果都正确；只有单字段 `in` 索引的表
+（`inst_relate` / `tubi_relate` / `geo_relate`）上 `in IN [..]` 也正确。受影响的表（`INFO FOR TABLE`）：
+`nearest_relate` `room_relate` `neg_relate` `room_panel_relate` `pe_owner`。源码钉
+`unique_in_out_tables_are_not_queried_with_in_in_literal` 守住不再写出这种语句。
