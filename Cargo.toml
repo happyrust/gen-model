@@ -161,7 +161,7 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "f660821b1766a50ff4d4a22f29eb240df2e2e355", default-features = false }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "cdbd5d647a1ccbd326e7f1d4c751a7fa1ee09bdf", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
 # old-pdms-io（`pdms_io`）不再是依赖——连 optional 都不是。`cargo tree --workspace -i pdms_io`
@@ -274,7 +274,7 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 # 前提：下面这个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
 #
-#   ../vendor/old-aios-core      codex/libgm-snout-caliber = f660821b
+#   ../vendor/old-aios-core      codex/libgm-snout-caliber = cdbd5d64
 #
 # old-pdms-io 与 old-parse-pdms-db 的那两条分别在 2026-09-04 随 `pdms_io` / `parse_pdms_db`
 # 依赖一起摘掉了（不再是任何 crate 的依赖，留着 patch 只会得到 cargo 的
