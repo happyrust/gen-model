@@ -8,7 +8,13 @@ use parry3d::bounding_volume::Aabb;
 use parry3d::bounding_volume::BoundingVolume;
 use std::collections::{HashMap, HashSet};
 
+/// 全量重算设备派生量：`cal_equi` 的 world transform + `nearest_relate` 最近楼板。
+///
+/// 先清软删设备的派生行再重算——软删的 EQUI 断开了 `pe_owner`，枚举（按
+/// `pe.deleted != true`）自然跳过它们，但**不会**顺手删掉它们留下的行。只靠枚举
+/// 跳过的话，软删那一刻的 `cal_equi` 行与 `nearest_relate` 边会永久留在库里。
 pub async fn update_cal_equip() -> anyhow::Result<()> {
+    clear_soft_deleted_equip_rows().await?;
     update_cal_equip_wtrans().await?;
     cal_equip_nearest_floor().await?;
     Ok(())
@@ -35,6 +41,26 @@ pub struct EquipRefreshOutcome {
     pub failed: usize,
     /// 空间树没就绪：`nearest_relate` 一条没动（阀门与楼板牵连也一并跳过）。
     pub floors_skipped: bool,
+}
+
+/// 清掉软删设备的两类派生行（`cal_equi` 与 `nearest_relate`）。
+///
+/// 软删的 EQUI 会断开 `pe_owner`（实测父边为空），从父根往下找不到它们，所以派生行
+/// 只能靠这条显式清理销掉。两张表各千行量级，实测各扫一遍 40～60ms。
+///
+/// 全量与增量**都**要调：只在一侧清，另一侧跑完就会把软删设备的派生行重新留在库里。
+/// 真库 2026-11-02 实测——软删 `pe:24381_101725` 后跑全量 `update_cal_equip`，
+/// `cal_equi` 行与 `nearest_relate` 边都原样留着（`{cal: true, edges: 1}`），
+/// 只有增量路径会清。
+pub(crate) async fn clear_soft_deleted_equip_rows() -> anyhow::Result<()> {
+    SUL_DB
+        .query(
+            "DELETE nearest_relate WHERE in.deleted = true; \
+             DELETE cal_equi WHERE type::thing('pe', record::id(id)).deleted = true;",
+        )
+        .await?
+        .check()?;
+    Ok(())
 }
 
 /// 根往下找设备的最大层数。真库 EQUI 最深在 SITE → ZONE → EQUI 这一级，再深是零件；
@@ -105,7 +131,7 @@ const EQUIP_EXPAND_DEPTH: usize = 4;
 /// ## 已删设备
 ///
 /// 软删的 EQUI 会断开 `pe_owner`（实测父边为空），从父根往下找不到它们；所以每次顺手把
-/// `deleted = true` 的设备的两类派生行清掉（两张表各千行量级，实测各扫一遍 40～60ms）。
+/// `deleted = true` 的设备的两类派生行清掉（见 [`clear_soft_deleted_equip_rows`]）。
 pub async fn update_cal_equip_for_roots(
     roots: &[RefnoEnum],
 ) -> anyhow::Result<EquipRefreshOutcome> {
@@ -114,13 +140,7 @@ pub async fn update_cal_equip_for_roots(
         return Ok(outcome);
     }
 
-    SUL_DB
-        .query(
-            "DELETE nearest_relate WHERE in.deleted = true; \
-             DELETE cal_equi WHERE type::thing('pe', record::id(id)).deleted = true;",
-        )
-        .await?
-        .check()?;
+    clear_soft_deleted_equip_rows().await?;
 
     let mut scan = collect_live_targets(roots).await?;
     let link_floors = crate::fast_model::spatial_state::current_state().is_ready();
@@ -926,6 +946,29 @@ mod equip_scan_tests {
         let frontier = scan.absorb(vec![node(1, "EQUI", true), node(2, "ZONE", true)]);
         assert!(scan.live.is_empty());
         assert!(frontier.is_empty());
+    }
+
+    /// 全量与增量必须都清软删设备的派生行。
+    ///
+    /// 这条钉的是「只有一侧清」的回归：软删的 EQUI 断开 `pe_owner`，枚举会跳过它，
+    /// 但它留下的 `cal_equi` 行与 `nearest_relate` 边不会自己消失。真库 2026-11-02
+    /// 实测，软删 `pe:24381_101725` 后跑全量，`{cal: true, edges: 1}` 原样留着。
+    ///
+    /// 用源码文本断言而不是行为测试：清理是两条 SQL，离线跑不了；而「两条入口都调了」
+    /// 这件事在源码里是唯一可查的证据。
+    #[test]
+    fn both_paths_clear_soft_deleted_derived_rows() {
+        let src = include_str!("equip_model.rs");
+        // 两条入口（update_cal_equip 与 update_cal_equip_for_roots）都得调。
+        assert!(
+            src.matches("clear_soft_deleted_equip_rows().await?;").count() >= 2,
+            "全量与增量都要调 clear_soft_deleted_equip_rows"
+        );
+        // 软删清理必须有自己的函数体，不能在两处各写一份 SQL。
+        assert!(
+            src.contains("async fn clear_soft_deleted_equip_rows()"),
+            "软删清理要有独立函数，两条入口共用"
+        );
     }
 
     #[test]
