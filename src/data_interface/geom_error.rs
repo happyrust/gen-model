@@ -47,6 +47,8 @@ pub(crate) const BOOL_POS: &str = "bool_pos";
 pub(crate) const BOOL_NEG: &str = "bool_neg";
 /// 基本体数据无法产生可用 BREP（缺失、非法或变换含 NaN）。
 pub(crate) const PRIMITIVE: &str = "primitive";
+/// 设备 / 阀门重算楼板边时射线打不中（有几何但脚下没楼板，或压根没有子件几何）。
+pub(crate) const EQUIP_FLOOR_MISS: &str = "equip_floor_miss";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryFailurePolicy {
@@ -225,6 +227,70 @@ pub(crate) async fn note_success(target: &str) {
     }
 }
 
+fn render_equip_floor_miss_upsert(target: &str, noun: &str, reason: &str) -> String {
+    format!(
+        "UPSERT {id} SET kind = '{EQUIP_FLOOR_MISS}', target = '{target_text}', \
+         noun = '{noun_text}', \
+         occurrences = (occurrences?:0) + 1, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{reason_text}';",
+        id = record_id(EQUIP_FLOOR_MISS, target),
+        target_text = escape_surql_str(target),
+        noun_text = escape_surql_str(noun),
+        reason_text = escape_surql_str(reason),
+    )
+}
+
+/// 记一次「设备 / 阀门重算楼板边时射线打不中」。
+///
+/// `reason` 用两个字符串之一：
+/// - `no_child_geometry`：子件 aabb 一条都取不到（源库里本来就没有几何）
+/// - `no_floor_below`：有几何，但射线打不中楼板（脚下确实没有楼板，或楼板网格在该
+///   (x,y) 处镂空）
+///
+/// 与 [`note_skip`] 同一条纪律：记账失败只发一句 warn，不能因为账本写不进去又把它
+/// 变回硬错误——跳过这件事已经定了。
+pub(crate) async fn note_equip_floor_miss(target: &str, noun: &str, reason: &str) {
+    if let Err(seed_error) = seed().await {
+        log::warn!("[geom_error] 已有错误行播种失败（继续尝试写当前楼板未挂）: {seed_error:#}");
+    }
+    if let Err(write_error) = SUL_DB
+        .query(render_equip_floor_miss_upsert(target, noun, reason))
+        .await
+        .and_then(|response| response.check())
+    {
+        log::warn!("[geom_error] 楼板未挂记录落库失败 target={target}: {write_error}");
+        return;
+    }
+    if let Some(set) = known().as_mut() {
+        set.insert(known_key(EQUIP_FLOOR_MISS, target));
+    }
+}
+
+/// 这台设备 / 阀门这一轮重新挂上了楼板边：销掉它的楼板未挂记录。
+///
+/// 销账是这本账能用的前提。`note_equip_floor_miss` 的 `occurrences` 只增不减，
+/// 没有销账的话，一台设备修好之后那行会永远留着，清单一直说它坏着——账本从「当前
+/// 有哪些挂不上」退化成「历史上曾经挂不上过」，排查时反而要自己去反查边。
+///
+/// 与 [`note_success`] 同一条纪律：先播种，只对**表里确实有行**的目标发 DELETE，
+/// 否则每轮几千台正常设备都要陪跑一条 DELETE。
+pub(crate) async fn clear_equip_floor_miss(target: &str) -> anyhow::Result<()> {
+    seed().await?;
+    let key = known_key(EQUIP_FLOOR_MISS, target);
+    if !known().as_ref().is_some_and(|set| set.contains(&key)) {
+        return Ok(());
+    }
+    SUL_DB
+        .query(render_clear_kind(EQUIP_FLOOR_MISS, target))
+        .await?
+        .check()?;
+    if let Some(set) = known().as_mut() {
+        set.remove(&key);
+    }
+    Ok(())
+}
+
 /// `/health` 用：现在有多少件的布尔被降级了、最近一条长什么样。
 ///
 /// 表为空就是 `null`——与 `parse_errors` / `idle_round_panic` 同一个约定：没有问题
@@ -351,7 +417,43 @@ mod tests {
         assert!(sql.contains("o\\'boom"), "{sql}");
     }
 
-    /// 语句得真能在 SurrealDB 上跑：数组记录 id、计数累加、首见时刻不被覆盖、销账。
+    /// 楼板未挂的行必须与布尔 / 基本体分开记：它有自己的 kind，销账时也只清自己
+    /// 那一条，否则一次「设备挂上楼板」会顺手抹掉同 refno 的几何降级记录。
+    #[test]
+    fn equip_floor_miss_is_its_own_kind_and_clears_only_itself() {
+        let sql = render_equip_floor_miss_upsert("pe:24381_46895", "EQUI", "no_floor_below");
+        assert!(
+            sql.contains("geom_error:['equip_floor_miss', 'pe:24381_46895']"),
+            "{sql}"
+        );
+        assert!(sql.contains("noun = 'EQUI'"), "{sql}");
+        assert!(sql.contains("last_error = 'no_floor_below'"), "{sql}");
+        assert!(sql.contains("occurrences = (occurrences?:0) + 1"), "{sql}");
+        assert!(!sql.contains("bool_pos"), "{sql}");
+        assert!(!sql.contains("primitive"), "{sql}");
+
+        let clear = render_clear_kind(EQUIP_FLOOR_MISS, "pe:24381_46895");
+        assert_eq!(
+            clear,
+            "DELETE geom_error:['equip_floor_miss', 'pe:24381_46895'];"
+        );
+        assert!(!clear.contains("bool_pos"), "{clear}");
+        assert!(!clear.contains("primitive"), "{clear}");
+    }
+
+    /// 两种原因要能分辨：`no_child_geometry` 是源库没有几何（改代码没用），
+    /// `no_floor_below` 是脚下真没楼板（换位置才有用）。混成一个字符串，排查时
+    /// 就得自己去反查子件，账本等于白记。
+    #[test]
+    fn the_two_miss_reasons_stay_distinguishable() {
+        let no_geom = render_equip_floor_miss_upsert("pe:1_1", "EQUI", "no_child_geometry");
+        let no_floor = render_equip_floor_miss_upsert("pe:1_1", "EQUI", "no_floor_below");
+        assert!(no_geom.contains("last_error = 'no_child_geometry'"), "{no_geom}");
+        assert!(no_floor.contains("last_error = 'no_floor_below'"), "{no_floor}");
+        assert_ne!(no_geom, no_floor);
+    }
+
+    /// 语句得真能在 SurrealDB 上跑：数组记录 id、计数累加、销账。
     ///
     /// 纯字符串断言查不出 `geom_error:['bool_pos', '…']` 是不是合法 SurrealQL，而这
     /// 批语句一旦解析失败，「布尔被降级过」这件事就彻底没了记录。
@@ -470,5 +572,56 @@ mod tests {
         let remaining: Vec<serde_json::Value> =
             response.take(0).expect("decode primitive remaining");
         assert!(remaining.is_empty(), "基本体恢复后必须销账: {remaining:?}");
+
+        // 楼板未挂：两次记账计数累加，销账后整行消失。销账是本轮新增的能力——
+        // 只记不清的话，设备修好之后那行会永远留着，清单会一直说它坏着。
+        db.query(render_equip_floor_miss_upsert(
+            "pe:24381_46895",
+            "EQUI",
+            "no_floor_below",
+        ))
+        .await
+        .expect("floor miss upsert 1")
+        .check()
+        .expect("floor miss upsert statement 1");
+        db.query(render_equip_floor_miss_upsert(
+            "pe:24381_46895",
+            "EQUI",
+            "no_floor_below",
+        ))
+        .await
+        .expect("floor miss upsert 2")
+        .check()
+        .expect("floor miss upsert statement 2");
+        let mut response = db
+            .query(format!(
+                "SELECT kind, target, noun, occurrences, last_error FROM {TABLE};"
+            ))
+            .await
+            .expect("read floor miss")
+            .check()
+            .expect("read floor miss statement");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode floor miss");
+        assert_eq!(rows.len(), 1, "同一设备只占一行: {rows:?}");
+        assert_eq!(rows[0]["kind"], EQUIP_FLOOR_MISS);
+        assert_eq!(rows[0]["target"], "pe:24381_46895");
+        assert_eq!(rows[0]["noun"], "EQUI");
+        assert_eq!(rows[0]["occurrences"], 2, "计数必须累加");
+        assert_eq!(rows[0]["last_error"], "no_floor_below");
+
+        db.query(render_clear_kind(EQUIP_FLOOR_MISS, "pe:24381_46895"))
+            .await
+            .expect("clear floor miss")
+            .check()
+            .expect("clear floor miss statement");
+        let mut response = db
+            .query(format!("SELECT target FROM {TABLE};"))
+            .await
+            .expect("recount floor miss")
+            .check()
+            .expect("recount floor miss statement");
+        let remaining: Vec<serde_json::Value> =
+            response.take(0).expect("decode floor miss remaining");
+        assert!(remaining.is_empty(), "挂上楼板后必须销账: {remaining:?}");
     }
 }

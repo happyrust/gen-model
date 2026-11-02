@@ -463,24 +463,20 @@ async fn rewrite_world_trans(equip: RefnoEnum) -> anyhow::Result<()> {
 /// 三处调用点以前都是静默放弃（`tracing::debug!` 在生产没有日志后端，一个字都落不到
 /// 文件里），排查时只能靠外部脚本反查。记进 `geom_error` 那本账后，
 /// `SELECT * FROM geom_error WHERE kind = 'equip_floor_miss'` 就是完整清单。
+///
+/// 成功挂边时由 [`clear_floor_miss`] 销账——只记不清的话，`occurrences` 只增不减，
+/// 一台设备修好之后那行永远留着，清单会从「现在挂不上」退化成「历史上曾经挂不上」。
 async fn note_floor_miss(target: &str, noun: &str, reason: &str) {
     println!("楼板未挂: {target} ({noun}) {reason}");
-    let id = format!(
-        "geom_error:['equip_floor_miss', '{}']",
-        crate::data_interface::dbnum_state::escape_surql_str(target)
-    );
-    let sql = format!(
-        "UPSERT {id} SET kind = 'equip_floor_miss', target = '{t}', noun = '{n}', \
-         occurrences = (occurrences?:0) + 1, \
-         first_seen_at = first_seen_at?:time::now(), \
-         last_seen_at = time::now(), last_error = '{r}';",
-        t = crate::data_interface::dbnum_state::escape_surql_str(target),
-        n = crate::data_interface::dbnum_state::escape_surql_str(noun),
-        r = crate::data_interface::dbnum_state::escape_surql_str(reason),
-    );
-    // 记账失败只 warn：跳过这件事已经定了，不能因为账本写不进去又把它变回硬错误。
-    if let Err(error) = SUL_DB.query(sql).await.and_then(|r| r.check()) {
-        log::warn!("[geom_error] 楼板未挂记录落库失败 target={target}: {error}");
+    crate::data_interface::geom_error::note_equip_floor_miss(target, noun, reason).await;
+}
+
+/// 这一轮重新挂上了楼板边：销掉 [`note_floor_miss`] 记下的那行。
+///
+/// 销账失败只 warn：边已经写成功了，账本晚一轮清干净不影响数据正确性。
+async fn clear_floor_miss(target: &str) {
+    if let Err(error) = crate::data_interface::geom_error::clear_equip_floor_miss(target).await {
+        log::warn!("[geom_error] 楼板未挂销账失败 target={target}: {error}");
     }
 }
 
@@ -496,11 +492,14 @@ async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
     let nearest = nearest_floor_below(&aabbs).await;
 
     let sql = match nearest {
-        Some((floor, dist)) => format!(
-            "BEGIN TRANSACTION; DELETE {e}->nearest_relate; \
-             RELATE {e}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
-            floor.to_table_key("FLOOR")
-        ),
+        Some((floor, dist)) => {
+            clear_floor_miss(&e).await;
+            format!(
+                "BEGIN TRANSACTION; DELETE {e}->nearest_relate; \
+                 RELATE {e}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
+                floor.to_table_key("FLOOR")
+            )
+        }
         // 树已就绪仍打不中：脚下确实没有楼板（或设备已无几何），旧边已过期。
         None => {
             // 「没有子件几何」与「有几何但射线打不中」是两回事，分开记，排查不用猜。
@@ -522,11 +521,14 @@ async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
     let nearest = query_neareast_along_axis(valve, Vec3::NEG_Z, "FLOOR").await?;
     let v = valve.to_pe_key();
     let sql = match nearest {
-        Some((floor, dist)) => format!(
-            "BEGIN TRANSACTION; DELETE {v}->nearest_relate; \
-             RELATE {v}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
-            floor.to_table_key("FLOOR")
-        ),
+        Some((floor, dist)) => {
+            clear_floor_miss(&v).await;
+            format!(
+                "BEGIN TRANSACTION; DELETE {v}->nearest_relate; \
+                 RELATE {v}->nearest_relate->{} SET dist = {dist}; COMMIT TRANSACTION;",
+                floor.to_table_key("FLOOR")
+            )
+        }
         None => {
             note_floor_miss(&v, "VALV", "no_floor_below").await;
             format!("DELETE {v}->nearest_relate;")
@@ -723,12 +725,15 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         }
         // 逐子件底角打射线，取最近的一块楼板（合并盒四角见 `nearest_floor_below` 的说明）。
         match nearest_floor_below(&aabbs).await {
-            Some((nearest, dist)) => equip_sql.push_str(&format!(
-                "relate {}->nearest_relate->FLOOR:{} set dist={};",
-                equip.to_pe_key(),
-                nearest.to_string(),
-                dist
-            )),
+            Some((nearest, dist)) => {
+                clear_floor_miss(&e).await;
+                equip_sql.push_str(&format!(
+                    "relate {}->nearest_relate->FLOOR:{} set dist={};",
+                    equip.to_pe_key(),
+                    nearest.to_string(),
+                    dist
+                ))
+            }
             None => note_floor_miss(&e, "EQUI", "no_floor_below").await,
         }
     }
