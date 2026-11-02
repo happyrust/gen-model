@@ -2309,3 +2309,269 @@ fn unique_in_out_tables_are_not_queried_with_in_in_literal() {
     assert!(!pattern.is_match("SELECT * FROM nearest_relate WHERE [pe:1_2] CONTAINS in;"));
     assert!(!pattern.is_match("SELECT * FROM inst_relate WHERE in IN [pe:1_2];"));
 }
+
+// ───────── mem-only：`->inst_relate` 图遍历恒空的成因定位（交接说明 N5） ─────────
+
+/// 一组边表实验的结果：图遍历命中数 + 插入脏行时是否报错。
+#[derive(Debug)]
+struct TraversalProbe {
+    /// 从 `pe:a` 走 `->inst_relate` 命中的条数。
+    hits: usize,
+    /// 同一 `pe:a` 用 `WHERE in = ` 等值查到的条数（对照组）。
+    eq_hits: usize,
+    /// 插入「没有 `out` 的行」时的语句级错误（`None` 表示被接受了）。
+    dirty_insert_error: Option<String>,
+}
+
+/// 从 `exec_capture` 的 `surrealdb::Value` 序列化文本里数数组元素。
+///
+/// `SELECT VALUE x` 的顶层是 `{"Array": [...]}` 包装，不是裸数组——直接
+/// `as_array()` 恒为 `None`，会把「命中 2 条」静默读成 0。
+fn count_array(body: &str) -> usize {
+    let value: serde_json::Value = serde_json::from_str(body).expect("结果应为 JSON");
+    value
+        .get("Array")
+        .and_then(|array| array.as_array())
+        .map(|items| items.len())
+        .unwrap_or(0)
+}
+
+/// 建表、造两条完整边、可选混入 `out = NONE` 的行，然后从 `pe:a` 做一次图遍历。
+///
+/// 三段分开跑：`DEFINE` / `INSERT RELATION` / 脏行插入各自独立，脏行插入的语句级
+/// 错误要单独取出来——`query()` 不检查语句级错误，混在一起会静默吞掉。
+///
+/// 真库形制（2026-11-02 实测）：`inst_relate` 308560 行里 289709 行是
+/// `booled = true` 且 `out = NONE`（烘焙网格行），18849 行有 `out`。这里用
+/// 2 条完整边 + `dirty_rows` 条 `out = NONE` 行，比例方向与真库一致。
+///
+/// `id_mode` 决定边的 id 形制，这是真库与 `dual_inst_relate_anc_u64_*` 之间
+/// 最容易被忽略的差别：
+/// - `"named"`：`inst_relate:r1`（测试里常见的随手命名）
+/// - `"mirror"`：`inst_relate:⟨a⟩`——**id 的 id-part 与 `in` 的 id-part 完全相同**，
+///   真库就是这种（`inst_relate:15516_106` 配 `in: pe:15516_106`）
+async fn probe_traversal(
+    case: &str,
+    ddl: &str,
+    dirty_rows: usize,
+    id_mode: &str,
+) -> TraversalProbe {
+    probe_traversal_with(case, ddl, dirty_rows, id_mode, "INSERT RELATION INTO").await
+}
+
+/// 同上，但由调用方决定用哪种语句写边。
+///
+/// `write` 的取值是真库那条线索的核心：
+/// - `"INSERT RELATION INTO"`：正统写法，边同时进**边存储**（图遍历走这里）
+/// - `"INSERT INTO"`：只写普通字段，**不进边存储**——`WHERE in = ` 查得到，
+///   `->inst_relate` 恒空。真库 `pe:X->inst_relate` 恒 0 而 `WHERE in =` 命中的
+///   现象，与这一组的预期完全一致。
+async fn probe_traversal_with(
+    case: &str,
+    ddl: &str,
+    dirty_rows: usize,
+    id_mode: &str,
+    write: &str,
+) -> TraversalProbe {
+    let db = mem_db(case).await;
+
+    let (id1, id2) = match id_mode {
+        "mirror" => ("inst_relate:⟨a⟩", "inst_relate:⟨a_h⟩"),
+        _ => ("inst_relate:r1", "inst_relate:r2"),
+    };
+    let setup = format!(
+        "{ddl} \
+         CREATE pe:a; CREATE inst_info:h1; CREATE inst_info:h2; \
+         {write} inst_relate [\
+           {{ id: {id1}, in: pe:a, out: inst_info:h1, booled: false }}, \
+           {{ id: {id2}, in: pe:a, out: inst_info:h2, booled: false }}\
+         ];"
+    );
+    let out = exec_capture(&db, &setup).await;
+    for (index, item) in out.iter().enumerate() {
+        assert!(item.is_ok(), "[{case}] setup 第 {index} 条语句失败: {item:?}");
+    }
+
+    let mut dirty_insert_error = None;
+    if dirty_rows > 0 {
+        let rows = (0..dirty_rows)
+            .map(|i| format!("{{ id: inst_relate:g{i}, in: pe:a, booled: true }}"))
+            .join(", ");
+        let out = exec_capture(&db, &format!("INSERT INTO inst_relate [{rows}];")).await;
+        for item in &out {
+            if let Err(error) = item {
+                dirty_insert_error = Some(error.clone());
+            }
+        }
+    }
+
+    let (hits, eq_hits) = {
+        let out = exec_capture(&db, "SELECT VALUE <string>id FROM pe:a->inst_relate;").await;
+        let body = out[0]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("[{case}] 图遍历语句本身报错: {error}"));
+        let hits = count_array(body);
+
+        let out = exec_capture(&db, "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;").await;
+        let body = out[0]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("[{case}] 等值查询本身报错: {error}"));
+        let eq_hits = count_array(body);
+        (hits, eq_hits)
+    };
+
+    // 诊断：几种等价写法各跑一次，定位是「遍历语法」还是「边没建成」。
+    // 只在 `N5_PROBE_VERBOSE=1` 时打印，正常运行不占输出。
+    if std::env::var("N5_PROBE_VERBOSE").is_ok_and(|v| v == "1") {
+        for sql in [
+            "SELECT VALUE <string>id FROM inst_relate;",
+            "SELECT VALUE <string>id FROM pe:a->?;",
+            "SELECT VALUE <string>id FROM pe:a->inst_relate->inst_info;",
+            "SELECT VALUE <string>id FROM inst_info:h1<-inst_relate;",
+        ] {
+            let out = exec_capture(&db, sql).await;
+            eprintln!("[{case}] {sql} => {out:?}");
+        }
+    }
+
+    TraversalProbe {
+        hits,
+        eq_hits,
+        dirty_insert_error,
+    }
+}
+
+/// 真库 `pe:X->inst_relate` 恒为 0 行，而 `->tubi_relate` / `->nearest_relate` /
+/// `->geo_relate` / `->pe_owner` 都正常。五张表在 `INFO FOR DB` 里定义完全一致
+/// （`TYPE ANY SCHEMALESS`），所以「表不是 TYPE RELATION」单独解释不了差异。
+///
+/// 真库 `EXPLAIN` 给出了决定性线索：图遍历走 **`Iterate Edges`**（边存储），
+/// 等值查询走 **`Iterate Index`**（`idx_inst_relate_in`）。两条路径读的不是同一份
+/// 数据——`INSERT RELATION` 会同时写边存储与普通字段，而 `INSERT INTO` /
+/// `UPDATE ... SET in =` 只写普通字段。这解释了「`WHERE in =` 命中、`->inst_relate`
+/// 恒空」这个组合。
+///
+/// 本用例把候选变量逐组拆开：
+///
+/// | 组 | 表类型 | 写入方式 | 脏行 | 边 id | 预期 |
+/// |---|---|---|---|---|---|
+/// | A | `TYPE ANY` | `INSERT RELATION` | 无 | 随手命名 | 通 |
+/// | B | `TYPE ANY` | `INSERT RELATION` | 20 条 `out=NONE` | 随手命名 | 通 |
+/// | C | `TYPE RELATION` | `INSERT RELATION` | 无 | 随手命名 | 通 |
+/// | D | `TYPE RELATION` | `INSERT RELATION` | 20 条 | 随手命名 | 通（脏行被拒） |
+/// | E | `TYPE ANY` | `INSERT RELATION` | 无 | **镜像 `in`** | 通 |
+/// | **F** | `TYPE ANY` | **`INSERT INTO`** | 无 | 随手命名 | **空（真库现象）** |
+///
+/// 判据：F 组空而 A 组通 → 成因是**写入路径没走边存储**，与表类型、脏行、id 形制
+/// 全都无关。这时 `filter_inst` 的 `array::len(->inst_relate) = 0` 在真库上恒真，
+/// 过滤退化成只看 `->tubi_relate`，需要把判据换成 `WHERE in = ` 等值写法。
+#[tokio::test(flavor = "multi_thread")]
+async fn inst_relate_graph_traversal_needs_relate_type_or_clean_rows() {
+    let any_ddl = "DEFINE TABLE inst_relate TYPE ANY SCHEMALESS;";
+    let rel_ddl = "DEFINE TABLE inst_relate TYPE RELATION IN pe OUT inst_info SCHEMALESS;";
+
+    let a = probe_traversal("n5_any_clean", any_ddl, 0, "named").await;
+    let b = probe_traversal("n5_any_dirty", any_ddl, 20, "named").await;
+    let c = probe_traversal("n5_rel_clean", rel_ddl, 0, "named").await;
+    let d = probe_traversal("n5_rel_dirty", rel_ddl, 20, "named").await;
+    let e = probe_traversal("n5_any_mirror", any_ddl, 0, "mirror").await;
+    let f = probe_traversal_with("n5_any_plain_insert", any_ddl, 0, "named", "INSERT INTO").await;
+
+    eprintln!("N5 六组 —— A={a:?}\nB={b:?}\nC={c:?}\nD={d:?}\nE={e:?}\nF={f:?}");
+
+    // 健全性地板：等值查询必须把边数出来，否则边根本没建成。
+    // B 组有 20 条脏行也满足 `in = pe:a`，所以是 22。
+    for (case, probe, expect_eq) in [
+        ("A", &a, 2usize),
+        ("B", &b, 22),
+        ("C", &c, 2),
+        ("D", &d, 2),
+        ("E", &e, 2),
+        ("F", &f, 2),
+    ] {
+        assert_eq!(
+            probe.eq_hits, expect_eq,
+            "{case} 组等值查询命中数不符: {probe:?}"
+        );
+    }
+
+    // 走 `INSERT RELATION` 的四组：完整边必须可遍历，表类型与 id 形制都不影响。
+    assert_eq!(a.hits, 2, "TYPE ANY + INSERT RELATION 应当可遍历: {a:?}");
+    assert_eq!(c.hits, 2, "TYPE RELATION + INSERT RELATION 应当可遍历: {c:?}");
+    assert_eq!(e.hits, 2, "镜像 id 形制不该让遍历变空: {e:?}");
+
+    // 脏行不影响图遍历：B 组等值查到 22 条，图遍历只回 2 条——引擎遍历时
+    // 会跳过没有 `out` 的行。这否掉「289711 行 out=NONE 把遍历拖空」这个猜想。
+    assert_eq!(
+        b.hits, 2,
+        "混入 out=NONE 的行不该改变遍历结果（引擎应跳过它们）: {b:?}"
+    );
+
+    // 关键判据：只写普通字段、没走边存储的那一组，图遍历必须是空。
+    // 真库的 `pe:X->inst_relate` 恒 0 与 `WHERE in =` 命中，正是这一组的形状。
+    assert_eq!(
+        f.hits, 0,
+        "`INSERT INTO` 只写普通字段、不进边存储，图遍历应为空: {f:?}"
+    );
+    assert_eq!(
+        f.eq_hits, 2,
+        "同一批行用等值查询仍应命中 2 条（这正是真库的组合）: {f:?}"
+    );
+
+    // D 组：`TYPE RELATION` 会拒收没有 `out` 的行，所以脏行写不进去。
+    // 真库那份 `TYPE ANY` 能容纳 289711 条 `out = NONE` 的烘焙网格行，
+    // 说明表类型是被有意放宽的，不是遗漏。
+    assert!(
+        d.dirty_insert_error.is_some(),
+        "TYPE RELATION 应拒收没有 out 的行: {d:?}"
+    );
+
+    // G 组：先建「没有 out 的行」（烘焙网格行就是这个形状），再用 `UPDATE ... SET out`
+    // 补上 out 字段。字段值有了，但边存储从未建立——这是真库最可能的历史路径，
+    // 因为 `inst_relate` 里 289711 条 `booled = true` 的行本来就是这么建的。
+    let g = {
+        let db = mem_db("n5_update_out").await;
+        let out = exec_capture(
+            &db,
+            "DEFINE TABLE inst_relate TYPE ANY SCHEMALESS; \
+             CREATE pe:a; CREATE inst_info:h1; \
+             CREATE inst_relate:baked SET in = pe:a, booled = true; \
+             UPDATE inst_relate:baked SET out = inst_info:h1;",
+        )
+        .await;
+        for (index, item) in out.iter().enumerate() {
+            assert!(item.is_ok(), "G 组第 {index} 条语句失败: {item:?}");
+        }
+        let hits = {
+            let out = exec_capture(&db, "SELECT VALUE <string>id FROM pe:a->inst_relate;").await;
+            count_array(out[0].as_ref().expect("G 组图遍历"))
+        };
+        let eq_hits = {
+            let out =
+                exec_capture(&db, "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;").await;
+            count_array(out[0].as_ref().expect("G 组等值查询"))
+        };
+        let has_out = {
+            let out = exec_capture(&db, "SELECT VALUE out FROM inst_relate:baked;").await;
+            !out[0].as_ref().map(|s| s.contains("NONE")).unwrap_or(true)
+        };
+        (hits, eq_hits, has_out)
+    };
+    eprintln!("N5 G 组（CREATE 无 out + UPDATE 补 out）—— {g:?}");
+
+    // `out` 字段确实被补上了（不是 NONE），等值查询也命中，但图遍历取不到——
+    // 与真库「18849 行有 out、`->inst_relate` 恒 0」完全一致。
+    assert!(g.2, "UPDATE 后 out 字段应当有值: {g:?}");
+    assert_eq!(g.1, 1, "等值查询应命中这条行: {g:?}");
+    assert_eq!(
+        g.0, 0,
+        "UPDATE 补 out 不写边存储，图遍历应为空（真库形态）: {g:?}"
+    );
+
+    eprintln!(
+        "N5 结论：图遍历走边存储、等值查询走字段索引，两者不是同一份数据。\
+         `INSERT INTO` / `CREATE` + `UPDATE SET out` 写的行只进字段索引，\
+         因此 `->inst_relate` 恒空而 `WHERE in =` 命中——与真库现象完全吻合。\
+         表类型、out=NONE 脏行、id 形制均不是成因。"
+    );
+}
