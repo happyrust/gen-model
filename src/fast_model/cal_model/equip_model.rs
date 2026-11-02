@@ -875,8 +875,16 @@ mod nearest_floor_live_tests {
             return Ok(());
         }
 
-        // 清空后重算，避免旧的边让 `where array::len(->nearest_relate)=0` 提前跳过。
-        SUL_DB.query("DELETE nearest_relate;").await?;
+        // 清空 EQUI 的边后重算，避免旧的边让内层 `where array::len(->nearest_relate)=0`
+        // 提前跳过。
+        //
+        // 只清 `in.noun = 'EQUI'`：这条测试只验设备覆盖率，而 `DELETE nearest_relate;`
+        // 是全表删，会把阀门那 510 条边一起清掉。真库 2026-11-02 实测——跑一次这条
+        // 测试，VALV 边从 510 变 0，而阀门全量只在启动序列里跑，下一次启动前阀门侧
+        // 一直是空的。测试不该有这种跨 noun 的副作用。
+        SUL_DB
+            .query("DELETE nearest_relate WHERE in.noun = 'EQUI';")
+            .await?;
         // `cal_equip_nearest_floor` 靠 `GLOBAL_AABB_TREE` 做射线查询，不先加载
         // 树的话 `query_neareast_by_pos_dir` 一律返回 None，覆盖率会是 0。
         crate::fast_model::aabb_tree::load_project_tree_verified().await?;
@@ -968,6 +976,24 @@ mod equip_scan_tests {
         assert!(
             src.contains("async fn clear_soft_deleted_equip_rows()"),
             "软删清理要有独立函数，两条入口共用"
+        );
+    }
+
+    /// 覆盖率测试只能清设备自己的边，不能全表删。
+    ///
+    /// `DELETE nearest_relate;` 会把阀门那 510 条边一起清掉，而阀门全量只在启动序列里
+    /// 跑——跑一次这条测试，阀门侧就要等到下次启动才恢复。真库 2026-11-02 实测：
+    /// 跑一次 `coverage_does_not_regress`，VALV 边从 510 变 0。
+    #[test]
+    fn the_coverage_test_does_not_wipe_valve_edges() {
+        let src = include_str!("equip_model.rs");
+        assert!(
+            !src.contains("DELETE nearest_relate;\")"),
+            "覆盖率测试不能全表删 nearest_relate，会连阀门边一起清掉"
+        );
+        assert!(
+            src.contains("DELETE nearest_relate WHERE in.noun = 'EQUI';"),
+            "覆盖率测试只该清设备自己的边"
         );
     }
 
