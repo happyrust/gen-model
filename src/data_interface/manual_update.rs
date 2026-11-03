@@ -2306,6 +2306,14 @@ pub struct DataBatchResult {
     /// 净窗口中的删除元素数。
     #[serde(default)]
     pub deleted_elements: usize,
+    /// 尾事务之后那次凭证前移的账（ADR-056 P2-2；plant-ui 计划 G3）。
+    ///
+    /// 只有窗口规划器（direct DESI）给了前移名单或退化原因时才有；老规划器与
+    /// CATA / SYST 窗口是 `None`，回执上**整格不出现**——客户端收成「服务端没说」，
+    /// 而不是「前移了 0 根」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_advance:
+        Option<crate::data_interface::window_root_plan::CredentialAdvanceReceipt>,
 }
 
 impl DataBatchResult {
@@ -5020,6 +5028,7 @@ impl AiosDBManager {
                     added_elements: 0,
                     modified_elements: 0,
                     deleted_elements: 0,
+                    credential_advance: None,
                 }),
                 Vec::new(),
             )
@@ -5054,6 +5063,7 @@ impl AiosDBManager {
                         added_elements: 0,
                         modified_elements: 0,
                         deleted_elements: 0,
+                        credential_advance: None,
                     }),
                     Vec::new(),
                 );
@@ -5128,6 +5138,7 @@ impl AiosDBManager {
                             added_elements: 0,
                             modified_elements: 0,
                             deleted_elements: 0,
+                            credential_advance: None,
                         }),
                         Vec::new(),
                     );
@@ -5157,6 +5168,7 @@ impl AiosDBManager {
                     added_elements: 0,
                     modified_elements: 0,
                     deleted_elements: 0,
+                    credential_advance: None,
                 }),
                 Vec::new(),
             );
@@ -5187,6 +5199,7 @@ impl AiosDBManager {
                             added_elements: 0,
                             modified_elements: 0,
                             deleted_elements: 0,
+                            credential_advance: None,
                         }),
                         Vec::new(),
                     );
@@ -5275,6 +5288,7 @@ impl AiosDBManager {
                             added_elements: 0,
                             modified_elements: 0,
                             deleted_elements: 0,
+                            credential_advance: None,
                         }),
                         Vec::new(),
                     )
@@ -5296,6 +5310,7 @@ impl AiosDBManager {
                         added_elements: 0,
                         modified_elements: 0,
                         deleted_elements: 0,
+                        credential_advance: None,
                     }),
                     Vec::new(),
                 ),
@@ -5337,6 +5352,7 @@ impl AiosDBManager {
                         added_elements: 0,
                         modified_elements: 0,
                         deleted_elements: 0,
+                        credential_advance: None,
                     }),
                     Vec::new(),
                 );
@@ -5387,6 +5403,7 @@ impl AiosDBManager {
             added_elements: 0,
             modified_elements: 0,
             deleted_elements: 0,
+            credential_advance: None,
         };
 
         Self::stage(
@@ -5498,6 +5515,9 @@ impl AiosDBManager {
                     fill_batch_session_times(&mut batch, project, &cand.path, merged);
                 }
                 batch.set_change_counts(&success.range_eles);
+                // 凭证前移的账只在成功路径上有（ADR-079：逐根凭证行退役，只剩这一格
+                // 回执）。规划器没给名单也没退化原因时是 `None`，回执上整格不出现。
+                batch.credential_advance = success.credential_advance.clone();
             }
             // MySQL 可选同步（`feature = "sql"`）2026-09-07 随整条 feature 退役：镜像表
             // 与它的连接池早就编不过，而这里是它在生产路上的唯一挂点。
@@ -8949,7 +8969,86 @@ mod tests {
             added_elements: 0,
             modified_elements: 0,
             deleted_elements: 0,
+            credential_advance: None,
         }
+    }
+
+    #[test]
+    fn the_batch_receipt_carries_the_credential_advance_receipt() {
+        use crate::data_interface::window_root_plan::CredentialAdvanceReceipt;
+
+        // 正常形态：名单非空 → requested = advanced，degraded 整格不出现。
+        let mut advanced = batch(7997, BatchStatus::Applied);
+        advanced.credential_advance = Some(CredentialAdvanceReceipt {
+            requested: 12,
+            advanced: 12,
+            degraded: None,
+        });
+        let json = serde_json::to_value(&advanced).unwrap();
+        assert_eq!(json["credential_advance"]["requested"], 12, "{json}");
+        assert_eq!(json["credential_advance"]["advanced"], 12, "{json}");
+        assert!(
+            json["credential_advance"].get("degraded").is_none(),
+            "degraded 缺席时整格不出现：{json}"
+        );
+
+        // 退化形态：护栏不信闭包 → 两个 0 加一句原因原文。
+        let mut degraded = batch(7997, BatchStatus::Applied);
+        degraded.credential_advance = Some(CredentialAdvanceReceipt {
+            requested: 0,
+            advanced: 0,
+            degraded: Some("candidates_ratio_above_threshold".into()),
+        });
+        let json = serde_json::to_value(&degraded).unwrap();
+        assert_eq!(
+            json["credential_advance"]["degraded"],
+            "candidates_ratio_above_threshold",
+            "{json}"
+        );
+
+        // 缺席形态：整键不出现，而不是 null。
+        let absent = batch(7997, BatchStatus::Applied);
+        let json = serde_json::to_value(&absent).unwrap();
+        assert!(
+            json.get("credential_advance").is_none(),
+            "整键缺席：{json}"
+        );
+    }
+
+    /// 凭证前移的账只从成功结果搬：失败早退（`failed_window_result`）恒为 `None`。
+    ///
+    /// 结构体上有了字段，不等于每条出口都填了它——这条钉的是搬运点本身。
+    #[test]
+    fn the_applied_batch_moves_the_credential_advance_receipt_from_the_success() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("if let Some(success) = incr.successes.first() {")
+            .expect("成功收尾块")
+            .1
+            .split_once("// MySQL 可选同步")
+            .expect("收尾块边界")
+            .0;
+        let counts = body
+            .find("batch.set_change_counts(&success.range_eles);")
+            .expect("增删改统计");
+        let moved = body
+            .find("batch.credential_advance = success.credential_advance.clone();")
+            .expect("凭证前移必须从成功结果搬到回执");
+        assert!(counts < moved, "搬运必须落在同一个成功块内且在其后：{body}");
+
+        // 失败早退那条出口拿不到成功结果，只能是 `None`。
+        let worker = include_str!("batch_worker.rs");
+        let failed = worker
+            .split_once("fn failed_window_result(")
+            .expect("失败早退构造点")
+            .1
+            .split_once("units: Vec::new(),")
+            .expect("构造点边界")
+            .0;
+        assert!(
+            failed.contains("credential_advance: None,"),
+            "失败批次没有凭证前移可搬：{failed}"
+        );
     }
 
     #[test]

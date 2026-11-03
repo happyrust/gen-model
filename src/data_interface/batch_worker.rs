@@ -3577,6 +3577,7 @@ fn failed_window_result(
             added_elements: 0,
             modified_elements: 0,
             deleted_elements: 0,
+            credential_advance: None,
         }),
         units: Vec::new(),
         warnings: std::mem::take(warnings),
