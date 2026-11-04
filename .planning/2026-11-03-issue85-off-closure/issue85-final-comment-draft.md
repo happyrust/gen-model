@@ -6,8 +6,8 @@
 
 ## 终态：off 与单侧件全部归零 ✅
 
-九库终态回归（2026-11-05，`verification/ams-rvm-20261030/` 逐库重跑，生成侧为含
-PJOI/SCOJ/CTORUS/PYRA/BEND/riser/HANG 修复链的 e3d-model 工作区版）：
+九库终态回归（2026-11-04 22:17，`verification/ams-rvm-20261030/` 逐库重跑，生成侧为含
+PJOI/SCOJ/CTORUS/PYRA/BEND/riser/HANG 修复链的 e3d-model `dd93719`）：
 
 | dbno | roots | both | exact | chord | film | off | only_baseline | only_generated | kind_differ |
 |---|---|---|---|---|---|---|---|---|---|
@@ -22,7 +22,7 @@ PJOI/SCOJ/CTORUS/PYRA/BEND/riser/HANG 修复链的 e3d-model 工作区版）：
 | 7999 | 4 | 15,149 | 15,149 | 0 | 0 | 0 | 0 | 0 | 0 |
 | **合计** | **19** | **241,393** | **241,393** | **0** | **0** | **0** | **0** | **0** | **0** |
 
-`cargo test --lib`：428 passed / 0 failed / 5 ignored。
+`cargo test --lib`：431 passed / 0 failed / 5 ignored（`e3d-model-cone` HEAD `dd93719` 实测）。
 
 ## 逐族归因 → commit
 
@@ -38,11 +38,11 @@ PJOI/SCOJ/CTORUS/PYRA/BEND/riser/HANG 修复链的 e3d-model 工作区版）：
 | 7356 CT05 chord 2 | 2 | `dc416e6` | 倾斜宿主轴（0.074°）上按 CUTB 补足沿轴走量 |
 | 7999 ATTA 1 | 1 | `9b9fb3e` | 参与布尔的 torus 按 E3D 粗环密度出面片（修复前后该件 Y 向 AABB 46.38→56.45mm，差 10.07mm 与 issue 记录一致） |
 | 7999 BRAN 1 | 1 | `e81381c` | 共享 TEE 的贯通管身归到它指向的 BRAN（SPAMAP 哨兵判别） |
-| 7999 PJOI/SCOJ | 894+533 | 工作区 | PJOI/SCOJ 走目录件路径（GTYP=JOIN + SPRE→GMRE 门），帧分别为 beam 端投影 / SNOD 站位系+`POSL=NB` 局部滚转 |
-| 73927 CTORUS/PYRA | 1+1 | 工作区 | 零尺寸目录图元与设计侧退化记录走 bodyless 通道；`Snout` 出身识别器保留声明种类（kind_differ 6 件同步清零） |
-| 80211 BEND 占位 | 6 | 工作区 | 缺 SPRE 的 BEND 补写零尺寸 bodyless 记录（BEND 1353/1353 exact） |
-| 80211 TUBI 1 | 1 | 工作区 | `/C-CO-1RB-7AA0A` 竖井头管：`PSPE=/ACP1000-Riser`，103/103 Riser 支管基准零隐式管 → `riser spec` 门抑制 |
-| 7333 HANG 轴线柱 | 529 | 工作区 | spec 驱动吊架（`HSPE` 非空）本体记录 = 链序第一个「正长+共轴」槽位的零径 `Cylinder[0, L]`（`tumat` 帧、bodyless+`local_transform`）；`1WCC` 手搭吊架（HSPE=nulref）E3D 一律不写 → `HSPE` 门 |
+| 7999 PJOI/SCOJ | 894+533 | `f1bd225` | PJOI/SCOJ 走目录件路径（GTYP=JOIN + SPRE→GMRE 门），帧分别为 beam 端投影 / SNOD 站位系+`POSL=NB` 局部滚转 |
+| 73927 CTORUS/PYRA | 1+1 | `f1bd225` | 零尺寸目录图元与设计侧退化记录走 bodyless 通道；`Snout` 出身识别器保留声明种类（kind_differ 6 件同步清零） |
+| 80211 BEND 占位 | 6 | `f1bd225` | 缺 SPRE 的 BEND 补写零尺寸 bodyless 记录（BEND 1353/1353 exact） |
+| 80211 TUBI 1 | 1 | `f1bd225` | `/C-CO-1RB-7AA0A` 竖井头管：`PSPE=/ACP1000-Riser`，103/103 Riser 支管基准零隐式管 → `riser spec` 门抑制 |
+| 7333 HANG 轴线柱 | 529 | `f1bd225` | spec 驱动吊架（`HSPE` 非空）本体记录 = 链序第一个「正长+共轴」槽位的零径 `Cylinder[0, L]`（`tumat` 帧、bodyless+`local_transform`）；`1WCC` 手搭吊架（HSPE=nulref）E3D 一律不写 → `HSPE` 门 |
 
 ## 遗留账（均已归因或修复，非 off）
 

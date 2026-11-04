@@ -15,18 +15,18 @@
 | PYRAMID | 1 | `PYRAMID 1 of SUBEQUIPMENT 21`（73927，`24383/78389` `HEIG=0`） | 是（`Pyramid[0,0,0,0,0,0,-0]` 零尺寸记录） | **已修复（2026-11-04）**：设计侧 `PYRA`（`HEIG=0`）+ 目录侧 `flat_lpyr` 全零都走 bodyless 记录，73927 PYRA 9/9 exact |
 | TUBI（only_generated） | 118+1 | `/GENERATED/TUBI n of BRAN ...` | — | 118 件**口径差异**——键名不同，几何已由 container_tubes 全覆盖；**另 1 件（`/C-CO-1RB-7AA0A` 头管 3500mm）= 真多发** |
 | TUBI（竖井门） | 1 | `/GENERATED/TUBI 1 of BRAN /C-CO-1RB-7AA0A`（80211） | 基准侧无 | **已修复（2026-11-04）**：该 BRAN `PSPE=/ACP1000-Riser`（电缆竖井 spec）。全库 103 条 Riser-spec 支管在基准里隐式管数=0（102 条槽位本就退化，仅这条槽位判据全过）；E3D 对竖井支管一律不画管身。已加 `riser spec` 门（`not_drawn_by_reason` 记账） |
-| HANG 轴线柱 | 529 | `HANG /SUPPORT/HANGERS/PIHA/**/H1|H2|H3`（7333） | 是：`Cylinder[0, L]` 零径轴线柱 | **已修复（2026-11-05）**：柱 = 链序第一个「正长+共轴」槽位（VH298 两段 2.5mm 槽位只画第一段；VH111=HNUT3.leave→VSPR.arrive 205mm）。`route::hang_axis_stub` 走 walk_route + slot_alignment 判据 + tumat 帧，进 bodyless 通道（`local_transform` 记录标架=元素、图元=槽位标架）。7333 `both=529 exact=529`，unkeyable 清零 |
-| HANG（only_generated） | 3 | `/GENERATED/1WCC-R22*/HANG-*`（66456） | 基准侧无 | **已修复（2026-11-05）**：`1WCC` 手搭吊架族（成员 PCLA/HELE/SCLA/HROD，`HSPE`=nulref）链上虽有正长共轴槽位（如 `HANG-12` slot2=360mm），E3D 对该族 241 根**一条记录不写**——判别门 = `HSPE` 非空（spec 驱动吊架才发本体记录）；7333 的 529 条记录所属吊架 `HSPE` 全非空。门后 66456 清零、7333 仍全 exact |
+| HANG 轴线柱 | 529 | `HANG /SUPPORT/HANGERS/PIHA/**/H1|H2|H3`（7333） | 是：`Cylinder[0, L]` 零径轴线柱 | **已修复（2026-11-04）**：柱 = 链序第一个「正长+共轴」槽位（VH298 两段 2.5mm 槽位只画第一段；VH111=HNUT3.leave→VSPR.arrive 205mm）。`route::hang_axis_stub` 走 walk_route + slot_alignment 判据 + tumat 帧，进 bodyless 通道（`local_transform` 记录标架=元素、图元=槽位标架）。7333 `both=529 exact=529`，unkeyable 清零 |
+| HANG（only_generated） | 3 | `/GENERATED/1WCC-R22*/HANG-*`（66456） | 基准侧无 | **已修复（2026-11-04）**：`1WCC` 手搭吊架族（成员 PCLA/HELE/SCLA/HROD，`HSPE`=nulref）链上虽有正长共轴槽位（如 `HANG-12` slot2=360mm），E3D 对该族 241 根**一条记录不写**——判别门 = `HSPE` 非空（spec 驱动吊架才发本体记录）；7333 的 529 条记录所属吊架 `HSPE` 全非空。门后 66456 清零、7333 仍全 exact |
 
 ## 汇总
 
-- **真缺失合计 ≈ 1,958 件 → 0**：PJOINT 894 + SCOJOINT 533 + CTORUS/PYRAMID 零散 2 + **HANG 轴线柱 529**（7333，2026-11-05 修复）全部已修（见上表）。
-- **真多发 4 件 → 0**：`/C-CO-1RB-7AA0A` 竖井头管（`riser spec` 门）+ `1WCC` 手搭吊架 3 根（`HSPE` 门，2026-11-05）。
+- **真缺失合计 ≈ 1,958 件 → 0**：PJOINT 894 + SCOJOINT 533 + CTORUS/PYRAMID 零散 2 + **HANG 轴线柱 529**（7333，2026-11-04 修复）全部已修（见上表）。
+- **真多发 4 件 → 0**：`/C-CO-1RB-7AA0A` 竖井头管（`riser spec` 门）+ `1WCC` 手搭吊架 3 根（`HSPE` 门，2026-11-04）。
 - **口径差异合计 ≈ 158 件**：BRANCH 40（键名）+ TUBI 118（键名）。
 - **BEND 占位 6 件 → 0**：缺 SPRE 的零尺寸记录已补写。
 - 以上全部属于 only_baseline/only_generated 口径，**不在 #85 的 "off" 统计内**（off 只统计双方都有的记录对）。
 
-## 处置（2026-11-05 更新）
+## 处置（2026-11-04 更新）
 
 - PJOINT/SCOJOINT/CTORUS/PYRAMID/HANG 轴线柱已修并全 exact；BRANCH/TUBI 键名差异、BEND 微缺失 → 写进 #85 终态报告的「已解释遗留账」。
-- 2026-11-05 终态：九库 19 roots **242,855 对全 exact**，`off 与单侧件 0 条`（新二进制逐库重跑；`_regress_all.ps1` 已补 `-BinDir` 透传，避免再静默落到共享 target 池的陈旧 debug 二进制上）。
+- 2026-11-04 终态：九库 19 roots **241,393 对全 exact**（`summary.json`，`generated_at = 2026-11-04T22:17:21+08:00`），`off 与单侧件 0 条`（新二进制逐库重跑；`_regress_all.ps1` 已补 `-BinDir` 透传，避免再静默落到共享 target 池的陈旧 debug 二进制上）。
