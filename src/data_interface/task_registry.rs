@@ -29,6 +29,8 @@ pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
 /// 它不是退役的 `room_recalc`（下注）：那是随每批数据走的「房间轮」，这是一次性、按库的整库重写，
 /// 此前只在 stdout 有一行「整库房间重算完成」，增量记录页看不到（计划 2026-10-24 W6）。
 pub const TASK_KIND_ROOM_REBUILD: &str = "room_rebuild";
+/// 页面发起的一次 RVM 对拍：本程序生成、E3D TTY 导出、再比对。只读，不进增量账本。
+pub const TASK_KIND_RVM_CHECK: &str = "rvm_check";
 // 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
 // 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
 // 从此恒回空列表（spec §4.7.2）。
@@ -723,6 +725,34 @@ impl TaskRegistry {
         }
         inner.insert(entry.task_id.clone(), entry.clone());
         DbnumModelEnsureAdmission::Created(entry)
+    }
+
+    /// 一次 RVM 比对。建行时还不知道库号，解析节点之后用 [`Self::set_dbnum`] 补上。
+    /// `detail` 里不许出现密码。
+    pub fn insert_running_rvm_check(
+        &self,
+        task_id: &str,
+        project: &str,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        let mut entry = TaskEntry::blank(task_id, TASK_KIND_RVM_CHECK, project);
+        entry.state = TaskState::Running;
+        entry.started_at = Some(now.clone());
+        entry.units_done = Some(0);
+        entry.total_units = Some(4);
+        entry.current_stage = Some("queued".to_string());
+        entry.stage_started_at = Some(now);
+        entry.detail = Some(detail);
+        self.insert_entry(entry);
+    }
+
+    pub fn set_dbnum(&self, task_id: &str, dbnum: u32, db_type: &str) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            entry.dbnum = Some(dbnum);
+            entry.db_type = Some(db_type.to_string());
+        }
     }
 
     pub fn insert_running_model_history(

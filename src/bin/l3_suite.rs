@@ -574,8 +574,10 @@ fn main() -> Result<()> {
             .to_path_buf(),
         project_evar: paths.project_work.join("evarsAvevaMarineSample.bat"),
         project: cli.e3d_project,
+        project_name: None,
         login: cli.e3d_login,
         mdb: cli.e3d_mdb,
+        install_dir: None,
         alive_timeout: Duration::from_secs(cli.alive_timeout_secs),
         timeout: DEFAULT_TIMEOUT,
     };

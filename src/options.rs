@@ -369,6 +369,36 @@ pub struct ReviewAttachmentsSection {
     pub dir: Option<String>,
 }
 
+/// `[rvm_check]` —— RVM 比对测试页用的本机工具路径。
+///
+/// 不放账号、密码、项目码或 MDB：那些由页面每次提交。路径留空时按
+/// `aios-database.exe` 同目录、`tools\` 和开发期常见的 Cargo 输出目录查找。
+///
+/// ```toml
+/// [rvm_check]
+/// gen_ams_exe = "D:/Rust/target/release/gen_ams.exe"
+/// rvm_compare_exe = "D:/Rust/target/release/rvm_compare.exe"
+/// e3d_launcher = "D:/apps/gen-model/scripts/e3d/run_ams_c_entrymacro.bat"
+/// work_dir = "D:/apps/gen-model/output/rvm-check"
+/// alive_timeout_secs = 300
+/// timeout_secs = 1200
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RvmCheckSection {
+    #[serde(default)]
+    pub gen_ams_exe: Option<String>,
+    #[serde(default)]
+    pub rvm_compare_exe: Option<String>,
+    #[serde(default)]
+    pub e3d_launcher: Option<String>,
+    #[serde(default)]
+    pub work_dir: Option<String>,
+    #[serde(default)]
+    pub alive_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 /// `[review_auth]` 缺省值，逐字取自旧端 `jwt_auth.rs::ReviewAuthConfig::default()`。
 /// 注意 `debug_user_id` 是 `designer_001` 而不是旧配置文件里那个 `debug-user`：
 /// 代码里的缺省才是「没配置时实际生效」的那一个，移植要对齐的也是它。
@@ -710,6 +740,8 @@ struct DbOptionExtFields {
     platform_auth: Option<PlatformAuthSection>,
     #[serde(default)]
     review_attachments: Option<ReviewAttachmentsSection>,
+    #[serde(default)]
+    rvm_check: Option<RvmCheckSection>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -1759,6 +1791,11 @@ fn data_face_notice_for(configured: Option<&str>, env_override: Option<&str>) ->
 /// 入范围判定——那样会绕开「跳过了要有声」的三道护栏。
 pub fn watch_dbnums() -> Vec<u32> {
     normalise_watch_dbnums(load_ext_fields().watch_dbnums.as_deref())
+}
+
+/// `[rvm_check]`。没写这一段时每个路径都是 `None`，由调用方按可执行文件位置补。
+pub fn rvm_check_section() -> RvmCheckSection {
+    load_ext_fields().rvm_check.clone().unwrap_or_default()
 }
 
 /// 去重且保序。配置里写重了不是错误（`[7998, 7998]` 的意图毫无歧义），但重复项会
@@ -3256,6 +3293,22 @@ mod tests {
             normalise_watch_dbnums(Some(&[8000, 7998, 8000])),
             vec![8000, 7998]
         );
+    }
+
+    #[test]
+    fn rvm_check_section_deserializes_without_credentials() {
+        let fields: DbOptionExtFields = toml::from_str(
+            r#"
+            [rvm_check]
+            gen_ams_exe = "D:/tools/gen_ams.exe"
+            timeout_secs = 90
+            "#,
+        )
+        .expect("合法配置");
+        let section = fields.rvm_check.expect("rvm_check");
+        assert_eq!(section.gen_ams_exe.as_deref(), Some("D:/tools/gen_ams.exe"));
+        assert_eq!(section.timeout_secs, Some(90));
+        assert_eq!(section.rvm_compare_exe, None);
     }
 
     /// ADR-023：缺配置按自动执行；显式 false 仍保留冷启动检查能力。

@@ -20,8 +20,27 @@ pub struct E3dDriver {
     pub projects_dir: PathBuf,
     pub project_evar: PathBuf,
     pub project: String,
+    /// 项目目录名（`AvevaMarineSample`）。空则启动器沿用自己的默认值。
+    pub project_name: Option<String>,
     pub login: String,
     pub mdb: String,
+    /// `des.exe` 所在安装目录。空则启动器沿用 `L3_E3D_INSTALL_DIR` 或它自己的默认值。
+    pub install_dir: Option<PathBuf>,
+    pub alive_timeout: Duration,
+    pub timeout: Duration,
+}
+
+/// 一次 TTY 会话的全部启动参数。密码只活在 [`E3dDriver::login`] 里，调用方不要把它写进日志。
+#[derive(Clone, Debug)]
+pub struct E3dDriverSpec {
+    pub launcher: PathBuf,
+    pub projects_dir: PathBuf,
+    pub project_evar: PathBuf,
+    pub project: String,
+    pub project_name: Option<String>,
+    pub login: String,
+    pub mdb: String,
+    pub install_dir: Option<PathBuf>,
     pub alive_timeout: Duration,
     pub timeout: Duration,
 }
@@ -69,11 +88,31 @@ impl E3dDriver {
                 project_work.join("evarsAvevaMarineSample.bat"),
             ),
             project: std::env::var("L3_E3D_PROJECT").unwrap_or_else(|_| "AMS".into()),
+            project_name: std::env::var("L3_E3D_PROJECT_NAME")
+                .ok()
+                .filter(|name| !name.is_empty()),
             login: std::env::var("L3_E3D_LOGIN").unwrap_or_else(|_| "SYSTEM/XXXXXX".into()),
             mdb: std::env::var("L3_E3D_MDB").unwrap_or_else(|_| "/ALL".into()),
+            install_dir: std::env::var_os("L3_E3D_INSTALL_DIR").map(PathBuf::from),
             alive_timeout: Duration::from_secs(env_u64("E3D_MCP_ALIVE_TIMEOUT_SECS", 300)),
             timeout: Duration::from_secs(env_u64("E3D_MCP_QUERY_TIMEOUT_SECS", 1200)),
         })
+    }
+
+    /// 按调用方给的参数构造，不读进程环境里的项目和登录。
+    pub fn from_spec(spec: E3dDriverSpec) -> Self {
+        Self {
+            launcher: spec.launcher,
+            projects_dir: spec.projects_dir,
+            project_evar: spec.project_evar,
+            project: spec.project,
+            project_name: spec.project_name.filter(|name| !name.is_empty()),
+            login: spec.login,
+            mdb: spec.mdb,
+            install_dir: spec.install_dir,
+            alive_timeout: spec.alive_timeout,
+            timeout: spec.timeout,
+        }
     }
 
     pub fn run(&self, repo: &Path, relative: &str) -> Result<String> {
@@ -128,6 +167,46 @@ impl E3dDriver {
             ),
         )?;
         self.run_file(repo, &macro_path, label)
+    }
+
+    /// 与 [`Self::run_source`] 相同的只读宏，但把哨兵和退出证据原样交还。
+    /// 导出类调用要在会话没走完时仍能读到日志。
+    pub fn run_source_evidence(
+        &self,
+        repo: &Path,
+        label: &str,
+        body: &str,
+    ) -> Result<E3dProcessEvidence> {
+        ensure!(
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
+            "invalid E3D query label"
+        );
+        ensure!(
+            !body.lines().any(|line| matches!(
+                line.trim().to_ascii_uppercase().as_str(),
+                "QUIT" | "SAVEWORK" | "SAVE WORK"
+            )),
+            "query body contains a stateful/session command"
+        );
+        let dir = repo.join("output/e3d-mcp").join(format!(
+            "query-{}-{}",
+            std::process::id(),
+            Local::now().format("%Y%m%d%H%M%S%6f")
+        ));
+        fs::create_dir_all(&dir)?;
+        let macro_path = dir.join(format!("{label}.mac"));
+        let log_path = macro_path.with_extension("log");
+        fs::write(
+            &macro_path,
+            format!(
+                "ALPHA LOG \"{}\" OVER\n$P MCP-BEGIN\n{body}\n$P MCP-END\nALPHA LOG END\n",
+                e3d_path(&log_path)
+            ),
+        )?;
+        self.run_file_evidence(repo, &macro_path, label)
     }
 
     fn run_file(&self, repo: &Path, macro_path: &Path, label: &str) -> Result<String> {
@@ -201,17 +280,15 @@ impl E3dDriver {
         // those processes so this single-purpose driver waits only for the
         // session it is about to create.
         let baseline_sessions = e3d_session_processes()?.into_iter().collect();
-        let mut launcher = Command::new("cmd")
+        let mut launcher = Command::new("cmd");
+        launcher
             .args(["/d", "/c"])
             .arg(e3d_path(&self.launcher))
-            .arg(e3d_path(&wrapper_path))
-            .env("L3_E3D_PROJECTS_DIR", &self.projects_dir)
-            .env("L3_E3D_PROJECT_EVAR", &self.project_evar)
-            .env("L3_E3D_PROJECT", &self.project)
-            .env("L3_E3D_LOGIN", &self.login)
-            .env("L3_E3D_MDB", &self.mdb)
-            .env("L3_E3D_TIMEOUT_SECONDS", self.timeout.as_secs().to_string())
-            .env("L3_E3D_PID_FILE", &pid_file)
+            .arg(e3d_path(&wrapper_path));
+        for (key, value) in self.session_env(&pid_file) {
+            launcher.env(key, value);
+        }
+        let mut launcher = launcher
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()?;
@@ -273,6 +350,34 @@ impl E3dDriver {
             }
             thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    /// 交给启动 bat 的环境。登录串只出现在 `L3_E3D_LOGIN`，不写进别的键。
+    fn session_env(&self, pid_file: &Path) -> Vec<(&'static str, String)> {
+        let mut env = vec![
+            (
+                "L3_E3D_PROJECTS_DIR",
+                self.projects_dir.display().to_string(),
+            ),
+            (
+                "L3_E3D_PROJECT_EVAR",
+                self.project_evar.display().to_string(),
+            ),
+            ("L3_E3D_PROJECT", self.project.clone()),
+            ("L3_E3D_LOGIN", self.login.clone()),
+            ("L3_E3D_MDB", self.mdb.clone()),
+            ("L3_E3D_TIMEOUT_SECONDS", self.timeout.as_secs().to_string()),
+            ("L3_E3D_PID_FILE", pid_file.display().to_string()),
+        ];
+        if let Some(dir) = &self.install_dir {
+            env.push(("L3_E3D_INSTALL_DIR", dir.display().to_string()));
+        }
+        if let Some(name) = &self.project_name {
+            if !name.is_empty() {
+                env.push(("L3_E3D_PROJECT_NAME", name.clone()));
+            }
+        }
+        env
     }
 }
 
@@ -583,6 +688,10 @@ fn pid_running(pid: u32) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
 }
 
+pub(crate) fn running_e3d_sessions() -> Result<Vec<String>> {
+    e3d_session_processes()
+}
+
 fn e3d_session_processes() -> Result<Vec<String>> {
     let output = Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
@@ -665,6 +774,40 @@ mod tests {
         assert!(validate_refno("24381/35844;Q NAME").is_err());
         assert!(validate_refno("24381").is_err());
         assert!(validate_refno("4294967296/1").is_err());
+    }
+
+    #[test]
+    fn spec_passes_install_dir_without_putting_login_in_other_keys() {
+        let driver = E3dDriver::from_spec(E3dDriverSpec {
+            launcher: PathBuf::from("launcher.bat"),
+            projects_dir: PathBuf::from(r"D:\Projects"),
+            project_evar: PathBuf::from(
+                r"D:\Projects\AvevaMarineSample\evarsAvevaMarineSample.bat",
+            ),
+            project: "AMS".into(),
+            project_name: Some("AvevaMarineSample".into()),
+            login: "SYSTEM/secret-value".into(),
+            mdb: "/ALL".into(),
+            install_dir: Some(PathBuf::from(r"E:\e3d\install")),
+            alive_timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(60),
+        });
+        let env = driver.session_env(Path::new("driver.pid"));
+        let install = env
+            .iter()
+            .find(|(key, _)| *key == "L3_E3D_INSTALL_DIR")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(install, Some(r"E:\e3d\install"));
+        assert!(
+            env.iter()
+                .any(|(key, value)| *key == "L3_E3D_PROJECT_NAME" && value == "AvevaMarineSample")
+        );
+        let login_keys: Vec<_> = env
+            .iter()
+            .filter(|(_, value)| value.contains("secret-value"))
+            .map(|(key, _)| *key)
+            .collect();
+        assert_eq!(login_keys, vec!["L3_E3D_LOGIN"]);
     }
 
     #[test]

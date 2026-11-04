@@ -8,6 +8,7 @@
 
 pub mod events;
 pub(crate) mod handlers;
+mod rvm_check;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
@@ -560,6 +561,14 @@ async fn serve_with_ready(
         // `/update/pending-units`（含 `/retry`）随 pending 表退了（ADR-072 D5，spec §7 退役格清单）。
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
+        .route("/api/v1/rvm-check/defaults", get(rvm_check::defaults))
+        .route("/api/v1/rvm-check/preflight", post(rvm_check::preflight))
+        .route("/api/v1/rvm-check/runs", post(rvm_check::start_run))
+        .route("/api/v1/rvm-check/runs/{id}", get(rvm_check::get_run))
+        .route(
+            "/api/v1/rvm-check/runs/{id}/files/{name}",
+            get(rvm_check::get_file),
+        )
         .route(
             "/api/v1/tasks/{id}/changes",
             get(handlers::task_changes),

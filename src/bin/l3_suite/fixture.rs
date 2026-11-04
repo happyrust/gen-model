@@ -287,8 +287,10 @@ pub(super) fn run(cli: &Cli, repo: &Path) -> Result<()> {
             .to_path_buf(),
         project_evar: evar,
         project: cli.e3d_project.clone(),
+        project_name: None,
         login: cli.e3d_login.clone(),
         mdb: cli.e3d_mdb.clone(),
+        install_dir: None,
         alive_timeout: Duration::from_secs(cli.alive_timeout_secs),
         timeout: DEFAULT_TIMEOUT,
     };
