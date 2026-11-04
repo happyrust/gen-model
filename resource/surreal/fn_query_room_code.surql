@@ -64,6 +64,57 @@ DEFINE FUNCTION fn::single_room_code($pe:record) {
     return string::concat($prefix, '-', $code);
 };
 
+remove function if exists fn::room_vote_codes;
+// 一组构件按房间投票，回房间码数组，名次靠前的在前；没有任何房间时回 `[]`。
+// 每个构件一票，投给 `fn::room_relate_of` 的最强边。名次依次比：票数多、
+// inside_count 合计大、center_dist 合计小、房间码字典序小。
+// 先按（面板, room_num）分组，每组只拼一次房间码：逐件调 `fn::single_room_code`
+// 会让跨房设备慢一倍以上（2026-11-04 8009 实测）。同一间房的几块面板拼出同一个码，
+// 所以拼完再按房间码合一次票。
+// `GROUP BY` 同一层写 `ORDER BY` 不生效，结果按分组键排（2026-11-04 8009 实测），
+// 排序必须单独一条 SELECT。
+// `$edge.in` 只在判过非空之后取：在 NONE 上取字段会让整条语句报错（mem 引擎实测）。
+DEFINE FUNCTION fn::room_vote_codes($members: array) {
+    let $edges = array::filter(
+        array::map($members, |$m| {
+            let $id = type::thing('pe', record::id($m));
+            let $edge = fn::room_relate_of($id);
+            return if $edge == NONE { NONE } else {
+                {
+                    member: $id,
+                    panel: $edge.in,
+                    room_num: $edge.room_num,
+                    inside: $edge.inside_count ?? 0,
+                    dist: $edge.center_dist ?? 0.0
+                }
+            };
+        }),
+        |$v| $v != NONE
+    );
+    if array::len($edges) == 0 {
+        return [];
+    };
+    let $groups = (select panel, room_num, array::first(member) as member, count() as n,
+        math::sum(inside) as inside, math::sum(dist) as dist
+        from $edges group by panel, room_num);
+    let $coded = array::filter(
+        array::map($groups, |$g| {
+            code: fn::single_room_code(type::thing('pe', record::id($g.member))),
+            n: $g.n,
+            inside: $g.inside,
+            dist: $g.dist
+        }),
+        |$v| $v.code != NONE && $v.code != ''
+    );
+    if array::len($coded) == 0 {
+        return [];
+    };
+    let $by_code = (select code, math::sum(n) as n, math::sum(inside) as inside,
+        math::sum(dist) as dist from $coded group by code);
+    let $ranked = (select * from $by_code order by n desc, inside desc, dist asc, code asc);
+    return array::map($ranked, |$r| $r.code);
+};
+
 remove function if exists fn::room_code;
 // 返回**数组**：消费方一律按 `fn::room_code($pe)[0]` 取首个房间码
 // （core 的 `AiosDBMgr::get_room_code`、rs-server 的 `heat_dissipation.rs`）。
@@ -108,30 +159,30 @@ DEFINE FUNCTION fn::room_code($pe:record) {
     // `return` 的表达式里，mem 引擎会把分支里的 `return` 当成表达式值，`$pe` 退化成
     // 整行对象后 `record::id($pe)` 报「Expected a record but found { … }」。
     // 改成平铺的 IF 语句，每支自己 return（2026-10-29 实测）。
+    // 设备、支吊架、区域与 BRAN 都由子孙件投票（`fn::room_vote_codes`），不按存储序取首个。
     // EQUI可能有两层
     if ($noun == 'EQUI' || $noun == 'STRU' || $noun == 'REST') {
-        for $id in array::flatten([$pe_id<-pe_owner.in.id, array::flatten($pe_id<-pe_owner.in<-pe_owner.in.id)]) {
-            let $room_code = fn::single_room_code($id);
-            if $room_code != NONE && $room_code != '' {
-               return [$room_code];
-            }
+        let $codes = fn::room_vote_codes(array::flatten([
+            $pe_id<-pe_owner.in.id,
+            array::flatten($pe_id<-pe_owner.in<-pe_owner.in.id)
+        ]));
+        if array::len($codes) == 0 {
+            return none;
         };
-        return none;
+        return [$codes[0]];
     };
+    // BRAN 回整张名次表，首个是得票最多的房间。
     if $noun == 'BRAN' {
-        return array::distinct(array::complement(
-            (select value fn::single_room_code(id) from array::flatten($pe_id<-pe_owner.in.id)),
-            [NONE, '']
-        ));
+        return fn::room_vote_codes(array::flatten($pe_id<-pe_owner.in.id));
     };
     if $noun == 'SUPPO' || $noun == 'ZONE' {
-        for $id in array::flatten(array::flatten(array::flatten($pe_id<-pe_owner.in<-pe_owner.in<-pe_owner.in.id))) {
-            let $room_code = fn::single_room_code($id);
-            if $room_code != NONE && $room_code != '' {
-               return [$room_code];
-            }
+        let $codes = fn::room_vote_codes(array::flatten(array::flatten(array::flatten(
+            $pe_id<-pe_owner.in<-pe_owner.in<-pe_owner.in.id
+        ))));
+        if array::len($codes) == 0 {
+            return none;
         };
-        return none;
+        return [$codes[0]];
     };
     // 其余构件（PANE / TUBI / 普通板件）看自己。
     // 再次收敛：`$pe_id` 被读过字段后会退化成整行对象，直接传给 `single_room_code`

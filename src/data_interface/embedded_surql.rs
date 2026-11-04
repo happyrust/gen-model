@@ -396,6 +396,148 @@ mod tests {
         );
     }
 
+    /// 设备、BRAN、区域、支吊架的房间按子孙件投票，不按存储序取首个。
+    /// 每件一票投给自己的最强边；同票依次比 inside_count 合计、center_dist 合计、房间码。
+    #[cfg(feature = "project_hd")]
+    #[tokio::test]
+    async fn owners_take_the_room_most_members_vote_for() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_room_vote")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        // 房间面板：R201 有两块面板（5_11、5_12），用来钉「同一间房的票要合并」。
+        let mut fixture = String::from(
+            "CREATE pe:⟨5_100⟩ SET noun = 'FLOOR', name = '/1RX-RM01';
+             CREATE pe:⟨5_10⟩ SET noun = 'SBFR', name = '/1RX-RM01-R201-VOLU', owner = pe:⟨5_100⟩;
+             CREATE pe:⟨5_20⟩ SET noun = 'SBFR', name = '/1RX-RM01-R301-VOLU', owner = pe:⟨5_100⟩;
+             CREATE pe:⟨5_30⟩ SET noun = 'SBFR', name = '/1RX-RM01-R401-VOLU', owner = pe:⟨5_100⟩;
+             CREATE pe:⟨5_11⟩ SET noun = 'PANE', name = '', owner = pe:⟨5_10⟩;
+             CREATE pe:⟨5_12⟩ SET noun = 'PANE', name = '', owner = pe:⟨5_10⟩;
+             CREATE pe:⟨5_21⟩ SET noun = 'PANE', name = '', owner = pe:⟨5_20⟩;
+             CREATE pe:⟨5_31⟩ SET noun = 'PANE', name = '', owner = pe:⟨5_30⟩;
+             CREATE pe:⟨5_1000⟩ SET noun = 'EQUI', name = '/E1';
+             CREATE pe:⟨5_2000⟩ SET noun = 'EQUI', name = '/E2';
+             CREATE pe:⟨5_3000⟩ SET noun = 'STRU', name = '/S3';
+             CREATE pe:⟨5_4000⟩ SET noun = 'REST', name = '/R4';
+             CREATE pe:⟨5_5000⟩ SET noun = 'EQUI', name = '/E5';
+             CREATE pe:⟨5_5100⟩ SET noun = 'SUBE', name = '/E5/SUB';
+             RELATE pe:⟨5_5100⟩->pe_owner->pe:⟨5_5000⟩;
+             CREATE pe:⟨5_6000⟩ SET noun = 'BRAN', name = '/P6/B1';
+             CREATE pe:⟨5_7000⟩ SET noun = 'ZONE', name = '/Z7';
+             CREATE pe:⟨5_7100⟩ SET noun = 'PIPE', name = '/P7';
+             CREATE pe:⟨5_7110⟩ SET noun = 'BRAN', name = '/P7/B1';
+             RELATE pe:⟨5_7100⟩->pe_owner->pe:⟨5_7000⟩;
+             RELATE pe:⟨5_7110⟩->pe_owner->pe:⟨5_7100⟩;
+             CREATE pe:⟨5_8000⟩ SET noun = 'SUPPO', name = '/H8';
+             CREATE pe:⟨5_8100⟩ SET noun = 'FRMW', name = '/H8/F';
+             CREATE pe:⟨5_8110⟩ SET noun = 'SBFR', name = '/H8/F/S';
+             RELATE pe:⟨5_8100⟩->pe_owner->pe:⟨5_8000⟩;
+             RELATE pe:⟨5_8110⟩->pe_owner->pe:⟨5_8100⟩;
+             CREATE pe:⟨5_9000⟩ SET noun = 'EQUI', name = '/E9';
+             CREATE pe:⟨5_9001⟩ SET noun = 'BOX', name = '';
+             RELATE pe:⟨5_9001⟩->pe_owner->pe:⟨5_9000⟩;
+             CREATE pe:⟨5_9500⟩ SET noun = 'EQUI', name = '/E95';\n",
+        );
+        // (属主, 成员, 面板, 房间号, inside_count, center_dist)
+        let members: &[(&str, &str, &str, &str, u8, f32)] = &[
+            // 多数决：R201 两票，压过单件最强的 R301。
+            ("5_1000", "5_1001", "5_21", "R301", 8, 10.0),
+            ("5_1000", "5_1002", "5_11", "R201", 8, 900.0),
+            ("5_1000", "5_1003", "5_11", "R201", 4, 950.0),
+            // 同票比 inside_count 合计：R301(8) 胜 R201(6)。
+            ("5_2000", "5_2001", "5_21", "R301", 8, 900.0),
+            ("5_2000", "5_2002", "5_11", "R201", 6, 100.0),
+            // 再比 center_dist 合计：R201(200) 胜 R301(500)。
+            ("5_3000", "5_3001", "5_21", "R301", 8, 500.0),
+            ("5_3000", "5_3002", "5_11", "R201", 8, 200.0),
+            // 全平比房间码：1RX-R201 在前。
+            ("5_4000", "5_4001", "5_21", "R301", 8, 300.0),
+            ("5_4000", "5_4002", "5_11", "R201", 8, 300.0),
+            // 孙件也投票：SUBE 下两件在 R401，直接子件一件在 R201。
+            ("5_5000", "5_5001", "5_11", "R201", 8, 10.0),
+            ("5_5100", "5_5101", "5_31", "R401", 8, 900.0),
+            ("5_5100", "5_5102", "5_31", "R401", 8, 900.0),
+            // BRAN 回名次表：R401 两票；R301 与 R201 一票同 inside，比 center_dist。
+            ("5_6000", "5_6001", "5_11", "R201", 8, 500.0),
+            ("5_6000", "5_6002", "5_31", "R401", 8, 900.0),
+            ("5_6000", "5_6003", "5_31", "R401", 8, 900.0),
+            ("5_6000", "5_6004", "5_21", "R301", 8, 100.0),
+            // 区域取曾孙件：R301 两票胜 R201 一票。
+            ("5_7110", "5_7111", "5_11", "R201", 8, 10.0),
+            ("5_7110", "5_7112", "5_21", "R301", 8, 900.0),
+            ("5_7110", "5_7113", "5_21", "R301", 8, 900.0),
+            // 支吊架同样取曾孙件。
+            ("5_8110", "5_8111", "5_31", "R401", 8, 10.0),
+            // 同一间房的两块面板合票：R201 两票（各一块面板）胜 R301 一票。
+            ("5_9500", "5_9501", "5_11", "R201", 4, 900.0),
+            ("5_9500", "5_9502", "5_12", "R201", 4, 900.0),
+            ("5_9500", "5_9503", "5_21", "R301", 8, 1.0),
+        ];
+        for (owner, member, panel, room_num, inside, dist) in members {
+            fixture.push_str(&format!(
+                "CREATE pe:⟨{member}⟩ SET noun = 'BOX', name = '';
+                 RELATE pe:⟨{member}⟩->pe_owner->pe:⟨{owner}⟩;
+                 RELATE pe:⟨{panel}⟩->room_relate->pe:⟨{member}⟩
+                     SET room_num = '{room_num}', inside_count = {inside}, center_dist = {dist};\n"
+            ));
+        }
+        db.query(fixture)
+            .await
+            .expect("fixture reaches db")
+            .check()
+            .expect("fixture rows created");
+
+        let owners = [
+            "5_1000", "5_2000", "5_3000", "5_4000", "5_5000", "5_7000", "5_8000", "5_9000",
+            "5_9500",
+        ];
+        let sql = owners
+            .iter()
+            .map(|key| format!("RETURN fn::room_code(pe:⟨{key}⟩);"))
+            .chain(std::iter::once("RETURN fn::room_code(pe:⟨5_6000⟩);".to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut response = db
+            .query(sql)
+            .await
+            .expect("room vote probes reach db")
+            .check()
+            .expect("room vote probes execute");
+        let mut codes = Vec::new();
+        for index in 0..owners.len() {
+            let raw: Option<serde_json::Value> = response.take(index).expect("decode room code");
+            codes.push(first_code(&raw));
+        }
+        let bran: Vec<String> = response.take(owners.len()).expect("decode bran room codes");
+
+        let expected = [
+            Some("1RX-R201"),
+            Some("1RX-R301"),
+            Some("1RX-R201"),
+            Some("1RX-R201"),
+            Some("1RX-R401"),
+            Some("1RX-R301"),
+            Some("1RX-R401"),
+            None,
+            Some("1RX-R201"),
+        ];
+        for ((owner, code), want) in owners.iter().zip(&codes).zip(expected) {
+            assert_eq!(code.as_deref(), want, "pe:{owner} 的房间码");
+        }
+        assert_eq!(
+            bran,
+            vec!["1RX-R401", "1RX-R301", "1RX-R201"],
+            "BRAN 的房间按名次排"
+        );
+    }
+
     /// `fn::room_height` / `fn::room_top_height` 必须读到面板的 aabb 真值。
     /// 旧写法 `<-room_relate.in.id->inst_relate.aabb.d.mins[2]` 把 inst_relate 当成
     /// 从 pe 出去的边，而它是普通表（`inst_relate:⟨ref0_ref1⟩`），整条链恒 NONE：
