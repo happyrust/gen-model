@@ -292,6 +292,7 @@ pub(super) fn run(cli: &Cli, repo: &Path) -> Result<()> {
         mdb: cli.e3d_mdb.clone(),
         install_dir: None,
         alive_timeout: Duration::from_secs(cli.alive_timeout_secs),
+        done_grace: done_grace_from_env(),
         timeout: DEFAULT_TIMEOUT,
     };
 
@@ -3295,6 +3296,7 @@ mod tests {
             done_seen,
             exit_status,
             timed_out,
+            forced_after_done: false,
             log_path: "driver.log".into(),
             scenario_log_path: "scenario.log".into(),
             driver_log: String::new(),

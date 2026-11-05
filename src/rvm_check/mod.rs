@@ -617,6 +617,7 @@ fn driver_for(spec: &RunSpec) -> E3dDriver {
         mdb: spec.e3d_mdb.clone(),
         install_dir: Some(spec.install_dir.clone()),
         alive_timeout: spec.tools.alive_timeout,
+        done_grace: crate::e3d_query::done_grace_from_env(),
         timeout: spec.tools.timeout,
     })
 }

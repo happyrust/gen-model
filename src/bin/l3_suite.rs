@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aios_database::e3d_query::{E3dDriver, E3dProcessEvidence, e3d_path};
+use aios_database::e3d_query::{E3dDriver, E3dProcessEvidence, done_grace_from_env, e3d_path};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Local;
 use clap::Parser;
@@ -579,6 +579,7 @@ fn main() -> Result<()> {
         mdb: cli.e3d_mdb,
         install_dir: None,
         alive_timeout: Duration::from_secs(cli.alive_timeout_secs),
+        done_grace: done_grace_from_env(),
         timeout: DEFAULT_TIMEOUT,
     };
     let selected = select_scenarios(&cli.scenarios)?;
