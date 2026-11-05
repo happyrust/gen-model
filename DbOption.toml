@@ -418,11 +418,12 @@ model_full_rebuild_enabled = true
 # token_expiration_hours = 24
 
 #【新增 2026-11-04】[rvm_check] —— RVM 比对测试页的本机工具。整段保持注释：不写就按
-# aios-database.exe 同目录、tools\ 和开发期 Cargo 输出目录查找。这里不放账号、密码、项目或 MDB。
+# aios-database.exe 同目录和当前目录下的 scripts\e3d 查启动脚本。这里不放账号、密码、项目或 MDB。
+#【2026-11-05】生成与比对改在后端进程内跑（e3d-model 的 export_rvm / compare_rvm_files），不再找
+# gen_ams.exe / rvm_compare.exe，旧的 gen_ams_exe / rvm_compare_exe 键写了也不读。timeout_secs
+# 同时是 E3D 导出子进程的超时和进程内生成的叫停期限；进程内生成内存爆掉会直接打到后端进程。
 # 和上面 [model_center] 一样，真要写活必须放在所有顶层键之后，后面不能再追加裸键。
 # [rvm_check]
-# gen_ams_exe = "D:/Rust/target/release/gen_ams.exe"
-# rvm_compare_exe = "D:/Rust/target/release/rvm_compare.exe"
 # e3d_launcher = "D:/apps/gen-model/scripts/e3d/run_ams_c_entrymacro.bat"
 # work_dir = "D:/apps/gen-model/output/rvm-check"
 # alive_timeout_secs = 300

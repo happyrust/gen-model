@@ -376,8 +376,6 @@ pub struct ReviewAttachmentsSection {
 ///
 /// ```toml
 /// [rvm_check]
-/// gen_ams_exe = "D:/Rust/target/release/gen_ams.exe"
-/// rvm_compare_exe = "D:/Rust/target/release/rvm_compare.exe"
 /// e3d_launcher = "D:/apps/gen-model/scripts/e3d/run_ams_c_entrymacro.bat"
 /// work_dir = "D:/apps/gen-model/output/rvm-check"
 /// alive_timeout_secs = 300
@@ -385,10 +383,6 @@ pub struct ReviewAttachmentsSection {
 /// ```
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RvmCheckSection {
-    #[serde(default)]
-    pub gen_ams_exe: Option<String>,
-    #[serde(default)]
-    pub rvm_compare_exe: Option<String>,
     #[serde(default)]
     pub e3d_launcher: Option<String>,
     #[serde(default)]
@@ -3301,14 +3295,15 @@ mod tests {
             r#"
             [rvm_check]
             gen_ams_exe = "D:/tools/gen_ams.exe"
+            e3d_launcher = "D:/tools/run.bat"
             timeout_secs = 90
             "#,
         )
-        .expect("合法配置");
+        .expect("旧配置里留着的 gen_ams_exe 照样读得动");
         let section = fields.rvm_check.expect("rvm_check");
-        assert_eq!(section.gen_ams_exe.as_deref(), Some("D:/tools/gen_ams.exe"));
+        assert_eq!(section.e3d_launcher.as_deref(), Some("D:/tools/run.bat"));
         assert_eq!(section.timeout_secs, Some(90));
-        assert_eq!(section.rvm_compare_exe, None);
+        assert_eq!(section.work_dir, None);
     }
 
     /// ADR-023：缺配置按自动执行；显式 false 仍保留冷启动检查能力。
