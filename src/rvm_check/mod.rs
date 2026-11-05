@@ -384,6 +384,33 @@ struct ResolvedNode {
     sesno: u32,
     noun: String,
     name: String,
+    /// SITE 在 MDB 全部 WORLD 成员里的序号（同为 SITE 的兄弟中排第几，1 起）。
+    /// 只有 SITE 才算；无名 SITE 的 E3D 显示名 `SITE n of WORLD /*` 用它。
+    world_ordinal: Option<usize>,
+}
+
+/// gen_ams 解库号用的目录：E3D 会话主项目的 `<代号>000`。
+///
+/// E3D 在 AMS 会话里打开 ACP 的设计库（23705/289 在 acp7321）时，库号 7000 解成主项目的
+/// ams7000，不是 acp000 里同号的 acp7000；拿库文件所在目录解，目录件就和 E3D 不是同一份。
+/// 外项目库再按主项目 `<代号>sys` 的登记补。主项目目录不存在时退回库文件所在目录。
+fn session_project_dir(spec: &RunSpec, node: &ResolvedNode) -> PathBuf {
+    let code_dir = spec
+        .project_dir
+        .join(format!("{}000", spec.e3d_project.to_ascii_lowercase()));
+    if code_dir.is_dir() {
+        code_dir
+    } else {
+        node.project_dir.clone()
+    }
+}
+
+/// MDB 顺序的 SITE 根表里，`target` 排第几（1 起）。
+fn world_ordinal_in(roots: &[RefU64], target: RefU64) -> Option<usize> {
+    roots
+        .iter()
+        .position(|refno| *refno == target)
+        .map(|index| index + 1)
 }
 
 fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode, String> {
@@ -403,6 +430,17 @@ fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode
         .to_path_buf();
     let noun = tree.noun_of(refno).unwrap_or_default();
     let name = tree.name_of(refno).unwrap_or_default();
+    let world_ordinal = if noun.eq_ignore_ascii_case("SITE") {
+        let roots = tree
+            .roots()
+            .map_err(|error| format!("读 MDB 的 SITE 根表失败：{error:#}"))?
+            .into_iter()
+            .map(|node| node.refno.refno())
+            .collect::<Vec<_>>();
+        world_ordinal_in(&roots, refno)
+    } else {
+        None
+    };
     Ok(ResolvedNode {
         dbnum,
         db_type: metadata.db_type,
@@ -411,6 +449,7 @@ fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode
         sesno: metadata.source.sesno,
         noun,
         name,
+        world_ordinal,
     })
 }
 
@@ -429,6 +468,7 @@ fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result
     }
     let ours = task_dir.join("ours");
     std::fs::create_dir_all(&ours).map_err(|error| format!("建输出目录失败：{error}"))?;
+    let project_dir = session_project_dir(spec, node);
     let mut args = vec![
         "--attlib".to_string(),
         attlib.display().to_string(),
@@ -441,11 +481,17 @@ fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result
         "--root".to_string(),
         spec.refno.clone(),
         "--project-dir".to_string(),
-        node.project_dir.display().to_string(),
+        project_dir.display().to_string(),
+        "--main-project-dir".to_string(),
+        project_dir.display().to_string(),
         "--out".to_string(),
         ours.display().to_string(),
         "--rvm".to_string(),
     ];
+    if let Some(ordinal) = node.world_ordinal {
+        args.push("--root-world-ordinal".to_string());
+        args.push(ordinal.to_string());
+    }
     if node.sesno > 0 {
         args.push("--sesno".to_string());
         args.push(node.sesno.to_string());
@@ -866,6 +912,19 @@ mod tests {
             "login ****** failed"
         );
         assert_eq!(redact("ab", "a"), "ab");
+    }
+
+    #[test]
+    fn unnamed_site_ordinal_counts_every_world_in_mdb_order() {
+        let roots = [
+            "14195/1", "14195/2", "15201/535", "23705/1", "23705/289", "23713/2343",
+            "23714/1", "23717/2", "23734/1", "23737/1", "24381/46775", "24381/79977",
+        ]
+        .map(|text| RefU64::from_str_refno(text).unwrap());
+        let at = |text: &str| world_ordinal_in(&roots, RefU64::from_str_refno(text).unwrap());
+        assert_eq!(at("14195/2"), Some(2));
+        assert_eq!(at("24381/79977"), Some(12));
+        assert_eq!(at("24381/1"), None);
     }
 
     #[test]
