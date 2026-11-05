@@ -1541,6 +1541,7 @@ fn spawn_generation_worker(
 ) -> impl std::future::Future<Output = anyhow::Result<()>> {
     crate::fast_model::concurrency::run_gated_cpu(move || {
         let mut cache = checkout_cache(&caches);
+        let mut lod1_cache = lod1_enabled().then(CatalogueMeshCache::default);
         while let Some((slot, root)) = queue.claim() {
             // Bake here, not on the consumer: triangulation, the SHA-256 and
             // the mesh file write are the rest of this root's CPU cost, and
@@ -1552,6 +1553,9 @@ fn spawn_generation_worker(
             let evaluate_micros = started.elapsed().as_micros();
             let outcome =
                 evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir, rooms.as_deref()));
+            if let (Some(lod1_cache), Ok(baked)) = (lod1_cache.as_mut(), outcome.as_ref()) {
+                bake_lod1_root(&set, &index, root, baked, &mesh_dir, lod1_cache);
+            }
             // 一根一行的生成账：整库那一档的墙钟压在哪几根上、是取数+几何还是烘焙，
             // 只有按根记才看得出来——按批记会把长尾摊平（7999 上 25 根里几根就占了 80%）。
             log::info!(
@@ -3210,6 +3214,7 @@ impl E3dModelService {
         // A production batch is one reuse window: identical evaluated catalogue
         // primitives across different delivery roots must share their local mesh.
         let mut catalogue_mesh_cache = CatalogueMeshCache::default();
+        let mut lod1_cache = lod1_enabled().then(CatalogueMeshCache::default);
         for (root_index, &root) in roots.iter().enumerate() {
             let mut publication = publications[root_index].clone();
             if cached[root_index] {
@@ -3232,7 +3237,12 @@ impl E3dModelService {
                 match generate_snapshot_from_set(set, index, root, &mut catalogue_mesh_cache)
                     .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir, None))
                 {
-                    Ok(outcome) => outcome,
+                    Ok(outcome) => {
+                        if let Some(lod1_cache) = lod1_cache.as_mut() {
+                            bake_lod1_root(set, index, root, &outcome, &self.mesh_dir, lod1_cache);
+                        }
+                        outcome
+                    }
                     Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
                         total.failed += 1;
                         total.failed_roots.push((root, format!("{error:#}")));
@@ -3965,6 +3975,8 @@ pub struct BakedElement {
     /// Content-addressed id; the file is already published under it.
     pub mesh_id: String,
     pub mesh_write: MeshWrite,
+    /// 盘上 `{mesh_id}.mesh` 的三角形数；粗精度副本（[`bake_lod1_root`]）拿它判值不值得写。
+    pub mesh_triangles: usize,
     pub world_bounds: [[f32; 3]; 2],
     /// Only a canonical primitive persists a local box.
     pub local_bounds: Option<[[f32; 3]; 2]>,
@@ -4059,12 +4071,123 @@ fn bake_element(
         is_invalid_tubi: element.is_invalid_tubi,
         world: element.world,
         primitive_instance: element.primitive_instance,
+        mesh_triangles: mesh.indices.len() / 3,
         mesh_id,
         mesh_write,
         world_bounds,
         local_bounds,
         room_edges,
     })
+}
+
+/// 显示用粗精度副本的弦高容差下限（mm）。L0 是 libgm 复刻口径 0.5 mm。
+const LOD1_MIN_CHORD_TOL_MM: f64 = 4.0;
+/// L0 少于这么多三角形的几何不出 L1：省下的顶点抵不上多一次请求。
+const LOD1_MIN_SOURCE_TRIANGLES: usize = 256;
+/// L1 至少要比 L0 少 30% 的三角形才落盘，否则读 L1 没有意义（接口回 404，前端用 L0）。
+const LOD1_MAX_KEEP_RATIO: f64 = 0.7;
+
+/// 生成时要不要多产一份 `lod1/` 粗网格（`AIOS_MESH_LOD1=1`）。默认关：它让每根多求值一遍。
+fn lod1_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("AIOS_MESH_LOD1")
+            .map(|value| matches!(value.trim(), "1" | "true" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// L0 够大、L1 非空且至少省下 30% 三角形才值得落盘。
+fn lod1_worth_keeping(l0_triangles: usize, l1_triangles: usize) -> bool {
+    l0_triangles >= LOD1_MIN_SOURCE_TRIANGLES
+        && l1_triangles > 0
+        && l1_triangles as f64 <= l0_triangles as f64 * LOD1_MAX_KEEP_RATIO
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Lod1Bake {
+    written: usize,
+    reused: usize,
+    /// 求出来了，但没比 L0 省够（或 L0 本来就小）——不落盘。
+    skipped: usize,
+    failed: usize,
+}
+
+/// 同一根在弦高容差下限 [`LOD1_MIN_CHORD_TOL_MM`] 下再求值一遍，把每件的粗网格写到
+/// `{mesh_dir}/lod1/{L0 mesh_id}.mesh`。
+///
+/// 文件名借 L0 的内容键：前端手里只有那一个键。L1 不进任何身份、不进投影、不进房间判定，
+/// 失败只记日志——L0 已经发布，这一份只是显示增强。`cache` 必须是 L1 专用的那一份：
+/// 目录网格缓存按求值结果复用，与 L0 共用会把两档精度混在一起。
+fn bake_lod1_root(
+    set: &Arc<DbSet>,
+    index: &SourceIndex,
+    root: RefNo,
+    baked: &BakedSnapshot,
+    mesh_dir: &Path,
+    cache: &mut CatalogueMeshCache,
+) -> Lod1Bake {
+    let mut report = Lod1Bake::default();
+    let wanted: HashMap<&GeometryId, &BakedElement> = baked
+        .elements
+        .iter()
+        .filter(|element| element.mesh_triangles >= LOD1_MIN_SOURCE_TRIANGLES)
+        .map(|element| (&element.geometry_id, element))
+        .collect();
+    if wanted.is_empty() {
+        return report;
+    }
+    let snapshot = match e3d_model::discretise::with_min_chord_tol(LOD1_MIN_CHORD_TOL_MM, || {
+        generate_snapshot_from_set(set, index, root, cache)
+    }) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!("[mesh-lod1] root {root} 粗精度求值失败，跳过: {error:#}");
+            report.failed += 1;
+            return report;
+        }
+    };
+    let dir = mesh_dir.join(crate::fast_model::e3d_mesh_store::LOD1_DIR);
+    let mut done = std::collections::HashSet::new();
+    for element in snapshot.elements {
+        let Some(source) = wanted.get(&element.geometry_id) else {
+            continue;
+        };
+        if !done.insert(source.mesh_id.clone()) {
+            continue;
+        }
+        let mesh = match element.primitive_instance.as_ref() {
+            Some(instance) => match canonical_primitive_mesh(instance.key) {
+                Ok(canonical) => crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical),
+                Err(error) => {
+                    log::warn!("[mesh-lod1] {} 标准图元求不出: {error}", source.mesh_id);
+                    report.failed += 1;
+                    continue;
+                }
+            },
+            None => local_generated_mesh(&element),
+        };
+        if mesh.aabb.is_none() || !lod1_worth_keeping(source.mesh_triangles, mesh.indices.len() / 3) {
+            report.skipped += 1;
+            continue;
+        }
+        match ensure_mesh_file(&dir.join(format!("{}.mesh", source.mesh_id)), &mesh) {
+            Ok(MeshWrite::Reused) => report.reused += 1,
+            Ok(_) => report.written += 1,
+            Err(error) => {
+                log::warn!("[mesh-lod1] {} 写盘失败: {error:#}", source.mesh_id);
+                report.failed += 1;
+            }
+        }
+    }
+    log::info!(
+        "[mesh-lod1] root={root} written={} reused={} skipped={} failed={}",
+        report.written,
+        report.reused,
+        report.skipped,
+        report.failed
+    );
+    report
 }
 
 /// bake 时这件几何在房间判定眼里的形状——与它随后变成的投影记录**字段相同**（`project_geometry_delta`
@@ -5058,6 +5181,15 @@ mod tests {
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
 
+    #[test]
+    fn lod1_is_kept_only_for_large_sources_that_shrink_enough() {
+        assert!(!lod1_worth_keeping(255, 10), "L0 太小不出 L1");
+        assert!(!lod1_worth_keeping(1000, 0), "空网格不落盘");
+        assert!(!lod1_worth_keeping(1000, 701), "省不到 30% 不落盘");
+        assert!(lod1_worth_keeping(1000, 700));
+        assert!(lod1_worth_keeping(256, 64));
+    }
+
     /// ADR-084（内存控制计划 P3）：生成输入缓存按**库数**设上限——每库一条（同库换 sesno 替换、不算逐出），
     /// 超过上限时最久没被生成用到的库整份出，**命中也刷新**；0 = 不限；`forget_dbnum` 不计入逐出数；
     /// 被替 / 被逐的值原样交还给调用方（在锁外 drop）。
@@ -5754,6 +5886,7 @@ mod tests {
             primitive_instance: None,
             mesh_id: mesh_id.into(),
             mesh_write: MeshWrite::Reused,
+            mesh_triangles: 0,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
             room_edges: Vec::new(),
@@ -5775,6 +5908,7 @@ mod tests {
             primitive_instance: None,
             mesh_id: mesh_id.into(),
             mesh_write: MeshWrite::Reused,
+            mesh_triangles: 0,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
             room_edges: Vec::new(),
@@ -6117,6 +6251,7 @@ mod tests {
                 primitive_instance: baked.primitive_instance.clone(),
                 mesh_id: baked.mesh_id.clone(),
                 mesh_write: MeshWrite::Reused,
+                mesh_triangles: baked.mesh_triangles,
                 world_bounds: baked.world_bounds,
                 local_bounds: baked.local_bounds,
                 room_edges: Vec::new(),

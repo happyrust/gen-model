@@ -1523,6 +1523,12 @@ pub async fn tree_children(
     })))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct MeshQuery {
+    /// 精度档：缺省 / 0 = 原网格；1 = 生成时多产的显示用粗网格（`lod1/`）。
+    pub lod: Option<u8>,
+}
+
 /// GET /api/v1/meshes/{geo_hash}.glb | {geo_hash}.mesh — 同一份网格的两种线上形态。
 ///
 /// `.glb`：磁盘 `.mesh`（rkyv 归档）现场转 glTF 二进制——浏览器旧口径，plant3d-web
@@ -1538,9 +1544,13 @@ pub async fn tree_children(
 /// 键的真实字符集，也是唯一一道目录穿越的门。文件不在回 404 `not_found`（与「refno
 /// 不存在」同码，客户端可负缓存）；文件在但编不成三角网格回 422 `precondition`——那是
 /// 数据的终局，重发同一个键还是同一个结果（只有 `.glb` 会走到这一步）。
+///
+/// `?lod=1` 读同一个键的粗精度副本（`meshes_dir()/lod1/{geo_hash}.mesh`，生成时开
+/// `AIOS_MESH_LOD1` 才有）。没有就 404：那个键要么太小、要么简化省不下多少，前端负缓存后用原网格。
 pub async fn mesh_glb(
     State(state): State<AppState>,
     Path(file): Path<String>,
+    Query(query): Query<MeshQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let _ = &state;
     let (stem, raw_mesh) = if let Some(stem) = file.strip_suffix(".glb") {
@@ -1557,7 +1567,14 @@ pub async fn mesh_glb(
             "geo_hash 只允许字母、数字与下划线: {stem}"
         )));
     }
-    let path = crate::options::meshes_dir().join(format!("{stem}.mesh"));
+    let dir = match query.lod.unwrap_or(0) {
+        0 => crate::options::meshes_dir(),
+        1 => crate::options::meshes_dir().join(crate::fast_model::e3d_mesh_store::LOD1_DIR),
+        other => {
+            return Err(ApiError::bad_request(format!("lod 只支持 0 或 1: {other}")));
+        }
+    };
+    let path = dir.join(format!("{stem}.mesh"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -5746,6 +5763,25 @@ mod tests {
             body.contains("crate::options::meshes_dir()"),
             "网格目录必须与生成侧走同一个解析口（options::meshes_dir，ADR-068 D7）: {body}"
         );
+    }
+
+    /// `?lod=` 只认 0 / 1：1 读 `lod1/` 子目录，其他值在读盘前 400。
+    #[test]
+    fn mesh_glb_handler_maps_lod_to_a_subdirectory_before_touching_the_disk() {
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn mesh_glb(")
+            .expect("mesh_glb handler must exist")
+            .1
+            .split_once("tokio::fs::read(")
+            .expect("handler reads the file after the gates")
+            .0;
+        assert!(body.contains("Query(query): Query<MeshQuery>"), "{body}");
+        assert!(body.contains("query.lod.unwrap_or(0)"), "缺省 = 原网格: {body}");
+        assert!(
+            body.contains("join(crate::fast_model::e3d_mesh_store::LOD1_DIR)"),
+            "lod=1 读 lod1/ 子目录: {body}"
+        );
+        assert!(body.contains("ApiError::bad_request"), "其他档位 400: {body}");
     }
 
     /// `.mesh` 直连形态（plant3d-web 2026-09-09 拍板）：读盘之后原样吐字节，

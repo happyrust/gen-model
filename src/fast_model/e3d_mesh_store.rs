@@ -14,6 +14,10 @@ const BAKED_MESH_DOMAIN: &[u8] = b"e3d-model/baked-mesh/v2\0";
 const TESSELLATION_POLICY_VERSION: &[u8] = b"e3d-model-tessellation/v1\0";
 static TEMP_MESH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// 显示用粗精度副本的子目录（`meshes_dir()/lod1/{L0 mesh_id}.mesh`）。文件名借 L0 的键，
+/// 内容不是那个键的摘要，所以这里的文件不过 [`verify_content_addressed_mesh`]。
+pub const LOD1_DIR: &str = "lod1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshWrite {
     Written,
