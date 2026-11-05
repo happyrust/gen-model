@@ -236,7 +236,16 @@ pub fn judge_compare(
         + counts.container_only_generated
         + counts.unkeyable_baseline
         + counts.unkeyable_generated;
-    let verdict = if counts.both == 0 || structural > 0 {
+    // E3D 一侧确实读过（`baseline_members` 在且为 0）、生成侧也一件没出，两边同样空：
+    // 只画中心线的 SITE（/1AXIS 的 SCTN 没有 SPRE）就是这样，不是对不上。缺这个字段的
+    // JSON 说明比对本身没跑完整，仍判红。
+    let both_empty = value.get("baseline_members").and_then(Value::as_u64) == Some(0)
+        && counts.both == 0
+        && counts.kind_differ == 0
+        && structural == 0;
+    let verdict = if both_empty {
+        RvmVerdict::Pass
+    } else if counts.both == 0 || structural > 0 {
         RvmVerdict::Fail
     } else if counts.kind_differ > 0 {
         RvmVerdict::KindDiffer
@@ -248,6 +257,7 @@ pub fn judge_compare(
 
 pub fn verdict_message(verdict: RvmVerdict, counts: &RvmCounts) -> String {
     match verdict {
+        RvmVerdict::Pass if counts.both == 0 => "通过：两侧都没有可比几何".to_string(),
         RvmVerdict::Pass => format!("通过：两侧 {} 个构件一致", counts.both),
         RvmVerdict::KindDiffer => format!(
             "包围盒通过，但有 {} 个构件的图元种类不一致",
@@ -457,6 +467,36 @@ mod tests {
         });
         assert_eq!(judge_compare(&tubes).0, RvmVerdict::Fail);
         assert_eq!(judge_compare(&serde_json::json!({})).0, RvmVerdict::Fail);
+    }
+
+    /// /1AXIS、/Steel_Template_Site、/MDS/TEMPLATES/ORI 的 compare.json：两边都没有带体的成员。
+    #[test]
+    fn green_when_both_sides_have_nothing_comparable() {
+        let empty = serde_json::json!({
+            "baseline_members": 0,
+            "baseline_geometries": 0,
+            "by_noun": {},
+            "pairs": [],
+            "only_baseline": [],
+            "only_generated": [],
+            "unkeyable_baseline": [],
+            "unkeyable_generated": [],
+            "centreline_only_baseline": [],
+            "container_tube_groups": 0,
+            "container_tubes": { "exact": 0, "chord": 0, "off": 0, "only_baseline": 0, "only_generated": 0 }
+        });
+        let (verdict, counts, mismatches, _, _) = judge_compare(&empty);
+        assert_eq!(verdict, RvmVerdict::Pass);
+        assert!(mismatches.is_empty());
+        assert_eq!(verdict_message(verdict, &counts), "通过：两侧都没有可比几何");
+
+        let mut ours_only = empty.clone();
+        ours_only["only_generated"] = serde_json::json!(["/ONLY-OURS"]);
+        assert_eq!(judge_compare(&ours_only).0, RvmVerdict::Fail);
+
+        let mut unread = empty.clone();
+        unread.as_object_mut().unwrap().remove("baseline_members");
+        assert_eq!(judge_compare(&unread).0, RvmVerdict::Fail);
     }
 
     /// `judge_compare` 只吃 `compare.json` 的内容：函数签名里压根没有退出码这个
