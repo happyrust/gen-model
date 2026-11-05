@@ -16,8 +16,9 @@
 //! - `outside_diameter`（PML `aod of $!mem`）：到达这一站的那条槽位按 `CGETOD` 取管子目录件
 //!   `PARA[2]`（e3d-model `departure_tube_outer_diameter`），取不到时按 PML `isoline.getod` 的回落
 //!   `min(bore × 1.1, bore + 10)` 用到达侧通径折算。Phase 4 起尺寸行位与字高都从它派生。
-//! - `ppoints` = P1 / P2 / P3（`CataloguePoints` 逐号解，世界系）：PML `getIsoUsedDirs` 判手柄、
-//!   `considerTee` 补点要用；`arrive_ppoint` / `leave_ppoint` 是 `walk_route` 给的到达 / 离开口编号。
+//! - `ppoints` = P0 / P1 / P2 / P3 / P9（`CataloguePoints` 逐号解，世界系）：PML `getIsoUsedDirs`
+//!   判手柄、`considerTee` 补点用 P1-P3；P0 / P9 是 PCOM 切段专属分支（plant-mbd `pcom.rs`）要的；
+//!   `arrive_ppoint` / `leave_ppoint` 是 `walk_route` 给的到达 / 离开口编号。
 //! - **隐式管身**：E3D 里两个管件之间的直管不是成员（只有 FTUB 这种定长管才是），成员表收不到，
 //!   而管道尺寸标注量的主要就是这些管长（PML `getcuttubi` / 线性尺寸）。这里按 E3D 画隐式管身的
 //!   同一套规则（e3d-model `walk_route` 的槽位：上一站离开点 → 本站到达点，含 Head→首站、末站→Tail；
@@ -656,13 +657,18 @@ fn diameter_evidence(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> Dia
     }
 }
 
-/// P1 / P2 / P3（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
+/// P1 / P2 / P3 + P0 / P9（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
+///
+/// P0 / P9 只喂 PCOM 切段专属分支用（plant-mbd `pcom.rs`：RJ 型用 P0/P1/P3/P9，
+/// `isobran.pmlobj` L1523-1543）；其余构件类型的目录 PTSET 里大多没有这两个号，
+/// `resolver.leave` 解不出就是 `Ok(None)`，按现有口径不填、不算错——这两个额外号不会让
+/// 非 PCOM 构件多出意料之外的 issue。
 fn catalogue_ppoints(
     member: &e3d_io::db_element::DbElement,
     resolver: &CataloguePoints,
 ) -> Result<Vec<PPoint>, BranchQueryError> {
-    let mut points = Vec::with_capacity(3);
-    for number in 1..=3 {
+    let mut points = Vec::with_capacity(5);
+    for number in [0, 1, 2, 3, 9] {
         match resolver.leave(member, Some(number)) {
             Ok(Some(point)) => points.push(PPoint {
                 number,
