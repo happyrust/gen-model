@@ -13,10 +13,11 @@
 //! 全标注类型（plant3d-web#103 M7）：[`object`] 按 `[mbd_type_rules]` 把被选中的元素判成九种标注类型之一、
 //! 取归属对象，再走 plant-mbd 统一入口；[`host`] 是各类型读取器共用的读法（属主链、可选属性、世界坐标、
 //! 目录参数、SPAMAP 空间候选）。各类型的读取器：设备 [`equipment_query`]（M3），找墙候选 [`civil_faces`]
-//! （设备先用，支架找墙与土建随后共用）。
+//! （设备先用，支架找墙与土建随后共用），土建 / 建筑 [`civil_query`]（M6）。
 
 pub mod branch_query;
 pub mod civil_faces;
+pub mod civil_query;
 pub mod equipment_query;
 pub mod host;
 pub mod object;
@@ -32,6 +33,7 @@ use plant_mbd::{
 
 pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
 pub use civil_faces::{CivilFaceError, civil_candidate, locate_candidates};
+pub use civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil, query_civil_with};
 pub use equipment_query::{EquipmentQueryError, query_equipment};
 pub use object::{
     Classified, MbdTypeRules, ObjectQueryError, SubjectKind, classify, classify_with,

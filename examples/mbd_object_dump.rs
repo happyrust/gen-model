@@ -12,7 +12,9 @@
 //! 视图键随类型：`branch`（管道，`branch_query` 的 `BranchQueryResult` 全量）/ `support` / `civil` / `equipment`。
 //! 设备是 `equipment_view` 的全量视图（原点 / 朝向 / 包围盒 / ELCONN / 管口 P1 / 找墙候选，判型说明在 `issues` 最前）；
 //! 找墙候选只在 `--db` 钉进来的设计库里找（服务端是 MDB 的全部 DESI 库），设备旁的墙在别的库时把那座库也给上
-//! （AMS：设备在 7999 / 8000，墙在 7997）。支架 / 土建现在只有归属（refno / noun / NAME），各 lane 的读取器落地后补字段。
+//! （AMS：设备在 7999 / 8000，墙在 7997）。土建 / 建筑是 `civil_view` 的全量视图（墙板的面 / SPINE、构件的棱线集、
+//! 楼板旁的墙与门、房间，按标注类型取数），楼板旁的墙与房间同样只在 `--db` 的设计库里找。支架现在只有归属
+//! （refno / noun / NAME），读取器落地后补字段。
 //! 每个 `--refno` 一个 `<w0_w1>.json`（按选中的 refno 命名）。
 //!
 //! ```powershell
@@ -35,7 +37,7 @@ use std::sync::Arc;
 use aios_database::data_interface::direct_store::TEMPLATE_DIR_ENV;
 use aios_database::fast_model::e3d_model_service::parse_refno;
 use aios_database::mbd::host::ChainedDbResolver;
-use aios_database::mbd::object::{MbdTypeRules, SubjectKind, stub_source};
+use aios_database::mbd::object::{MbdTypeRules, SubjectKind, civil_view, stub_source};
 use aios_database::mbd::{branch_query, classify_with, equipment_view, wire_refno};
 use clap::Parser;
 use e3d_io::db_element::{DbFilePin, DbFileResolver, DbSet, template_file_for};
@@ -162,7 +164,35 @@ fn main() -> anyhow::Result<()> {
                 }
             },
             SubjectKind::Support => serde_json::to_value(&stub_source(&classified).supports[0])?,
-            SubjectKind::Civil => serde_json::to_value(&stub_source(&classified).civils[0])?,
+            SubjectKind::Civil => match civil_view(&set, &classified) {
+                Ok(view) => {
+                    let lined = view.members.iter().filter(|m| !m.lines.is_empty()).count();
+                    let plated = view
+                        .members
+                        .iter()
+                        .filter(|m| !m.plate_faces.is_empty())
+                        .count();
+                    let doors: usize = view.walls.iter().map(|wall| wall.members.len()).sum();
+                    eprintln!(
+                        "{raw}: {} {subject_refno} faces {} spine {} members {} (edges {lined}, plates {plated}), walls {} (doors {doors}), rooms {}, issues {}",
+                        classified.subject_noun,
+                        view.element.faces.len(),
+                        view.element.spine.len(),
+                        view.members.len(),
+                        view.walls.len(),
+                        view.rooms.len(),
+                        view.issues.len()
+                    );
+                    serde_json::to_value(view)?
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{raw}: {} {subject_refno}: {error}",
+                        classified.subject_noun
+                    );
+                    continue;
+                }
+            },
             SubjectKind::Equipment => match equipment_view(&set, &classified) {
                 Ok(view) => {
                     let nouns: Vec<&str> = view
@@ -218,8 +248,8 @@ fn main() -> anyhow::Result<()> {
             "$schema_comment": format!(
                 "Generated {today} by gen-model `cargo run --example mbd_object_dump -- --db {db_name} --refno {raw}` \
                  (direct .dat read; annotation type and subject from [mbd_type_rules], dbno {} sesno {sesno}). \
-                 equipment views are full (civil candidates searched in the --db design databases only); \
-                 support / civil views carry only the subject until their readers land. \
+                 equipment and civil views are full (civil candidates, floor walls and rooms searched in the \
+                 --db design databases only); support views carry only the subject until their reader lands. \
                  Do not hand-edit: re-run instead.",
                 refno.dbno()
             ),

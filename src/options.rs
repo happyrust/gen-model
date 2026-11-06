@@ -738,6 +738,8 @@ struct DbOptionExtFields {
     review_attachments: Option<ReviewAttachmentsSection>,
     #[serde(default)]
     rvm_check: Option<RvmCheckSection>,
+    #[serde(default)]
+    mbd_civil: Option<MbdCivilConfig>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -2406,6 +2408,39 @@ pub fn effective_mbd_type_rules(configured: Option<&MbdTypeRulesConfig>) -> MbdT
         support_exclude_keywords: clean(&configured.support_exclude_keywords),
         rules,
     }
+}
+
+/// `DbOption.toml` 的 `[mbd_civil]`：MBD 土建 / 建筑视图的宿主规则（plant3d-web#103 M6，读取器在
+/// `crate::mbd::civil_query`）。
+///
+/// 建筑楼板要标板上墙的门，PML 认 `PURPOSE = DOOR` 的 FITT；AMS 的门一扇都没设 PURP，于是再按目录规格或名字认：
+/// FITT 的 `SPRE` 所在 SPEC 的 NAME 在 `door_specs` 里（不分大小写），或 FITT 的 NAME 合 `door_name_patterns`
+/// 里任一正则，就当门交给求解器。PURP = DOOR 的照旧认；两张表都写成空表就只认 PURP。写错的正则跳过并点名。
+///
+/// ```toml
+/// [mbd_civil]
+/// door_specs = ["/DOOR-SPEC"]
+/// door_name_patterns = ['-M\d+']
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MbdCivilConfig {
+    pub door_specs: Vec<String>,
+    pub door_name_patterns: Vec<String>,
+}
+
+impl Default for MbdCivilConfig {
+    fn default() -> Self {
+        Self {
+            door_specs: vec!["/DOOR-SPEC".to_string()],
+            door_name_patterns: vec![r"-M\d+".to_string()],
+        }
+    }
+}
+
+/// 生效的 `[mbd_civil]`：没写这一段取缺省，段里没写的键取缺省。
+pub fn mbd_civil() -> MbdCivilConfig {
+    load_ext_fields().mbd_civil.clone().unwrap_or_default()
 }
 
 /// 旧环境变量名（`AIOS_ROOM_MEMBERSHIP`）。**已退役（2026-10-23）**：房间归属不再是开关，还设着只会在

@@ -40,8 +40,9 @@
 //! 管道两类走现成的 [`layout_pipe`]，再补数据包层的 `annotation_type` / `subject`（`/api/mbd/v2/pipe/{refno}` 是
 //! 管道的别名，输出不变）。EM9 管道现在与 EM4 同一份布局——plant-mbd 的 `LayoutRequest::instrument_pipe` 还是空
 //! 操作，EM9 规则接线时改走 `layout_object`。设备两类读真视图（[`equipment_view`]：
-//! [`super::equipment_query::query_equipment`] + 判型说明）进 `layout_object`；支架 / 土建先拿只有归属的占位视图
-//! （[`stub_source`]），求解器还是占位，出信封 + `layout.not_implemented`，各自的宿主读取器落地后换掉。
+//! [`super::equipment_query::query_equipment`] + 判型说明）进 `layout_object`，土建 / 建筑同样（[`civil_view`]：
+//! [`super::civil_query::query_civil_with`]，按标注类型取土建或建筑的数）；支架先拿只有归属的占位视图
+//! （[`stub_source`]），求解器还是占位，出信封 + `layout.not_implemented`，宿主读取器落地后换掉。
 //! `meta.source_version` 一律按 `layout_pipe` 的口径注入。
 
 use std::sync::{Arc, OnceLock};
@@ -54,6 +55,7 @@ use plant_mbd::{
     MbdV2Subject, ObjectLayoutRequest, SupportQueryResult, layout_object,
 };
 
+use super::civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil_with};
 use super::equipment_query::{EquipmentQueryError, query_equipment};
 use super::host::{self, ChainLink, HostError, soft};
 use super::{BranchQueryError, SOURCE_TO_DESIGN_MM_TO_M, layout_pipe, wire_refno};
@@ -375,6 +377,15 @@ impl From<EquipmentQueryError> for ObjectQueryError {
         match error {
             EquipmentQueryError::NotFound { refno } => Self::NotFound { refno },
             EquipmentQueryError::Db(error) => Self::Db(error),
+        }
+    }
+}
+
+impl From<CivilQueryError> for ObjectQueryError {
+    fn from(error: CivilQueryError) -> Self {
+        match error {
+            CivilQueryError::NotFound { refno } => Self::NotFound { refno },
+            CivilQueryError::Db(error) => Self::Db(error),
         }
     }
 }
@@ -713,6 +724,10 @@ pub fn layout_classified(
             equipments: vec![equipment_view(set, classified)?],
             ..InMemoryMbdSource::default()
         },
+        SubjectKind::Civil => InMemoryMbdSource {
+            civils: vec![civil_view(set, classified)?],
+            ..InMemoryMbdSource::default()
+        },
         _ => stub_source(classified),
     };
     let mut data =
@@ -735,9 +750,25 @@ pub fn equipment_view(
     Ok(view)
 }
 
-/// 归属对象的占位视图：只有 refno / noun / NAME，判型的 `notes` 进 `issues`。支架 / 土建的读取器落地前拿它进
-/// `layout_object`（设备已走 [`equipment_view`]，这里的设备分支只留给要「只看归属」的调用方）；管道不用（走
-/// [`layout_pipe`]），给空源。
+/// 土建 / 建筑的真视图：[`query_civil_with`] 按标注类型取数（建筑只给 NXTR、楼板旁的墙带门，门规则取
+/// [`DoorRule::current`]），判型的 `notes` 排在读取器的问题之前（统一端点与 `examples/mbd_object_dump` 共用）。
+pub fn civil_view(
+    set: &Arc<DbSet>,
+    classified: &Classified,
+) -> Result<CivilQueryResult, ObjectQueryError> {
+    let mut view = query_civil_with(
+        set,
+        classified.subject_refno,
+        CivilMode::of(classified.annotation_type),
+        &DoorRule::current(),
+    )?;
+    view.issues.splice(0..0, classified.notes.iter().cloned());
+    Ok(view)
+}
+
+/// 归属对象的占位视图：只有 refno / noun / NAME，判型的 `notes` 进 `issues`。支架的读取器落地前拿它进
+/// `layout_object`（设备、土建已走 [`equipment_view`] / [`civil_view`]，这里的这两支只留给要「只看归属」的
+/// 调用方）；管道不用（走 [`layout_pipe`]），给空源。
 pub fn stub_source(classified: &Classified) -> InMemoryMbdSource {
     let subject_refno = classified.subject_wire_refno();
     let subject_noun = classified.subject_noun.clone();

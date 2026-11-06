@@ -1,7 +1,7 @@
 //! 找墙候选（plant3d-web#103 M3 宿主侧）：STWALL / GWALL / FLOOR / WALL → `plant_mbd::CivilCandidate`，以及沿
 //! 基准点五条射线从 SPAMAP 收候选。字段与 PML 口径见 plant-mbd `docs/field-dictionary.md`「找墙候选」（markCivil
-//! `getDataOfCivil` L431-1043、mbdlocation `getconindir` L682-872）。设备（[`super::equipment_query`]）先用，EM9
-//! 仪表架支架的找墙与土建读取器随后共用。
+//! `getDataOfCivil` L431-1043、mbdlocation `getconindir` L682-872）。设备（[`super::equipment_query`]）与土建视图
+//! （[`super::civil_query`]，经 [`civil_shape_of`]）共用，EM9 仪表架支架的找墙随后接上。
 //!
 //! # 面（一律世界 mm，`world_matrix`）
 //!
@@ -56,7 +56,7 @@ use e3d_model::section::{
     evaluate_section_profile, section_catalogue, section_cut_planes, section_placement, spine_path,
 };
 use e3d_model::transform::world_matrix;
-use glam::{DMat3, DMat4, DVec3};
+use glam::{DMat3, DMat4, DQuat, DVec3};
 use plant_mbd::{CivilCandidate, CivilFace, CurvedWall};
 
 use super::host::{self, Aabb, HostError, noun_of, soft};
@@ -140,11 +140,35 @@ pub fn civil_candidate(set: &Arc<DbSet>, refno: RefNo) -> Result<CivilCandidate,
     civil_candidate_of(&set.element(refno), &mut Vec::new())
 }
 
-/// [`civil_candidate`]，非致命的说明（截面退回 DESP、`:JJ_QTHD` 与几何不符）追加进 `notes`。
-pub fn civil_candidate_of(
+/// 一块墙板读出来的几何，找墙候选（[`civil_candidate_of`]）与土建视图（[`super::civil_query`]）共用。厚度是
+/// 几何值，`:JJ_QTHD` 由调用方另盖。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CivilShape {
+    /// [`noun_of`] 的写法：STWALL / GWALL / WALL / FLOOR。
+    pub noun: String,
+    pub faces: Vec<CivilFace>,
+    pub curved: Option<CurvedWall>,
+    /// 截面外包矩形宽（STWALL / WALL）、FLOOR 的环高、GWALL 两张大面的距离。
+    pub thickness: f64,
+    /// 截面外包矩形高（STWALL / WALL）、GWALL 水平面的高差；FLOOR 没有。
+    pub height: Option<f64>,
+    /// STWALL：截面系到世界（列 = 截面 x（厚度向）/ y（高度向）/ 沿轴 z），即 PML 的 `ori of STWALL wrt/*`。
+    pub section_frame: Option<DMat4>,
+    /// STWALL / WALL：截面外包矩形。
+    pub section: Option<SectionBox>,
+    /// WALL：SPINE 上的点（世界 mm）——起点、每段弧的中点、每段的终点。
+    pub spine: Vec<DVec3>,
+    /// WALL：截面底边中点在 SPINE 起点处的世界位置（PML `pos ppli cbow prop 0`）。
+    pub cbow: Option<DVec3>,
+    /// FLOOR / GWALL：第一个环的高 `HEIG`。
+    pub loop_height: Option<f64>,
+}
+
+/// 一块墙板的几何（不读名字与 UDA），非致命的说明（截面退回 DESP…）追加进 `notes`。
+pub fn civil_shape_of(
     element: &DbElement,
     notes: &mut Vec<String>,
-) -> Result<CivilCandidate, CivilFaceError> {
+) -> Result<CivilShape, CivilFaceError> {
     let refno = element.refno();
     match element.exists() {
         Ok(true) => {}
@@ -175,6 +199,29 @@ pub fn civil_candidate_of(
             detail,
         },
     })?;
+    Ok(CivilShape {
+        noun,
+        faces: shape.faces,
+        curved: shape.curved,
+        thickness: shape.thickness,
+        height: shape.height,
+        section_frame: shape.section_frame,
+        section: shape.section,
+        spine: shape.spine,
+        cbow: shape.cbow,
+        loop_height: shape.loop_height,
+    })
+}
+
+/// [`civil_candidate`]，非致命的说明（截面退回 DESP、`:JJ_QTHD` 与几何不符）追加进 `notes`。
+pub fn civil_candidate_of(
+    element: &DbElement,
+    notes: &mut Vec<String>,
+) -> Result<CivilCandidate, CivilFaceError> {
+    let shape = civil_shape_of(element, notes)?;
+    let refno = element.refno();
+    let noun = shape.noun.clone();
+    let label = format!("{noun} {}", wire_refno(refno));
     let thickness = match jj_qthd(element)? {
         Some(uda) => {
             if (uda - shape.thickness).abs() > THICKNESS_SNAP {
@@ -216,16 +263,22 @@ pub fn snap_to_integer(value: f64, tolerance: f64) -> f64 {
 }
 
 /// 几何量去掉浮点尾数（记到 1e-6 mm；E3D 自己的位置记到 0.01 mm）。
-fn tidy(value: f64) -> f64 {
+pub(crate) fn tidy(value: f64) -> f64 {
     (value * 1e6).round() / 1e6
 }
 
-/// 一块墙板读出来的几何（厚度是几何值，UDA 在外面盖）。
+/// 一块墙板读出来的几何（厚度是几何值，UDA 在外面盖），字段同 [`CivilShape`]。
+#[derive(Default)]
 struct Shape {
     faces: Vec<CivilFace>,
     curved: Option<CurvedWall>,
     thickness: f64,
     height: Option<f64>,
+    section_frame: Option<DMat4>,
+    section: Option<SectionBox>,
+    spine: Vec<DVec3>,
+    cbow: Option<DVec3>,
+    loop_height: Option<f64>,
 }
 
 enum Failure {
@@ -268,7 +321,7 @@ fn jj_qthd(element: &DbElement) -> Result<Option<f64>, DbElementError> {
 }
 
 /// 数值 UDA：字典里没有 / 对这个 noun 无效按没有；存成文本的按文本解数。
-fn uda_number(element: &DbElement, name: &str) -> Result<Option<f64>, DbElementError> {
+pub(crate) fn uda_number(element: &DbElement, name: &str) -> Result<Option<f64>, DbElementError> {
     let value = match element.get_double(name) {
         Ok(value) => value,
         Err(DbElementError::UnknownAttribute { .. } | DbElementError::Uda { .. }) => None,
@@ -399,9 +452,11 @@ fn stwall_shape(
     let faces = section_wall_faces(to_world, placement.length, Some(&cuts), section);
     Ok(Shape {
         faces: Vec::from(faces),
-        curved: None,
         thickness: section.width(),
         height: Some(section.height()),
+        section_frame: Some(to_world),
+        section: Some(section),
+        ..Shape::default()
     })
 }
 
@@ -451,6 +506,11 @@ fn wall_shape(element: &DbElement, label: &str, notes: &mut Vec<String>) -> Resu
     let (section, _) = wall_section(element, label, notes)?;
     let world = world_matrix(element)?;
     let up = world.transform_vector3(DVec3::Z);
+    let spine = spine_points(&path.segments)
+        .into_iter()
+        .map(|point| world.transform_point3(point))
+        .collect();
+    let cbow = spine_cbow(&path.segments, section).map(|point| world.transform_point3(point));
     if let Some(arc) = one_circle(&path.segments) {
         let curved = curved_wall(
             world.transform_point3(arc.centre),
@@ -463,10 +523,13 @@ fn wall_shape(element: &DbElement, label: &str, notes: &mut Vec<String>) -> Resu
         )
         .map_err(Failure::Geometry)?;
         return Ok(Shape {
-            faces: Vec::new(),
             curved: Some(curved),
             thickness: section.width(),
             height: Some(section.height()),
+            section: Some(section),
+            spine,
+            cbow,
+            ..Shape::default()
         });
     }
     match path.segments.as_slice() {
@@ -480,9 +543,12 @@ fn wall_shape(element: &DbElement, label: &str, notes: &mut Vec<String>) -> Resu
             .map_err(Failure::Geometry)?;
             Ok(Shape {
                 faces: Vec::from(faces),
-                curved: None,
                 thickness: section.width(),
                 height: Some(section.height()),
+                section: Some(section),
+                spine,
+                cbow,
+                ..Shape::default()
             })
         }
         segments => {
@@ -504,6 +570,51 @@ fn wall_shape(element: &DbElement, label: &str, notes: &mut Vec<String>) -> Resu
             )))
         }
     }
+}
+
+/// SPINE 上的点（WALL 局部系）：起点、每段弧的中点、每段的终点。PML 直取 `members of first spine` 的位置
+/// （L535-540），CURVE 是 THRU 时它就在弧上；CENT / FILL 的 CURVE 位置不在弧上，这里一律取弧中点——求解器只拿
+/// 前三点定圆、逐点累加夹角，弧上的任何一点都一样。
+fn spine_points(segments: &[SpineSegment]) -> Vec<DVec3> {
+    let mut points = Vec::with_capacity(segments.len() * 2 + 1);
+    for segment in segments {
+        if points.is_empty() {
+            points.push(segment.start());
+        }
+        if let SpineSegment::Arc {
+            start,
+            centre,
+            axis,
+            sweep,
+            ..
+        } = segment
+            && let Some(axis) = axis.try_normalize()
+        {
+            points.push(*centre + DQuat::from_axis_angle(axis, sweep * 0.5) * (*start - *centre));
+        }
+        points.push(segment.end());
+    }
+    points
+}
+
+/// 截面底边中点（x 取外包矩形中线、y 取底边）在 SPINE 起点处的位置（WALL 局部系），PML `pos ppli cbow prop 0`：
+/// 截面 x 朝行进方向左手侧（俯视，绕 WALL 的 Z），y 沿 WALL 的 Z（与 [`curved_wall`] / [`straight_wall_faces`]
+/// 同一套截面系）。
+fn spine_cbow(segments: &[SpineSegment], section: SectionBox) -> Option<DVec3> {
+    let first = segments.first()?;
+    let tangent = match first {
+        SpineSegment::Straight { start, end } => *end - *start,
+        SpineSegment::Arc {
+            start,
+            centre,
+            axis,
+            ..
+        } => axis.cross(*start - *centre),
+    }
+    .try_normalize()?;
+    let left = DVec3::Z.cross(tangent).try_normalize()?;
+    let x = (section.x[0] + section.x[1]) * 0.5;
+    Some(first.start() + left * x + DVec3::Z * section.y[0])
 }
 
 /// 同一个圆上首尾相接的几段弧（含 POINSP / CURVE / POINSP / CURVE / POINSP 的整圈），并成一段。
@@ -662,14 +773,15 @@ fn prism_shape(element: &DbElement, noun: &str) -> Result<Shape, Failure> {
     let prism = prism_faces(world, &ring, profile.height, noun == "GWALL");
     Ok(Shape {
         faces: prism.faces,
-        curved: None,
         thickness: prism.thickness,
         height: prism.height,
+        loop_height: Some(profile.height),
+        ..Shape::default()
     })
 }
 
 /// 相邻重合（不到 0.1 mm）的顶点并掉，首尾重合的也并（markCivil L743）；留先到的那个点的 FRAD。
-fn merged_ring(ring: &[FilletVertex]) -> Vec<FilletVertex> {
+pub(crate) fn merged_ring(ring: &[FilletVertex]) -> Vec<FilletVertex> {
     let close = |a: &FilletVertex, b: &FilletVertex| (a.x - b.x).hypot(a.y - b.y) < MERGE_POINT_MM;
     let mut merged: Vec<FilletVertex> = Vec::with_capacity(ring.len());
     for vertex in ring {
@@ -882,14 +994,26 @@ impl RayCorridors {
 /// 候选的世界包围盒，与求解器 `locate::prepare` 同一算法：有面取全部面顶点；曲墙取两道弧的端点与扫角内朝世界
 /// E / N / W / S 的极点，各沿朝上的轴拉高墙高。几何读不懂时 `None`。
 pub fn candidate_aabb(candidate: &CivilCandidate) -> Option<Aabb> {
-    let mut points: Vec<DVec3> = candidate
-        .faces
+    shape_aabb(
+        &candidate.faces,
+        candidate.curved.as_ref(),
+        candidate.height,
+    )
+}
+
+/// [`candidate_aabb`] 的核：面、曲墙两道弧（墙高 `height`）。
+pub fn shape_aabb(
+    faces: &[CivilFace],
+    curved: Option<&CurvedWall>,
+    height: Option<f64>,
+) -> Option<Aabb> {
+    let mut points: Vec<DVec3> = faces
         .iter()
         .flat_map(|face| face.vertices.iter().copied().map(DVec3::from_array))
         .collect();
     if points.is_empty() {
-        let curved = candidate.curved.as_ref()?;
-        let height = candidate.height.filter(|height| *height > 0.0)?;
+        let curved = curved?;
+        let height = height.filter(|height| *height > 0.0)?;
         let centre = DVec3::from_array(curved.center);
         let axis = DVec3::from_array(curved.axis).try_normalize()?;
         let raw_x = DVec3::from_array(curved.x_axis);
