@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
-use plant_mbd::{InMemoryDataSource, LayoutRequest, MbdV2PipeData, layout_branch};
+use plant_mbd::{
+    InMemoryDataSource, LayoutRequest, MbdV2PipeData, MbdV2SourceDatabase, MbdV2SourceVersion,
+    layout_branch,
+};
 
 pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
 
@@ -33,16 +36,36 @@ pub const SOURCE_TO_DESIGN_MM_TO_M: [f64; 16] = [
 ///
 /// `input_refno` 原样回填进 `MbdV2PipeData::input_refno`（前端 URL 里怎么写就怎么回），
 /// `branch_refno` 归一化为 `w0_w1`（[`wire_refno`]）。
+///
+/// `meta.source_version` 由宿主填：读的是哪一库、哪一会话只有宿主知道，求解器是纯库，
+/// 离线 CLI 照旧缺省。
 pub fn layout_pipe(
     set: &Arc<DbSet>,
     refno: RefNo,
     input_refno: &str,
 ) -> Result<MbdV2PipeData, BranchQueryError> {
-    let query = branch_query(set, refno)?;
+    let queried = branch_query_with_diameters(set, refno)?;
+    let query = queried.result;
     let branch_refno = query.branch_refno.clone();
     let source = InMemoryDataSource {
         branches: vec![query],
     };
     let request = LayoutRequest::new(input_refno, branch_refno, SOURCE_TO_DESIGN_MM_TO_M);
-    layout_branch(&source, &request).map_err(|message| BranchQueryError::Solver { refno, message })
+    let mut data = layout_branch(&source, &request)
+        .map_err(|message| BranchQueryError::Solver { refno, message })?;
+    let version = queried.source_version;
+    data.meta.source_version = Some(MbdV2SourceVersion {
+        dbnum: version.dbnum,
+        sesno: version.sesno,
+        databases: version
+            .databases
+            .into_iter()
+            .map(|database| MbdV2SourceDatabase {
+                dbnum: database.dbnum,
+                sesno: database.sesno,
+                db_type: database.db_type,
+            })
+            .collect(),
+    });
+    Ok(data)
 }
