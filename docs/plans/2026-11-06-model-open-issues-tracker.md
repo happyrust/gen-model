@@ -12,7 +12,7 @@
 | P2 | e3d-model#24 | 隐式管身某段 E3D 不画，我们照画 | 1 件只在我们：`TUBI 9 /Copy-of-1RCS007MN-TUBE/801VP`（2315 mm） | `24381/101405` | 待办 | 两条假设已否证（见 issue 评论）：偏轴 ATTA（40 个同类槽位只此一个不画）；离开侧 SPAMAP 第二字为空（aps250142 STIF `2013286686/123` 同样为空但 E3D 照画，首版 `4b38b0c` 已 revert）。APS 239 库扫过：空离开键可画槽位 4 个（2 个 HVAC STIF，E3D 照画；2 个 aps7200 1 mm 吊架段），没有第二个管道样本。需 E3D 侧单件取证 |
 | — | e3d-model#25 | 零长 SCTN 名下的 SJOI J1 E3D 照画，我们整串 skipped | 2 件配不上：`/MDS/SPECIALS/PIPE/3-BAR-2/S1/J1`、`4-BAR-2/S1/J1` | `23714/1` | 已关 | `b94615c`（已推 main）：零长轴取 +Z，两只 J1 exact，不可配对 2 → 0。规则只有 2 个样本，且 DRNS 恰为 +Z，遇到 DRNS ≠ +Z 的零长 SCTN 时复核 |
 | — | e3d-model#22 | RTOR 内半径大于外半径时 E3D 照画，我们判退化 | 2 件（RTORUS 1/2 of SUBE 10 of `/Copy-of-R43-R540-008`） | `24381/101405` | 已关 | `46f8d8f`（github main）；39 站零退化 |
-| P2 | e3d-model#26 | FRMW 名下 PNOD 里的 PJOI `GTYP` 为空值时，E3D 有时照画、我们整串 skipped | 3 件配不上：`/MDS/FT62/1-V1/JOINT1`、`/MDS/FT64/1-V1/JOINT1`、`/MDS/FT64/1-V2/JOINT1`（各一只 7 面 FacetGroup） | `15516/2`、`23734/1` | 待办 | 拦截点是 `category.rs:638-646` 的 `GTYP=JOIN` 门。已排除 CREF 有无（ams7999 有 490 只同样满足却不画）、零长 SCTN（宿主 SCTN 非零长）、DESP、PNOD FIXT、目录链断（组件 `23704/812411 JOIN /MDS-CP-AA` 有 GMRE）。放开门会一次多出 ams7999 的 490 只与 ams8000 的 248 只，不改；需找到区分这 3 只与那 490 只的属性 |
+| — | e3d-model#26 | FRMW 名下 PNOD 里的 PJOI `GTYP` 为空值时，E3D 有时照画、我们整串 skipped | 3 件配不上：`/MDS/FT62/1-V1/JOINT1`、`/MDS/FT64/1-V1/JOINT1`、`/MDS/FT64/1-V2/JOINT1` | `15516/2`、`23734/1` | 已关 | `5775ecb`（已推 main）：判据是宿主 SCTN 的 `RREF` 有没有指到这只 PJOI 的宿主 PNOD。`GTYP` 空 + RREF 命中 → 画（ams7324/7350 各 3 只）；`GTYP` 空 + RREF 不命中 → 不画（ams7324 FT61 的 18 只、ams7999 的 500 只、ams8000 的 248 只，与 E3D 一致）。39 站零回归，6 件 unkeyable → exact。`RREF` 是新增读点，已进读取集合（181）与 `ancestor_reads_guard` 的 `WithinUnit` 登记 |
 
 ### 可接受的残差（不单独跟踪）
 
@@ -73,18 +73,20 @@
 | gen-model | `feat/rvm-check-inprocess` | `b4b6f72` | fix(e3d-query): L3-DONE 后宽限到期强制收掉 E3D 会话，按成功返回（#87） |
 | gen-model | `feat/rvm-check-inprocess` | `87dee7b` | feat(rvm-check): 生成与比对改在后端进程内跑 |
 | gen-model | `refactor` | `108f08fd` | docs(plans): 模型问题跟踪清单：#22/#23/#25 关单、#24 证据、kind_differ 残差 |
+| gen-model | `refactor` | `b77ff105` | docs(plans): 跟踪清单补 #26 行、SITE 复测结果与 kind_differ 备注 |
 
 推送之后：gen-model 更新 vendor，过回归门（见 gen-model#63「下一步顺序」）。在 #73 修好之前，线上需要手动跑一次 `model/rebuild`。
 
 ## 回归门（每次合入前跑）
 
-- e3d-model：`cargo +nightly-2026-10-25 test --release --lib`（当前 462 个通过），以及 `attribute_reads_guard`、`ancestor_reads_guard`、`reference_reads_guard`、`noun_coverage`。
+- e3d-model：`cargo +nightly-2026-10-25 test --release --lib`（当前 463 个通过），以及 `attribute_reads_guard`、`ancestor_reads_guard`、`reference_reads_guard`、`noun_coverage`。
 - 39 站对拍：`gen-model/.scratch/rvm-fix/b39_run.ps1`，产物放 E 盘，和 `b39/p2a` 逐站逐对比较。判档只许变好，不许变差。
 - gen-model：`cargo +nightly-2026-10-25 test --lib -- e3d_query rvm_check model_impact::tests options::tests::rvm_check`（当前 84 个通过）。
 
 ## 最近进展
 
 - 2026-11-06：SITE RVM 复测（干净构建，独立后端 8122）：10 个原失败站里 7 个全过（`24381/46775`、`23714/1`、`24381/535`、`23705/1`、`23713/2343`、`24381/177373`、以及 `24381/101405` 只剩 #24 那 1 件）；`15516/2`、`23734/1` 各剩 3 件 unkeyable（新开 e3d-model#26）；`23705/289` 因依赖未提交的 e3d-io / e3d-model 改动而出现 8 只 Z 偏移。
+- 2026-11-06：#26 定位到宿主 SCTN 的 `RREF` 判据，`5775ecb` 推 main 并关闭；39 站零回归，6 件 unkeyable → exact。
 - 2026-11-06：#22 合入后复验并关闭。#24 补 APS 全库取证（无管道第二样本），评论在 issue。kind_differ「负体不按 TUFL 筛」实验在 23710/1 多出 276 对 kind_differ，否证，未改代码。
 - 2026-11-06：#23（`8e3cf67`）、#25（`b94615c`）推到 e3d-model main 并关闭，`46f8d8f`（#22）随之在 github main；39 站对 `m1076db`、`m1076` 零退化，`=24381/46775` 只在 E3D 0、`=23714/1` 不可配对 0。#24 两条假设都被否证，首版已 revert，issue 保持开启。`23705/289` 的 4 对 kind_differ 定为可接受残差（见上表）。
 - 2026-11-05：#22 本地修复（`46f8d8f`），39 站零退化；#87 本地修复（`b4b6f72`），实机 5 站全部 pass。两个 issue 下都已留评论，都没关。
