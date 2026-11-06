@@ -7,6 +7,9 @@ use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 use parry3d::bounding_volume::BoundingVolume;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// 全量重算设备派生量：`cal_equi` 的 world transform + `nearest_relate` 最近楼板。
 ///
@@ -41,6 +44,85 @@ pub struct EquipRefreshOutcome {
     pub failed: usize,
     /// 空间树没就绪：`nearest_relate` 一条没动（阀门与楼板牵连也一并跳过）。
     pub floors_skipped: bool,
+    /// 到期没来得及算的设备 + 阀门，加上柱子空间反查没跑到的楼板块数；旧值原样保留。
+    pub deferred: usize,
+    /// 整库口径：楼板柱子空间反查没做（见 [`EQUIP_DERIVED_LIBRARY_SCALE_ROOTS`]）。
+    pub floor_space_skipped: bool,
+}
+
+/// 任务内一轮设备派生量重算的期限（GitHub #88）。派生量是可重建的缓存：到点就停，没算到的设备 /
+/// 阀门 / 楼板旧值保留、记进 [`EquipRefreshOutcome::deferred`]，由手动 [`update_cal_equip`] 或下一个碰到
+/// 它们的任务回补。不设期限时，一次整库 ModelOnly（7997，6772 根）在这一段跑了 20 分钟以上，把水位和后面
+/// 排队的任务一起挂住。
+pub(crate) const EQUIP_DERIVED_BUDGET: Duration = Duration::from_secs(5 * 60);
+
+/// 根数到这个量就按整库口径算：不做楼板柱子空间反查（真库 p90 一块楼板 12～25 秒，整库几百块就是小时级）。
+/// 整库口径下本库的设备 / 阀门都在根下，逐台重算本来就会重连楼板边；漏掉的只是**别的库**里站在本库楼板
+/// 上的设备，留给它们自己的任务或手动重算。
+pub(crate) const EQUIP_DERIVED_LIBRARY_SCALE_ROOTS: usize = 2_000;
+
+/// 一条展开 / 反查 SQL 点名的 key 上限：整库 ModelOnly 的前沿是全库节点，拼成一条就是 MB 级语句。
+const NODE_QUERY_CHUNK: usize = 1_000;
+
+/// [`update_cal_equip_for_roots_with`] 的口径。缺省（[`update_cal_equip_for_roots`]）不设期限、逐根展开。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EquipRefreshScope {
+    /// 到点即停；`None` 不设期限。
+    pub deadline: Option<Instant>,
+    /// 整库口径（见 [`EQUIP_DERIVED_LIBRARY_SCALE_ROOTS`]）。
+    pub library_scale: bool,
+}
+
+/// `deadline` 已过。期限只在两个目标之间检查：已开始的那一台照常算完，不在写库中途撂下。
+pub(crate) fn budget_exhausted(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+/// 整个任务都在重算这个库（整库 ModelOnly）或根数到了门槛，就按整库口径算。
+pub(crate) fn library_scale_refresh(whole_library: bool, roots: usize) -> bool {
+    whole_library || roots >= EQUIP_DERIVED_LIBRARY_SCALE_ROOTS
+}
+
+/// 任务内一轮派生量重算的回执（`/health.equip_derived.last`）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EquipDerivedRun {
+    pub dbnum: u32,
+    pub task_id: String,
+    pub roots: usize,
+    pub library_scale: bool,
+    pub elapsed_ms: u64,
+    pub budget_secs: u64,
+    pub deferred: usize,
+    pub failed: usize,
+    pub error: Option<String>,
+    pub finished_at: String,
+}
+
+static EQUIP_DERIVED_LAST: Mutex<Option<EquipDerivedRun>> = Mutex::new(None);
+static EQUIP_DERIVED_DEFERRED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 记下一轮任务内重算（进程内，不落库）。
+pub fn note_equip_derived_run(run: EquipDerivedRun) {
+    EQUIP_DERIVED_DEFERRED_TOTAL.fetch_add(run.deferred as u64, Ordering::Relaxed);
+    *EQUIP_DERIVED_LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run);
+}
+
+/// `/health.equip_derived`：`null` = 本进程还没在任务里重算过；`deferred_total` 非零 = 有设备 / 阀门的
+/// 派生量因为到期留着旧值，要靠手动 `update_cal_equip` 或后续任务回补。
+pub fn equip_derived_snapshot() -> serde_json::Value {
+    let last = EQUIP_DERIVED_LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match last {
+        None => serde_json::Value::Null,
+        Some(last) => serde_json::json!({
+            "last": last,
+            "deferred_total": EQUIP_DERIVED_DEFERRED_TOTAL.load(Ordering::Relaxed),
+        }),
+    }
 }
 
 /// 清掉软删设备的两类派生行（`cal_equi` 与 `nearest_relate`）。
@@ -132,8 +214,23 @@ const EQUIP_EXPAND_DEPTH: usize = 4;
 ///
 /// 软删的 EQUI 会断开 `pe_owner`（实测父边为空），从父根往下找不到它们；所以每次顺手把
 /// `deleted = true` 的设备的两类派生行清掉（见 [`clear_soft_deleted_equip_rows`]）。
+///
+/// ## 期限与整库口径（GitHub #88）
+///
+/// 任务里调的是 [`update_cal_equip_for_roots_with`]：先算根下的设备、再算根下的阀门、再算现有边牵连的，
+/// 最贵的楼板柱子空间反查放最后，期限一到剩下的记进 `deferred`、旧值保留。整库口径不做柱子空间反查。
 pub async fn update_cal_equip_for_roots(
     roots: &[RefnoEnum],
+) -> anyhow::Result<EquipRefreshOutcome> {
+    update_cal_equip_for_roots_with(roots, EquipRefreshScope::default(), |_, _| {}).await
+}
+
+/// [`update_cal_equip_for_roots`] 带期限、口径与进度回调的版本。每算完一个设备 / 阀门调一次
+/// `on_progress(已算, 已知总数)`；牵连进来的目标会把总数往上加。
+pub async fn update_cal_equip_for_roots_with(
+    roots: &[RefnoEnum],
+    scope: EquipRefreshScope,
+    mut on_progress: impl FnMut(usize, usize) + Send,
 ) -> anyhow::Result<EquipRefreshOutcome> {
     let mut outcome = EquipRefreshOutcome::default();
     if roots.is_empty() {
@@ -146,29 +243,28 @@ pub async fn update_cal_equip_for_roots(
     let link_floors = crate::fast_model::spatial_state::current_state().is_ready();
     outcome.floors_skipped = !link_floors
         && !(scan.live.is_empty() && scan.valves.is_empty() && scan.floors.is_empty());
-    if link_floors {
-        // 牵连名单拿不全只记一笔失败，不拖住根下设备的重算。
-        match fetch_nodes(floor_dependents_sql(&scan.floors)).await {
-            Ok(nodes) => outcome.via_floors = scan.absorb_floor_dependents(nodes),
-            Err(error) => {
-                tracing::warn!(error = %error, "楼板现有边反查失败，挂在这些楼板上的设备 / 阀门本轮不重算");
-                outcome.failed += 1;
-            }
-        }
-        if !scan.floors.is_empty() {
-            let entries = floor_column_entries(&scan.floors).await;
-            match column_dependents(&entries).await {
-                Ok(nodes) => outcome.via_floor_space = scan.absorb_floor_dependents(nodes),
-                Err(error) => {
-                    tracing::warn!(error = %error, "楼板空间反查失败，楼板新位置上方的设备 / 阀门本轮不重算");
-                    outcome.failed += 1;
-                }
-            }
-        }
-    }
+    println!(
+        "[设备派生量] 开始 根={} 设备={} 阀门={} 楼板={} 口径={}{}",
+        roots.len(),
+        scan.live.len(),
+        scan.valves.len(),
+        scan.floors.len(),
+        if scope.library_scale { "整库" } else { "逐根" },
+        if link_floors { "" } else { "（空间树未就绪，只写 cal_equi）" }
+    );
+    let mut progress = Progress {
+        done: 0,
+        total: scan.live.len() + if link_floors { scan.valves.len() } else { 0 },
+    };
+    on_progress(0, progress.total);
 
-    for equip in scan.live {
-        match refresh_one_equip(equip, link_floors).await {
+    let live = std::mem::take(&mut scan.live);
+    for (index, equip) in live.iter().enumerate() {
+        if budget_exhausted(scope.deadline, Instant::now()) {
+            outcome.deferred += live.len() - index;
+            break;
+        }
+        match refresh_one_equip(*equip, link_floors).await {
             Ok(linked) => {
                 outcome.refreshed += 1;
                 outcome.floors_linked += usize::from(linked);
@@ -178,12 +274,86 @@ pub async fn update_cal_equip_for_roots(
                 outcome.failed += 1;
             }
         }
+        progress.done += 1;
+        on_progress(progress.done, progress.total);
     }
     if !link_floors {
         return Ok(outcome);
     }
-    for equip in scan.floor_equips {
-        match relink_floor(equip).await {
+    drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress).await;
+
+    // 牵连名单拿不全只记一笔失败，不拖住其余的重算。
+    if budget_exhausted(scope.deadline, Instant::now()) {
+        outcome.deferred += scan.floors.len();
+        return Ok(outcome);
+    }
+    match floor_dependents(&scan.floors).await {
+        Ok(nodes) => {
+            outcome.via_floors = scan.absorb_floor_dependents(nodes);
+            progress.total += outcome.via_floors;
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "楼板现有边反查失败，挂在这些楼板上的设备 / 阀门本轮不重算");
+            outcome.failed += 1;
+        }
+    }
+    drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress).await;
+
+    if scope.library_scale {
+        outcome.floor_space_skipped = !scan.floors.is_empty();
+        return Ok(outcome);
+    }
+    let floors = std::mem::take(&mut scan.floors);
+    for (index, floor) in floors.iter().enumerate() {
+        if budget_exhausted(scope.deadline, Instant::now()) {
+            outcome.deferred += floors.len() - index;
+            break;
+        }
+        let entries = floor_column_entries(std::slice::from_ref(floor)).await;
+        let complete = match column_dependents(&entries, scope.deadline).await {
+            Ok((nodes, complete)) => {
+                let added = scan.absorb_floor_dependents(nodes);
+                outcome.via_floor_space += added;
+                progress.total += added;
+                complete
+            }
+            Err(error) => {
+                tracing::warn!(floor = ?floor, error = %error, "楼板空间反查失败，楼板新位置上方的设备 / 阀门本轮不重算");
+                outcome.failed += 1;
+                true
+            }
+        };
+        drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress)
+            .await;
+        if !complete {
+            outcome.deferred += floors.len() - index;
+            break;
+        }
+    }
+    Ok(outcome)
+}
+
+/// 已算 / 已知总数，喂给 [`update_cal_equip_for_roots_with`] 的进度回调。
+struct Progress {
+    done: usize,
+    total: usize,
+}
+
+/// 算掉 `scan` 里排着的牵连设备（只重连楼板边）与阀门；期限一到，剩下的记进 `deferred`、留在原地不算。
+async fn drain_floor_targets(
+    scan: &mut EquipScan,
+    scope: EquipRefreshScope,
+    outcome: &mut EquipRefreshOutcome,
+    progress: &mut Progress,
+    on_progress: &mut (impl FnMut(usize, usize) + Send),
+) {
+    let equips = std::mem::take(&mut scan.floor_equips);
+    for (index, equip) in equips.iter().enumerate() {
+        if budget_exhausted(scope.deadline, Instant::now()) {
+            outcome.deferred += equips.len() - index;
+            break;
+        }
+        match relink_floor(*equip).await {
             Ok(linked) => {
                 outcome.relinked += 1;
                 outcome.floors_linked += usize::from(linked);
@@ -193,9 +363,16 @@ pub async fn update_cal_equip_for_roots(
                 outcome.failed += 1;
             }
         }
+        progress.done += 1;
+        on_progress(progress.done, progress.total);
     }
-    for valve in scan.valves {
-        match refresh_one_valve(valve).await {
+    let valves = std::mem::take(&mut scan.valves);
+    for (index, valve) in valves.iter().enumerate() {
+        if budget_exhausted(scope.deadline, Instant::now()) {
+            outcome.deferred += valves.len() - index;
+            break;
+        }
+        match refresh_one_valve(*valve).await {
             Ok(linked) => {
                 outcome.valves_refreshed += 1;
                 outcome.valves_linked += usize::from(linked);
@@ -205,11 +382,26 @@ pub async fn update_cal_equip_for_roots(
                 outcome.failed += 1;
             }
         }
+        progress.done += 1;
+        on_progress(progress.done, progress.total);
     }
-    Ok(outcome)
 }
 
-/// 挂在这些楼板上、或挂在已软删楼板上的 `nearest_relate` 起点（设备 / 阀门）。
+/// 挂在这些楼板上、或挂在已软删楼板上的 `nearest_relate` 起点（设备 / 阀门）。楼板按
+/// [`NODE_QUERY_CHUNK`] 分条点名，软删那一句只问一次。
+async fn floor_dependents(floors: &[RefnoEnum]) -> anyhow::Result<Vec<Node>> {
+    let mut nodes = fetch_nodes(soft_deleted_floor_dependents_sql().to_owned()).await?;
+    for chunk in floors.chunks(NODE_QUERY_CHUNK) {
+        nodes.extend(fetch_nodes(floor_dependents_sql(chunk)).await?);
+    }
+    Ok(nodes)
+}
+
+fn soft_deleted_floor_dependents_sql() -> &'static str {
+    "SELECT in AS id, in.noun AS noun, in.deleted AS deleted FROM nearest_relate \
+     WHERE type::thing('pe', record::id(out)).deleted = true;"
+}
+
 fn floor_dependents_sql(floors: &[RefnoEnum]) -> String {
     let floors = floors
         .iter()
@@ -218,7 +410,7 @@ fn floor_dependents_sql(floors: &[RefnoEnum]) -> String {
         .join(",");
     format!(
         "SELECT in AS id, in.noun AS noun, in.deleted AS deleted FROM nearest_relate \
-         WHERE out IN [{floors}] OR type::thing('pe', record::id(out)).deleted = true;"
+         WHERE out IN [{floors}];"
     )
 }
 
@@ -296,14 +488,21 @@ fn floor_dependent_of(link: ColumnLink) -> Option<Node> {
         .find(|node| is(node, "EQUI"))
 }
 
-/// 柱子里的条目 → 设备 / 阀门节点（去重交给 [`EquipScan::absorb_floor_dependents`]）。
-async fn column_dependents(entries: &[(RefnoEnum, String)]) -> anyhow::Result<Vec<Node>> {
+/// 柱子里的条目 → 设备 / 阀门节点（去重交给 [`EquipScan::absorb_floor_dependents`]）。大楼板的柱子有
+/// 十几万条目、要查几十批，期限在批与批之间检查；第二格为 `false` = 到期没查完，已查到的照样返回。
+async fn column_dependents(
+    entries: &[(RefnoEnum, String)],
+    deadline: Option<Instant>,
+) -> anyhow::Result<(Vec<Node>, bool)> {
     let to_node = |id: Option<surrealdb::sql::Thing>, noun: Option<String>, deleted: Option<bool>| {
         let refno = crate::data_interface::helper::pe_thing_to_refno(id?).ok()?;
         Some((refno, noun, deleted.unwrap_or(false)))
     };
     let mut nodes = Vec::new();
     for batch in entries.chunks(COLUMN_LOOKUP_BATCH) {
+        if budget_exhausted(deadline, Instant::now()) {
+            return Ok((nodes, false));
+        }
         let keys = batch
             .iter()
             .map(|(refno, _)| refno.to_pe_key())
@@ -325,7 +524,7 @@ async fn column_dependents(entries: &[(RefnoEnum, String)]) -> anyhow::Result<Ve
             })
         }));
     }
-    Ok(nodes)
+    Ok((nodes, true))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -431,23 +630,35 @@ async fn fetch_nodes(sql: String) -> anyhow::Result<Vec<(RefnoEnum, Option<Strin
 
 async fn collect_live_targets(roots: &[RefnoEnum]) -> anyhow::Result<EquipScan> {
     let mut scan = EquipScan::default();
-    let mut nodes = fetch_nodes(format!(
-        "SELECT id, noun, deleted FROM [{}];",
-        pe_keys(roots)
-    ))
+    let mut nodes = fetch_nodes_chunked(roots, |keys| {
+        format!("SELECT id, noun, deleted FROM [{keys}];")
+    })
     .await?;
     for depth in 0..=EQUIP_EXPAND_DEPTH {
         let frontier = scan.absorb(std::mem::take(&mut nodes));
         if frontier.is_empty() || depth == EQUIP_EXPAND_DEPTH {
             break;
         }
-        nodes = fetch_nodes(format!(
-            "SELECT id, noun, deleted FROM array::flatten((SELECT VALUE <-pe_owner.in FROM [{}]));",
-            pe_keys(&frontier)
-        ))
+        nodes = fetch_nodes_chunked(&frontier, |keys| {
+            format!(
+                "SELECT id, noun, deleted FROM array::flatten((SELECT VALUE <-pe_owner.in FROM [{keys}]));"
+            )
+        })
         .await?;
     }
     Ok(scan)
+}
+
+/// 每 [`NODE_QUERY_CHUNK`] 个 refno 一条 SQL（`sql` 拿到的是逗号拼好的 pe key），结果按原顺序接起来。
+async fn fetch_nodes_chunked(
+    refnos: &[RefnoEnum],
+    sql: impl Fn(&str) -> String,
+) -> anyhow::Result<Vec<Node>> {
+    let mut nodes = Vec::new();
+    for chunk in refnos.chunks(NODE_QUERY_CHUNK) {
+        nodes.extend(fetch_nodes(sql(&pe_keys(chunk))).await?);
+    }
+    Ok(nodes)
 }
 
 /// 重算单台设备：`cal_equi` 照写；`link_floors` 时再换 `nearest_relate`。
@@ -1123,9 +1334,63 @@ mod equip_scan_tests {
     fn floor_dependents_sql_names_the_floor_table_and_soft_deleted_floors() {
         let sql = floor_dependents_sql(&[r(2), r(3)]);
         assert!(sql.contains("out IN [FLOOR:24381_2,FLOOR:24381_3]"), "{sql}");
-        assert!(sql.contains("record::id(out)).deleted = true"), "{sql}");
-        let empty = floor_dependents_sql(&[]);
-        assert!(empty.contains("out IN []"), "空名单仍要能跑，只剩软删楼板那一半: {empty}");
+        assert!(
+            !sql.contains("deleted = true"),
+            "软删楼板那一句单独问一次，不随每批楼板重复: {sql}"
+        );
+        assert!(
+            soft_deleted_floor_dependents_sql().contains("record::id(out)).deleted = true"),
+            "挂在软删楼板上的照样拉进来"
+        );
+    }
+
+    /// #88：期限只在目标之间检查，没设期限就永不到期。
+    #[test]
+    fn the_budget_only_runs_out_once_its_deadline_has_passed() {
+        let now = Instant::now();
+        assert!(!budget_exhausted(None, now), "没设期限就不到期");
+        assert!(!budget_exhausted(Some(now + Duration::from_secs(1)), now));
+        assert!(budget_exhausted(Some(now), now), "到点即到期");
+        assert!(budget_exhausted(Some(now), now + Duration::from_millis(1)));
+    }
+
+    /// #88：整库 ModelOnly 或根数到门槛走整库口径（不做楼板柱子空间反查）。
+    #[test]
+    fn whole_library_or_many_roots_refresh_at_library_scale() {
+        assert!(library_scale_refresh(true, 1));
+        assert!(library_scale_refresh(false, EQUIP_DERIVED_LIBRARY_SCALE_ROOTS));
+        assert!(!library_scale_refresh(false, EQUIP_DERIVED_LIBRARY_SCALE_ROOTS - 1));
+        assert!(!library_scale_refresh(false, 0));
+    }
+
+    /// #88：任务里的那一轮必须带期限、口径与进度回调；空间反查排在最后，期限先砍最贵的那段。
+    #[test]
+    fn the_spatial_floor_pass_runs_last_and_honours_the_deadline() {
+        let source = include_str!("equip_model.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let body = source
+            .split_once("pub async fn update_cal_equip_for_roots_with(")
+            .expect("带期限的入口")
+            .1
+            .split_once("\nstruct Progress")
+            .expect("入口结尾")
+            .0;
+        let live = body.find("refresh_one_equip(").expect("根下设备");
+        let existing = body.find("floor_dependents(&scan.floors)").expect("现有边反查");
+        let library = body
+            .find("outcome.floor_space_skipped =")
+            .expect("整库口径");
+        let spatial = body.find("column_dependents(&entries, scope.deadline)").expect("空间反查");
+        assert!(
+            live < existing && existing < library && library < spatial,
+            "顺序必须是 根下设备 → 现有边反查 → 整库口径收手 → 柱子空间反查"
+        );
+        assert!(
+            body.matches("budget_exhausted(scope.deadline").count() >= 3,
+            "设备循环、现有边反查前、楼板循环都要查期限"
+        );
     }
 }
 

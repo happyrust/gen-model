@@ -54,6 +54,7 @@ fn append(path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn event(id: u64, stage: &str, detail: &str) {
+    remember_stage(id, stage, detail);
     let row = serde_json::json!({"time":chrono::Local::now().to_rfc3339(),
         "pid":std::process::id(), "build_id":crate::build_info::BUILD_ID,
         "operation":id, "stage":stage, "detail":detail});
@@ -90,13 +91,150 @@ impl Drop for Operation {
     }
 }
 
+// ---- Crash forensics (GitHub #78) ----
+// Windows reports every Rust abort (allocation failure, panic while aborting, explicit abort) and the CRT's
+// `abort()` as 0xC0000409 from one `__fastfail` site, so neither the exit code nor the fault offset tells them
+// apart. The hooks below run on the failing thread just before the process dies and leave one line naming the
+// thread, the generation root it was working on, the last journal stage and the process memory. They do not
+// allocate: the allocation-failure hook runs with the allocator already refusing.
+
+static LAST_STAGE: Mutex<([u8; 160], usize)> = Mutex::new(([0; 160], 0));
+static CRASH_NOTES: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+thread_local! {
+    static CURRENT_ROOT: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn remember_stage(id: u64, stage: &str, detail: &str) {
+    use std::fmt::Write as _;
+    let Ok(mut last) = LAST_STAGE.try_lock() else { return };
+    let mut line = NoteLine::default();
+    let _ = write!(line, "op={id} {stage} {}", detail.replace(['\n', '\r'], " "));
+    let len = line.len.min(last.0.len());
+    last.0[..len].copy_from_slice(&line.buf[..len]);
+    last.1 = len;
+}
+
+/// The generation root this thread is computing until the guard drops; crash notes name it.
+pub struct CurrentRoot(());
+impl CurrentRoot {
+    pub fn enter(word0: u32, word1: u32) -> Self {
+        let _ = CURRENT_ROOT.try_with(|root| root.set((word0, word1)));
+        Self(())
+    }
+}
+impl Drop for CurrentRoot {
+    fn drop(&mut self) { let _ = CURRENT_ROOT.try_with(|root| root.set((0, 0))); }
+}
+
+/// A fixed-size line buffer: formatting into it never touches the allocator.
+struct NoteLine { buf: [u8; 640], len: usize }
+impl Default for NoteLine { fn default() -> Self { Self { buf: [0; 640], len: 0 } } }
+impl std::fmt::Write for NoteLine {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let take = text.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+fn utf8_prefix(bytes: &[u8]) -> &str {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
+    }
+}
+
+/// `(working set, private commit)` in bytes; zeros where the platform query is not wired.
+fn process_memory() -> (usize, usize) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } != 0 {
+            return (counters.WorkingSetSize, counters.PagefileUsage);
+        }
+    }
+    (0, 0)
+}
+
+fn crash_note(kind: &str, extra: std::fmt::Arguments<'_>) {
+    use std::fmt::Write as _;
+    let mut line = NoteLine::default();
+    let (word0, word1) = CURRENT_ROOT.try_with(|root| root.get()).unwrap_or((0, 0));
+    let (working_set, commit) = process_memory();
+    let unix_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis());
+    let _ = write!(line, "[crash] unix_ms={unix_ms} kind={kind} pid={} build={} thread={} root={word0}/{word1} working_set_mb={} commit_mb={} ",
+        std::process::id(), crate::build_info::BUILD_ID,
+        std::thread::current().name().unwrap_or("?"), working_set >> 20, commit >> 20);
+    if let Ok(last) = LAST_STAGE.try_lock() { let _ = write!(line, "last_stage=\"{}\" ", utf8_prefix(&last.0[..last.1])); }
+    let _ = line.write_fmt(extra);
+    let _ = line.write_str("\n");
+    let _ = std::io::stderr().write_all(&line.buf[..line.len]);
+    if let Some(mut file) = CRASH_NOTES.get() { let _ = file.write_all(&line.buf[..line.len]); }
+}
+
+fn alloc_failed(layout: std::alloc::Layout) {
+    crash_note("alloc_failed", format_args!("memory allocation of {} bytes failed", layout.size()));
+}
+
+#[cfg(windows)]
+static NOTED_EXCEPTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+unsafe extern "system" fn first_chance_note(info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
+    use windows_sys::Win32::Foundation::{EXCEPTION_ACCESS_VIOLATION, EXCEPTION_STACK_OVERFLOW};
+    const CONTINUE_SEARCH: i32 = 0;
+    let code = unsafe { info.as_ref().and_then(|info| info.ExceptionRecord.as_ref()).map(|record| record.ExceptionCode) };
+    let kind = match code {
+        Some(EXCEPTION_STACK_OVERFLOW) => "stack_overflow",
+        Some(EXCEPTION_ACCESS_VIOLATION) => "access_violation",
+        _ => return CONTINUE_SEARCH,
+    };
+    if !NOTED_EXCEPTION.swap(true, Ordering::Relaxed) {
+        crash_note(kind, format_args!("first-chance exception code=0x{:08X}", code.unwrap_or_default() as u32));
+    }
+    CONTINUE_SEARCH
+}
+
+#[cfg(windows)]
+unsafe extern "C" { fn signal(signum: i32, handler: usize) -> usize; }
+
+#[cfg(windows)]
+extern "C" fn native_abort_note(_signum: i32) {
+    crash_note("abort", format_args!("SIGABRT from native code (C/C++ abort, e.g. manifold or rocksdb)"));
+}
+
+/// Install the crash notes above. Call once at process start, after [`install_panic_hook`].
+pub fn install_crash_handlers() {
+    if let Ok(file) = std::fs::create_dir_all("logs")
+        .and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open("logs/crash-notes.log"))
+    {
+        let _ = CRASH_NOTES.set(file);
+    }
+    std::alloc::set_alloc_error_hook(alloc_failed);
+    #[cfg(windows)]
+    unsafe {
+        const SIGABRT: i32 = 22;
+        windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(1, Some(first_chance_note));
+        signal(SIGABRT, native_abort_note as usize);
+    }
+}
+
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Avoid reacquiring a journal lock if the panic came from diagnostics itself.
+        let (word0, word1) = CURRENT_ROOT.try_with(|root| root.get()).unwrap_or((0, 0));
+        let (working_set, commit) = process_memory();
+        let last_stage = LAST_STAGE.try_lock().map(|last| utf8_prefix(&last.0[..last.1]).to_owned()).unwrap_or_default();
         let line = serde_json::json!({"time":chrono::Local::now().to_rfc3339(),
             "pid":std::process::id(), "build_id":crate::build_info::BUILD_ID,
             "stage":"panic", "message":info.to_string(),
+            "thread":std::thread::current().name().unwrap_or("?"), "root":format!("{word0}/{word1}"),
+            "working_set_bytes":working_set, "commit_bytes":commit, "last_stage":last_stage,
             "backtrace":std::backtrace::Backtrace::force_capture().to_string()}).to_string();
         eprintln!("[process] {line}");
         if let Ok(_lock) = LOCK.try_lock() {

@@ -48,9 +48,11 @@ pub struct E3dDriverSpec {
     pub timeout: Duration,
 }
 
-/// `L3-DONE` 之后的默认宽限，`E3D_MCP_DONE_GRACE_SECS` 覆盖。
+/// `L3-DONE` 之后的默认宽限，`E3D_MCP_DONE_GRACE_SECS` 覆盖。包装宏收尾是 `QUIT` / `FINISH` / `FINISH`，
+/// 但 2026-11-06 在影子工程上导出 `24381/106125` 之后，这三条并不让 `des.exe` 返回（包装宏里等满 90 s、
+/// 写进用户宏里同样卡住，控制台被藏起来，看不出是不是在等保存确认）。宽限才是实际收尾。
 pub fn done_grace_from_env() -> Duration {
-    Duration::from_secs(env_u64("E3D_MCP_DONE_GRACE_SECS", 60))
+    Duration::from_secs(env_u64("E3D_MCP_DONE_GRACE_SECS", 5))
 }
 
 /// 进程层只陈述可观察事实；是否已经保存由持有目标 DB 路径的变更执行器裁决。
@@ -62,6 +64,9 @@ pub struct E3dProcessEvidence {
     pub timed_out: bool,
     /// 宏已走完（`L3-DONE` 在盘上），但 QUIT 后会话迟迟不退，宽限到期由驱动收掉。
     pub forced_after_done: bool,
+    /// 包装宏 `QUIT` 之后的收尾标记走到了第几条：0 = `QUIT` 就结束了会话；1 = `QUIT` 没结束、走到了第一条
+    /// `FINISH`；2 = 第一条 `FINISH` 也没结束、走到了第二条。宏没跑到 `QUIT` 时也是 0。
+    pub tail_markers: u8,
     pub log_path: PathBuf,
     pub scenario_log_path: PathBuf,
     pub driver_log: String,
@@ -273,18 +278,17 @@ impl E3dDriver {
         let wrapper_path = driver_dir.join("driver.mac");
         let alive_log = driver_dir.join("driver-alive.log");
         let done_log = driver_dir.join("driver-done.log");
+        let tail_logs = [
+            driver_dir.join("driver-after-quit.log"),
+            driver_dir.join("driver-after-finish.log"),
+        ];
         let pid_file = driver_dir.join("driver.pid");
         let driver_log = driver_dir.join("driver.log");
         let scenario_log = macro_path.with_extension("log");
         let _ = fs::remove_file(&scenario_log);
         fs::write(
             &wrapper_path,
-            format!(
-                "ALPHA LOG \"{}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{}\"\nALPHA LOG \"{}\" OVER\n$P L3-DONE\nALPHA LOG END\nQUIT\n",
-                e3d_path(&alive_log),
-                e3d_path(macro_path),
-                e3d_path(&done_log)
-            ),
+            wrapper_macro(&alive_log, macro_path, &done_log, &tail_logs),
         )?;
         let stdout = File::create(&driver_log)?;
         let stderr = stdout.try_clone()?;
@@ -332,12 +336,20 @@ impl E3dDriver {
                 // not just the launcher process lifetime.
                 wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
                     .with_context(|| format!("wait for E3D session shutdown after {label}"))?;
+                let tail_markers = tail_markers_reached(&tail_logs);
+                if tail_markers > 0 {
+                    eprintln!(
+                        "E3D TTY {label}: QUIT did not end the session; it exited after {} FINISH line(s) ran past it",
+                        tail_markers
+                    );
+                }
                 return Ok(E3dProcessEvidence {
                     alive_seen: reached_command_loop,
                     done_seen: finished_macro,
                     exit_status: status.code().map(|code| code as u32),
                     timed_out: false,
                     forced_after_done: false,
+                    tail_markers,
                     log_path: driver_log,
                     scenario_log_path: scenario_log.clone(),
                     driver_log: log,
@@ -360,8 +372,9 @@ impl E3dDriver {
             });
             if action == WaitAction::ForceAfterDone {
                 let waited = done_at.map_or(0, |at| now.duration_since(at).as_secs());
+                let tail_markers = tail_markers_reached(&tail_logs);
                 eprintln!(
-                    "E3D TTY {label}: L3-DONE written {waited}s ago but the session has not exited; terminating it and treating the run as complete"
+                    "E3D TTY {label}: L3-DONE written {waited}s ago but the session has not exited (tail markers reached: {tail_markers}); terminating it and treating the run as complete"
                 );
                 terminate_tree(launcher.id()).context("stop lingering E3D launcher")?;
                 terminate_pid_file(&pid_file).context("stop lingering E3D session")?;
@@ -373,6 +386,7 @@ impl E3dDriver {
                     exit_status: None,
                     timed_out: false,
                     forced_after_done: true,
+                    tail_markers,
                     log_path: driver_log.clone(),
                     scenario_log_path: scenario_log.clone(),
                     driver_log: fs::read_to_string(&driver_log).unwrap_or_default(),
@@ -390,6 +404,7 @@ impl E3dDriver {
                     exit_status: None,
                     timed_out: true,
                     forced_after_done: false,
+                    tail_markers: tail_markers_reached(&tail_logs),
                     log_path: driver_log.clone(),
                     scenario_log_path: scenario_log.clone(),
                     driver_log: fs::read_to_string(&driver_log).unwrap_or_default(),
@@ -720,6 +735,41 @@ enum WaitAction {
     ForceAfterDone,
 }
 
+/// 驱动入口宏。用户宏跑完写 `L3-DONE`，然后 `QUIT` / `FINISH` / `FINISH`（GitHub #87）。仓里自称能自己退出的
+/// 导出宏也是这三条，但影子工程上一次真实导出之后 `QUIT` 本身不返回，后面的 `FINISH` 没机会跑；收尾标记用来
+/// 区分「哪一条真让它退了」和「宽限到期强制收掉」。`QUIT` 之后每条收尾前各开一份自己的标记日志（不用 `APPEND`）。
+fn wrapper_macro(
+    alive_log: &Path,
+    macro_path: &Path,
+    done_log: &Path,
+    tail_logs: &[PathBuf; 2],
+) -> String {
+    format!(
+        "ALPHA LOG \"{}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{}\"\nALPHA LOG \"{}\" OVER\n$P L3-DONE\nALPHA LOG END\n\
+         QUIT\n\
+         ALPHA LOG \"{}\" OVER\n$P L3-AFTER-QUIT\nALPHA LOG END\n\
+         FINISH\n\
+         ALPHA LOG \"{}\" OVER\n$P L3-AFTER-FINISH\nALPHA LOG END\n\
+         FINISH\n",
+        e3d_path(alive_log),
+        e3d_path(macro_path),
+        e3d_path(done_log),
+        e3d_path(&tail_logs[0]),
+        e3d_path(&tail_logs[1]),
+    )
+}
+
+/// 会话结束时收尾标记写到了第几份（见 [`E3dProcessEvidence::tail_markers`]）。
+fn tail_markers_reached(tail_logs: &[PathBuf; 2]) -> u8 {
+    if contains(&tail_logs[1], "L3-AFTER-FINISH") {
+        2
+    } else if contains(&tail_logs[0], "L3-AFTER-QUIT") {
+        1
+    } else {
+        0
+    }
+}
+
 /// 启动器还没退时这一轮该做什么。宽限只在超时之前多开一个出口：
 /// 见到 `L3-DONE` 但 deadline 先到，仍按超时处理。
 fn next_action(state: WaitState) -> WaitAction {
@@ -861,6 +911,61 @@ mod tests {
             done_at: done_after.map(|secs| started + Duration::from_secs(secs)),
             done_grace: Duration::from_secs(60),
         }
+    }
+
+    /// GitHub #87：`L3-DONE` 之后是 `QUIT` / `FINISH` / `FINISH`，每条之后各写一份收尾标记，
+    /// 宏用不着再自己 `QUIT`。
+    #[test]
+    fn the_wrapper_ends_with_quit_then_two_finishes_each_followed_by_a_marker() {
+        let dir = std::env::temp_dir().join(format!("e3d-wrapper-{}", std::process::id()));
+        let tail = [dir.join("after-quit.log"), dir.join("after-finish.log")];
+        let text = wrapper_macro(
+            &dir.join("alive.log"),
+            &dir.join("user.mac"),
+            &dir.join("done.log"),
+            &tail,
+        );
+        let lines = text.lines().map(str::trim).collect::<Vec<_>>();
+        let position = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| *line == needle)
+                .unwrap_or_else(|| panic!("缺 `{needle}`：{text}"))
+        };
+        let done = position("$P L3-DONE");
+        let quit = position("QUIT");
+        let after_quit = position("$P L3-AFTER-QUIT");
+        let finishes = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| **line == "FINISH")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let after_finish = position("$P L3-AFTER-FINISH");
+        assert_eq!(finishes.len(), 2, "{text}");
+        assert!(
+            done < quit && quit < after_quit && after_quit < finishes[0]
+                && finishes[0] < after_finish
+                && after_finish < finishes[1],
+            "顺序必须是 L3-DONE → QUIT → 标记 → FINISH → 标记 → FINISH：{text}"
+        );
+        assert_eq!(lines.last(), Some(&"FINISH"));
+    }
+
+    #[test]
+    fn tail_markers_count_how_far_the_wrapper_ran_past_quit() {
+        let dir = std::env::temp_dir().join(format!("e3d-tail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tail = [dir.join("after-quit.log"), dir.join("after-finish.log")];
+        for path in &tail {
+            let _ = fs::remove_file(path);
+        }
+        assert_eq!(tail_markers_reached(&tail), 0, "QUIT 就退了");
+        fs::write(&tail[0], "L3-AFTER-QUIT\n").unwrap();
+        assert_eq!(tail_markers_reached(&tail), 1, "走到了第一条 FINISH");
+        fs::write(&tail[1], "L3-AFTER-FINISH\n").unwrap();
+        assert_eq!(tail_markers_reached(&tail), 2, "第一条 FINISH 也没退");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

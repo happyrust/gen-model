@@ -577,7 +577,7 @@ pub fn batch_failure_snapshot() -> Option<serde_json::Value> {
 /// 判据是**数据窗口本身**，不是任务终态标签：`Partial` 的定义是「有成功也有失败」，
 /// 数据批次 Failed + 某个交付单元成功同样折成 Partial——那种 Partial 数据没收口，
 /// 必须照旧阻断。反过来，数据 Applied 而模型/副作用失败的 Partial，失败都已落在
-/// durable pending 的重试账与死信门槛里（空闲轮 `has_dead_work` 扣着模型门），
+/// 进程内的生成根账本里（按根退避重试、同错连败判死，`model_sesno` 不盖），
 /// 再把数据阶段拉 Blocked 只会让同阶段其余库连坐一个对账周期，数据侧却没有任何
 /// 要重放的东西。
 ///
@@ -1290,7 +1290,7 @@ async fn run_one_batch(
         failure_streak = Some(note_batch_failure(job.dbnum, observed_end_sesno, &message).await);
     } else {
         // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
-        // 连败账清零。模型失败自有 durable pending 的重试账与死信门槛。
+        // 连败账清零。模型失败另有进程内的生成根账本：按根退避重试、同错连败判死（ADR-090 D1 / ISSUE-029）。
         batch_failure_ledger().clear(job.dbnum);
     }
     let result_json = serde_json::to_value(&result).unwrap_or_default();
@@ -1780,6 +1780,11 @@ async fn execute_frozen_batch(
     // 单元回执的房间「后」（GitHub #71）在栅栏之后拍：本任务发出去的房间边——刷盘时重算的、随模型行落的——
     // 此刻都已在库里，定向 / 整库房间重算也已跑完；`run_unit_worklist` 收尾那一刻拍到的只会是旧边。
     // 没等栅栏的任务（非 DESI / 初始化编排）单元清单里本来就没有 `rooms_before`，这里空转。
+    // 栅栏之后的每一段都换自己的阶段名（GitHub #88）：沿用 `durable_pending` 时，面板上的「刷盘 n/N」停在
+    // 已经满格的那一刻，看着像栅栏卡死。
+    if result.units.iter().any(|unit| unit.rooms_before.is_some()) {
+        registry.set_stage(&job.task_id, "rooms_after");
+    }
     snapshot_rooms_after(&mut result.units).await;
 
     // 设备派生量（`cal_equi` 的 world transform、`nearest_relate` 的最近楼板）跟房间「后」同一个理由放在
@@ -1787,7 +1792,7 @@ async fn execute_frozen_batch(
     // `Generated` 单元算——刚体前移、单元级发布也会挪设备，不只整根重算那一路；刷盘被放弃的根此刻已改记
     // `Failed`，不会混进来。没等栅栏（非 DESI / 初始化编排）不算：库里的模型行未必是这一版。
     if flush.is_some() && crate::options::incremental_cal_equip_enabled() {
-        refresh_equip_derived(&mut result).await;
+        refresh_equip_derived(registry, job, &mut result).await;
     }
 
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
@@ -1987,7 +1992,19 @@ async fn snapshot_rooms_after(units: &mut [ModelUnitResult]) {
 
 /// 本任务成功的根 → 受影响设备的派生量重算。失败只进 `warnings`：派生量是可重建的缓存，不该让任务失败，
 /// 与启动段的降级姿态一致。
-async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
+///
+/// 有自己的阶段名 `equip_derived`、进度（复用依赖进度那几格）与期限（[`EQUIP_DERIVED_BUDGET`]，GitHub #88）：
+/// 到期没算到的旧值保留、记进告警与 `/health.equip_derived`，任务状态与水位不受影响。整库 ModelOnly 或根数到
+/// 门槛时按整库口径算（不做楼板柱子空间反查）。
+///
+/// [`EQUIP_DERIVED_BUDGET`]: crate::fast_model::cal_model::equip_model::EQUIP_DERIVED_BUDGET
+async fn refresh_equip_derived(
+    registry: &'static TaskRegistry,
+    job: &FrozenBatch,
+    result: &mut DataBatchTaskResult,
+) {
+    use crate::fast_model::cal_model::equip_model;
+
     let roots = result
         .units
         .iter()
@@ -1997,39 +2014,128 @@ async fn refresh_equip_derived(result: &mut DataBatchTaskResult) {
     if roots.is_empty() {
         return;
     }
+    registry.set_stage(&job.task_id, "equip_derived");
     let started = Instant::now();
-    match crate::fast_model::cal_model::equip_model::update_cal_equip_for_roots(&roots).await {
+    let budget = equip_derived_budget();
+    delay_before_equip_derived(job.dbnum).await;
+    let scope = equip_model::EquipRefreshScope {
+        deadline: Some(started + budget),
+        library_scale: equip_model::library_scale_refresh(
+            whole_library_model_only(job),
+            roots.len(),
+        ),
+    };
+    let dbnum = job.dbnum;
+    let task_id = job.task_id.as_str();
+    let refreshed = equip_model::update_cal_equip_for_roots_with(&roots, scope, |done, total| {
+        registry.set_dependency_progress(
+            task_id,
+            "equip_derived",
+            Some(dbnum),
+            None,
+            total as u64,
+            done as u64,
+            0,
+            DEPENDENCY_STALL_TIMEOUT.as_secs() as i64,
+        );
+        beat();
+    })
+    .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let mut run = equip_model::EquipDerivedRun {
+        dbnum,
+        task_id: job.task_id.clone(),
+        roots: roots.len(),
+        library_scale: scope.library_scale,
+        elapsed_ms,
+        budget_secs: budget.as_secs(),
+        deferred: 0,
+        failed: 0,
+        error: None,
+        finished_at: Local::now().to_rfc3339(),
+    };
+    match refreshed {
         Ok(outcome) => {
-            if outcome.refreshed + outcome.relinked + outcome.valves_refreshed + outcome.failed > 0 {
-                println!(
-                    "[设备派生量] 根={} 重算 {} 台 / 重连 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 边 {} 空间 {} / 失败 {}{} {}ms",
-                    roots.len(),
-                    outcome.refreshed,
-                    outcome.relinked,
-                    outcome.floors_linked,
-                    outcome.valves_refreshed,
-                    outcome.valves_linked,
-                    outcome.via_floors,
-                    outcome.via_floor_space,
-                    outcome.failed,
-                    if outcome.floors_skipped {
-                        "（空间树未就绪，楼板边未动）"
-                    } else {
-                        ""
-                    },
-                    started.elapsed().as_millis()
-                );
-            }
+            run.deferred = outcome.deferred;
+            run.failed = outcome.failed;
+            println!(
+                "[设备派生量] 根={} 口径={} 重算 {} 台 / 重连 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 边 {} 空间 {}{} / 失败 {} / 到期未算 {}{} {elapsed_ms}ms",
+                roots.len(),
+                if scope.library_scale { "整库" } else { "逐根" },
+                outcome.refreshed,
+                outcome.relinked,
+                outcome.floors_linked,
+                outcome.valves_refreshed,
+                outcome.valves_linked,
+                outcome.via_floors,
+                outcome.via_floor_space,
+                if outcome.floor_space_skipped {
+                    "（整库口径未做）"
+                } else {
+                    ""
+                },
+                outcome.failed,
+                outcome.deferred,
+                if outcome.floors_skipped {
+                    "（空间树未就绪，楼板边未动）"
+                } else {
+                    ""
+                },
+            );
             if outcome.failed > 0 {
                 result.warnings.push(format!(
                     "设备 / 阀门派生量有 {} 个重算失败（旧值保留，可由手动重算回补）",
                     outcome.failed
                 ));
             }
+            if outcome.deferred > 0 {
+                result.warnings.push(format!(
+                    "设备派生量重算到期（{} s）：还有 {} 个设备 / 阀门 / 楼板没算，旧值保留，可由手动 update_cal_equip 回补",
+                    budget.as_secs(),
+                    outcome.deferred
+                ));
+            }
         }
-        Err(error) => result.warnings.push(format!(
-            "设备派生量重算未完成（旧值保留，可由手动重算回补）: {error:#}"
-        )),
+        Err(error) => {
+            run.error = Some(format!("{error:#}"));
+            result.warnings.push(format!(
+                "设备派生量重算未完成（旧值保留，可由手动重算回补）: {error:#}"
+            ));
+        }
+    }
+    equip_model::note_equip_derived_run(run);
+}
+
+/// [`EQUIP_DERIVED_BUDGET`]；测试钩 `AIOS_TEST_EQUIP_DERIVED_BUDGET_MS="<ms>"` 可调小（生产保护同
+/// `model_refresh::test_hook_var`），让回放能在秒级复现「到期截断」。
+///
+/// [`EQUIP_DERIVED_BUDGET`]: crate::fast_model::cal_model::equip_model::EQUIP_DERIVED_BUDGET
+fn equip_derived_budget() -> Duration {
+    crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_EQUIP_DERIVED_BUDGET_MS")
+        .and_then(|millis| millis.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(crate::fast_model::cal_model::equip_model::EQUIP_DERIVED_BUDGET)
+}
+
+/// 测试钩：`AIOS_TEST_DELAY_EQUIP_DERIVED="<dbnum>:<ms>"`（或 `"*:<ms>"`）——设备派生量这一段开头睡 `<ms>` 毫秒，
+/// 计入期限。只拉长时间、不改判据：回放用它断言面板此刻报 `equip_derived` 而不是 `durable_pending`，配合
+/// `AIOS_TEST_EQUIP_DERIVED_BUDGET_MS` 断言到期截断。生产保护同 `model_refresh::test_hook_var`。
+async fn delay_before_equip_derived(dbnum: u32) {
+    let Some(spec) =
+        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_DELAY_EQUIP_DERIVED")
+    else {
+        return;
+    };
+    let Some((which, millis)) = spec.rsplit_once(':') else {
+        return;
+    };
+    let Ok(millis) = millis.trim().parse::<u64>() else {
+        return;
+    };
+    let which = which.trim();
+    if (which == "*" || which.parse::<u32>().ok() == Some(dbnum)) && millis > 0 {
+        println!("[测试钩] dbnum {dbnum} 设备派生量前按 AIOS_TEST_DELAY_EQUIP_DERIVED 等 {millis} ms");
+        tokio::time::sleep(Duration::from_millis(millis)).await;
     }
 }
 
@@ -2059,6 +2165,9 @@ async fn abandon_undurable_roots(
             dbnum,
             &root_refno,
             &noun,
+            // 刷盘判决只带根与错误，各根生成瞄准的窗右端没跟到这里（派生 / 级联根取规划项的窗，
+            // 不一定是数据窗右端），拿不到就记 0。
+            0,
             &error,
             FailureEvidence::Circumstance,
         );
@@ -2375,7 +2484,15 @@ fn settle_room_recompute_failures(
     for (root, error) in failed {
         let root_refno =
             crate::data_interface::generation_root::refno_from_e3d(*root).to_pdms_str();
-        mark_generation_failed(dbnum, &root_refno, "", error, FailureEvidence::Circumstance);
+        // 房间重算只报根与原因，这一窗的右端没传到这里，拿不到就记 0。
+        mark_generation_failed(
+            dbnum,
+            &root_refno,
+            "",
+            0,
+            error,
+            FailureEvidence::Circumstance,
+        );
         result.units.push(ModelUnitResult {
             dbnum,
             root_refno,
@@ -3403,10 +3520,13 @@ async fn run_model_side_actions(
 /// 进程终止账本就消失：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T` 那一窗本来就
 /// 把这根重排（它在差分里）。已放弃的根会被后面窗口的 `model_sesno` 盖过去，所以判死那一窗就撤掉它的
 /// 旧模型（[`retire_newly_abandoned_roots`]），重启后水位担保的是「没有模型」。解析不出来的 refno 只记日志。
+///
+/// `source_end_sesno` 记这次生成瞄准的窗右端（「够新」据它判）；调用点拿不到时传 0。
 fn mark_generation_failed(
     dbnum: u32,
     root_refno: &str,
     noun: &str,
+    source_end_sesno: i32,
     error: &str,
     evidence: FailureEvidence,
 ) {
@@ -3417,12 +3537,55 @@ fn mark_generation_failed(
     };
     match evidence {
         FailureEvidence::RootFault => {
-            ledger::record_failed(dbnum, root, noun, 0, error);
+            ledger::record_failed(dbnum, root, noun, source_end_sesno, error);
         }
         FailureEvidence::Circumstance => {
-            ledger::record_transient_failure(dbnum, root, noun, 0, error)
+            ledger::record_transient_failure(dbnum, root, noun, source_end_sesno, error)
         }
     }
+}
+
+/// 把工作单里还在退避的根挑出来（GitHub #72，判据在 `model_root_ledger::deferral`）：退避期没过、本单元的
+/// 源也不比失败那一版新。解析不出 refno 的单元照常生成。测试钩 `AIOS_TEST_MODEL_ROOT_BACKOFF_SECS=0`
+/// 关掉退避（生产保护同 `model_refresh::test_hook_var`），给要立刻重试的回放用。
+fn split_backing_off_units(
+    worklist: Vec<crate::data_interface::manual_update::UnitTask>,
+    now: Instant,
+) -> (
+    Vec<(
+        crate::data_interface::manual_update::UnitTask,
+        crate::data_interface::model_root_ledger::Deferral,
+    )>,
+    Vec<crate::data_interface::manual_update::UnitTask>,
+) {
+    use crate::data_interface::model_root_ledger as ledger;
+    let backoff_disabled =
+        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_MODEL_ROOT_BACKOFF_SECS")
+            .is_some_and(|secs| secs.trim() == "0");
+    if backoff_disabled {
+        return (Vec::new(), worklist);
+    }
+    let mut deferred = Vec::new();
+    let mut due = Vec::with_capacity(worklist.len());
+    for task in worklist {
+        let deferral = ledger::parse_root(&task.root_refno)
+            .and_then(|root| ledger::deferral(task.dbnum, root, task.source_end_sesno, now));
+        match deferral {
+            Some(deferral) => deferred.push((task, deferral)),
+            None => due.push(task),
+        }
+    }
+    (deferred, due)
+}
+
+/// 退避中的单元回执上那句话：还剩几秒、连败几次、上次为什么失败。
+fn backoff_message(deferral: &crate::data_interface::model_root_ledger::Deferral) -> String {
+    format!(
+        "model root backing off: retry in {}s after {} consecutive failure(s); last error: {}",
+        deferral.remaining.as_secs(),
+        deferral.consecutive_failures,
+        deferral.error.chars().take(300).collect::<String>()
+    )
 }
 
 /// 一次生成失败是不是「这根自己坏了」的证据：ISSUE-029 的判死只数前一种。
@@ -3942,6 +4105,7 @@ async fn run_single_unit(
             task.dbnum,
             &task.root_refno,
             &task.noun,
+            task.source_end_sesno,
             error,
             FailureEvidence::of(cause),
         );
@@ -4529,6 +4693,7 @@ async fn run_unit_worklist(
                 task.dbnum,
                 &task.root_refno,
                 &task.noun,
+                task.source_end_sesno,
                 reason,
                 FailureEvidence::Circumstance,
             );
@@ -4565,6 +4730,51 @@ async fn run_unit_worklist(
             (left.dbnum, left.root_refno.as_str()).cmp(&(right.dbnum, right.root_refno.as_str()))
         });
         return (results, true);
+    }
+
+    // 退避中的根（GitHub #72 / ADR-090 D1）：上次失败后的退避期没过、源也没前移，这一轮不重算。单元记失败，
+    // 这一窗就不会被判追平、水位照旧不盖；账本那一条原样留着——不算又一次失败，不把退避再往后推。
+    let (deferred, worklist) = split_backing_off_units(worklist, Instant::now());
+    if let (Some(dbnum), Some((_, soonest))) = (
+        dbnum,
+        deferred.iter().min_by_key(|(_, deferral)| deferral.remaining),
+    ) {
+        println!(
+            "模型根退避 dbnum={dbnum} 本轮不重算 {} 根（最快 {}s 后到期；失败根逐次翻倍退避，30 s 起、10 min 封顶）",
+            deferred.len(),
+            soonest.remaining.as_secs()
+        );
+    }
+    for (task, deferral) in deferred {
+        let message = backoff_message(&deferral);
+        emit(
+            progress,
+            ManualUpdateEvent::ModelUnitFinished {
+                dbnum: task.dbnum,
+                root_refno: task.root_refno.clone(),
+                success: false,
+                message: Some(message.clone()),
+            },
+        );
+        registry.bump_units_done(task_id);
+        results.push(ModelUnitResult {
+            dbnum: task.dbnum,
+            root_refno: task.root_refno,
+            noun: task.noun,
+            status: UnitGenStatus::Failed,
+            attempts: task.attempts,
+            message: Some(message),
+            old_owner: task.old_owner,
+            new_owner: task.new_owner,
+            kind: UnitKind::Regen,
+            transform_fallback_reason: None,
+            unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
+        });
     }
     let task_rooms = rooms.frozen().cloned();
 
@@ -4755,6 +4965,7 @@ async fn run_unit_worklist(
                         task.dbnum,
                         &task.root_refno,
                         &task.noun,
+                        task.source_end_sesno,
                         error,
                         evidence,
                     );
@@ -6216,6 +6427,75 @@ mod tests {
         assert!(refused < delete && delete < restore, "{helper}");
     }
 
+    /// GitHub #72：退避中的根这一轮不进生成器、不拍快照，单元记失败（这一窗不判追平，水位不盖）；
+    /// 挑拣不改账本，退避不往后推；不在退避里的根照常生成。
+    #[test]
+    fn backing_off_roots_skip_generation_without_pushing_their_backoff_further() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum = 994_101;
+        ledger::forget_dbnum(dbnum);
+        mark_generation_failed(
+            dbnum,
+            "24384/7",
+            "BRAN",
+            726,
+            "manifold boolean failed",
+            FailureEvidence::RootFault,
+        );
+        let root = ledger::parse_root("24384/7").unwrap();
+        let before = ledger::entry(dbnum, root).unwrap();
+        let task = |refno: &str, end: i32| UnitTask {
+            dbnum,
+            root_refno: refno.into(),
+            noun: "BRAN".into(),
+            source_end_sesno: end,
+            attempts: 0,
+            old_owner: None,
+            new_owner: None,
+            transform: None,
+            unit_publish: None,
+        };
+        let (newer, _) = split_backing_off_units(vec![task("24384/7", 727)], Instant::now());
+        assert!(newer.is_empty(), "窗口右端前进 = 数据又变了，退避中也立刻重算");
+        let (deferred, due) = split_backing_off_units(
+            vec![task("24384/7", 726), task("24384/8", 726)],
+            Instant::now(),
+        );
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].0.root_refno, "24384/7");
+        assert_eq!(
+            due.iter().map(|task| task.root_refno.as_str()).collect::<Vec<_>>(),
+            vec!["24384/8"]
+        );
+        let message = backoff_message(&deferred[0].1);
+        assert!(
+            message.contains("backing off") && message.contains("manifold boolean failed"),
+            "{message}"
+        );
+        assert_eq!(ledger::entry(dbnum, root).unwrap(), before, "挑拣不改账本");
+        ledger::forget_dbnum(dbnum);
+
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let worklist = source
+            .split_once("async fn run_unit_worklist(")
+            .expect("worklist")
+            .1;
+        let split = worklist
+            .find("split_backing_off_units(worklist")
+            .expect("退避挑拣");
+        let snapshot = worklist
+            .find("unit_room_snapshot::snapshot(")
+            .expect("房间「前」");
+        assert!(split < snapshot, "退避的根不拍快照、不进生成器");
+        assert!(
+            !worklist[split..snapshot].contains("mark_generation_failed("),
+            "退避跳过不算又一次失败"
+        );
+    }
+
     /// ADR-079：生成失败只进进程内账本——记 `failed`（拦水位、下一窗重排），带原话；
     /// 库里一行都不写；解析不出来的 refno 不记。
     #[test]
@@ -6227,6 +6507,7 @@ mod tests {
             dbnum,
             "24384/7",
             "BRAN",
+            726,
             "manifold boolean failed",
             FailureEvidence::RootFault,
         );
@@ -6234,11 +6515,15 @@ mod tests {
             dbnum,
             "garbage",
             "EQUI",
+            726,
             "ignored",
             FailureEvidence::RootFault,
         );
         let census = ledger::census(dbnum);
-        assert_eq!((census.chasing, census.abandoned, census.settled), (1, 0, 0));
+        assert_eq!(
+            (census.chasing, census.abandoned, census.settled),
+            (1, 0, 0)
+        );
         let root = ledger::parse_root("24384/7").unwrap();
         assert_eq!(
             ledger::chasing_roots(dbnum),
@@ -6248,6 +6533,10 @@ mod tests {
         assert_eq!(entry.status_label(), "failed");
         assert_eq!(entry.error(), Some("manifold boolean failed"));
         assert_eq!(entry.noun, "BRAN");
+        assert_eq!(
+            entry.source_end_sesno, 726,
+            "失败记账写这一窗的右端，不再恒为 0"
+        );
         ledger::forget_dbnum(dbnum);
 
         let source = include_str!("batch_worker.rs");
@@ -6273,6 +6562,7 @@ mod tests {
                 dbnum,
                 "24384/7",
                 "BRAN",
+                726,
                 "房间计算器冻不出",
                 FailureEvidence::Circumstance,
             );
@@ -6282,6 +6572,7 @@ mod tests {
                 dbnum,
                 "24384/8",
                 "BRAN",
+                726,
                 "manifold boolean failed",
                 FailureEvidence::RootFault,
             );
@@ -6909,7 +7200,7 @@ mod tests {
     /// mark_failed 的判据是数据窗口本身，不是任务终态标签（回退到旧写法
     /// `matches!(state, Failed | Partial)` 就会红）：
     /// 数据 Applied 而模型侧失败的 Partial 不得把数据阶段拉 Blocked——
-    /// 模型失败在 durable pending 的重试账里，数据侧没有要重放的东西；
+    /// 模型失败在进程内的生成根账本里，数据侧没有要重放的东西；
     /// 反过来数据批次 Failed 折成的 Partial（有单元成功）必须照旧阻断。
     #[test]
     fn only_an_unsettled_data_window_blocks_the_data_phase() {
@@ -7323,6 +7614,68 @@ mod tests {
             helper.contains("filter(|unit| unit.rooms_before.is_some())")
                 && helper.contains("unit.rooms_before = None;"),
             "只给拍过「前」的根拍「后」，拍不到就把「前」也摘掉——两格同生共死"
+        );
+    }
+
+    /// GitHub #88：栅栏之后的两段（拍房间「后」、设备派生量）各有阶段名，设备派生量带期限、进度与心跳。
+    /// 以前它们沿用 `durable_pending`、没有进度：7997 整库 ModelOnly 的面板停在「刷盘 6772/6772」，看着像
+    /// 栅栏卡死，实际卡在设备派生量，20 分钟以上没有任何信号，后面排队的任务一起挂住。
+    #[test]
+    fn the_stages_after_the_durable_fence_report_themselves_and_equip_derived_has_a_budget() {
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch")
+            .1;
+        let fence = body
+            .find("await_units_durable(registry, job, &result.units)")
+            .expect("栅栏");
+        let rooms_after_stage = body
+            .find("registry.set_stage(&job.task_id, \"rooms_after\")")
+            .expect("拍「后」有自己的阶段名");
+        let rooms_after = body
+            .find("snapshot_rooms_after(&mut result.units)")
+            .expect("拍「后」");
+        let equip = body
+            .find("refresh_equip_derived(registry, job, &mut result)")
+            .expect("设备派生量拿得到登记表与任务");
+        let task_end = body.find("commit_task_end_on(").expect("收尾那一笔");
+        assert!(
+            fence < rooms_after_stage
+                && rooms_after_stage < rooms_after
+                && rooms_after < equip
+                && equip < task_end,
+            "顺序必须是 栅栏 → 换阶段名 rooms_after → 拍「后」 → 设备派生量 → 收尾那一笔"
+        );
+        let helper = source
+            .split_once("async fn refresh_equip_derived(")
+            .expect("helper")
+            .1
+            .split_once("\nfn equip_derived_budget(")
+            .expect("helper end")
+            .0;
+        assert!(
+            helper.contains("registry.set_stage(&job.task_id, \"equip_derived\")"),
+            "设备派生量有自己的阶段名"
+        );
+        assert!(
+            helper.contains("deadline: Some(started + budget)"),
+            "设备派生量带期限"
+        );
+        assert!(
+            helper.contains("\"equip_derived\",") && helper.contains("beat();"),
+            "每算完一个目标喊一次进度、打一次心跳"
+        );
+        assert!(
+            helper.contains("whole_library_model_only(job)"),
+            "整库 ModelOnly 按整库口径算"
+        );
+        assert!(
+            helper.contains("note_equip_derived_run(run)"),
+            "每一轮都记进 /health.equip_derived"
         );
     }
 

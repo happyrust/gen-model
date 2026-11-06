@@ -4,6 +4,8 @@
 #![feature(slice_take)]
 #![feature(const_async_blocks)]
 #![feature(type_alias_impl_trait)]
+// 内存分配失败时先记一行崩溃留痕再 abort（`process_diagnostics::install_crash_handlers`，GitHub #78）。
+#![feature(alloc_error_hook)]
 // `FrozenSource` 的稳定文件身份（Windows 卷序列号 + 文件索引）要它，见 `frozen_source.rs`。
 #![cfg_attr(windows, feature(windows_by_handle))]
 // 暂时屏蔽warnings

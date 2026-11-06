@@ -5277,16 +5277,17 @@ mod tests {
             Some(NoModelTier::MetadataOnly)
         );
         assert!(change_is_metadata_only(&diff(&["NAME"])));
-        // S6 新档：字典 DCHC=0 且生成器不读的名字（`DUTY`；`HREF` 手写表登记在级联侧也一样）放行，
-        // 记新档；与老名单混合也是新档。
+        // S6 新档：字典 DCHC=0 且生成器不读的名字（`DUTY`；`SCREF` 同样）放行，记新档；与老名单混合也是新档。
+        // `HREF` 自 2026-11-04 起进了读取集合（route 的跨管分支点接管判据），不再走这一档。
         assert_eq!(
             change_metadata_tier(&diff(&["DUTY"])),
             Some(NoModelTier::UnreadAttribute)
         );
         assert_eq!(
-            change_metadata_tier(&diff(&["HREF"])),
+            change_metadata_tier(&diff(&["SCREF"])),
             Some(NoModelTier::UnreadAttribute)
         );
+        assert_eq!(change_metadata_tier(&diff(&["HREF"])), None);
         assert_eq!(
             change_metadata_tier(&diff(&["DUTY", "NAME"])),
             Some(NoModelTier::UnreadAttribute)

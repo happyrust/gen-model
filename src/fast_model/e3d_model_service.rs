@@ -1542,6 +1542,8 @@ fn spawn_generation_worker(
     crate::fast_model::concurrency::run_gated_cpu(move || {
         let mut cache = checkout_cache(&caches);
         while let Some((slot, root)) = queue.claim() {
+            // 崩溃留痕点得出这条线正在算哪一根（GitHub #78）。
+            let _working_on = crate::process_diagnostics::CurrentRoot::enter(root.word0, root.word1);
             // Bake here, not on the consumer: triangulation, the SHA-256 and
             // the mesh file write are the rest of this root's CPU cost, and
             // doing them here is what lets the `Manifold` die on this thread

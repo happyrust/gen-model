@@ -537,12 +537,12 @@ fn wnoevt_no_event_names() -> &'static HashSet<String> {
 ///
 /// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
 /// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
-/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `CMPR DIR ELDATA FILL GTYP HREF HSPE MINBEN NGMR OUTD PKEY
-/// PSPE TREF UKEY VXREF` 十五个（core 不重画、我们却真拿来生成的输入），其余 3926 个都放行。其中 12 个被
-/// 手写表登记成几何 / 级联输入（`DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA ORRF PTOF`）：
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `CMPR DIR ELDATA FILL GTYP HREF HSPE JFRE MINBEN NGMR OUTD PKEY
+/// PSPE TREF UKEY VXREF` 十六个（core 不重画、我们却真拿来生成的输入），其余 3925 个都放行。其中 11 个被
+/// 手写表登记成几何 / 级联输入（`DKEY DDPR FSPREF SCREF STYP CURD PTYP` 与 `SIZE MAXA ORRF PTOF`）：
 /// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
-/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_twelve_names`] 逐个点名钉住，名单变了就得重新问
-/// 「新名字真的没人读吗」。
+/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_eleven_names`] 逐个点名钉住，名单变了就得重新问
+/// 「新名字真的没人读吗」。`JFRE` 自 2026-11-06（e3d-model `222a0ef`，SJOI 梁认领）起被生成器读到，离开这一档。
 ///
 /// **戳是第一票的唯一例外**（2026-09-17 Q6，用户拍板）：`CACHID` 不在字典快照里（`raw_dchc_code` 回
 /// `None`）——它是 3.1 运行库 schema 里的项目 UDA，字典按构造就不会收它，这一票不是「还没补上」而是
@@ -1277,7 +1277,7 @@ mod tests {
                 "{name}"
             );
             // S6：字典 DCHC=0 且生成器不读的名字（`DKEY MAXA …`）两票放行，手写表那一格只剩报表意义，
-            // 见 `the_two_votes_override_the_hand_tables_for_exactly_twelve_names`。
+            // 见 `the_two_votes_override_the_hand_tables_for_exactly_eleven_names`。
             let expected = if attribute_is_metadata_only(name) {
                 OperationImpact::Skip
             } else {
@@ -2601,7 +2601,7 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十五个，全来自 e3d-model：`DIR` catalogue_point、
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十六个，全来自 e3d-model：`DIR` catalogue_point、
     /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
     /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN`、GENPRI 归档里的 B-rep `ELDATA`、跨管分支点接管的
     /// `HREF`/`TREF`（route）、吊架与竖井 spec 门 `HSPE`/`PSPE`（route / pipeline）——core 会话内不为它们
@@ -2618,8 +2618,8 @@ mod tests {
         assert_eq!(
             zero,
             [
-                "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "HREF", "HSPE", "MINBEN", "NGMR", "OUTD",
-                "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
+                "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "HREF", "HSPE", "JFRE", "MINBEN", "NGMR",
+                "OUTD", "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
             ]
         );
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2667,9 +2667,12 @@ mod tests {
         // `HREF` / `TREF`（route 的跨管分支点接管判据）、`PSPE`（pipeline 的竖井支管门）、`HSPE`（route 的
         // spec 驱动吊架门）。其中 `HREF` / `HSPE` / `PSPE` / `TREF` 是字典 DCHC=0——上面那一列随之从 11 个
         // 变成 15 个（core 会话内不为它们重画，我们却真拿它们生成）；`SPAMAP` 仍是戳，不进 `names`。
+        // 2026-11-06：e3d-model `222a0ef`（SJOI 的 GJTORG 收尾）读 `JFRE`，`5775ecb`（空 GTYP 的 PJOI
+        // 按宿主 `RREF` 决定画不画）读 `RREF`。`JFRE` 是字典 DCHC=0，上面那一列从 15 个变成 16 个；
+        // `RREF` 不在字典里。并集 181 → 183。
         // 2026-11-05：e3d-model 把 RVM 导出搬进库模块 `rvm_export`（原在 `src/bin`，不扫），EXSCAN 管号读路由
         // 成员的 `LOFF`（181）；字典 DCHC=4，上面那一列不变。
-        assert_eq!(generation_read_set().len(), 181, "读取集合条数漂移");
+        assert_eq!(generation_read_set().len(), 183, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2873,8 +2876,9 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十五个（第十一个是 GENPRI 归档的 `ELDATA`，
-        // 第十二到十五个是本次 AMS 九库收口带进的 `HREF` / `HSPE` / `PSPE` / `TREF`），其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十六个（第十一个是 GENPRI 归档的 `ELDATA`，
+        // 第十二到十五个是 AMS 九库收口带进的 `HREF` / `HSPE` / `PSPE` / `TREF`，第十六个是
+        // 2026-11-06 `JFRE`），其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2887,7 +2891,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 15,
+            3941 - 16,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
@@ -2960,15 +2964,16 @@ mod tests {
     }
 
     /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
-    /// **恰好 12 个**，逐个点名。它们是当年按语义猜进表的（`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；
+    /// **恰好 11 个**，逐个点名。它们是当年按语义猜进表的（`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；
     /// 其余同理），core 不为它们重画、我们也不读，判决以两票为准，手写表那一格只剩报表意义
     /// （`classify_attribute_effect` 照旧回级联 / 几何，建边资格不变）。名单变了就得重新问
     /// 「新名字真的没人读吗」——多出来一个是读取集合漏了、少一个是有人开始读它了：
     /// 2026-09-27 少了 `NGMR`（e3d-model 宿主 FIXING 扫描读目录件的负体集）；2026-11-04 又少了
     /// `HREF` / `PSPE` / `TREF`（本次 AMS 九库收口：route 的跨管分支点接管判据读 `HREF`/`TREF`，
-    /// pipeline 的竖井支管门读 `PSPE`，三者都进了读取集合），15 → 12。
+    /// pipeline 的竖井支管门读 `PSPE`，三者都进了读取集合），15 → 12。2026-11-06 再少 `JFRE`
+    /// （e3d-model `222a0ef` 的 SJOI 梁认领门读它），12 → 11。
     #[test]
-    fn the_two_votes_override_the_hand_tables_for_exactly_twelve_names() {
+    fn the_two_votes_override_the_hand_tables_for_exactly_eleven_names() {
         let mut overridden: Vec<&str> = ATTRIBUTE_EFFECT_TABLES
             .iter()
             .filter(|(_, effect)| *effect != AttributeEffect::DataOnly)
@@ -2979,8 +2984,8 @@ mod tests {
         assert_eq!(
             overridden,
             [
-                "CURD", "DDPR", "DKEY", "FSPREF", "JFRE", "MAXA", "ORRF", "PTOF", "PTYP", "SCREF",
-                "SIZE", "STYP",
+                "CURD", "DDPR", "DKEY", "FSPREF", "MAXA", "ORRF", "PTOF", "PTYP", "SCREF", "SIZE",
+                "STYP",
             ]
         );
         for name in &overridden {

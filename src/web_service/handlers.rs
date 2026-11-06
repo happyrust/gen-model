@@ -1070,6 +1070,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "active_dependency": crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot(),
             "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
             "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+            "equip_derived": crate::fast_model::cal_model::equip_model::equip_derived_snapshot(),
+            "model_root_backoff": crate::data_interface::model_root_ledger::backoff_snapshot(),
             "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
             "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
             "runtime_lag": crate::runtime_lag::snapshot(),
@@ -1263,6 +1265,12 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 连败到上限、重扫已停止自动重跑——水位差还在但没人再追，只有新会话或
         // 人工执行会解开；不摆出来的话它与「一直没增量」在外面看不出区别。
         "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+        // 任务内设备派生量重算的最近一次回执（GitHub #88；进程内，不读库）。`null` = 本进程还没在任务里
+        // 重算过；`deferred_total` 非零 = 有设备 / 阀门因为到期留着旧派生量，要靠手动 `update_cal_equip` 回补。
+        "equip_derived": crate::fast_model::cal_model::equip_model::equip_derived_snapshot(),
+        // 模型根失败退避（GitHub #72 / ADR-090 D1；进程内账本，不读库）。`null` = 没有根在退避；否则
+        // `backing_off` 是总数、`samples` 点名最快到期的几根。退避中的根仍算「还在赶」、仍拦水位，只是这会儿不重算。
+        "model_root_backoff": crate::data_interface::model_root_ledger::backoff_snapshot(),
         // 运行期目录版本核对的最近一次回执（H1，2026-09-08；进程内，不读库）。摄入形态下
         // 目录库不进数据批次，目录换了版只有这一条路让模型面知道：sweep 看见目录文件会话
         // 前移 / 周期对账那一拍 / `/update/execute`。`null` = 本进程还没跑过运行期核对
@@ -6312,6 +6320,65 @@ mod tests {
         assert!(body.contains("model_dbnum_ensure::current_roots(dbnum)"));
         assert!(body.contains("\"ready_total\": view.ready_total"));
         assert!(body.contains("\"only_ready\": only_ready"));
+    }
+
+    /// GitHub #74 第 3 点：`ready` 只是本进程的投影（冷重启后一律 false），回执标出 `ready_source`；诊断快照另按
+    /// 库级凭证 ∨ 进程账本判一次 durable 就绪，「0 ready」到底是没生成过还是只是重启了，看这一格。任务快照只说
+    /// 本任务的进度，不补。
+    #[test]
+    fn dbnum_model_roots_says_where_ready_comes_from_and_adds_the_durable_view() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn dbnum_model_roots(")
+            .expect("dbnum roots handler")
+            .1
+            .split_once("/// POST /api/v1/dbnums/{dbnum}/data/reinitialize")
+            .expect("roots handler end")
+            .0;
+        assert!(body.contains("\"ready_source\": \"process_projection\""));
+        assert!(body.contains("\"durable_ready_total\": durable_ready_total"));
+        assert!(
+            body.contains("let durable_ready = if query.task_id.is_none()"),
+            "只有诊断快照补 durable 就绪"
+        );
+        assert!(
+            body.contains("model_coverage::generation_roots_cache_current(&refnos)"),
+            "durable 就绪与按需生成同一个判据，不在 handler 里另起一套"
+        );
+        assert!(
+            body.contains("root.durable_ready = Some(covered.contains(&root.generation_root))"),
+            "每根都标 durable_ready"
+        );
+    }
+
+    /// GitHub #74 第 1 点：「模型落后」那档按根回读 durable——投影里本身、名下、头上都没有回执的根才回读，
+    /// 点名进 `durable_fallback_roots`，来源标 `model-memory+rocksdb-fallback`。能不能回读只看路由判据。
+    #[test]
+    fn lagging_model_records_fall_back_to_durable_rows_per_root() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_records(")
+            .expect("records handler must exist")
+            .1
+            .split_once("mod tests {")
+            .expect("records handler end marker")
+            .0;
+        let gate = body
+            .find("let durable_fallback = route.allows_durable_fallback();")
+            .expect("回读与否只看 model_read_route");
+        let under = body.find("store.receipt_roots_under(scope, *root)").expect("名下");
+        let above = body.find("store.receipt_root_above(scope, *root)").expect("头上");
+        let fallback = body
+            .find("durable_fallback_roots.push(name.clone());")
+            .expect("回读的根点名");
+        let label = body
+            .find("\"model-memory+rocksdb-fallback\"")
+            .expect("回读有自己的来源标签");
+        assert!(
+            gate < under && under < above && above < fallback && fallback < label,
+            "投影里本身、名下、头上都没有回执，才轮到回读"
+        );
+        assert!(body.contains("\"durable_fallback_roots\": durable_fallback_roots"));
     }
 
     /// **只有 `mem` 报占位地址。**

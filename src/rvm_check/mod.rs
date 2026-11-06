@@ -216,6 +216,7 @@ fn try_login_now(spec: &RunSpec, notes: &mut Vec<String>) -> bool {
         Ok(evidence) => {
             let log = evidence_text(&evidence);
             let ok = evidence.completed() && export_macro::login_ok(&log);
+            notes.push(session_note(&evidence));
             if !ok {
                 notes.push(redact(
                     &format!(
@@ -540,6 +541,7 @@ fn export_e3d(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<St
         .map_err(|error| format!("E3D 导出没有启动：{error:#}"))?;
     let first_log = evidence_text(&first);
     append_log(task_dir, &redact(&first_log, &spec.password));
+    append_log(task_dir, &session_note(&first));
     if export_ok(&first_log, &rvm) {
         return Ok("refno".to_string());
     }
@@ -560,6 +562,7 @@ fn export_e3d(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<St
         .map_err(|error| format!("按名称再导出没有启动：{error:#}"))?;
     let second_log = evidence_text(&second);
     append_log(task_dir, &redact(&second_log, &spec.password));
+    append_log(task_dir, &session_note(&second));
     if export_ok(&second_log, &rvm) {
         return Ok("name".to_string());
     }
@@ -576,12 +579,23 @@ fn export_ok(log: &str, rvm: &Path) -> bool {
 
 fn export_failure(prefix: &str, evidence: &E3dProcessEvidence, log: &str) -> String {
     format!(
-        "{prefix}（exit={:?} alive={} done={} timeout={}）\n{}",
+        "{prefix}（exit={:?} alive={} done={} timeout={} forced_after_done={} tail_markers={}）\n{}",
         evidence.exit_status,
         evidence.alive_seen,
         evidence.done_seen,
         evidence.timed_out,
+        evidence.forced_after_done,
+        evidence.tail_markers,
         tail(log, 500)
+    )
+}
+
+/// 一次 E3D 会话怎么结束的（GitHub #87）：成功也记，`forced_after_done` 为真 = 宏走完后会话不退、被宽限收掉；
+/// `tail_markers` 是包装宏 `QUIT` 之后的收尾走到了第几条（0 = `QUIT` 就退了）。
+fn session_note(evidence: &E3dProcessEvidence) -> String {
+    format!(
+        "[E3D 会话] exit={:?} forced_after_done={} tail_markers={} timeout={}",
+        evidence.exit_status, evidence.forced_after_done, evidence.tail_markers, evidence.timed_out
     )
 }
 

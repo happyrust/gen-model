@@ -129,6 +129,9 @@ jobs:
           rustc --version
           cargo --version
 
+      # 键按 Cargo.lock 哈希定、不带 run_id（GitHub #79）：cache 与 artifact 共用账户额度，带 run_id 时
+      # 每跑一次就永久多存一份、互不淘汰，曾把额度撑爆。依赖一变新 key 自然替换旧 key；失败轮靠
+      # restore-keys 的前缀回退续跑。
       - name: Restore cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v4
@@ -137,9 +140,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             gen-model/target
-          key: cargo-linux-release-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-linux-release-${{ hashFiles('gen-model/Cargo.lock') }}
           restore-keys: |
-            cargo-linux-release-${{ hashFiles('gen-model/Cargo.lock') }}-
             cargo-linux-release-
 
       - name: Build release binary
@@ -161,16 +163,16 @@ jobs:
               --features ws,gen_model,manifold,project_hd,http_api
           fi
 
-      # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
+      # 只在没命中同一 key 时保存，避免每次运行都重写同一份大缓存（写也算额度与时长）。
       - name: Save cargo cache
-        if: always() && steps.cargo-cache.outcome == 'success'
+        if: always() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             gen-model/target
-          key: cargo-linux-release-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-linux-release-${{ hashFiles('gen-model/Cargo.lock') }}
 
       - name: Package binary
         run: |

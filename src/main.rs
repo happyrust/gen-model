@@ -128,6 +128,12 @@ struct TraceArgs {
 
 fn main() -> anyhow::Result<()> {
     aios_database::process_diagnostics::install_panic_hook();
+    aios_database::process_diagnostics::install_crash_handlers();
+    // 全局 rayon 池（`room_model` / `db_model` 的 `par_iter`）与几何私有池同样给 64MB 栈（GitHub #78）：
+    // 默认 2MB，而发布包不像仓内脚本那样设 `RUST_MIN_STACK`。必须在第一次 `par_iter` 之前建。
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(RUNTIME_STACK_SIZE)
+        .build_global();
     use clap::Parser;
 
     let cli = Cli::parse();
