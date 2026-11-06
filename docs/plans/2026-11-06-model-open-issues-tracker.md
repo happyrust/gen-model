@@ -12,6 +12,7 @@
 | P2 | e3d-model#24 | 隐式管身某段 E3D 不画，我们照画 | 1 件只在我们：`TUBI 9 /Copy-of-1RCS007MN-TUBE/801VP`（2315 mm） | `24381/101405` | 待办 | 两条假设已否证（见 issue 评论）：偏轴 ATTA（40 个同类槽位只此一个不画）；离开侧 SPAMAP 第二字为空（aps250142 STIF `2013286686/123` 同样为空但 E3D 照画，首版 `4b38b0c` 已 revert）。APS 239 库扫过：空离开键可画槽位 4 个（2 个 HVAC STIF，E3D 照画；2 个 aps7200 1 mm 吊架段），没有第二个管道样本。需 E3D 侧单件取证 |
 | — | e3d-model#25 | 零长 SCTN 名下的 SJOI J1 E3D 照画，我们整串 skipped | 2 件配不上：`/MDS/SPECIALS/PIPE/3-BAR-2/S1/J1`、`4-BAR-2/S1/J1` | `23714/1` | 已关 | `b94615c`（已推 main）：零长轴取 +Z，两只 J1 exact，不可配对 2 → 0。规则只有 2 个样本，且 DRNS 恰为 +Z，遇到 DRNS ≠ +Z 的零长 SCTN 时复核 |
 | — | e3d-model#22 | RTOR 内半径大于外半径时 E3D 照画，我们判退化 | 2 件（RTORUS 1/2 of SUBE 10 of `/Copy-of-R43-R540-008`） | `24381/101405` | 已关 | `46f8d8f`（github main）；39 站零退化 |
+| P2 | e3d-model#26 | FRMW 名下 PNOD 里的 PJOI `GTYP` 为空值时，E3D 有时照画、我们整串 skipped | 3 件配不上：`/MDS/FT62/1-V1/JOINT1`、`/MDS/FT64/1-V1/JOINT1`、`/MDS/FT64/1-V2/JOINT1`（各一只 7 面 FacetGroup） | `15516/2`、`23734/1` | 待办 | 拦截点是 `category.rs:638-646` 的 `GTYP=JOIN` 门。已排除 CREF 有无（ams7999 有 490 只同样满足却不画）、零长 SCTN（宿主 SCTN 非零长）、DESP、PNOD FIXT、目录链断（组件 `23704/812411 JOIN /MDS-CP-AA` 有 GMRE）。放开门会一次多出 ams7999 的 490 只与 ams8000 的 248 只，不改；需找到区分这 3 只与那 490 只的属性 |
 
 ### 可接受的残差（不单独跟踪）
 
@@ -20,7 +21,7 @@
 | chord | 10 | MDS `IJOINT2/3` 0.1–0.5 mm；FLOOR、GWALL 0.05–2.18 mm；`TUBI 1 /-CCV-E-3-L-1704` 0.07 mm |
 | reference_artifact | 4 | `/1RX-FN09-F001` FLOOR 2、`/1RX-FN03-FN` FLOOR 5、`/1RS-WF03-F-C-F001` FLOOR 12、`/1RS-WF05-F-C-F001` FLOOR 9 |
 | film | 3 | `/1RX-FN01-F001` FLOOR 12、`/1LR-WF05-S-C` FLOOR 6、`/1RS-WF03-W-C-RR001` GWALL 13 |
-| kind_differ | 4 | `23705/289` 的 `/MDS-Standards-ST59-PS`、`GT85-PS`、`GT86A-PS-1`、`GT87A-PS-1`：几何 exact，E3D 写一只布尔后的 FacetGroup，我们按图元写 Box/Cylinder/Facet（或 Pyramid）。原因在目录负体：ST59/GT85 的法兰孔 NSCY 是 `TUFL=false`，被我们的显示筛收走；腹板孔 `PDIA = PLOD + DESP[19]`，E3D 日志自己报 `DESP parameter number (19) out of range`；GT86A/87A 的 NSCY `PDIA = RPRO PLOD`，LSTU 链不在会话里时 POD 取 0，刀退化。我们一把刀都没扣上（`negatives_applied` 0），就走了按图元写出。E3D 侧本身报目录错，不是 e3d-model#7 的回归；2026-11-06 实验（负体只按 LEVE 筛、不按 TUFL 筛，39 站 xneg）：23705/289 kind_differ 4 → 2（ST59/GT85 改为整只面片），但 `23710/1` 新增 276 对 kind_differ，几何判档全不变。所以 E3D 对 TUFL=false 负体并非一律照扣，假设否证，不改 |
+| kind_differ | 4 | `23705/289` 的 `/MDS-Standards-ST59-PS`、`GT85-PS`、`GT86A-PS-1`、`GT87A-PS-1`：几何 exact，E3D 写一只布尔后的 FacetGroup，我们按图元写 Box/Cylinder/Facet（或 Pyramid）。原因在目录负体：ST59/GT85 的法兰孔 NSCY 是 `TUFL=false`，被我们的显示筛收走；腹板孔 `PDIA = PLOD + DESP[19]`，E3D 日志自己报 `DESP parameter number (19) out of range`；GT86A/87A 的 NSCY `PDIA = RPRO PLOD`，LSTU 链不在会话里时 POD 取 0，刀退化。我们一把刀都没扣上（`negatives_applied` 0），就走了按图元写出。E3D 侧本身报目录错，不是 e3d-model#7 的回归；2026-11-06 实验（负体只按 LEVE 筛、不按 TUFL 筛，39 站 xneg）：23705/289 kind_differ 4 → 2（ST59/GT85 改为整只面片），但 `23710/1` 新增 276 对 kind_differ，几何判档全不变。所以 E3D 对 TUFL=false 负体并非一律照扣，假设否证，不改。2026-11-06 干净构建复测（全部取已提交版本）：这 4 对已消失，但同一站出现 8 只 Z 偏移件（ST59/GT85 基准 z 0..200、生成 84.86..336.5；GT86A/87A 基准 z -100..0、生成 -184.5..-59.15），根因是 PLOD 依赖工作区未提交的 `vendor/e3d-io` `db_param_env.rs`（LSTU 链走不到时 POD 取 0）与 `vendor/e3d-model` `catalogue.rs` 的 `void_negatives`；提交这两处后需复测确认 |
 
 ### 待核实
 
@@ -71,6 +72,7 @@
 |---|---|---|---|
 | gen-model | `feat/rvm-check-inprocess` | `b4b6f72` | fix(e3d-query): L3-DONE 后宽限到期强制收掉 E3D 会话，按成功返回（#87） |
 | gen-model | `feat/rvm-check-inprocess` | `87dee7b` | feat(rvm-check): 生成与比对改在后端进程内跑 |
+| gen-model | `refactor` | `108f08fd` | docs(plans): 模型问题跟踪清单：#22/#23/#25 关单、#24 证据、kind_differ 残差 |
 
 推送之后：gen-model 更新 vendor，过回归门（见 gen-model#63「下一步顺序」）。在 #73 修好之前，线上需要手动跑一次 `model/rebuild`。
 
@@ -82,6 +84,7 @@
 
 ## 最近进展
 
+- 2026-11-06：SITE RVM 复测（干净构建，独立后端 8122）：10 个原失败站里 7 个全过（`24381/46775`、`23714/1`、`24381/535`、`23705/1`、`23713/2343`、`24381/177373`、以及 `24381/101405` 只剩 #24 那 1 件）；`15516/2`、`23734/1` 各剩 3 件 unkeyable（新开 e3d-model#26）；`23705/289` 因依赖未提交的 e3d-io / e3d-model 改动而出现 8 只 Z 偏移。
 - 2026-11-06：#22 合入后复验并关闭。#24 补 APS 全库取证（无管道第二样本），评论在 issue。kind_differ「负体不按 TUFL 筛」实验在 23710/1 多出 276 对 kind_differ，否证，未改代码。
 - 2026-11-06：#23（`8e3cf67`）、#25（`b94615c`）推到 e3d-model main 并关闭，`46f8d8f`（#22）随之在 github main；39 站对 `m1076db`、`m1076` 零退化，`=24381/46775` 只在 E3D 0、`=23714/1` 不可配对 0。#24 两条假设都被否证，首版已 revert，issue 保持开启。`23705/289` 的 4 对 kind_differ 定为可接受残差（见上表）。
 - 2026-11-05：#22 本地修复（`46f8d8f`），39 站零退化；#87 本地修复（`b4b6f72`），实机 5 站全部 pass。两个 issue 下都已留评论，都没关。
