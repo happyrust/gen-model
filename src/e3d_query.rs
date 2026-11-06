@@ -27,6 +27,8 @@ pub struct E3dDriver {
     /// `des.exe` 所在安装目录。空则启动器沿用 `L3_E3D_INSTALL_DIR` 或它自己的默认值。
     pub install_dir: Option<PathBuf>,
     pub alive_timeout: Duration,
+    /// `L3-DONE` 落盘后等启动器自己退出的宽限；到期仍不退就收掉会话、按成功返回。
+    pub done_grace: Duration,
     pub timeout: Duration,
 }
 
@@ -42,7 +44,13 @@ pub struct E3dDriverSpec {
     pub mdb: String,
     pub install_dir: Option<PathBuf>,
     pub alive_timeout: Duration,
+    pub done_grace: Duration,
     pub timeout: Duration,
+}
+
+/// `L3-DONE` 之后的默认宽限，`E3D_MCP_DONE_GRACE_SECS` 覆盖。
+pub fn done_grace_from_env() -> Duration {
+    Duration::from_secs(env_u64("E3D_MCP_DONE_GRACE_SECS", 60))
 }
 
 /// 进程层只陈述可观察事实；是否已经保存由持有目标 DB 路径的变更执行器裁决。
@@ -52,6 +60,8 @@ pub struct E3dProcessEvidence {
     pub done_seen: bool,
     pub exit_status: Option<u32>,
     pub timed_out: bool,
+    /// 宏已走完（`L3-DONE` 在盘上），但 QUIT 后会话迟迟不退，宽限到期由驱动收掉。
+    pub forced_after_done: bool,
     pub log_path: PathBuf,
     pub scenario_log_path: PathBuf,
     pub driver_log: String,
@@ -95,6 +105,7 @@ impl E3dDriver {
             mdb: std::env::var("L3_E3D_MDB").unwrap_or_else(|_| "/ALL".into()),
             install_dir: std::env::var_os("L3_E3D_INSTALL_DIR").map(PathBuf::from),
             alive_timeout: Duration::from_secs(env_u64("E3D_MCP_ALIVE_TIMEOUT_SECS", 300)),
+            done_grace: done_grace_from_env(),
             timeout: Duration::from_secs(env_u64("E3D_MCP_QUERY_TIMEOUT_SECS", 1200)),
         })
     }
@@ -111,6 +122,7 @@ impl E3dDriver {
             mdb: spec.mdb,
             install_dir: spec.install_dir,
             alive_timeout: spec.alive_timeout,
+            done_grace: spec.done_grace,
             timeout: spec.timeout,
         }
     }
@@ -295,6 +307,7 @@ impl E3dDriver {
         let started = Instant::now();
         let deadline = started + self.timeout + Duration::from_secs(15);
         let mut alive = false;
+        let mut done_at: Option<Instant> = None;
         loop {
             if let Some(status) = launcher.try_wait()? {
                 let log = fs::read_to_string(&driver_log).unwrap_or_default();
@@ -324,6 +337,7 @@ impl E3dDriver {
                     done_seen: finished_macro,
                     exit_status: status.code().map(|code| code as u32),
                     timed_out: false,
+                    forced_after_done: false,
                     log_path: driver_log,
                     scenario_log_path: scenario_log.clone(),
                     driver_log: log,
@@ -331,8 +345,41 @@ impl E3dDriver {
                 });
             }
             alive |= contains(&alive_log, "L3-ALIVE");
-            let stalled_login = !alive && started.elapsed() >= self.alive_timeout;
-            if stalled_login || Instant::now() >= deadline {
+            if done_at.is_none() && contains(&done_log, "L3-DONE") {
+                done_at = Some(Instant::now());
+            }
+            let now = Instant::now();
+            let action = next_action(WaitState {
+                now,
+                started,
+                deadline,
+                alive_timeout: self.alive_timeout,
+                alive,
+                done_at,
+                done_grace: self.done_grace,
+            });
+            if action == WaitAction::ForceAfterDone {
+                let waited = done_at.map_or(0, |at| now.duration_since(at).as_secs());
+                eprintln!(
+                    "E3D TTY {label}: L3-DONE written {waited}s ago but the session has not exited; terminating it and treating the run as complete"
+                );
+                terminate_tree(launcher.id()).context("stop lingering E3D launcher")?;
+                terminate_pid_file(&pid_file).context("stop lingering E3D session")?;
+                wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
+                    .with_context(|| format!("wait for lingering E3D session after {label}"))?;
+                return Ok(E3dProcessEvidence {
+                    alive_seen: true,
+                    done_seen: true,
+                    exit_status: None,
+                    timed_out: false,
+                    forced_after_done: true,
+                    log_path: driver_log.clone(),
+                    scenario_log_path: scenario_log.clone(),
+                    driver_log: fs::read_to_string(&driver_log).unwrap_or_default(),
+                    scenario_log: fs::read_to_string(&scenario_log).ok(),
+                });
+            }
+            if action == WaitAction::TimedOut {
                 terminate_tree(launcher.id()).context("stop timed-out E3D launcher")?;
                 terminate_pid_file(&pid_file).context("stop timed-out E3D session")?;
                 wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
@@ -342,6 +389,7 @@ impl E3dDriver {
                     done_seen: contains(&done_log, "L3-DONE"),
                     exit_status: None,
                     timed_out: true,
+                    forced_after_done: false,
                     log_path: driver_log.clone(),
                     scenario_log_path: scenario_log.clone(),
                     driver_log: fs::read_to_string(&driver_log).unwrap_or_default(),
@@ -654,6 +702,40 @@ pub fn parse_owner_chain(raw: &str) -> Vec<OwnerNode> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WaitState {
+    now: Instant,
+    started: Instant,
+    deadline: Instant,
+    alive_timeout: Duration,
+    alive: bool,
+    done_at: Option<Instant>,
+    done_grace: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitAction {
+    Wait,
+    TimedOut,
+    ForceAfterDone,
+}
+
+/// 启动器还没退时这一轮该做什么。宽限只在超时之前多开一个出口：
+/// 见到 `L3-DONE` 但 deadline 先到，仍按超时处理。
+fn next_action(state: WaitState) -> WaitAction {
+    if let Some(done_at) = state.done_at {
+        if state.now >= done_at + state.done_grace && state.now < state.deadline {
+            return WaitAction::ForceAfterDone;
+        }
+    }
+    let stalled_login =
+        !state.alive && state.now.duration_since(state.started) >= state.alive_timeout;
+    if stalled_login || state.now >= state.deadline {
+        return WaitAction::TimedOut;
+    }
+    WaitAction::Wait
+}
+
 fn env_path(name: &str, default: impl Into<PathBuf>) -> PathBuf {
     std::env::var_os(name)
         .map(PathBuf::from)
@@ -768,6 +850,59 @@ fn terminate_pid_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn wait_state(elapsed: u64, alive: bool, done_after: Option<u64>) -> WaitState {
+        let started = Instant::now();
+        WaitState {
+            now: started + Duration::from_secs(elapsed),
+            started,
+            deadline: started + Duration::from_secs(1215),
+            alive_timeout: Duration::from_secs(300),
+            alive,
+            done_at: done_after.map(|secs| started + Duration::from_secs(secs)),
+            done_grace: Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn done_marker_inside_grace_keeps_waiting() {
+        assert_eq!(
+            next_action(wait_state(130, true, Some(100))),
+            WaitAction::Wait
+        );
+    }
+
+    #[test]
+    fn done_marker_past_grace_forces_shutdown() {
+        assert_eq!(
+            next_action(wait_state(160, true, Some(100))),
+            WaitAction::ForceAfterDone
+        );
+    }
+
+    #[test]
+    fn missing_done_marker_times_out_at_deadline() {
+        assert_eq!(next_action(wait_state(1214, true, None)), WaitAction::Wait);
+        assert_eq!(
+            next_action(wait_state(1215, true, None)),
+            WaitAction::TimedOut
+        );
+        // 宽限没到 deadline 就到了：仍是超时，不是强制成功。
+        assert_eq!(
+            next_action(wait_state(1215, true, Some(1200))),
+            WaitAction::TimedOut
+        );
+    }
+
+    #[test]
+    fn stalled_login_times_out() {
+        assert_eq!(next_action(wait_state(299, false, None)), WaitAction::Wait);
+        assert_eq!(
+            next_action(wait_state(300, false, None)),
+            WaitAction::TimedOut
+        );
+        assert_eq!(next_action(wait_state(300, true, None)), WaitAction::Wait);
+    }
+
     #[test]
     fn refno_validation_blocks_command_injection() {
         assert_eq!(validate_refno("24381/035844").unwrap(), "24381/35844");
@@ -790,6 +925,7 @@ mod tests {
             mdb: "/ALL".into(),
             install_dir: Some(PathBuf::from(r"E:\e3d\install")),
             alive_timeout: Duration::from_secs(30),
+            done_grace: Duration::from_secs(60),
             timeout: Duration::from_secs(60),
         });
         let env = driver.session_env(Path::new("driver.pid"));

@@ -1,4 +1,4 @@
-//! 把 `rvm_compare --baseline --generated` 写出的 JSON 收成页面用的一页报告。
+//! 把逐件比对（`e3d_model::rvm_compare::CompareReport`，落盘为 `compare.json`）收成页面用的一页报告。
 //!
 //! 颜色不看进程退出码：配上了一部分、同时又有 `only_*` 时，那个进程仍可能是 0，
 //! 差异只在 JSON 里。口径与 `scripts/Compare-SlykRvmStrict.ps1` 相同：

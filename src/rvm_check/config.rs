@@ -7,14 +7,11 @@ use crate::options::RvmCheckSection;
 
 #[derive(Clone, Debug)]
 pub struct ResolvedTools {
-    pub gen_ams: PathBuf,
-    pub rvm_compare: PathBuf,
     pub launcher: PathBuf,
     pub work_dir: PathBuf,
     pub alive_timeout: Duration,
+    /// E3D 导出子进程的超时，也是进程内生成的叫停期限。
     pub timeout: Duration,
-    pub gen_ams_found: bool,
-    pub rvm_compare_found: bool,
     pub launcher_found: bool,
 }
 
@@ -48,14 +45,6 @@ pub fn resolve_tools() -> ResolvedTools {
 }
 
 pub fn resolve_tools_from(search: ToolSearch) -> ResolvedTools {
-    let gen_ams = pick(
-        search.configured.gen_ams_exe.as_deref(),
-        &exe_candidates(&search, "gen_ams.exe"),
-    );
-    let rvm_compare = pick(
-        search.configured.rvm_compare_exe.as_deref(),
-        &exe_candidates(&search, "rvm_compare.exe"),
-    );
     let launcher = pick(
         search.configured.e3d_launcher.as_deref(),
         &launcher_candidates(&search),
@@ -63,11 +52,7 @@ pub fn resolve_tools_from(search: ToolSearch) -> ResolvedTools {
     let work_dir = configured_path(search.configured.work_dir.as_deref())
         .unwrap_or_else(|| default_work_dir(search.exe_dir.as_deref(), search.cwd.as_deref()));
     ResolvedTools {
-        gen_ams_found: gen_ams.is_file(),
-        rvm_compare_found: rvm_compare.is_file(),
         launcher_found: launcher.is_file(),
-        gen_ams,
-        rvm_compare,
         launcher,
         work_dir,
         alive_timeout: Duration::from_secs(
@@ -158,38 +143,6 @@ fn configured_path(value: Option<&str>) -> Option<PathBuf> {
     (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
-fn exe_candidates(search: &ToolSearch, file: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(dir) = &search.exe_dir {
-        out.push(dir.join(file));
-        out.push(dir.join("tools").join(file));
-    }
-    if let Some(cwd) = &search.cwd {
-        out.push(cwd.join("target").join("debug").join(file));
-        out.push(cwd.join("target").join("release").join(file));
-        out.push(
-            cwd.join("..")
-                .join("vendor")
-                .join("e3d-model")
-                .join("target")
-                .join("debug")
-                .join(file),
-        );
-        out.push(
-            cwd.join("..")
-                .join("vendor")
-                .join("e3d-model")
-                .join("target")
-                .join("release")
-                .join(file),
-        );
-    }
-    for root in [r"D:\Rust\target\debug", r"D:\Rust\target\release"] {
-        out.push(PathBuf::from(root).join(file));
-    }
-    out
-}
-
 fn launcher_candidates(search: &ToolSearch) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let relative = Path::new("scripts")
@@ -220,43 +173,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_exe_wins_over_a_file_sitting_next_to_the_server() {
+    fn configured_launcher_wins_and_timeout_defaults() {
         let root = std::env::temp_dir().join(format!("rvm-check-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("tools")).unwrap();
-        let beside = root.join("gen_ams.exe");
-        std::fs::write(&beside, b"beside").unwrap();
-        let configured = root.join("configured-gen_ams.exe");
+        std::fs::create_dir_all(&root).unwrap();
+        let configured = root.join("configured-launcher.bat");
         std::fs::write(&configured, b"configured").unwrap();
         let resolved = resolve_tools_from(ToolSearch {
             configured: RvmCheckSection {
-                gen_ams_exe: Some(configured.display().to_string()),
+                e3d_launcher: Some(configured.display().to_string()),
                 ..RvmCheckSection::default()
             },
             exe_dir: Some(root.clone()),
             cwd: Some(root.clone()),
         });
-        assert_eq!(resolved.gen_ams, configured);
-        assert!(resolved.gen_ams_found);
+        assert_eq!(resolved.launcher, configured);
+        assert!(resolved.launcher_found);
         assert_eq!(resolved.timeout, Duration::from_secs(1200));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn an_empty_config_finds_the_tool_directory() {
-        let root =
-            std::env::temp_dir().join(format!("rvm-check-tools-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("tools")).unwrap();
-        let compare = root.join("tools").join("rvm_compare.exe");
-        std::fs::write(&compare, b"compare").unwrap();
-        let resolved = resolve_tools_from(ToolSearch {
-            configured: RvmCheckSection::default(),
-            exe_dir: Some(root.clone()),
-            cwd: None,
-        });
-        assert_eq!(resolved.rvm_compare, compare);
-        assert!(resolved.rvm_compare_found);
         let _ = std::fs::remove_dir_all(&root);
     }
 

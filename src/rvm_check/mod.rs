@@ -1,18 +1,19 @@
-//! 页面上的一次 RVM 对拍：本程序 `gen_ams --rvm`、E3D `des.exe -tty` 导出、
-//! `rvm_compare` 比对。三步都是子进程，判定只看比对 JSON。
+//! 页面上的一次 RVM 对拍：本程序生成 RVM（[`e3d_model::rvm_export::export_rvm`]）、E3D
+//! `des.exe -tty` 导出、逐件比对（[`e3d_model::rvm_compare::compare_rvm_files`]）。只有 E3D 导出
+//! 是子进程；生成与比对在本进程里跑，panic 由 [`catch_unwind`] 收成失败的一步，超时靠生成钩子
+//! 协作叫停。内存爆掉没有隔离，会直接打到后端进程。判定只看比对 JSON。
 //!
 //! 密码只活在 [`RunSpec`] 里，拼进 `L3_E3D_LOGIN` 时由 [`crate::e3d_query::E3dDriver`]
 //! 负责。任务详情、报告和落盘日志都先过 [`redact`]。
 
-use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aios_core::RefU64;
-use anyhow::Context;
+use e3d_model::rvm_export::{RvmExportOptions, export_rvm};
+use e3d_model::{GenerationHooks, GenerationStopped, Stop};
 
 use crate::data_interface::direct_store::DirectSchema;
 use crate::data_interface::direct_tree::DirectTreeService;
@@ -168,8 +169,6 @@ pub fn preflight(spec: &RunSpec, try_login: bool) -> PreflightReport {
     checks.push(file_check("项目 evars", &spec.project_evar));
     let code_dir = spec.project_dir.join(format!("{}000", spec.e3d_project));
     checks.push(dir_check("项目库目录", &code_dir));
-    checks.push(file_check("gen_ams.exe", &spec.tools.gen_ams));
-    checks.push(file_check("rvm_compare.exe", &spec.tools.rvm_compare));
 
     let running_des = running_e3d_sessions().unwrap_or_default();
     let mut notes = vec![
@@ -321,7 +320,7 @@ pub fn execute(
     tasks.set_stage(task_id, STAGE_COMPARE);
     tasks.set_units_done(task_id, 4);
     let compare_started = Instant::now();
-    match compare_rvms(&spec.tools, &task_dir) {
+    match compare_rvms(&task_dir) {
         Ok((verdict, counts, mismatches, centreline, truncated)) => {
             report.verdict = verdict.as_str().to_string();
             report.message = verdict_message(verdict, &counts);
@@ -384,33 +383,30 @@ struct ResolvedNode {
     sesno: u32,
     noun: String,
     name: String,
-    /// SITE 在 MDB 全部 WORLD 成员里的序号（同为 SITE 的兄弟中排第几，1 起）。
-    /// 只有 SITE 才算；无名 SITE 的 E3D 显示名 `SITE n of WORLD /*` 用它。
+    /// SITE 在 MDB 全部 SITE 根里的序号（1 起，[`DirectTreeService::roots`] 的顺序）。
+    /// 无名 SITE 的 E3D 显示名 `SITE n of WORLD /*` 按整个 MDB 数，单库数不出来。
     world_ordinal: Option<usize>,
 }
 
-/// gen_ams 解库号用的目录：E3D 会话主项目的 `<代号>000`。
+/// 生成时解库号的目录：E3D 会话主项目的 `<代号>000`。
 ///
-/// E3D 在 AMS 会话里打开 ACP 的设计库（23705/289 在 acp7321）时，库号 7000 解成主项目的
-/// ams7000，不是 acp000 里同号的 acp7000；拿库文件所在目录解，目录件就和 E3D 不是同一份。
-/// 外项目库再按主项目 `<代号>sys` 的登记补。主项目目录不存在时退回库文件所在目录。
+/// AMS 会话打开 ACP 的设计库（23705/289 在 acp7321）时，引用到的库号 7000 在 E3D 里是主项目的
+/// ams7000，不是 acp000 里同号的 acp7000；拿库文件所在目录去解，目录件就跟 E3D 不是同一份。
+/// 外项目库（SCB 一类）再按主项目 `<代号>sys` 的登记补。主项目目录不在就退回库文件所在目录。
 fn session_project_dir(spec: &RunSpec, node: &ResolvedNode) -> PathBuf {
-    let code_dir = spec
+    let main = spec
         .project_dir
         .join(format!("{}000", spec.e3d_project.to_ascii_lowercase()));
-    if code_dir.is_dir() {
-        code_dir
+    if main.is_dir() {
+        main
     } else {
         node.project_dir.clone()
     }
 }
 
-/// MDB 顺序的 SITE 根表里，`target` 排第几（1 起）。
-fn world_ordinal_in(roots: &[RefU64], target: RefU64) -> Option<usize> {
-    roots
-        .iter()
-        .position(|refno| *refno == target)
-        .map(|index| index + 1)
+/// `target` 在 MDB 顺序的 SITE 根表里排第几（1 起）；不在表里（不是 SITE 根）为 `None`。
+fn world_ordinal(sites: &[RefU64], target: RefU64) -> Option<usize> {
+    sites.iter().position(|site| *site == target).map(|at| at + 1)
 }
 
 fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode, String> {
@@ -431,13 +427,13 @@ fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode
     let noun = tree.noun_of(refno).unwrap_or_default();
     let name = tree.name_of(refno).unwrap_or_default();
     let world_ordinal = if noun.eq_ignore_ascii_case("SITE") {
-        let roots = tree
+        let sites: Vec<RefU64> = tree
             .roots()
             .map_err(|error| format!("读 MDB 的 SITE 根表失败：{error:#}"))?
             .into_iter()
-            .map(|node| node.refno.refno())
-            .collect::<Vec<_>>();
-        world_ordinal_in(&roots, refno)
+            .map(|site| site.refno.refno())
+            .collect();
+        world_ordinal(&sites, refno)
     } else {
         None
     };
@@ -453,13 +449,17 @@ fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode
     })
 }
 
-fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<(), String> {
-    if !spec.tools.gen_ams_found {
-        return Err(format!(
-            "找不到 gen_ams.exe（试过 {}）",
-            spec.tools.gen_ams.display()
-        ));
+/// 到点叫停生成。生成在 DFS 每弹一个元素、每个根写 RVM 之前问一次，叫停是协作式的：
+/// 卡在单个元素里不出来的那种挂起管不到。
+struct Deadline(Instant);
+
+impl GenerationHooks for Deadline {
+    fn should_stop(&self, _visited: usize) -> Option<Stop> {
+        (Instant::now() >= self.0).then_some(Stop::Cancelled)
     }
+}
+
+fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<(), String> {
     let template = DirectSchema::template_dir_from_env()
         .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
     let attlib = template.join("attlib.dat");
@@ -468,48 +468,59 @@ fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result
     }
     let ours = task_dir.join("ours");
     std::fs::create_dir_all(&ours).map_err(|error| format!("建输出目录失败：{error}"))?;
+    let root = e3d_model::rvm_export::parse_refno(&spec.refno)
+        .map_err(|error| format!("refno 无法解析：{error:#}"))?;
     let project_dir = session_project_dir(spec, node);
-    let mut args = vec![
-        "--attlib".to_string(),
-        attlib.display().to_string(),
-        "--db".to_string(),
-        node.db_file.display().to_string(),
-        "--template".to_string(),
-        template.display().to_string(),
-        "--db-type".to_string(),
-        node.db_type.clone(),
-        "--root".to_string(),
-        spec.refno.clone(),
-        "--project-dir".to_string(),
-        project_dir.display().to_string(),
-        "--main-project-dir".to_string(),
-        project_dir.display().to_string(),
-        "--out".to_string(),
-        ours.display().to_string(),
-        "--rvm".to_string(),
-    ];
-    if let Some(ordinal) = node.world_ordinal {
-        args.push("--root-world-ordinal".to_string());
-        args.push(ordinal.to_string());
+    let opts = RvmExportOptions {
+        attlib,
+        db_file: node.db_file.clone(),
+        template: template.to_path_buf(),
+        db_type: node.db_type.clone(),
+        sesno: (node.sesno > 0).then_some(node.sesno),
+        root: Some(root),
+        out: ours.clone(),
+        project_dirs: vec![project_dir.clone()],
+        main_project_dir: Some(project_dir),
+        root_world_ordinal: node.world_ordinal,
+        rvm: true,
+        ..RvmExportOptions::default()
+    };
+    let deadline = Deadline(Instant::now() + spec.tools.timeout);
+    // 库句柄、元素缓存都是 export_rvm 自己的局部量，返回时随之释放；跨 SITE 只留进程级的
+    // 基本体网格缓存（按形状键，不按实例）。
+    let result = catch_unwind(AssertUnwindSafe(|| export_rvm(&opts, &deadline)));
+    let outcome = match result {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) => {
+            if matches!(
+                error.downcast_ref::<GenerationStopped>(),
+                Some(GenerationStopped::Hook { .. })
+            ) {
+                return Err(format!(
+                    "生成超时（{} 秒）：{error:#}",
+                    spec.tools.timeout.as_secs()
+                ));
+            }
+            return Err(format!("生成失败：{error:#}"));
+        }
+        Err(panic) => return Err(format!("生成时 panic：{}", panic_text(&*panic))),
+    };
+    let _ = std::fs::write(ours.join("gen.log"), outcome.log.join("\n"));
+    if let Some(detail) = outcome.accounts_error {
+        return Err(format!("生成的账没平：{detail}"));
     }
-    if node.sesno > 0 {
-        args.push("--sesno".to_string());
-        args.push(node.sesno.to_string());
-    }
-    let captured = run_tool(&spec.tools.gen_ams, &args, spec.tools.timeout)
-        .map_err(|error| format!("gen_ams 没有启动：{error:#}"))?;
-    let generated = ours.join("generated.rvm");
-    if captured.timed_out {
-        return Err("gen_ams 超时".to_string());
-    }
-    if captured.exit != Some(0) || !generated.is_file() {
-        return Err(format!(
-            "gen_ams 没有写出 generated.rvm（exit={:?}）\n{}",
-            captured.exit,
-            tail(&captured.stderr, 800)
-        ));
+    if !outcome.rvm_path.as_deref().is_some_and(Path::is_file) {
+        return Err("生成没有写出 generated.rvm".to_string());
     }
     Ok(())
+}
+
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "（非字符串 panic）".to_string())
 }
 
 fn export_e3d(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<String, String> {
@@ -575,40 +586,23 @@ fn export_failure(prefix: &str, evidence: &E3dProcessEvidence, log: &str) -> Str
 }
 
 fn compare_rvms(
-    tools: &ResolvedTools,
     task_dir: &Path,
 ) -> Result<(RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool), String> {
-    if !tools.rvm_compare_found {
-        return Err(format!(
-            "找不到 rvm_compare.exe（试过 {}）",
-            tools.rvm_compare.display()
-        ));
-    }
     let baseline = task_dir.join("e3d.rvm");
     let generated = task_dir.join("ours").join("generated.rvm");
     let out = task_dir.join("compare.json");
-    let args = vec![
-        "--baseline".to_string(),
-        baseline.display().to_string(),
-        "--generated".to_string(),
-        generated.display().to_string(),
-        "--out".to_string(),
-        out.display().to_string(),
-    ];
-    let captured = run_tool(&tools.rvm_compare, &args, tools.timeout)
-        .map_err(|error| format!("rvm_compare 没有启动：{error:#}"))?;
-    if captured.timed_out {
-        return Err("rvm_compare 超时".to_string());
-    }
-    let bytes = std::fs::read(&out).map_err(|_| {
-        format!(
-            "rvm_compare 没有写出 compare.json（exit={:?}）\n{}",
-            captured.exit,
-            tail(&captured.stderr, 800)
-        )
-    })?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("compare.json 不是 JSON：{error}"))?;
+    let report = match catch_unwind(AssertUnwindSafe(|| {
+        e3d_model::rvm_compare::compare_rvm_files(&baseline, &generated)
+    })) {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => return Err(format!("比对没有跑完：{error:#}")),
+        Err(panic) => return Err(format!("比对时 panic：{}", panic_text(&*panic))),
+    };
+    let value =
+        serde_json::to_value(&report).map_err(|error| format!("比对报告无法序列化：{error}"))?;
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("比对报告无法序列化：{error}"))?;
+    std::fs::write(&out, bytes).map_err(|error| format!("写 compare.json 失败：{error}"))?;
     Ok(judge_compare(&value))
 }
 
@@ -623,54 +617,9 @@ fn driver_for(spec: &RunSpec) -> E3dDriver {
         mdb: spec.e3d_mdb.clone(),
         install_dir: Some(spec.install_dir.clone()),
         alive_timeout: spec.tools.alive_timeout,
+        done_grace: crate::e3d_query::done_grace_from_env(),
         timeout: spec.tools.timeout,
     })
-}
-
-struct Captured {
-    exit: Option<i32>,
-    timed_out: bool,
-    stderr: String,
-}
-
-fn run_tool(exe: &Path, args: &[String], timeout: Duration) -> anyhow::Result<Captured> {
-    let mut child = Command::new(exe)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("启动 {}", exe.display()))?;
-    let stdout = child.stdout.take().context("stdout")?;
-    let stderr = child.stderr.take().context("stderr")?;
-    let stdout_thread = thread::spawn(move || read_lossy(stdout));
-    let stderr_thread = thread::spawn(move || read_lossy(stderr));
-    let started = Instant::now();
-    let mut timed_out = false;
-    let exit = loop {
-        if let Some(status) = child.try_wait()? {
-            break status.code();
-        }
-        if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            timed_out = true;
-            break None;
-        }
-        thread::sleep(Duration::from_millis(200));
-    };
-    let _stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
-    Ok(Captured {
-        exit,
-        timed_out,
-        stderr,
-    })
-}
-
-fn read_lossy(mut pipe: impl Read) -> String {
-    let mut bytes = Vec::new();
-    let _ = pipe.read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn evidence_text(evidence: &E3dProcessEvidence) -> String {
@@ -921,10 +870,30 @@ mod tests {
             "23714/1", "23717/2", "23734/1", "23737/1", "24381/46775", "24381/79977",
         ]
         .map(|text| RefU64::from_str_refno(text).unwrap());
-        let at = |text: &str| world_ordinal_in(&roots, RefU64::from_str_refno(text).unwrap());
+        let at = |text: &str| world_ordinal(&roots, RefU64::from_str_refno(text).unwrap());
         assert_eq!(at("14195/2"), Some(2));
         assert_eq!(at("24381/79977"), Some(12));
         assert_eq!(at("24381/1"), None);
+    }
+
+    /// 进程内比对：同一份 RVM 两侧各放一份，必须绿，`compare.json` 照写。
+    #[test]
+    fn an_rvm_compared_with_itself_in_process_passes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/rvm/1RCV0101-B1.rvm");
+        let task_dir =
+            std::env::temp_dir().join(format!("rvm-check-self-compare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&task_dir);
+        std::fs::create_dir_all(task_dir.join("ours")).unwrap();
+        std::fs::copy(&fixture, task_dir.join("e3d.rvm")).unwrap();
+        std::fs::copy(&fixture, task_dir.join("ours").join("generated.rvm")).unwrap();
+
+        let (verdict, counts, mismatches, _, _) = compare_rvms(&task_dir).unwrap();
+        let wrote_json = task_dir.join("compare.json").is_file();
+        let _ = std::fs::remove_dir_all(&task_dir);
+        assert_eq!(verdict, RvmVerdict::Pass, "{mismatches:?}");
+        assert!(counts.both > 0);
+        assert_eq!(counts.off, 0);
+        assert!(wrote_json);
     }
 
     #[test]

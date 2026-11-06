@@ -2667,7 +2667,9 @@ mod tests {
         // `HREF` / `TREF`（route 的跨管分支点接管判据）、`PSPE`（pipeline 的竖井支管门）、`HSPE`（route 的
         // spec 驱动吊架门）。其中 `HREF` / `HSPE` / `PSPE` / `TREF` 是字典 DCHC=0——上面那一列随之从 11 个
         // 变成 15 个（core 会话内不为它们重画，我们却真拿它们生成）；`SPAMAP` 仍是戳，不进 `names`。
-        assert_eq!(generation_read_set().len(), 180, "读取集合条数漂移");
+        // 2026-11-05：e3d-model 把 RVM 导出搬进库模块 `rvm_export`（原在 `src/bin`，不扫），EXSCAN 管号读路由
+        // 成员的 `LOFF`（181）；字典 DCHC=4，上面那一列不变。
+        assert_eq!(generation_read_set().len(), 181, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
