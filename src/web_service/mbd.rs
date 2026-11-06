@@ -1,4 +1,5 @@
-//! `GET /api/mbd/v2/pipe/{refno}` —— MBD 管道尺寸标注（`.planning/2026-09-06-plant-mbd-pipe-dimension` Phase 2，D6）。
+//! `GET /api/mbd/v2/pipe/{refno}` —— MBD 管道尺寸标注（`.planning/2026-09-06-plant-mbd-pipe-dimension` Phase 2，D6）；
+//! `GET /api/mbd/v2/object/{refno}` —— 全标注类型的统一端点（plant3d-web#103 M7，见 [`mbd_v2_object`]）。
 //!
 //! 路径故意不在 `/api/v1` 下：它是 `old/plant3d-web` `src/api/mbdV2Api.ts` 早已写死的契约路径，
 //! 前端用 `?mbd_refno=<refno>&mbdBackendPort=<本服务端口>` 直接打过来，本仓零前端改动即可首发（D7）。
@@ -27,7 +28,7 @@ use tokio::sync::OnceCell;
 
 use super::{ApiError, AppState};
 use crate::fast_model::e3d_model_service::{E3dModelService, parse_refno};
-use crate::mbd::{BranchQueryError, layout_pipe};
+use crate::mbd::{BranchQueryError, ObjectQueryError, layout_object_refno, layout_pipe};
 
 static SERVICE: OnceCell<Arc<E3dModelService>> = OnceCell::const_new();
 
@@ -81,14 +82,19 @@ pub async fn respond(
         })?;
     match outcome {
         Ok(data) => Ok(Json(data).into_response()),
-        Err(BranchQueryError::NotFound { refno }) => Err(ApiError::not_found(format!(
+        Err(error) => pipe_error_response(error),
+    }
+}
+
+/// 管道出包失败的响应（`/pipe` 与 `/object` 的管道两类共用）。
+fn pipe_error_response(error: BranchQueryError) -> Result<Response, ApiError> {
+    match error {
+        BranchQueryError::NotFound { refno } => Err(ApiError::not_found(format!(
             "refno {refno} 在所钉会话里不存在"
         ))),
-        Err(
-            error @ (BranchQueryError::NotRouteContainer { .. }
-            | BranchQueryError::NotPipeRoute { .. }),
-        ) => Err(ApiError::precondition(error.to_string())),
-        Err(BranchQueryError::RootError { refno, issues }) => {
+        error @ (BranchQueryError::NotRouteContainer { .. }
+        | BranchQueryError::NotPipeRoute { .. }) => Err(ApiError::precondition(error.to_string())),
+        BranchQueryError::RootError { refno, issues } => {
             // 与 `ApiError` 同一信封（`code / message / detail`），只是 `detail` 带上四级定位的 issues，
             // 前端尺寸面板能把「为什么整条没出图」说清楚，而不是只剩一个 422。
             let message = format!(
@@ -107,10 +113,82 @@ pub async fn respond(
             });
             Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response())
         }
-        Err(error @ BranchQueryError::Solver { .. }) => {
+        error @ BranchQueryError::Solver { .. } => Err(ApiError::precondition(error.to_string())),
+        BranchQueryError::Db(error) => Err(ApiError::from_domain(error.into())),
+        error @ BranchQueryError::SourceChanged { .. } => {
             Err(ApiError::precondition(error.to_string()))
         }
-        Err(BranchQueryError::Db(error)) => Err(ApiError::from_domain(error.into())),
-        Err(error @ BranchQueryError::SourceChanged { .. }) => Err(ApiError::precondition(error.to_string())),
     }
+}
+
+/// GET /api/mbd/v2/object/{refno} —— 任意被选中的元素：按 `[mbd_type_rules]` 判出九种标注类型之一与归属对象
+/// （`crate::mbd::object`），回带 `annotation_type` / `subject` 的 V2 数据包。
+///
+/// - 管道两类与 `/pipe` 出同一份图元，只多数据包层的 `annotation_type` / `subject`（`/pipe` 是管道的别名，
+///   输出不变）；选中管件 / ATTA 时归属对象是所属 BRAN，`input_refno` 原样回填。
+/// - 支架 / 土建 / 设备：宿主读取器落地前只给求解器归属视图，`meta.source_version` 照填；求解器还是占位的类型只有
+///   信封 + 一条 `layout.not_implemented`（Info），已落地的（设备）按缺数据出声。
+///
+/// 状态：`400 bad_request`（refno 写法不对）/ `404 not_found`（不存在）/ `422 not_annotatable`（存在但不是任何
+/// 标注的对象：PIPE / ZONE / SITE、CWALL、支架区外的 STRU、风管 BRAN…，`detail` 带 `refno` / `noun` / `reason`）/
+/// 管道两类的其余失败同 `/pipe`（`422 precondition`）/ `500 internal`（读库出错）。
+pub async fn mbd_v2_object(
+    State(_state): State<AppState>,
+    Path(refno): Path<String>,
+) -> Result<Response, ApiError> {
+    let parsed = parse_refno(&refno)
+        .map_err(|error| ApiError::bad_request(format!("refno `{refno}` 无法解析：{error:#}")))?;
+    let service = service().await?;
+    let set = service
+        .build_set(parsed.dbno(), None)
+        .map_err(ApiError::from_domain)?;
+    respond_object(set, parsed, refno).await
+}
+
+/// [`mbd_v2_object`] 去掉 MDB 视图那一步的主体，同 [`respond`]。
+pub async fn respond_object(
+    set: Arc<DbSet>,
+    refno: RefNo,
+    input_refno: String,
+) -> Result<Response, ApiError> {
+    let outcome =
+        tokio::task::spawn_blocking(move || layout_object_refno(&set, refno, &input_refno))
+            .await
+            .map_err(|join| {
+                ApiError::from_domain(anyhow::anyhow!("mbd object task aborted: {join}"))
+            })?;
+    match outcome {
+        Ok(data) => Ok(Json(data).into_response()),
+        Err(ObjectQueryError::NotFound { refno }) => Err(ApiError::not_found(format!(
+            "refno {refno} 在所钉会话里不存在"
+        ))),
+        Err(error @ ObjectQueryError::NotAnnotatable { .. }) => Err(not_annotatable(error)),
+        Err(ObjectQueryError::Pipe(error)) => pipe_error_response(error),
+        Err(error @ (ObjectQueryError::Solver { .. } | ObjectQueryError::SourceChanged { .. })) => {
+            Err(ApiError::precondition(error.to_string()))
+        }
+        Err(ObjectQueryError::Db(error)) => Err(ApiError::from_domain(error.into())),
+        Err(ObjectQueryError::Internal(message)) => {
+            Err(ApiError::from_domain(anyhow::anyhow!(message)))
+        }
+    }
+}
+
+/// `422 not_annotatable`：统一信封，`detail` 点名是哪个元素、为什么。
+fn not_annotatable(error: ObjectQueryError) -> ApiError {
+    let message = error.to_string();
+    let detail = match error {
+        ObjectQueryError::NotAnnotatable {
+            refno,
+            noun,
+            reason,
+        } => serde_json::json!({
+            "refno": crate::mbd::wire_refno(refno),
+            "noun": noun,
+            "reason": reason,
+        }),
+        _ => serde_json::Value::Null,
+    };
+    ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "not_annotatable", message)
+        .with_detail(detail)
 }
