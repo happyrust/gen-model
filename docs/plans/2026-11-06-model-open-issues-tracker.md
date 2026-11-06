@@ -1,13 +1,13 @@
 # 模型问题跟踪清单（2026-11-06）
 
-依据：39 站全量对拍（p2a 加上 e3d-model `46f8d8f`，共 196,329 对）、e3d-model 与 gen-model 的 open issue。
+依据：39 站全量对拍（最初是 p2a 加上 e3d-model `46f8d8f`，共 196,329 对；现行基线 `b39/rref3`，见「回归门」）、e3d-model 与 gen-model 的 open issue。
 状态栏：`待办` / `进行中` / `已修待推` / `待确认` / `已关`。改动后在「最近进展」里记一行日期和结论。
 
 ## 一、几何对不上（39 站对拍）
 
 | 优先 | Issue | 问题 | 涉及件 | 站 | 状态 | 下一步 |
 |---|---|---|---|---|---|---|
-| P1 | e3d-model#21 | SJOI 斜交连接梁的 IJOINT 平移：缺 GJTORG 第二次求交的闭式 | 9 件 off（3.4–12.7 mm）：`/MDS/VT01`、`VT02`、`VT05`、`FT13` 下的 `IJOINT1/2/3` | `23713/2343`、`15516/2`、`23734/1` | 待办 | P3 第三条线已否证，需要新的推导或 IDA 取证 |
+| — | e3d-model#21 | SJOI 斜交连接梁的 IJOINT 平移：缺 GJTORG 第二次求交的闭式 | 9 件 off（3.4–12.7 mm）：`/MDS/VT01`、`VT02`、`VT05`、`FT13` 下的 `IJOINT1/2/3` | `23713/2343`、`15516/2`、`23734/1` | 已关 | `222a0ef`（main）：`GJTORG` 收尾按反编译重写（`JFRE` / 梁认领门 + 两次求交）。`rref3` 里这几站的 IJOINT 全 exact（如 `23713_2343` 的 `/MDS/VT05/2-BAR-1/S1/IJOINT1`、`/MDS/FT13/2-BAR-1/S1/IJOINT1`）。遗留的 perp 分支经验规则记在二节 |
 | — | e3d-model#23 | HVAC 头槽位断面解不出时，E3D 写半径 0 的圆柱占位，我们记 unbuildable 不写 | 1 件只在 E3D：`TUBE 1 of BRANCH /-CAM-E-2-H-5302` | `24381/46775` | 已关 | `8e3cf67`（已推 main）：照 E3D 写 0 径 Cylinder 占位，只在 E3D 1 → 0 |
 | P2 | e3d-model#24 | 隐式管身某段 E3D 不画，我们照画 | 1 件只在我们：`TUBI 9 /Copy-of-1RCS007MN-TUBE/801VP`（2315 mm） | `24381/101405` | 待办 | 两条假设已否证（见 issue 评论）：偏轴 ATTA（40 个同类槽位只此一个不画）；离开侧 SPAMAP 第二字为空（aps250142 STIF `2013286686/123` 同样为空但 E3D 照画，首版 `4b38b0c` 已 revert）。APS 239 库扫过：空离开键可画槽位 4 个（2 个 HVAC STIF，E3D 照画；2 个 aps7200 1 mm 吊架段），没有第二个管道样本。需 E3D 侧单件取证 |
 | — | e3d-model#25 | 零长 SCTN 名下的 SJOI J1 E3D 照画，我们整串 skipped | 2 件配不上：`/MDS/SPECIALS/PIPE/3-BAR-2/S1/J1`、`4-BAR-2/S1/J1` | `23714/1` | 已关 | `b94615c`（已推 main）：零长轴取 +Z，两只 J1 exact，不可配对 2 → 0。规则只有 2 个样本，且 DRNS 恰为 +Z，遇到 DRNS ≠ +Z 的零长 SCTN 时复核 |
@@ -33,22 +33,24 @@
 
 | 优先 | Issue | 问题 | 状态 | 下一步 |
 |---|---|---|---|---|
-| P3 | e3d-model#20 | SCTN 端关节在 mode 0 下 NAPP 2 刀还切不切：13 处关节缺 E3D 真值（不在 39 站内） | 待办 | 在 E3D 里取这 13 处的真值 |
+| P3 | e3d-model#20 | SCTN 端关节在 mode 0 下 NAPP 2 刀还切不切：13 处关节缺 E3D 真值 | 进行中 | MDS 三处（7324 / 7329 / 7350 的 `/MDS/FT17/2-V1`）其实在 39 站里，E3D 不切、exact（issue 评论 11-05）。剩 aps7166 `/Endplates-Column-JOINT` 那 10 处：aps7166 不在 APS 的 `/ALL`，要在项目副本里挂库后导出 |
+| P3 | e3d-model#21 遗留 | perp 分支（`\|v44·v38\| ≤ 5e-6`）整支留站位是经验规则：其中 42 件反编译可证（第一次求交分母为 0），另 100 件（VT10 的 `*-BAR-*`、FT04H / FT04V 的 `*-V1`）按反编译应能求交、E3D 仍留站位 | 待办 | 用 `examples/sjoi_gjtorg_probe.rs --all --verbose` 记下 `v44` / `v38` / `v45` 各在哪个坐标系里点乘；活桥断点前不改 `datum.rs` 那一支（笔记 §54.3） |
 | P3 | gen-model#63 余项 | aps7200 `/INNER-KICKPLATE` 差 5.63 mm | 待办 | 在 E3D 里造同形样本 |
 | P3 | gen-model#63 余项 | FN09 楼板 | 待办 | 等 E3D 按修正清单改完后重导、对拍 |
-| P4 | gen-model#62 | 对拍覆盖面扩展：MDS AISC / DIN / SPECIALS、ams8000、APS、ams2510xx 的 FIXING 真值 | 待办 | — |
-| P4 | gen-model#86 | PML 还有约 8000 条程序用到未实现的操作码（1402/112/103/1006/1012/105/1309/108/104） | 待办 | — |
+| P4 | gen-model#62 | 对拍覆盖面扩展：MDS AISC / DIN / SPECIALS、ams8000、APS、ams2510xx 的 FIXING 真值 | 只差 tag | 第 0–5 步都已完成，0.1.43（`cb0fbd8a5`）与 0.1.44（`83aa3c250`）都已上线并抽查对上；缺 `v0.1.43` / `v0.1.44` 两个 tag（最新仍是 `v0.1.38`） |
+| P4 | gen-model#86 | PML 还有 3,676 条程序用到未实现的操作码（1402/112/103/1006/1012/105/1309/108/104；原写「约 8000」是算错，见 issue 更正） | 待办 | 普查（`vendor/e3d-model/examples/pml_opcode_census.rs`）先给每组写全文代表词、按第二词分桶，再逐桶反推 |
 | — | e3d-model#16 | 算法文档（持续更新，不算缺陷） | 持续 | — |
 
 ## 三、生成流程与线上落地
 
 | 优先 | Issue | 问题 | 状态 | 下一步 |
 |---|---|---|---|---|
-| P1 | gen-model#73 | 初始化时，对「模型目标没变」的根沿用旧 vendor 生成的行，所以换了 e3d-model 的几何修复也不会落地 | 待办 | 生成行里记下 vendor 版本，版本不同就重算；修好之前，每次发版都要手动 `model/rebuild` |
-| P2 | gen-model#74 | 一根 failed 让整库 lagging，`model/records` 对整库返回 0 条（ams7330：364 根里 4 根失败） | 待办 | — |
-| P2 | gen-model#78 | release 二进制在范围生成中段 `0xc0000409` 崩溃，每次同一偏移，根因未定 | 待办 | — |
-| P3 | gen-model#72 | 模型侧生成失败没有停跑和退避的记录，和数据批次的 `DATA_BATCH_PARK_AFTER` 不对称 | 待办 | — |
-| P3 | gen-model#34 | 结构连接级联（JOIS/JOIE ↔ CREF）默认关闭，关节负体落地后存在正确性缺口 | 待办（ready-for-human） | 卡在 SCTN 关节端切（SJOI/PJOI 的 `CUTP`/`CUTB`）和真机 SAVEWORK |
+| P1 | gen-model#88 | 批次 worker：7997 `model_only` 停在 `durable_pending`（6772/6772 已 ACK），挡住后面排队的 7998 / 8000 | 进行中 | 卡点不在 durable 栅栏：栅栏在 6772/6772 时已返回，任务卡在其后、`task_end` 之前的 `refresh_equip_derived`（设备派生量增量重算，11-01 `5b6eca135` / `40583bcea` / `d85c2cf61` 起）。它沿用 `durable_pending` 阶段名，没有进度、心跳和期限；整库 `model_only` 时对全部根做子树展开和楼板柱子空间反查。`wipe_reinit` 不走这段，所以能跑完。修法：独立阶段 + 进度、合作式预算、整库走全量重算 |
+| — | gen-model#73 | 初始化时，对「模型目标没变」的根沿用旧 vendor 生成的行，所以换了 e3d-model 的几何修复也不会落地 | 已落地，待线上复核 | `43dd85c5a`（ADR-093）：生成器指纹改读 vendor 构建身份，水位行加库级落款 `model_generator`，落款不一致就整库重排；已在 `origin/publish`。部署后核 `/health.core.e3d_model_build_id`、`dbnum_watermark.model_generator` 全等于当前指纹、启动日志 `reason=model_generator_changed`，再重启不再排，即可关单 |
+| P2 | gen-model#74 | 一根 failed 让整库 lagging，`model/records` 对整库返回 0 条（ams7330：364 根里 4 根失败） | 进行中 | 三点的代码大多已提交：按根回读 durable（`4fa7ef4ab`），初始化冷根幸存件照投影、roots 的 `ready_source` / `durable_ready_total`（`5133bc271`）。剩初始化回执写 `published survivors` 的那段（原在主工作区未提交）和专门单测 |
+| P2 | gen-model#78 | release 二进制在范围生成中段 `0xc0000409` 崩溃，每次同一偏移，根因未定 | 进行中 | Windows 上 `0xc0000409` 是 Rust abort 的统一出口：栈溢出、OOM、panic 后 abort 都落在同一偏移，「同偏移」推不出确定性路径。最可疑的是几何 rayon 池没设栈大小（默认 2 MB），而发布包 `Start-AMS.ps1` 不像其它脚本那样设 `RUST_MIN_STACK`。先补崩溃留痕（VEH + minidump、alloc error hook、release 出 PDB）再复现 |
+| P3 | gen-model#72 | 模型侧生成失败没有停跑和退避的记录，和数据批次的 `DATA_BATCH_PARK_AFTER` 不对称 | 进行中 | ADR-090 D1 已拍板：按根指数退避（30 s 起、翻倍、10 min 封顶），不 park；判死线 `DEAD_ROOT_STREAK = 5` 不动 |
+| P3 | gen-model#34 | 结构连接级联（JOIS/JOIE ↔ CREF）默认关闭，关节负体落地后存在正确性缺口 | 待办（ready-for-human） | ADR-090 D2：先过语料门（在项目副本里改 MDS 关节 FIXING → 被截 GENSEC 所在根进 regen、两态对照、D10 分桶时延不慢）再翻默认。SCTN 端面斜切走的是 SCTN 自己的 `DRNS` / `DRNE`，`CUTB` 只挪关节原点；J-C（无源 PJOI）与 CMFI 空组仍记 skipped |
 
 ## 四、增量更新
 
@@ -64,20 +66,20 @@
 
 | 优先 | Issue | 问题 | 状态 | 下一步 |
 |---|---|---|---|---|
-| — | gen-model#87 | E3D TTY 写完 L3-DONE 后不退出，后端白等满 1200 s | 已修待推 | `b4b6f72`（`feat/rvm-check-inprocess`，本地）：宽限 60 s 后强制收尾，并按成功返回 |
-| P3 | 新开（待建） | QUIT 后 `des.exe -tty` 不退出的根因：实测 5/5 站都会发生，每站固定多等一个宽限期（60 s） | 待办 | 查清根因；或者先调小 `E3D_MCP_DONE_GRACE_SECS` |
-| P3 | gen-model#79 | CI 有四道门长期坏掉，还有一次把账户配额撑爆 | 待办 | — |
+| — | gen-model#87 | E3D TTY 写完 L3-DONE 后不退出，后端白等满 1200 s | 已进 refactor，待部署 | `b4b6f725c` 随合并 `da97d03eb` 在 `origin/refactor`：宽限到期强制收尾，并按成功返回；`publish` 还没有 |
+| P3 | gen-model#87 余项 | QUIT 后 `des.exe -tty` 不退出的根因：实测 5/5 站都会发生，每站固定多等一个宽限期（60 s） | 进行中 | 头号假设：包装宏只有一条顶层 `QUIT`，导出宏停在 `export` 模块里，这一条只退出模块；仓里能自己退出的导出宏收尾都是 `QUIT` / `FINISH` / `FINISH`，登录探针不进模块所以能退 |
+| P3 | gen-model#79 | CI 有四道门长期坏掉，还有一次把账户配额撑爆 | 大部分已修 | `windows-tests.yml` 的触发分支、缓存 key、Save 条件、junction 自检和两个护栏脚本已修（`c566dce03`…`a10272347`，在 `origin/refactor`）；`linux-binary.yml`、`windows-binary.yml` 的 cargo 缓存 key 仍带 `run_id`，每跑一次多存一份 |
 
 ## 六、待推送的本地提交
 
+2026-11-06 晚核对：上面原列的 `b4b6f72`、`87dee7b`、`108f08fd`、`b77ff105` 都已在 `origin/refactor`；e3d-model、e3d-io 的 `main` 与 GitHub 一致。还没推的：
+
 | 仓库 | 分支 | 提交 | 内容 |
 |---|---|---|---|
-| gen-model | `feat/rvm-check-inprocess` | `b4b6f72` | fix(e3d-query): L3-DONE 后宽限到期强制收掉 E3D 会话，按成功返回（#87） |
-| gen-model | `feat/rvm-check-inprocess` | `87dee7b` | feat(rvm-check): 生成与比对改在后端进程内跑 |
-| gen-model | `refactor` | `108f08fd` | docs(plans): 模型问题跟踪清单：#22/#23/#25 关单、#24 证据、kind_differ 残差 |
-| gen-model | `refactor` | `b77ff105` | docs(plans): 跟踪清单补 #26 行、SITE 复测结果与 kind_differ 备注 |
+| gen-model | `refactor`（本地） | `972b06cfa` | feat(mbd): layout_pipe 在 meta.source_version 填入读取版本 |
+| gen-model | `fix/model-open-issues-1106`（worktree `gen-model-fix1106`） | 见分支 | 本清单「三、五」各项的修复，过回归门后并入 `refactor` |
 
-推送之后：gen-model 更新 vendor，过回归门（见 gen-model#63「下一步顺序」）。在 #73 修好之前，线上需要手动跑一次 `model/rebuild`。
+`origin/refactor` 比 `origin/publish` 多 11 个提交（含 #87 的修复）。#73 的修复已在 `publish`，部署了它的环境不必再在换 vendor 后手动 `model/rebuild`。
 
 ## 回归门（每次合入前跑）
 
@@ -88,6 +90,7 @@
 
 ## 最近进展
 
+- 2026-11-06（晚）：按代码与 `rref3` 核对改口：e3d-model#21 已由 `222a0ef` 修好并关闭（P1 几何清零，perp 遗留降为 P3）；#73 已落地（`43dd85c5a`，在 `publish`）；#74 三点大多已提交；#87 已在 `origin/refactor`；#79 只剩两个二进制工作流的缓存 key；#62 只差 tag；新增 #88（卡点在设备派生量重算，不在 durable 栅栏）。修复在 worktree `gen-model-fix1106` 的 `fix/model-open-issues-1106` 分支上做，主工作区的未提交改动不动。
 - 2026-11-06：SITE RVM 复测（干净构建，独立后端 8122）：10 个原失败站里 7 个全过（`24381/46775`、`23714/1`、`24381/535`、`23705/1`、`23713/2343`、`24381/177373`、以及 `24381/101405` 只剩 #24 那 1 件）；`15516/2`、`23734/1` 各剩 3 件 unkeyable（新开 e3d-model#26）；`23705/289` 因依赖未提交的 e3d-io / e3d-model 改动而出现 8 只 Z 偏移。
 - 2026-11-06：#26 定位到宿主 SCTN 的 `RREF` 判据，`5775ecb` 推 main 并关闭；39 站零回归，6 件 unkeyable → exact。
 - 2026-11-06：#27 查明为验证脚本用法错（两个 `--project-dir` 导致 `acp7000_0001`/`ams7000_0001` 撞号、库 7000/7600/6000 全不外交），非代码缺陷，已关。`b39_run.ps1` 改为「主项目目录 + `--main-project-dir`」走 `adopt_foreign_dbs`。39 站全量重跑：`off` 162 → 0、`only_baseline` 5441 → 0、`exact` 191946 → 199180，两侧都有的键零变差。新基线 `b39/rref3`。
