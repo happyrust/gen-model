@@ -45,11 +45,11 @@
 
 | 优先 | Issue | 问题 | 状态 | 下一步 |
 |---|---|---|---|---|
-| P1 | gen-model#88 | 批次 worker：7997 `model_only` 停在 `durable_pending`（6772/6772 已 ACK），挡住后面排队的 7998 / 8000 | 已修待推 | 卡点是栅栏之后的 `refresh_equip_derived`。已改成独立阶段 `equip_derived`、5 分钟预算、整库或根数 ≥ 2000 跳过空间反查、节点按 1000 分块，`/health.equip_derived` 报推迟数。全库单测 2844 通过。没在 7997 的沙箱库上做 A/B，生产 8022 没动 |
-| — | gen-model#73 | 初始化时，对「模型目标没变」的根沿用旧 vendor 生成的行，所以换了 e3d-model 的几何修复也不会落地 | 已落地，待线上复核 | `43dd85c5a`（ADR-093）：生成器指纹改读 vendor 构建身份，水位行加库级落款 `model_generator`，落款不一致就整库重排；已在 `origin/publish`。部署后核 `/health.core.e3d_model_build_id`、`dbnum_watermark.model_generator` 全等于当前指纹、启动日志 `reason=model_generator_changed`，再重启不再排，即可关单 |
-| P2 | gen-model#74 | 一根 failed 让整库 lagging，`model/records` 对整库返回 0 条（ams7330：364 根里 4 根失败） | 已修待推 | 按根回读和 `ready_source` 已在 refactor。初始化回执对 `projection.partial` 的最后一条 `Generated` 写成 `published survivors; {reason}`，单测 `published_survivors_are_named_on_the_generated_unit_only` 在全库 2844 里通过。没在沙箱复现「一根失败」，也没关 GitHub |
+| P1 | gen-model#88 | 批次 worker：7997 `model_only` 停在 `durable_pending`（6772/6772 已 ACK），挡住后面排队的 7998 / 8000 | 已修待推（本机已验） | 卡点是栅栏之后的 `refresh_equip_derived`。已改成独立阶段 `equip_derived`、5 分钟预算、整库或根数 ≥ 2000 跳过空间反查、节点按 1000 分块，`/health.equip_derived` 报推迟数。全库单测 2844 通过。2026-11-07 本机 8022 换成本分支二进制，#73 触发 7997 整库重排：6772/6772，`durable_pending` 15.5 s，`equip_derived` 115.8 s（`library_scale`，推迟 0），8 分 25 秒收尾，7998、8000 随后出队 |
+| — | gen-model#73 | 初始化时，对「模型目标没变」的根沿用旧 vendor 生成的行，所以换了 e3d-model 的几何修复也不会落地 | 本机已验，线上未部署 | `43dd85c5a`（ADR-093）：生成器指纹改读 vendor 构建身份，水位行加库级落款 `model_generator`，落款不一致就整库重排；在 `origin/publish` 分支上，但 11-05 那次 publish 构建失败（CI 从 `ci/gen-model-linux-20260918` 拉的 e3d-model 只到 `b9324e0`，缺 `e3d_model::pipeline::Stop`），最后一次成功部署仍是 10-26 的 `83aa3c250`，不含本修复。2026-11-07 本机 8022 验过：首启日志点名 7997/7998/8000 `reason=model_generator_changed`，三库 `dbnum_watermark.model_generator` 改为新指纹，再重启 `generator_stale_dbnums` 为空、不再排。同日补漏：指纹原先只含 e3d-model，现加 e3d-io、e3d-attlib 两段（未提交），本机同样验过首启重排、再启不排 |
+| P2 | gen-model#74 | 一根 failed 让整库 lagging，`model/records` 对整库返回 0 条（ams7330：364 根里 4 根失败） | 已修待推（本机已验） | 按根回读和 `ready_source` 已在 refactor。初始化回执对 `projection.partial` 的最后一条 `Generated` 写成 `published survivors; {reason}`，单测 `published_survivors_are_named_on_the_generated_unit_only` 在全库 2844 里通过。2026-11-07 本机 8022 用 `AIOS_TEST_FAIL_ROOTS=24384/2529` 让 8000 整库重建里一根整根失败：任务 `partial`，其余 953 根就绪，对照根 `24384/2541` 照常读到 6 条，失败根继续给出库里旧的 8 条；进程内该库判 lagging（追赶 1 根），去掉钩子重启后三库 `in_sync`、8000 `durable_ready_total` 954/954。钩子不接初始化路径，7330 式「部分件失败」只有单测，没有本机复现。没关 GitHub |
 | P2 | gen-model#78 | release 二进制在范围生成中段 `0xc0000409` 崩溃，每次同一偏移，根因未定 | 已修待推 | 几何池和主 rayon 池 64MB 栈，`the_geometry_pool_runs_on_large_stacks` 通过。崩溃笔记记当前根、阶段、工作集；分配失败、栈溢出、访问违例和 `SIGABRT` 写 `logs/crash-notes.log`。发布脚本留行号 PDB，`Start-AMS` 默认 `RUST_MIN_STACK` 128MB，并有 `-EnableCrashDumps`。没在生产进程上复现 |
-| P3 | gen-model#72 | 模型侧生成失败没有停跑和退避的记录，和数据批次的 `DATA_BATCH_PARK_AFTER` 不对称 | 已修待推 | 按根 30 秒起、翻倍、10 分钟封顶，只活在进程里；退避中的根仍挡水位，本轮不生成、不增加尝试、不把退避再往后推。新的 `source_end_sesno` 立刻复活。`/health.model_root_backoff` 报样本。`backing_off_roots_skip_generation_without_pushing_their_backoff_further` 在全库 2844 里通过。ADR-090 正文不在这个 worktree，追记写在 changelog |
+| P3 | gen-model#72 | 模型侧生成失败没有停跑和退避的记录，和数据批次的 `DATA_BATCH_PARK_AFTER` 不对称 | 已修待推 | 按根 30 秒起、翻倍、10 分钟封顶，只活在进程里；退避中的根仍挡水位，本轮不生成、不增加尝试、不把退避再往后推。新的 `source_end_sesno` 立刻复活。`/health.model_root_backoff` 报样本。`backing_off_roots_skip_generation_without_pushing_their_backoff_further` 在全库 2844 里通过。ADR-090 正文不在这个 worktree，追记写在 changelog。2026-11-07 本机注入一根失败后观察 7 分钟：没有新窗口时这根不会被自动重试，所以退避只在第一次失败后的 30 秒里出现在 `/health.model_root_backoff`；重复尝试下的退避节奏只有单测 |
 | P3 | gen-model#34 | 结构连接级联（JOIS/JOIE ↔ CREF）默认关闭，关节负体落地后存在正确性缺口 | 待办（默认不翻） | 同库 FIXING ↔ GENSEC、同库 SJOI ↔ SCTN 在开关关着时已经由 e3d-model `plan_update` 把对端根放进 regen（`structural_connection.rs` 文件头）。开关还补得上的是 PJOI/SUBJ → SCTN、没有标架样本的 SJOI、`CMPF.CFRA`，以及跨库交接。语料目标已定位、还没改位：SCTN `=23734/3557`（`/MDS/FT54A/4-BAR-2`）的 JOIE 是 PJOI `=23713/5493`（PNODE `=23713/5492` 的唯一成员），CREF 指回这根梁，跨库 7329↔7350。短名 `/MDS/FT54A` 和 `COLL ALL SJOI` 会让 des 0xC0000005；按 refno 和成员路径查询正常。没有 SAVEWORK，默认仍是 false（`options.rs`、`DbOption.toml`、ADR-080、CONTEXT）。不补 NGMR→GENSEC 边 |
 
 ## 四、增量更新
@@ -79,7 +79,7 @@
 | gen-model | `refactor`（本地） | `972b06cfa` | feat(mbd): layout_pipe 在 meta.source_version 填入读取版本 |
 | gen-model | `fix/model-open-issues-1106`（worktree `gen-model-fix1106`） | 见分支 | 本清单「三、五」各项的修复，过回归门后并入 `refactor` |
 
-`origin/refactor` 比 `origin/publish` 多 11 个提交（含 #87 的修复）。#73 的修复已在 `publish`，部署了它的环境不必再在换 vendor 后手动 `model/rebuild`。
+`origin/refactor` 比 `origin/publish` 多 11 个提交（含 #87 的修复）。#73 的修复在 `publish` 分支上，但 11-05 的 publish 构建失败，生产仍是 10-26 的 `83aa3c250`；而且 e3d-model 仓里已经没有 CI 默认拉的 `ci/gen-model-linux-20260918`，再推 publish 会在拉 vendor 时失败。还没推的 vendor 提交：e3d-model `022132c`、`58955ad`、`1e56a42`，e3d-io `b6ff292`、`74bd1ee`。
 
 ## 回归门（每次合入前跑）
 
@@ -90,6 +90,8 @@
 
 ## 最近进展
 
+- 2026-11-07（续）：生成器指纹加 `e3d-io:`、`e3d-attlib:` 两段（`build.rs` `vendor_identity`，ADR-093 追记），单改 e3d-io 的几何修复也会触发整库重排；12 个相关单测通过，本机 8022 首启三库按 `model_generator_changed` 重排（约 10 分钟），再重启不排。8022 现从 `gen-model-fix1106\target\_run\aios-database.exe` 运行，重编不再撞文件锁。#74 本机验收见三节。publish 构建修法要先定 vendor 分支口径，未改 workflow。
+- 2026-11-07：本机 8022 换成本分支 `668ddf89d` 的 debug 二进制（e3d-model `1e56a42`；工作目录、参数、`AIOS_STORE_MODE=rocksdb` 同前，另加 `AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS=1`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=60000`）。#73 首启排三库整库重排，#88 那段在 7997 上 115.8 s 走完，三库约 10 分钟回到 `model_ready`，内存峰值约 1.9 GB；再重启不再排。抽查：#22 的 `24381/129910`、`129911` 两只 RTOR 在库里有几何，网页 `show_refno=24381/129625` 能看到；#24 的 `24381/106125` 仍是 15 条管段记录（含 TUBI 9）；#23 的 `24381/47065` 前后都是 13 条构件记录，零径占位只进 RVM，不进网页用的模型记录。证据在 `target/_verify-1107/`（不入库）。旧二进制（主工作区 `target/debug`，e3d-model `6f2b68a`）若再起，会因落款不一致把三库按旧几何重排，且不带 #88 的修复。
 - 2026-11-06（夜）：e3d-model release：lib 463 通过、5 忽略；`attribute_reads_guard` 3、`ancestor_reads_guard` 5、`reference_reads_guard` 2、`noun_coverage` 8，全过。#86 普查接上 1012 后两组消失（+62 读通）。#34 默认保持关闭，语料门没跑。
 - 2026-11-06（夜）：`revert1106` 39 站（撤回偏轴门的 `gen_ams`）复现 #27 的总数：exact 199180、off 0、kind_differ 0、only_baseline 0、only_generated 1（#24）。约 1240 条只在基准是撞号旧账，勾销。#21 探针：走完求交的 perp 关节局部点乘等于世界点乘，留站位与 E3D 一致，不改 `datum.rs:717`。#20 端板：`=23550/1` 导出和 `dblist()` 都崩，7166/7505 不在 `/ALL`。
 - 2026-11-06（夜）：`23705/289` 用已提交的 POD / `void_negatives` 重导，32 对全 exact，8 只 Z 偏移没回来。#20 的三只 `/MDS/FT17/2-V1` 重新导出也对上（exact，0 mm）；`/Endplates-Column-JOINT` 在 `aps7505`，按名字进去 des 崩溃。
