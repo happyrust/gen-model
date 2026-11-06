@@ -20,6 +20,8 @@ pub mod civil_faces;
 pub mod equipment_query;
 pub mod host;
 pub mod object;
+pub mod support_geometry;
+pub mod support_query;
 
 use std::sync::Arc;
 
