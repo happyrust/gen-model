@@ -126,8 +126,10 @@ fn pipe_error_response(error: BranchQueryError) -> Result<Response, ApiError> {
 ///
 /// - 管道两类与 `/pipe` 出同一份图元，只多数据包层的 `annotation_type` / `subject`（`/pipe` 是管道的别名，
 ///   输出不变）；选中管件 / ATTA 时归属对象是所属 BRAN，`input_refno` 原样回填。
-/// - 支架 / 土建 / 设备：宿主读取器落地前只给求解器归属视图，`meta.source_version` 照填；求解器还是占位的类型只有
-///   信封 + 一条 `layout.not_implemented`（Info），已落地的（设备）按缺数据出声。
+/// - 设备：宿主读取器（`crate::mbd::equipment_query`：原点 / 朝向 / 包围盒 / ELCONN / 管口 P1 / 找墙候选）出真视图，
+///   设备名、坐标块、偏转角、定位尺寸与墙板标签由求解器出；读不到的部分是 `data.view_issue` 告警。
+/// - 支架 / 土建：宿主读取器落地前只给求解器归属视图，信封 + 一条 `layout.not_implemented`（Info）。
+///   `meta.source_version` 各类型照填。
 ///
 /// 状态：`400 bad_request`（refno 写法不对）/ `404 not_found`（不存在）/ `422 not_annotatable`（存在但不是任何
 /// 标注的对象：PIPE / ZONE / SITE、CWALL、支架区外的 STRU、风管 BRAN…，`detail` 带 `refno` / `noun` / `reason`）/

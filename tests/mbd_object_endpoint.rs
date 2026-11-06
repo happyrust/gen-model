@@ -4,9 +4,10 @@
 //! `web_service::mbd::respond_object` / `respond`，只把「从 MDB 视图开 DbSet」换成 `common/mbd_db.rs` 的 AMS 优先
 //! 链式开库。判型规则取本进程的 `[mbd_type_rules]`（仓根 `DbOption.toml` 没写这一段就是缺省表）。
 //!
-//! 200：BRAN（与 `/pipe` 同一份图元、多出 `annotation_type` / `subject`）、EQUI / 支架 STRU（含从 REST 配对过去）/
-//! STWALL（信封；求解器还是占位的类型带 `layout.not_implemented`）；422 `not_annotatable`（PIPE）；400（refno 写法
-//! 不对）；404（不存在）。样本库或模板目录缺席整体跳过。
+//! 200：BRAN（与 `/pipe` 同一份图元、多出 `annotation_type` / `subject`）、EQUI（宿主读取器出真视图：设备名 + 坐标块，
+//! 找墙结果打印出来对账）/ 支架 STRU（含从 REST 配对过去）/ STWALL（信封；求解器还是占位的类型带
+//! `layout.not_implemented`）；422 `not_annotatable`（PIPE）；400（refno 写法不对）；404（不存在）。样本库或模板目录
+//! 缺席整体跳过。
 
 #[path = "common/mbd_db.rs"]
 mod mbd_db;
@@ -190,6 +191,32 @@ async fn object_endpoint_classifies_and_maps_errors() {
         "24383_76416",
         "EQUI",
         7999,
+    );
+    // 设备读取器（M3）：真视图出设备名 + 坐标块，不再只有 equipment.base_point_missing；找墙结果（定位尺寸、墙 / 板
+    // 标签或 locate.* 问题）打印出来对账。
+    let functions: Vec<&str> = equi["primitives"]
+        .as_array()
+        .expect("primitives")
+        .iter()
+        .map(|primitive| primitive["function"].as_str().unwrap_or(""))
+        .collect();
+    let rules: Vec<&str> = equi["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|issue| issue["rule_id"].as_str())
+        .collect();
+    eprintln!(
+        "EQUI 24383_76416: notes {} functions {functions:?} issues {rules:?}",
+        equi["meta"]["notes"]
+    );
+    assert!(
+        functions.contains(&"设备信息") && functions.contains(&"设备坐标"),
+        "{functions:?}"
+    );
+    assert!(
+        !rules.contains(&"equipment.base_point_missing"),
+        "{rules:?}"
     );
 
     let (status, stru) = get_json(&client, format!("{base}/api/mbd/v2/object/24383_69033")).await;

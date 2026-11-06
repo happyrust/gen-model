@@ -412,6 +412,11 @@ impl Aabb {
         point.cmpge(self.min - DVec3::splat(tolerance)).all()
             && point.cmple(self.max + DVec3::splat(tolerance)).all()
     }
+
+    /// 两盒相交（贴边算相交）。
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.min.cmple(other.max).all() && self.max.cmpge(other.min).all()
+    }
 }
 
 /// [`spamap_candidates`] 的一条：元素、类型、SPAMAP 记的世界包围盒。
@@ -474,8 +479,9 @@ struct SpamapKey {
     modified: Option<SystemTime>,
 }
 
-/// 缓存几张表（库文件 + 会话 + 文件身份为键）。7997 整表 5.6 万条、解码后约 3 MB。
-const SPAMAP_CACHE_SLOTS: usize = 8;
+/// 缓存几张表（库文件 + 会话 + 文件身份为键）。找墙要搜 `DbSet` 里全部 DESI 库
+/// （[`super::civil_faces::locate_candidates`]），槽位按一座 MDB 的设计库都放得下给；7997 整表 5.6 万条、解码后约 3 MB。
+const SPAMAP_CACHE_SLOTS: usize = 64;
 
 type SpamapSlots = Vec<(SpamapKey, Option<Arc<SpamapIndex>>)>;
 
