@@ -5277,16 +5277,14 @@ mod tests {
             Some(NoModelTier::MetadataOnly)
         );
         assert!(change_is_metadata_only(&diff(&["NAME"])));
-        // S6 新档：字典 DCHC=0 且生成器不读的名字（`DUTY`；`HREF` 手写表登记在级联侧也一样）放行，
-        // 记新档；与老名单混合也是新档。
+        // S6 新档：字典 DCHC=0 且生成器不读的名字（`DUTY`）放行，记新档；与老名单混合也是新档。
+        // `HREF` 曾在这一档（手写表登记在级联侧），e3d-model `route.rs` 起按它认共享 TEE 的穿管分支，
+        // 第二票没了，2026-11-06 起不再放行。
         assert_eq!(
             change_metadata_tier(&diff(&["DUTY"])),
             Some(NoModelTier::UnreadAttribute)
         );
-        assert_eq!(
-            change_metadata_tier(&diff(&["HREF"])),
-            Some(NoModelTier::UnreadAttribute)
-        );
+        assert_eq!(change_metadata_tier(&diff(&["HREF"])), None);
         assert_eq!(
             change_metadata_tier(&diff(&["DUTY", "NAME"])),
             Some(NoModelTier::UnreadAttribute)

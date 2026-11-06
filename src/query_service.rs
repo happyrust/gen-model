@@ -1192,9 +1192,9 @@ mod tests {
         assert_eq!(response.result["generator_reads"], true);
     }
 
-    /// 预览的 `action` 与规划器的元数据门同口径（S6 两票）：`NAME` 与新档 `HREF`（手写表登记成级联、
-    /// 字典 DCHC=0 且生成器不读）都是 skip；戳 `CACHID` 2026-09-17 Q6 起第一票由戳表给，也是 skip；
-    /// 读取集合里的 `DIR` 照旧 regen。
+    /// 预览的 `action` 与规划器的元数据门同口径（S6 两票）：`NAME` 与新档 `DUTY`（字典 DCHC=0 且生成器不读）
+    /// 都是 skip；戳 `CACHID` 2026-09-17 Q6 起第一票由戳表给，也是 skip；读取集合里的 `DIR` 照旧 regen。
+    /// `HREF` 2026-11-06 起进了读取集合（e3d-model `route.rs` 按它认共享 TEE 的穿管分支），改判 regen。
     #[tokio::test]
     async fn the_impact_preview_skips_exactly_what_the_metadata_gate_admits() {
         async fn action(attribute: &str) -> (String, String, bool) {
@@ -1213,8 +1213,12 @@ mod tests {
             ("skip".into(), "data_only".into(), false)
         );
         assert_eq!(
+            action("DUTY").await,
+            ("skip".into(), "unknown".into(), false)
+        );
+        assert_eq!(
             action("HREF").await,
-            ("skip".into(), "dependency_cascade".into(), false)
+            ("regen".into(), "dependency_cascade".into(), true)
         );
         assert_eq!(
             action("CACHID").await,
