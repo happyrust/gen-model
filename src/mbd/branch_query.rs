@@ -396,6 +396,7 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             name,
             stext,
             connection,
+            ..BranchMember::default()
         });
 
         if station.is_some() {
@@ -524,6 +525,7 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
         tail_connection,
         split_members: None,
         issues,
+        ..BranchQueryResult::default()
     }, diameters, source_version })
 }
 
@@ -758,6 +760,7 @@ fn push_implied_tube(
         name: None,
         stext: None,
         connection: None,
+        ..BranchMember::default()
     });
 }
 
