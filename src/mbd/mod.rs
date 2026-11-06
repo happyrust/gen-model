@@ -9,8 +9,14 @@
 //!
 //! 坐标：E3D 库文件里是 mm（源坐标系），契约以 `geometry_space = source_mm` +
 //! [`SOURCE_TO_DESIGN_MM_TO_M`]（列主序对角缩放）交给前端换成设计坐标米。
+//!
+//! 全标注类型（plant3d-web#103 M7）：[`object`] 按 `[mbd_type_rules]` 把被选中的元素判成九种标注类型之一、
+//! 取归属对象，再走 plant-mbd 统一入口；[`host`] 是各类型读取器共用的读法（属主链、可选属性、世界坐标、
+//! 目录参数、SPAMAP 空间候选）。
 
 pub mod branch_query;
+pub mod host;
+pub mod object;
 
 use std::sync::Arc;
 
@@ -22,6 +28,10 @@ use plant_mbd::{
 };
 
 pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
+pub use object::{
+    Classified, MbdTypeRules, ObjectQueryError, SubjectKind, classify, classify_with,
+    layout_classified, layout_object_refno, support_parts,
+};
 
 /// `source_mm → design_m`：16 元素**列主序**（THREE `Matrix4.fromArray` 布局，平移在 12–14）。
 /// 对角矩阵转置不变，顺序约定由前端 `fixtures/mbd-v2/source-to-design-translation.json` 钉死。

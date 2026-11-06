@@ -656,6 +656,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
     #[serde(default)]
+    mbd_type_rules: Option<MbdTypeRulesConfig>,
+    #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
     project_search_paths: Option<Vec<String>>,
@@ -2264,6 +2266,145 @@ fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec
         default_spec_value_rules()
     } else {
         rules
+    }
+}
+
+/// `DbOption.toml` 的 `[mbd_type_rules]`：MBD 统一端点 `GET /api/mbd/v2/object/{refno}` 判标注类型的规则
+/// （plant3d-web#103 M7，判型逻辑在 `crate::mbd::object`）。缺省见 [`default_mbd_type_rules`]。
+///
+/// 判定分两步。先按模型结构认出对象族（`subject`）与归属对象，这一步不看配置以外的名字：BRAN 及其成员 →
+/// `pipe`；SUPPO、或「支架区」里 ZONE 一级的 STRU / REST 及其下属 → `support`；EQUI 及其 NOZZ / ELCONN /
+/// 图元 → `equipment`；WALL / GWALL / STWALL / FLOOR 及其下的 FITT / 负体 → `civil`。支架区 = ZONE 的 NAME
+/// 含 `support_zone_keywords` 之一，或 PURP 属于 `support_zone_purposes`；ZONE 一级的 STRU / REST 名字含
+/// `support_exclude_keywords` 之一的不算支架（PML 支架窗体对名字含 `CIV` 的 STRU 报「Select Supp pls」）。
+/// 再按 `rules` 的顺序取第一条 `subject` 相同、`site_keywords` 与 `zone_keywords` 都命中的规则（各自为空 =
+/// 不限；非空 = 属主链上 SITE / ZONE 的 NAME 含其中之一），它的 `annotation_type`（plant-mbd
+/// `AnnotationType` 的 wire 值）就是结果；一条都不中 = 不可标注。关键字比较都不分大小写，中文原样比。
+///
+/// ```toml
+/// [mbd_type_rules]
+/// support_zone_keywords = ["SUPP"]
+/// support_zone_purposes = ["SUPP"]
+/// support_exclude_keywords = ["CIV"]
+///
+/// [[mbd_type_rules.rules]]
+/// subject = "support"
+/// site_keywords = ["INST"]
+/// zone_keywords = ["RACK"]
+/// annotation_type = "em9_inst_supp"
+/// ```
+///
+/// 段里没写的键取缺省。`rules` 写成空表等于没写（回落缺省规则表）；三张关键字表写成空表就是真的空
+/// （例如只认 PURP、不认名字）。`subject` / `annotation_type` 用字符串而不是枚举：认不出的那一条在
+/// 判型模块里跳过并点名，不会让整张扩展表跟着读坏（见 [`read_ext_fields`]）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MbdTypeRulesConfig {
+    pub support_zone_keywords: Vec<String>,
+    pub support_zone_purposes: Vec<String>,
+    pub support_exclude_keywords: Vec<String>,
+    pub rules: Vec<MbdTypeRuleConfig>,
+}
+
+impl Default for MbdTypeRulesConfig {
+    fn default() -> Self {
+        default_mbd_type_rules()
+    }
+}
+
+/// `[[mbd_type_rules.rules]]` 的一条。`subject` 是 `pipe` / `support` / `equipment` / `civil`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MbdTypeRuleConfig {
+    pub subject: String,
+    #[serde(default)]
+    pub site_keywords: Vec<String>,
+    #[serde(default)]
+    pub zone_keywords: Vec<String>,
+    pub annotation_type: String,
+}
+
+/// 缺省的 MBD 标注类型规则 = PML `function/export/getmbdtype.pmlfnc` 加各窗体 `addonece` 的取对象口径。
+///
+/// 规则只在同一 `subject` 内比先后。getmbdtype 先判「ZONE 名含 MTGD / COMM / CASE / LIGHT → EQUI」（L16-27），
+/// 那一档在这里只给设备生效、出 EM4（PML 连 SITE 名都不看）；HVAC 属主的 BRAN 在结构判那一步就挡掉了，
+/// 管道只剩 INST → EM9、其余 EM4（L36-44 的 PIPE / ELEC / 都不含）；支架按 L48-61 的 INST + 属主 ZONE 名含
+/// RACK；设备的 HVACEQUI / ELECEQUI（L71-74）这一版窗体都没有，按 EM4 设备；getmbdtype 没有土建分支（L80-90
+/// 整段注释掉），按窗体 markArchForm / markCivilForm 以 SITE 名含 ARCH 分。
+pub fn default_mbd_type_rules() -> MbdTypeRulesConfig {
+    let words = |items: &[&str]| {
+        items
+            .iter()
+            .map(|word| word.to_string())
+            .collect::<Vec<_>>()
+    };
+    let rule =
+        |subject: &str, site: &[&str], zone: &[&str], annotation_type: &str| MbdTypeRuleConfig {
+            subject: subject.to_string(),
+            site_keywords: words(site),
+            zone_keywords: words(zone),
+            annotation_type: annotation_type.to_string(),
+        };
+    MbdTypeRulesConfig {
+        support_zone_keywords: words(&["SUPP"]),
+        support_zone_purposes: words(&["SUPP"]),
+        support_exclude_keywords: words(&["CIV"]),
+        rules: vec![
+            rule(
+                "equipment",
+                &[],
+                &["MTGD", "COMM", "CASE", "LIGHT"],
+                "em4_equi",
+            ),
+            rule("pipe", &["INST"], &[], "em9_pipe"),
+            rule("pipe", &[], &[], "em4_pipe"),
+            rule("support", &["INST"], &["RACK"], "em9_inst_supp"),
+            rule("support", &["INST"], &[], "em9_pipe_supp"),
+            rule("support", &[], &[], "em4_supp"),
+            rule("equipment", &["INST"], &[], "em9_equi"),
+            rule("equipment", &[], &[], "em4_equi"),
+            rule("civil", &["ARCH"], &[], "arch"),
+            rule("civil", &[], &[], "civil"),
+        ],
+    }
+}
+
+/// 生效的 MBD 标注类型规则（[`effective_mbd_type_rules`] 作用在配置上）。
+pub fn mbd_type_rules() -> MbdTypeRulesConfig {
+    effective_mbd_type_rules(load_ext_fields().mbd_type_rules.as_ref())
+}
+
+/// 没写这一段取缺省；写了的：关键字去首尾空白、丢空串，`subject` / `annotation_type` 去空白转小写，
+/// `rules` 为空回落缺省规则表。认不认得出 `subject` / `annotation_type` 由判型模块判。
+pub fn effective_mbd_type_rules(configured: Option<&MbdTypeRulesConfig>) -> MbdTypeRulesConfig {
+    let Some(configured) = configured else {
+        return default_mbd_type_rules();
+    };
+    let clean = |words: &[String]| {
+        words
+            .iter()
+            .map(|word| word.trim().to_string())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let rules = if configured.rules.is_empty() {
+        default_mbd_type_rules().rules
+    } else {
+        configured
+            .rules
+            .iter()
+            .map(|rule| MbdTypeRuleConfig {
+                subject: rule.subject.trim().to_ascii_lowercase(),
+                site_keywords: clean(&rule.site_keywords),
+                zone_keywords: clean(&rule.zone_keywords),
+                annotation_type: rule.annotation_type.trim().to_ascii_lowercase(),
+            })
+            .collect()
+    };
+    MbdTypeRulesConfig {
+        support_zone_keywords: clean(&configured.support_zone_keywords),
+        support_zone_purposes: clean(&configured.support_zone_purposes),
+        support_exclude_keywords: clean(&configured.support_exclude_keywords),
+        rules,
     }
 }
 
