@@ -14,10 +14,6 @@ const BAKED_MESH_DOMAIN: &[u8] = b"e3d-model/baked-mesh/v2\0";
 const TESSELLATION_POLICY_VERSION: &[u8] = b"e3d-model-tessellation/v1\0";
 static TEMP_MESH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// 显示用粗精度副本的子目录（`meshes_dir()/lod1/{L0 mesh_id}.mesh`）。文件名借 L0 的键，
-/// 内容不是那个键的摘要，所以这里的文件不过 [`verify_content_addressed_mesh`]。
-pub const LOD1_DIR: &str = "lod1";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshWrite {
     Written,
@@ -40,6 +36,13 @@ pub struct E3dPersistReport {
     pub mesh_written: usize,
     /// 盘上内容与身份不符、本次原子重写了的 mesh 数；每一个都另有一行 warn 点名。
     pub mesh_repaired: usize,
+    /// 显示用粗网格（`mesh_lod1`，`AIOS_MESH_LOD1`）的账：新写 / 盘上已有 / 不值得（含此前判过的）/
+    /// 粗精度快照里对不上 / 失败。关着时全零。只是显示增强的账，不参与任何成败判定。
+    pub lod1_written: usize,
+    pub lod1_reused: usize,
+    pub lod1_skipped: usize,
+    pub lod1_unmatched: usize,
+    pub lod1_failed: usize,
     #[serde(skip)]
     pub(crate) mesh_ids: std::collections::BTreeSet<String>,
     /// 本次生成读的是哪一版设计文件（一次调用一个 dbnum、一个会话）。读透写行时钉的
@@ -66,6 +69,18 @@ pub struct E3dPersistReport {
     /// `pe` / `ATT_*` 是编排层 `model_refresh::generate_roots_report` 在发布模型行之前做的事。
     #[serde(skip)]
     pub visited_by_root: std::collections::HashMap<RefNo, Vec<RefNo>>,
+}
+
+impl E3dPersistReport {
+    /// 把一根的粗网格账并进来。`known_skipped`（此前判过不值得）与 `skipped`（这次判的）对报表
+    /// 读者是同一件事——这个键没有粗网格——所以合成一格。
+    pub(crate) fn note_lod1(&mut self, bake: crate::fast_model::mesh_lod1::Lod1Bake) {
+        self.lod1_written += bake.written;
+        self.lod1_reused += bake.reused;
+        self.lod1_skipped += bake.skipped + bake.known_skipped;
+        self.lod1_unmatched += bake.unmatched;
+        self.lod1_failed += bake.failed;
+    }
 }
 
 /// 网格键（`geo_hash`）的合法字符集：内容寻址键只由数字、字母与下划线组成，长度有上限。

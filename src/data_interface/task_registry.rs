@@ -31,6 +31,8 @@ pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
 pub const TASK_KIND_ROOM_REBUILD: &str = "room_rebuild";
 /// 页面发起的一次 RVM 对拍：本程序生成、E3D TTY 导出、再比对。只读，不进增量账本。
 pub const TASK_KIND_RVM_CHECK: &str = "rvm_check";
+/// 显示用粗网格回填（ADR-096，`POST /api/v1/mesh-lod1/backfill`）：按库枚举交付单元根、只写 `lod1-v1/`。
+pub const TASK_KIND_MESH_LOD1_BACKFILL: &str = "mesh_lod1_backfill";
 // 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
 // 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
 // 从此恒回空列表（spec §4.7.2）。
@@ -741,6 +743,25 @@ impl TaskRegistry {
         entry.started_at = Some(now.clone());
         entry.units_done = Some(0);
         entry.total_units = Some(4);
+        entry.current_stage = Some("queued".to_string());
+        entry.stage_started_at = Some(now);
+        entry.detail = Some(detail);
+        self.insert_entry(entry);
+    }
+
+    /// 一次粗网格回填（ADR-096）。`total_units` 等枚举完根再由 [`Self::set_unit_totals`] 补；
+    /// 一次可以跨几个库，`detail` 里记库号清单，`dbnum` 留空。
+    pub fn insert_running_mesh_lod1_backfill(
+        &self,
+        task_id: &str,
+        project: &str,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        let mut entry = TaskEntry::blank(task_id, TASK_KIND_MESH_LOD1_BACKFILL, project);
+        entry.state = TaskState::Running;
+        entry.started_at = Some(now.clone());
+        entry.units_done = Some(0);
         entry.current_stage = Some("queued".to_string());
         entry.stage_started_at = Some(now);
         entry.detail = Some(detail);

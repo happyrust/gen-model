@@ -9,6 +9,8 @@
 pub mod events;
 pub(crate) mod handlers;
 mod rvm_check;
+/// 显示用粗网格回填（ADR-096）：`/api/v1/mesh-lod1/backfill`。
+mod mesh_lod1;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
@@ -565,6 +567,11 @@ async fn serve_with_ready(
         .route("/api/v1/rvm-check/preflight", post(rvm_check::preflight))
         .route("/api/v1/rvm-check/runs", post(rvm_check::start_run))
         .route("/api/v1/rvm-check/runs/{id}", get(rvm_check::get_run))
+        .route("/api/v1/mesh-lod1/backfill", post(mesh_lod1::backfill_start))
+        .route(
+            "/api/v1/mesh-lod1/backfill/{id}",
+            get(mesh_lod1::backfill_get),
+        )
         .route(
             "/api/v1/rvm-check/runs/{id}/files/{name}",
             get(rvm_check::get_file),

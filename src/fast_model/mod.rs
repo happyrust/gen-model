@@ -1,5 +1,7 @@
 pub mod e3d_mesh_store;
 pub mod e3d_model_service;
+/// 显示用粗精度网格（`lod1-v1/`，ADR-096）：按 L0 键命名的显示增强副本，标准图元按键预生成。
+pub mod mesh_lod1;
 /// 生成器身份（GitHub #73）：逐根回执的 `generator_fingerprint` 与水位行库级落款 `model_generator` 共用的那一串。
 pub mod generator_identity;
 #[cfg(feature = "legacy_model")]

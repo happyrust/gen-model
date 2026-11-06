@@ -1276,6 +1276,16 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 - `1` / `2` / `3` 是仓内三份单位几何（单位盒 / 单位圆柱 / 单位球）。客户端本地造这三份
   几何时，参数须与它们对齐，见 `web_service::mesh_glb` 的
   `repository_unit_meshes_convert_end_to_end`（`cargo test -- --nocapture` 打印包围盒）。
+- **`?lod=`（显示用粗网格，ADR-096，2026-11-06）**：`lod=0` / 缺省 = 上面的原网格；`lod=1` = 同一个键的
+  **显示用粗精度副本**，读 `meshes_dir()/lod1-v1/{geo_hash}.mesh`（`fast_model::mesh_lod1`；目录名带策略版本，
+  容差 / 比例 / 门槛一变就换目录）。两种形态（`.mesh` / `.glb`）都认。粗网格是在弦高容差下限 4 mm 下重求的
+  同一件几何，至少比原网格少 30% 三角形才存在；只有原网格 ≥ 256 三角形的件才会有（plant3d-web 的
+  `DTX_LOD1_MIN_SOURCE_TRIANGLES` 同值，它据此决定要不要来问）。**粗网格不是内容寻址的**——文件名借 L0
+  的键，内容随策略版本变——所以这一档**不给 `immutable`**：`Cache-Control: public, max-age=604800`、
+  `ETag: "{geo_hash}-lod1v1"`；`lod=0` 的缓存头照旧。没有粗网格 → `404 not_found`「网格 {geo_hash} 没有粗精度
+  副本」（太小 / 省不够 / 还没回填；客户端负缓存后用原网格）；`lod` 不是 0 / 1 → `400 bad_request`，在读盘之前判。
+  粗网格不进任何身份键、投影、房间判定与 RVM 对拍；清理网格（§4.5.1D）时随 L0 一并删。生成期开
+  `AIOS_MESH_LOD1=1` 才顺手产；开关之前生成好的库用 §4.11.3 回填。
 
 ### 4.11.1 `POST /api/v1/element/ptset` — 构件目录 P 点集（E3D `PTSET`）
 
@@ -1377,6 +1387,27 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   `plines: []` 且带 `reason`（E3D 同样没有 p-line 可拾，不是错）；`400 bad_request` refno 写法不对；
   `404 not_found` refno 在所钉会话里不存在（含其 db 不在项目 / MDB 里）；`500 internal` 读库出错。
 - 数据时点同 §4.11.1。
+
+### 4.11.3 `POST /api/v1/mesh-lod1/backfill`、`GET /api/v1/mesh-lod1/backfill/{task_id}` — 给已有库补显示用粗网格（ADR-096，2026-11-06）
+
+- 为什么有它：开着 `AIOS_MESH_LOD1` 的生成会顺手产粗网格，但开关之前生成好的库一个都没有，而目标与上一轮
+  逐位相同、缓存命中的根不会再生成。整库重生成太贵；这条路**只求值、只写 `lod1-v1/`**，L0 文件与库里的行
+  一个字节都不动。
+- `POST` 体：`{ "project"?, "mdb"?, "dbnums": [7997, 7999] }`（身份字段同 §3；`dbnums` 去重、空表 400）。
+  回 `202 { "task_id" }`。`AIOS_MESH_LOD1` 没开 → `412 precondition`（本进程不产粗网格，也不回填）；已有一次
+  回填在跑 → `409 conflict`（回填按根走几何闸，两次并行只会互相抢）。
+- 任务体：先把**标准单位圆柱**的粗网格一次写全（234 个键，幂等；服务启动时若开着开关也会跑一次），再逐库：
+  交付单元根按初始化同一条路从文件枚举（`initialization_roots`）；每根在几何闸下 L0 只求值、只算网格身份——
+  **不写 L0、不算房间、不碰库**——L0 文件不在盘上的件视为未发布、跳过；其余按盘分拣：已有 `.mesh` 计 reused、
+  有 `.none` 标记（此前求过、省不够）计 skipped、都没有的才在 4 mm 容差下限下把整根再求值一遍落盘。
+  一根失败只记账、不中断；一个库连根都枚举不出来（不在当前 MDB）记进 `dbnums_failed`，别的库照补。
+- `GET` 回任务行（形状同 §4.4）：`state` 为 `running / succeeded / partial / failed`（有根失败、有件写失败或有库
+  起不来 → `partial`），`stage` 为 `prepare-canonical` / `dbnum-{n}`，`units_done / total_units` 按根累计，
+  `result` 是账：`{ dbnums, dbnums_failed: [[dbnum, reason]], roots, roots_failed, unpublished, identity_failed,
+  bake: { written, reused, known_skipped, skipped, unmatched, failed } }`。`unmatched` = L0 要粗网格的件在粗精度
+  快照里对不上（粗容差下 CSG 失败 / 被丢 / 变成了标准图元），不留标记、下次再试。
+- 幂等：再跑一次全是 `reused` / `known_skipped`，耗时只剩枚举与 L0 求值。同一账也进生成报表
+  （`E3dPersistReport.lod1_*`）与逐根日志 `model root generated: … lod1={ms}`。
 
 ### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
 

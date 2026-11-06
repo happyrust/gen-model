@@ -28,7 +28,8 @@
 //!
 //! 不碰 `aabb` / `trans` / `vec3` 这几张内容寻址小表（一直按「泄漏有界、不回收」处理，见
 //! `helper::render_cascade_delete` 的注释），也不碰 `meshes/` 下的非网格目录（房间输入缓存、
-//! `model-input-cache` 之类）。
+//! `model-input-cache` 之类）。唯一跟着键走进子目录的是显示用粗网格 `lod1-v1/{键}.mesh` 及其
+//! `.none` 标记（ADR-096）：它借 L0 的名字，L0 没了它就是孤儿，随 L0 一并摘掉。
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -82,6 +83,9 @@ pub struct MeshPurgeReport {
     pub inst_geo_removed: usize,
     /// 键集里撞上单位几何、按规矩跳过的个数（行与文件都没动）。
     pub shared_unit_skipped: usize,
+    /// 随 L0 一起摘掉的显示用粗网格（`lod1-v1/{键}.mesh`）个数；`.none` 标记一并删但不计数。
+    /// 粗网格借 L0 的名字，L0 没了它就是孤儿，不留。
+    pub lod1_removed: usize,
 }
 
 impl MeshPurgeReport {
@@ -90,6 +94,9 @@ impl MeshPurgeReport {
         let mut note = format!("一并删除网格文件 {} 个", self.removed);
         if self.inst_geo_removed > 0 {
             note.push_str(&format!("、几何行 {} 行", self.inst_geo_removed));
+        }
+        if self.lod1_removed > 0 {
+            note.push_str(&format!("、粗网格 {} 个", self.lod1_removed));
         }
         if self.absent > 0 {
             note.push_str(&format!("（另 {} 个本来就不在盘上）", self.absent));
@@ -329,6 +336,22 @@ pub(crate) fn remove_mesh_files_in(dir: &Path, ids: &BTreeSet<String>) -> MeshPu
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => report.absent += 1,
             Err(error) => report.failed.push((mesh_id.clone(), error.to_string())),
         }
+        // 粗网格与它的「不值得」标记随 L0 走（ADR-096）：文件名借的是 L0 的键，L0 没了就是孤儿。
+        // 不在盘上不算事；删失败只记日志——它是显示增强，不该让清理回执为它报红。
+        for path in [
+            crate::fast_model::mesh_lod1::lod1_mesh_path(dir, mesh_id),
+            crate::fast_model::mesh_lod1::lod1_marker_path(dir, mesh_id),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    if path.extension().is_some_and(|ext| ext == "mesh") {
+                        report.lod1_removed += 1;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!("[mesh-lod1] 清理 {} 失败: {error}", path.display()),
+            }
+        }
     }
     report
 }
@@ -438,6 +461,34 @@ mod tests {
             report.note(),
             "一并删除网格文件 2 个（另 1 个本来就不在盘上），2 个删失败"
         );
+    }
+
+    /// 粗网格随 L0 走（ADR-096）：`lod1-v1/{键}.mesh` 与 `.none` 标记一并删、只计 `.mesh`；别的键的
+    /// 粗网格不碰；`note()` 把它说出来。
+    #[test]
+    fn the_purge_takes_the_lod1_copy_and_its_marker_along_with_the_l0_mesh() {
+        use crate::fast_model::mesh_lod1::{lod1_dir, lod1_marker_path, lod1_mesh_path};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lod1_dir(dir.path())).unwrap();
+        for key in ["e3d_baked_v2_aa", "e3d_baked_v2_bb", "e3d_baked_v2_keep"] {
+            std::fs::write(dir.path().join(format!("{key}.mesh")), b"mesh").unwrap();
+        }
+        std::fs::write(lod1_mesh_path(dir.path(), "e3d_baked_v2_aa"), b"coarse").unwrap();
+        std::fs::write(lod1_marker_path(dir.path(), "e3d_baked_v2_bb"), b"").unwrap();
+        std::fs::write(lod1_mesh_path(dir.path(), "e3d_baked_v2_keep"), b"coarse").unwrap();
+        let ids: BTreeSet<String> = ["e3d_baked_v2_aa", "e3d_baked_v2_bb"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+
+        let report = remove_mesh_files_in(dir.path(), &ids);
+        assert_eq!(report.removed, 2, "{report:?}");
+        assert_eq!(report.lod1_removed, 1, "只计 .mesh，标记不计: {report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(!lod1_mesh_path(dir.path(), "e3d_baked_v2_aa").exists());
+        assert!(!lod1_marker_path(dir.path(), "e3d_baked_v2_bb").exists());
+        assert!(lod1_mesh_path(dir.path(), "e3d_baked_v2_keep").exists(), "别的键的粗网格不碰");
+        assert_eq!(report.note(), "一并删除网格文件 2 个、粗网格 1 个");
     }
 
     /// 单位几何 `1` / `2` / `3`（`BOXI_GEO_HASH` / `TUBI_GEO_HASH` / 单位球）收到了也不删：全项目所有

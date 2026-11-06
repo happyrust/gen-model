@@ -1525,8 +1525,22 @@ pub async fn tree_children(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct MeshQuery {
-    /// 精度档：缺省 / 0 = 原网格；1 = 生成时多产的显示用粗网格（`lod1/`）。
+    /// 精度档：缺省 / 0 = 原网格；1 = 显示用粗网格（`mesh_lod1::LOD1_DIR`，生成时开 `AIOS_MESH_LOD1`
+    /// 或回填接口写出）。
     pub lod: Option<u8>,
+}
+
+/// `?lod=` → 读哪个目录：0 = 网格目录本身，1 = 粗网格子目录（名字带策略版本），其他档位 400。
+/// 在读盘之前判：档位不对不该让客户端等一次 404。
+pub(crate) fn lod_mesh_dir(
+    base: std::path::PathBuf,
+    lod: u8,
+) -> Result<std::path::PathBuf, ApiError> {
+    match lod {
+        0 => Ok(base),
+        1 => Ok(crate::fast_model::mesh_lod1::lod1_dir(&base)),
+        other => Err(ApiError::bad_request(format!("lod 只支持 0 或 1: {other}"))),
+    }
 }
 
 /// GET /api/v1/meshes/{geo_hash}.glb | {geo_hash}.mesh — 同一份网格的两种线上形态。
@@ -1545,8 +1559,10 @@ pub struct MeshQuery {
 /// 不存在」同码，客户端可负缓存）；文件在但编不成三角网格回 422 `precondition`——那是
 /// 数据的终局，重发同一个键还是同一个结果（只有 `.glb` 会走到这一步）。
 ///
-/// `?lod=1` 读同一个键的粗精度副本（`meshes_dir()/lod1/{geo_hash}.mesh`，生成时开
-/// `AIOS_MESH_LOD1` 才有）。没有就 404：那个键要么太小、要么简化省不下多少，前端负缓存后用原网格。
+/// `?lod=1` 读同一个键的**显示用粗精度副本**（`meshes_dir()/lod1-v1/{geo_hash}.mesh`，
+/// `fast_model::mesh_lod1`）。没有就 404：那个键要么太小、要么简化省不下多少、要么还没回填，
+/// 前端负缓存后用原网格。粗网格**不是**内容寻址的（文件名借 L0 的键，内容随策略版本变），所以
+/// 这一档不给 `immutable`：7 天 `max-age`，ETag 带策略版本（`"{geo_hash}-lod1v1"`）。
 pub async fn mesh_glb(
     State(state): State<AppState>,
     Path(file): Path<String>,
@@ -1567,18 +1583,17 @@ pub async fn mesh_glb(
             "geo_hash 只允许字母、数字与下划线: {stem}"
         )));
     }
-    let dir = match query.lod.unwrap_or(0) {
-        0 => crate::options::meshes_dir(),
-        1 => crate::options::meshes_dir().join(crate::fast_model::e3d_mesh_store::LOD1_DIR),
-        other => {
-            return Err(ApiError::bad_request(format!("lod 只支持 0 或 1: {other}")));
-        }
-    };
+    let lod = query.lod.unwrap_or(0);
+    let dir = lod_mesh_dir(crate::options::meshes_dir(), lod)?;
     let path = dir.join(format!("{stem}.mesh"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::not_found(format!("网格 {stem} 不存在")));
+            return Err(ApiError::not_found(if lod == 0 {
+                format!("网格 {stem} 不存在")
+            } else {
+                format!("网格 {stem} 没有粗精度副本")
+            }));
         }
         Err(error) => {
             return Err(ApiError::from_domain(anyhow::anyhow!(
@@ -1604,14 +1619,23 @@ pub async fn mesh_glb(
         .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
         (glb, "model/gltf-binary")
     };
+    // 内容寻址的 L0 永不改变，给 `immutable`；粗网格借 L0 的名字、内容随策略版本变，只给 7 天。
+    let (cache_control, etag) = if lod == 0 {
+        ("public, max-age=31536000, immutable", format!("\"{stem}\""))
+    } else {
+        (
+            "public, max-age=604800",
+            format!(
+                "\"{stem}-lod1v{}\"",
+                crate::fast_model::mesh_lod1::LOD1_POLICY_VERSION
+            ),
+        )
+    };
     axum::response::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, content_type)
-        .header(
-            axum::http::header::CACHE_CONTROL,
-            "public, max-age=31536000, immutable",
-        )
-        .header(axum::http::header::ETAG, format!("\"{stem}\""))
+        .header(axum::http::header::CACHE_CONTROL, cache_control)
+        .header(axum::http::header::ETAG, etag)
         .header(axum::http::header::CONTENT_LENGTH, payload.len())
         .body(axum::body::Body::from(payload))
         .map_err(|error| ApiError::from_domain(anyhow::anyhow!("构造网格响应失败: {error}")))
@@ -5765,9 +5789,25 @@ mod tests {
         );
     }
 
-    /// `?lod=` 只认 0 / 1：1 读 `lod1/` 子目录，其他值在读盘前 400。
+    /// `?lod=` 只认 0 / 1：0 = 网格目录本身，1 = 带策略版本的粗网格子目录，其他值 400——
+    /// 并且在读盘之前判。
     #[test]
-    fn mesh_glb_handler_maps_lod_to_a_subdirectory_before_touching_the_disk() {
+    fn lod_mesh_dir_maps_lod_to_a_policy_versioned_subdirectory_or_rejects() {
+        let base = std::path::PathBuf::from("meshes");
+        assert_eq!(lod_mesh_dir(base.clone(), 0).unwrap(), base);
+        assert_eq!(
+            lod_mesh_dir(base.clone(), 1).unwrap(),
+            base.join(crate::fast_model::mesh_lod1::LOD1_DIR)
+        );
+        assert_eq!(
+            lod_mesh_dir(base.clone(), 1).unwrap(),
+            base.join(format!("lod1-v{}", crate::fast_model::mesh_lod1::LOD1_POLICY_VERSION))
+        );
+        for other in [2u8, 7, u8::MAX] {
+            let error = lod_mesh_dir(base.clone(), other).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "lod={other}");
+        }
+
         let body = include_str!("handlers.rs")
             .split_once("pub async fn mesh_glb(")
             .expect("mesh_glb handler must exist")
@@ -5777,11 +5817,23 @@ mod tests {
             .0;
         assert!(body.contains("Query(query): Query<MeshQuery>"), "{body}");
         assert!(body.contains("query.lod.unwrap_or(0)"), "缺省 = 原网格: {body}");
-        assert!(
-            body.contains("join(crate::fast_model::e3d_mesh_store::LOD1_DIR)"),
-            "lod=1 读 lod1/ 子目录: {body}"
-        );
-        assert!(body.contains("ApiError::bad_request"), "其他档位 400: {body}");
+        assert!(body.contains("lod_mesh_dir("), "档位在读盘前解析: {body}");
+    }
+
+    /// 粗网格不是内容寻址的：`lod=1` 的响应不许带 `immutable`，ETag 带策略版本；L0 照旧一年 immutable。
+    #[test]
+    fn mesh_glb_handler_caches_lod1_for_a_week_and_l0_forever() {
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn mesh_glb(")
+            .expect("mesh_glb handler must exist")
+            .1
+            .split_once("\n}")
+            .expect("handler must close")
+            .0;
+        assert!(body.contains("\"public, max-age=31536000, immutable\""), "{body}");
+        assert!(body.contains("\"public, max-age=604800\""), "{body}");
+        assert!(body.contains("-lod1v{}"), "ETag 带策略版本: {body}");
+        assert!(body.contains("没有粗精度副本"), "lod=1 的 404 说清是粗网格缺: {body}");
     }
 
     /// `.mesh` 直连形态（plant3d-web 2026-09-09 拍板）：读盘之后原样吐字节，

@@ -1350,6 +1350,22 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
     startup_step_done("batch-worker", stage, "");
 
+    // 显示用粗网格（ADR-096）：开着就把标准单位圆柱的粗网格一次写全——幂等、不阻塞启动，
+    // 生成期遇到标准图元只剩查表；同级的旧策略目录只点名不删。关着时什么都不碰。
+    if crate::fast_model::mesh_lod1::lod1_enabled() {
+        let mesh_dir = crate::options::meshes_dir();
+        tokio::task::spawn_blocking(move || {
+            for stale in crate::fast_model::mesh_lod1::stale_lod1_dirs(&mesh_dir) {
+                log::warn!(
+                    "[mesh-lod1] 旧策略目录 {} 不再读写（当前 {}），可手工删除",
+                    stale.display(),
+                    crate::fast_model::mesh_lod1::LOD1_DIR
+                );
+            }
+            crate::fast_model::mesh_lod1::prepare_canonical_lod1(&mesh_dir);
+        });
+    }
+
     // Watcher events are dirtiness signals only; `async_watch` debounces them
     // into the same full manifest scan used by startup and reconciliation.
     // 无条件起（ADR-058 D8）：看门狗是这个进程对「文件变了」的唯一耳朵，没有哪份配置
