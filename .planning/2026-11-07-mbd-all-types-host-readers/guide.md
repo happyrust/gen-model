@@ -94,3 +94,15 @@ fn open(dbs: &[&str]) -> Option<Arc<DbSet>> {
 3. UDA：测试里的 DbSet 不挂 UDA 字典时所有 `:X` 悄悄变 None；AMS 本身没有 `:ZD_*`。
 4. 样本覆盖不全：没有在用 SUPPO、没有 PURP=DOOR、很多 NOZZ 没目录件、MSUP 的 SCTN 只画中心线、SPAMAP 没有容器与负体条目、NOZZ 只有点盒。
 5. 坐标系与时效：POS / ORI / HPOS / POSS 是属主系，必须乘 `world_matrix`；SCTN / STWALL 自身没有 POS / ORI；SPAMAP 是存盘快照、精度 0.1 mm；DbSet 打开时钉住会话，长时间读取要比对 `is_current`。
+
+## 判型约定（`mbd::object`，2026-11-07 定稿）
+
+`[mbd_type_rules]` 的缺省表照 PML `getmbdtype` 与 `getsuppname`，在 AMS 上补了五条，均已采纳：
+
+1. 支架区除了 ZONE 名含 `SUPP`，也认 `PURP=SUPP`：AMS 的 `/1RX02-LSUP`、`/1RX03-MSUP` 名字里没有 SUPP，四个支架区都只靠 PURP 认得出。
+2. REST / HANG 只在同一 ZONE 里找配对的 STRU：REST 名去掉 `/REST` 得 S，依次找 `S/STRU`、`S`（`getsuppname`）；找不到就以 REST 本身为归属并留一条视图 issue。
+3. ZONE 名含 MTGD / COMM / CASE / LIGHT 判设备的那条只对 EQUI 名下元素生效（PML 对区里任何元素都回 EQUI）。
+4. 土建判在支架区之前。
+5. 名字以 `-MBD` 结尾的 STRU（PML 存标注用）与名字含 `CIV` 的 STRU 不算支架。
+
+AMS 判型结果见 `tests/mbd_object_classify.rs`（25 个对象）；`em9_inst_supp`（INST + RACK）在 AMS 没有样本，只有规则表测试。
