@@ -1054,6 +1054,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "version": crate::build_info::VERSION,
             "build_id": crate::build_info::BUILD_ID,
             "e3d_model_build_id": crate::build_info::E3D_MODEL_BUILD_ID,
+            "e3d_io_build_id": crate::build_info::E3D_IO_BUILD_ID,
+            "e3d_attlib_build_id": crate::build_info::E3D_ATTLIB_BUILD_ID,
             "started_at": crate::data_interface::task_registry::process_started_at(),
             "capabilities": model_capabilities(),
             "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
@@ -1208,8 +1210,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "read_through": read_through,
         "version": crate::build_info::VERSION,
         "build_id": crate::build_info::BUILD_ID,
-        // GitHub #73：部署后核「换了哪一版 e3d-model」看这一格；它也是生成器指纹的 `e3d-model:` 段。
+        // GitHub #73：部署后核「换了哪一版 vendor」看这三格；它们也是生成器指纹的前三段。
         "e3d_model_build_id": crate::build_info::E3D_MODEL_BUILD_ID,
+        "e3d_io_build_id": crate::build_info::E3D_IO_BUILD_ID,
+        "e3d_attlib_build_id": crate::build_info::E3D_ATTLIB_BUILD_ID,
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "capabilities": model_capabilities(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),

@@ -21,6 +21,23 @@ pub const E3D_MODEL_VERSION: &str = env!("E3D_MODEL_VERSION");
 /// e3d-model vendor 的构建身份（GitHub #73）：`<版本>@g<提交号>`，工作树脏或没有 git 时补源码内容哈希；
 /// vendor 目录找不到时 `unknown`。生成器指纹（`fast_model::generator_identity`）的 `e3d-model:` 槽填的就是它。
 pub const E3D_MODEL_BUILD_ID: &str = env!("E3D_MODEL_BUILD_ID");
+/// e3d-io vendor 的 crate 版本与构建身份，口径同 [`E3D_MODEL_BUILD_ID`]。e3d-model 经它读库、求目录 PML，
+/// 单改它也改几何，所以它是生成器指纹的 `e3d-io:` 段。
+pub const E3D_IO_VERSION: &str = env!("E3D_IO_VERSION");
+pub const E3D_IO_BUILD_ID: &str = env!("E3D_IO_BUILD_ID");
+/// e3d-attlib vendor（属性字典，e3d-model 与 e3d-io 都依赖它）的 crate 版本与构建身份：生成器指纹的 `e3d-attlib:` 段。
+pub const E3D_ATTLIB_VERSION: &str = env!("E3D_ATTLIB_VERSION");
+pub const E3D_ATTLIB_BUILD_ID: &str = env!("E3D_ATTLIB_BUILD_ID");
+
+/// 日志里点名「本进程按哪一版 vendor 算几何」：`e3d-model <身份>、e3d-io <身份>、e3d-attlib <身份>`。
+pub fn vendor_build_ids() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        format!(
+            "e3d-model {E3D_MODEL_BUILD_ID}、e3d-io {E3D_IO_BUILD_ID}、e3d-attlib {E3D_ATTLIB_BUILD_ID}"
+        )
+    })
+}
 
 /// Format the embedded build timestamp, never the process startup time.
 pub fn build_time() -> &'static str {
@@ -50,8 +67,10 @@ pub struct BuildInfo {
     pub target: &'static str,
     pub profile: &'static str,
     pub rustc: &'static str,
-    /// e3d-model vendor 的构建身份（[`E3D_MODEL_BUILD_ID`]）：部署后核「换了哪一版 vendor」看这一格。
+    /// e3d-model vendor 的构建身份（[`E3D_MODEL_BUILD_ID`]）：部署后核「换了哪一版 vendor」看这一格和下面两格。
     pub e3d_model_build_id: &'static str,
+    pub e3d_io_build_id: &'static str,
+    pub e3d_attlib_build_id: &'static str,
 }
 
 pub fn current() -> BuildInfo {
@@ -67,6 +86,8 @@ pub fn current() -> BuildInfo {
         profile: PROFILE,
         rustc: RUSTC,
         e3d_model_build_id: E3D_MODEL_BUILD_ID,
+        e3d_io_build_id: E3D_IO_BUILD_ID,
+        e3d_attlib_build_id: E3D_ATTLIB_BUILD_ID,
     }
 }
 
@@ -87,5 +108,9 @@ mod tests {
         assert!(display_version().starts_with(&format!("{VERSION} (built ")));
         assert_eq!(info.e3d_model_build_id, E3D_MODEL_BUILD_ID);
         assert!(!info.e3d_model_build_id.is_empty());
+        assert_eq!(info.e3d_io_build_id, E3D_IO_BUILD_ID);
+        assert_eq!(info.e3d_attlib_build_id, E3D_ATTLIB_BUILD_ID);
+        assert!(vendor_build_ids().contains(E3D_IO_BUILD_ID));
+        assert!(vendor_build_ids().contains(E3D_ATTLIB_BUILD_ID));
     }
 }

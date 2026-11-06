@@ -1,3 +1,12 @@
+## 2026-11-07
+
+### 生成器指纹带上 e3d-io 与 e3d-attlib（#73 补漏）
+
+- **为什么**：e3d-model 经 e3d-io 读库、求目录 PML，属性字典在 e3d-attlib，三家都是路径依赖。指纹原先只含 e3d-model 的构建身份，单改 e3d-io 的几何修复（11-06 的 POD `b6ff292`、操作码 1012 `74bd1ee`）不改指纹，库级落款仍判「一致」，旧行照用。
+- **改**：`build.rs` 的 vendor 身份泛化成 `vendor_identity(仓名, 环境变量)`，e3d-io（`E3D_IO_VENDOR_DIR`）、e3d-attlib（`E3D_ATTLIB_VENDOR_DIR`）同口径注入 `E3D_IO_BUILD_ID` / `E3D_ATTLIB_BUILD_ID`。生成器指纹改为 `e3d-model:…;e3d-io:…;e3d-attlib:…;aios-database:…;<规则标签>`。`/health` 与 `version --json` 多 `e3d_io_build_id`、`e3d_attlib_build_id`；生成器核对日志点名三家身份。ADR-093 追记。
+- **后果**：换上这版后，每个盖过模型水位的库整库重排一次（落款与回执指纹全部对不上）。
+- **验证**：`generator_identity` / `build_info` / `generator_reconcile` / `startup_reconcile` 相关 12 个单测通过。本机 8022（`watch 7997,7998,8000`）换上新二进制：首启日志点名三家身份、三库 `reason=model_generator_changed`；7997 6772 根 7 分 31 秒（`equip_derived` 113.5 s），8000 954 根约 70 s；三库 `dbnum_watermark.model_generator` 改为三段指纹；再重启 `generator_stale_dbnums` 为空、不排工。
+- **没动**：`RULE_TAGS`；plant-mbd、old-aios-core 不进指纹（不参与几何生成）。
 ## 2026-11-06
 
 ### 对拍残差复核，以及目录公式里的第二个 REAL（验证）

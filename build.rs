@@ -79,21 +79,22 @@ fn source_tree_hash(src_dir: &Path, manifest: &str) -> u64 {
     hash
 }
 
-/// e3d-model（`Cargo.toml` 里的 path 依赖，默认 `../vendor/e3d-model`，可用 `E3D_MODEL_VENDOR_DIR` 指到别处）
-/// 的构建身份（GitHub #73）：`<crate 版本>@g<提交号>`，工作树脏或没有 git 时补源码内容哈希。它进模型回执的
-/// `generator_fingerprint` 与水位行的库级落款——只换 vendor 不动本仓版本号时指纹也要变，否则换了几何修复旧行
-/// 一根都不重算。找不到 vendor 目录时两样都是 `unknown`：那样的构建分不出 vendor 换没换。
-fn e3d_model_identity() -> (String, String) {
-    println!("cargo:rerun-if-env-changed=E3D_MODEL_VENDOR_DIR");
+/// 一个 vendor 仓（`Cargo.toml` 里的 path 依赖，默认 `../vendor/<name>`，可用 `env_var` 指到别处）的构建身份
+/// （GitHub #73）：`<crate 版本>@g<提交号>`，工作树脏或没有 git 时补源码内容哈希。e3d-model 与它读库、读目录 PML
+/// 所经的 e3d-io、e3d-attlib 三家的身份都进模型回执的 `generator_fingerprint` 与水位行的库级落款——只换 vendor
+/// 不动本仓版本号时指纹也要变，否则换了几何修复旧行一根都不重算。找不到 vendor 目录时两样都是 `unknown`：那样的
+/// 构建分不出 vendor 换没换。
+fn vendor_identity(name: &str, env_var: &str) -> (String, String) {
+    println!("cargo:rerun-if-env-changed={env_var}");
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
-    let vendor_dir = env::var("E3D_MODEL_VENDOR_DIR")
+    let vendor_dir = env::var(env_var)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("..").join("vendor").join("e3d-model"));
+        .unwrap_or_else(|_| manifest_dir.join("..").join("vendor").join(name));
     let cargo_toml = vendor_dir.join("Cargo.toml");
     let Ok(manifest) = fs::read_to_string(&cargo_toml) else {
         println!(
-            "cargo:warning=e3d-model vendor 目录找不到（{}），生成器指纹里的 e3d-model 身份记为 unknown",
+            "cargo:warning={name} vendor 目录找不到（{}），生成器指纹里的 {name} 身份记为 unknown",
             vendor_dir.display()
         );
         return ("unknown".into(), "unknown".into());
@@ -165,7 +166,11 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".into());
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".into());
     let rustc = command_stdout("rustc", &["--version"]).unwrap_or_else(|| "unknown".into());
-    let (e3d_model_version, e3d_model_build_id) = e3d_model_identity();
+    let (e3d_model_version, e3d_model_build_id) =
+        vendor_identity("e3d-model", "E3D_MODEL_VENDOR_DIR");
+    let (e3d_io_version, e3d_io_build_id) = vendor_identity("e3d-io", "E3D_IO_VENDOR_DIR");
+    let (e3d_attlib_version, e3d_attlib_build_id) =
+        vendor_identity("e3d-attlib", "E3D_ATTLIB_VENDOR_DIR");
 
     println!("cargo:rustc-env=AIOS_BUILD_ID={build_id}");
     println!("cargo:rustc-env=AIOS_BUILD_EPOCH={build_epoch}");
@@ -176,6 +181,10 @@ fn main() {
     println!("cargo:rustc-env=AIOS_RUSTC_VERSION={rustc}");
     println!("cargo:rustc-env=E3D_MODEL_VERSION={e3d_model_version}");
     println!("cargo:rustc-env=E3D_MODEL_BUILD_ID={e3d_model_build_id}");
+    println!("cargo:rustc-env=E3D_IO_VERSION={e3d_io_version}");
+    println!("cargo:rustc-env=E3D_IO_BUILD_ID={e3d_io_build_id}");
+    println!("cargo:rustc-env=E3D_ATTLIB_VERSION={e3d_attlib_version}");
+    println!("cargo:rustc-env=E3D_ATTLIB_BUILD_ID={e3d_attlib_build_id}");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut resource = winresource::WindowsResource::new();
@@ -193,7 +202,7 @@ fn main() {
             .set(
                 "Comments",
                 &format!(
-                    "git={git_commit}; dirty={git_dirty}; build_epoch={build_epoch}; e3d-model={e3d_model_build_id}"
+                    "git={git_commit}; dirty={git_dirty}; build_epoch={build_epoch}; e3d-model={e3d_model_build_id}; e3d-io={e3d_io_build_id}; e3d-attlib={e3d_attlib_build_id}"
                 ),
             );
         resource
