@@ -7,8 +7,9 @@
 //!   走 `SPRE → SPCO.CATR → SCOM.PTRE → PTAX/PTCA`，世界系 mm。成员 k 的到达端是
 //!   `tubes[k].to`、离开端是 `tubes[k+1].from`（`tubes.len() == members.len() + 1`）。
 //! - **穿过件**（`Route::non_route_members`，目录 `GTYP≠ANCI` 的 ATTA、WELD 等）：PML
-//!   `getisolines` L1512-1515 对它们 `skip`、不看方向，这里只给 `pos` + `noun`，**留在序列里**
-//!   ——切段的成员序戳出一个洞比缺一条尺寸糟得多（rs-mbd 2026-08-20 教训）。
+//!   `getisolines` L1512-1515 对它们 `skip`、不看方向，**留在序列里**——切段的成员序戳出一个洞比缺一条
+//!   尺寸糟得多（rs-mbd 2026-08-20 教训）。端口取它们自己的 `ARRI` / `LEAV` 号 P 点（M2b 的附件分类、
+//!   支腿与焊点读 ATTA 的 `adir / ldir`），解不出就只有 `pos`；外径照旧不给。
 //! - **端口方向朝外**：`arrive_axis` 指向来流一侧、`leave_axis` 指向去流一侧，相邻成员满足
 //!   `next.arrive_axis == -prev.leave_axis`。这与 e3d-model `slot_alignment` 的
 //!   `ArriveCheck::Member`（拿 `−to.dir` 与槽位向量比）是同一口径。
@@ -16,9 +17,12 @@
 //! - `outside_diameter`（PML `aod of $!mem`）：到达这一站的那条槽位按 `CGETOD` 取管子目录件
 //!   `PARA[2]`（e3d-model `departure_tube_outer_diameter`），取不到时按 PML `isoline.getod` 的回落
 //!   `min(bore × 1.1, bore + 10)` 用到达侧通径折算。Phase 4 起尺寸行位与字高都从它派生。
-//! - `ppoints` = P0 / P1 / P2 / P3 / P9（`CataloguePoints` 逐号解，世界系）：PML `getIsoUsedDirs`
+//! - `ppoints` = P0–P6 / P9 / P101（`CataloguePoints` 逐号解，世界系）：PML `getIsoUsedDirs`
 //!   判手柄、`considerTee` 补点用 P1-P3；P0 / P9 是 PCOM 切段专属分支（plant-mbd `pcom.rs`）要的；
-//!   `arrive_ppoint` / `leave_ppoint` 是 `walk_route` 给的到达 / 离开口编号。
+//!   P4–P6 是 ATTA 弯头垫板与 KD 管件四焊点、P101 是挡块两侧取点的方向（M2b）；`bore` 按 E3D 的
+//!   `PPBORE`，0 即 unset、不给。`arrive_ppoint` / `leave_ppoint` 是 `walk_route` 给的到达 / 离开口编号。
+//! - M2a / M2b 的其余字段（目录参数与名字、连接类型、目录原语、`vol`、`ipara`、`dmf_targets`、
+//!   `navigation`，BRAN 的 `flow_direction` / `heat_tracing` / `dmf_walls`）在 [`fields`] 里读。
 //! - **隐式管身**：E3D 里两个管件之间的直管不是成员（只有 FTUB 这种定长管才是），成员表收不到，
 //!   而管道尺寸标注量的主要就是这些管长（PML `getcuttubi` / 线性尺寸）。这里按 E3D 画隐式管身的
 //!   同一套规则（e3d-model `walk_route` 的槽位：上一站离开点 → 本站到达点，含 Head→首站、末站→Tail；
@@ -31,6 +35,8 @@
 //! 下发；整条 BRAN 没有任何带几何的成员、或连近似 Head 都建不起来 → [`BranchQueryError::RootError`]
 //! （宿主映射 422）。refno 不存在 → `NotFound`（404）；不是派生隐式管身的路由容器 →
 //! `NotRouteContainer`（422）；是风管那一支 → `NotPipeRoute`（422）。
+
+mod fields;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +57,8 @@ use plant_mbd::{
     suppress_issue,
 };
 
+use super::host;
+
 /// 前端 `mbd_refno` 与 plant-mbd fixtures 的 refno 写法：`w0_w1`。
 pub fn wire_refno(refno: RefNo) -> String {
     format!("{}_{}", refno.word0, refno.word1 as i32)
@@ -58,7 +66,9 @@ pub fn wire_refno(refno: RefNo) -> String {
 
 #[derive(Debug)]
 pub enum BranchQueryError {
-    SourceChanged { dbnum: u32 },
+    SourceChanged {
+        dbnum: u32,
+    },
     /// refno 在所钉会话里不存在。
     NotFound {
         refno: RefNo,
@@ -168,7 +178,10 @@ pub struct BranchReadVersion {
     pub databases: Vec<DatabaseReadVersion>,
 }
 
-pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryWithDiameters, BranchQueryError> {
+pub fn branch_query_with_diameters(
+    set: &Arc<DbSet>,
+    refno: RefNo,
+) -> Result<BranchQueryWithDiameters, BranchQueryError> {
     let container = set.element(refno);
     if !container.exists()? {
         return Err(BranchQueryError::NotFound { refno });
@@ -258,6 +271,23 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
         )
     });
 
+    // 成员的 `vol`：本库 SPAMAP 里的世界包围盒（`fields` 模块文档）。表读不动不碍别的字段，留一笔。
+    let spamap = match host::spamap_index(set, refno.dbno()) {
+        Ok(index) => index,
+        Err(error) => {
+            issues.push(fields::info_issue(
+                &branch_refno,
+                &branch_refno,
+                "adapter.spamap_unreadable",
+                format!("member world boxes (vol) are left out: {error}"),
+            ));
+            None
+        }
+    };
+    // 穿过件 → 它所在槽位的起点站（导航的 `pre / next tubi` 用）；成员 `DMFARR` 的目标（BRAN 级 `dmf_walls` 用）。
+    let mut slot_from: HashMap<String, String> = HashMap::new();
+    let mut dmf_targets: Vec<RefNo> = Vec::new();
+
     // 文件原序（PML `coll all bran mem`），站点与穿过件混排；隐式管身插在前一站之后。
     // order = 输出序列下标（含合成管身）。
     for member in container.members()? {
@@ -311,11 +341,12 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             );
         }
 
-        let pos = match world_matrix(&member) {
-            Ok(matrix) => Some(matrix.w_axis.truncate()),
+        let world = match world_matrix(&member) {
+            Ok(matrix) => Some(matrix),
             Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
         };
+        let pos = world.map(|matrix| matrix.w_axis.truncate());
         // P1 / P2 / P3：isoDim 的手柄判定与 TEE 补点要它们；解不出的号就不填。
         let ppoints = catalogue_ppoints(&member, &resolver)?;
         // 焊缝：DTXR 含 SHOP 为车间焊（isobran.getwelds L4211-4216）；编号是项目 UDA :ZD_WLDN（L4665），
@@ -352,8 +383,20 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             None => (None, None),
         };
 
-        let start = arrive.map(|point| point.pos).or(pos);
-        let end = leave.map(|point| point.pos).or(pos);
+        // 端口：站点取槽位端；穿过件取自己的 ARRI / LEAV 号 P 点（切段不看，M2b 的附件分类、支腿与焊点要
+        // ATTA 的 adir / ldir）。外径只认站点的槽位，穿过件照旧不给（求解器按导航取所在管的外径）。
+        let (port_in, port_out) = match station {
+            Some(_) => (arrive, leave),
+            None => pass_through_ports(
+                &member,
+                &resolver,
+                &branch_refno,
+                &object_refno,
+                &mut issues,
+            ),
+        };
+        let start = port_in.map(|point| point.pos).or(pos);
+        let end = port_out.map(|point| point.pos).or(pos);
         let (Some(start), Some(end)) = (start, end) else {
             // 连世界原点都算不出：这个成员没有任何坐标可用，跳过并留痕。
             issues.push(suppress_issue(
@@ -373,15 +416,37 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             ));
         }
 
-        diameters.insert(object_refno.clone(), diameter_evidence(slot_od, arrive.and_then(|point| point.bore)));
-        members.push(BranchMember {
+        let extra = fields::member_fields(
+            &fields::MemberSite {
+                member: &member,
+                noun: &noun,
+                world,
+                arrive_ppoint,
+                leave_ppoint,
+            },
+            spamap.as_deref(),
+            &branch_refno,
+            &mut issues,
+        );
+        dmf_targets.extend(extra.dmf_targets.iter().copied());
+        if station.is_none()
+            && let Some((from_refno, _, _)) = last_leave.as_ref()
+        {
+            slot_from.insert(object_refno.clone(), from_refno.clone());
+        }
+
+        diameters.insert(
+            object_refno.clone(),
+            diameter_evidence(slot_od, arrive.and_then(|point| point.bore)),
+        );
+        let mut branch_member = BranchMember {
             refno: object_refno.clone(),
             owner_refno: branch_refno.clone(),
             start: start.to_array(),
             end: end.to_array(),
             noun: Some(noun),
-            arrive_axis: arrive.map(|point| point.dir.to_array()),
-            leave_axis: leave.map(|point| point.dir.to_array()),
+            arrive_axis: port_in.map(|point| point.dir.to_array()),
+            leave_axis: port_out.map(|point| point.dir.to_array()),
             pos: pos.map(|origin: DVec3| origin.to_array()),
             arrive_refno: None,
             order: members.len() as u32,
@@ -397,7 +462,9 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             stext,
             connection,
             ..BranchMember::default()
-        });
+        };
+        extra.apply(&mut branch_member);
+        members.push(branch_member);
 
         if station.is_some() {
             // 站点：下一段隐式管身从它的离开点起；离开点解不出就断掉这一段（不猜）。
@@ -440,6 +507,7 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             tail_slot_od,
         );
     }
+    fields::assign_navigation(&mut members, &slot_from);
 
     let (head_pos, head_dir) = match (head_pos, head_dir) {
         (Some(pos), Some(dir)) => (Some(pos), Some(dir)),
@@ -499,34 +567,54 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
     let label_bore_text = optional_text(&container, ":ZD_GDWJ")?;
     let head_connection = connection_ref(container.get_element("HREF")?)?;
     let tail_connection = connection_ref(container.get_element("TREF")?)?;
+    // 流向 / 伴热与墙体定位的墙板；墙板可能在别的设计库，要赶在下面清点打开过的库之前读。
+    let branch_extra = fields::branch_fields(&container, &dmf_targets, &branch_refno, &mut issues);
 
     let mut databases = Vec::new();
     for (dbnum, source) in set.opened_sources()? {
         if !source.is_current().unwrap_or(false) {
             return Err(BranchQueryError::SourceChanged { dbnum });
         }
-        databases.push(DatabaseReadVersion { dbnum, sesno: source.sesno,
-            db_type: set.db_type(dbnum).unwrap_or_default() });
+        databases.push(DatabaseReadVersion {
+            dbnum,
+            sesno: source.sesno,
+            db_type: set.db_type(dbnum).unwrap_or_default(),
+        });
     }
     databases.sort_by_key(|database| database.dbnum);
-    let sesno = set.pinned_sesno(refno.dbno()).ok_or(BranchQueryError::SourceChanged { dbnum: refno.dbno() })?;
-    let source_version = BranchReadVersion { dbnum: refno.dbno(), sesno, databases };
-    Ok(BranchQueryWithDiameters { result: BranchQueryResult {
-        branch_refno,
-        members,
-        head_pos,
-        head_dir,
-        tail_pos,
-        tail_dir,
-        volume_center: None,
-        name,
-        label_bore_text,
-        head_connection,
-        tail_connection,
-        split_members: None,
-        issues,
-        ..BranchQueryResult::default()
-    }, diameters, source_version })
+    let sesno = set
+        .pinned_sesno(refno.dbno())
+        .ok_or(BranchQueryError::SourceChanged {
+            dbnum: refno.dbno(),
+        })?;
+    let source_version = BranchReadVersion {
+        dbnum: refno.dbno(),
+        sesno,
+        databases,
+    };
+    Ok(BranchQueryWithDiameters {
+        result: BranchQueryResult {
+            branch_refno,
+            members,
+            head_pos,
+            head_dir,
+            tail_pos,
+            tail_dir,
+            volume_center: None,
+            name,
+            label_bore_text,
+            head_connection,
+            tail_connection,
+            flow_direction: branch_extra.flow_direction,
+            heat_tracing: branch_extra.heat_tracing,
+            dmf_walls: branch_extra.dmf_walls,
+            split_members: None,
+            issues,
+            ..BranchQueryResult::default()
+        },
+        diameters,
+        source_version,
+    })
 }
 
 /// 引用目标在别的库、库没注册 / 元素不在所钉会话：按「没有」，不算错（同 [`catalogue_od`]）。
@@ -653,30 +741,37 @@ fn diameter_evidence(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> Dia
     let catalogue_od_mm = tube_outer_diameter(catalogue_od, None, None);
     let arrive_bore_mm = arrive_bore.filter(|value| value.is_finite() && *value > 0.0);
     DiameterEvidence {
-        source: if catalogue_od_mm.is_some() { "catalogue" } else if arrive_bore_mm.is_some() { "bore-estimate" } else { "missing" },
+        source: if catalogue_od_mm.is_some() {
+            "catalogue"
+        } else if arrive_bore_mm.is_some() {
+            "bore-estimate"
+        } else {
+            "missing"
+        },
         catalogue_od_mm,
         arrive_bore_mm,
     }
 }
 
-/// P1 / P2 / P3 + P0 / P9（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
+/// P1 / P2 / P3 + P0 / P9 + P4–P6 / P101（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
 ///
 /// P0 / P9 只喂 PCOM 切段专属分支用（plant-mbd `pcom.rs`：RJ 型用 P0/P1/P3/P9，
-/// `isobran.pmlobj` L1523-1543）；其余构件类型的目录 PTSET 里大多没有这两个号，
-/// `resolver.leave` 解不出就是 `Ok(None)`，按现有口径不填、不算错——这两个额外号不会让
-/// 非 PCOM 构件多出意料之外的 issue。
+/// `isobran.pmlobj` L1523-1543）；P4–P6 / P101 是 M2b 的 ATTA 弯头垫板、KD 四焊点与挡块方向。其余构件类型的
+/// 目录 PTSET 里大多没有这几个号，`resolver.leave` 解不出就是 `Ok(None)`，按现有口径不填、不算错——额外的号
+/// 不会让别的构件多出意料之外的 issue。`bore` 照 E3D 设计级 `PPBORE`：PBOR 未设与求出 0 一律是 unset
+/// （e3d-model 交出的点集同一口径），不给。
 fn catalogue_ppoints(
     member: &e3d_io::db_element::DbElement,
     resolver: &CataloguePoints,
 ) -> Result<Vec<PPoint>, BranchQueryError> {
-    let mut points = Vec::with_capacity(5);
-    for number in [0, 1, 2, 3, 9] {
+    let mut points = Vec::with_capacity(9);
+    for number in [0, 1, 2, 3, 4, 5, 6, 9, 101] {
         match resolver.leave(member, Some(number)) {
             Ok(Some(point)) => points.push(PPoint {
                 number,
                 pos: point.pos.to_array(),
                 dir: point.dir.to_array(),
-                bore: point.bore,
+                bore: point.bore.filter(|bore| bore.is_finite() && *bore > 0.0),
             }),
             Ok(None) => {}
             Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => {}
@@ -791,6 +886,34 @@ fn optional_double(
         Err(DbElementError::UnknownAttribute { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// 穿过件自己的到达 / 离开口：`ARRI` / `LEAV` 号的目录 P 点（PML `apos / adir / lpos / ldir of $!mem wrt/*`，
+/// 世界系、方向朝外）。目录链走不到就没有、不留痕（切段本来就跳过穿过件）；读库出错也只记一条 Info，不让整条 BRAN 失败。
+fn pass_through_ports(
+    member: &e3d_io::db_element::DbElement,
+    resolver: &CataloguePoints,
+    branch_refno: &str,
+    object_refno: &str,
+    issues: &mut Vec<MbdV2Issue>,
+) -> (Option<RoutePoint>, Option<RoutePoint>) {
+    let arrive = resolver.arrive(member, fields::whole_number(member, "ARRI"));
+    let leave = resolver.leave(member, fields::whole_number(member, "LEAV"));
+    let mut keep = |side: &str, resolved: Result<Option<RoutePoint>, DbElementError>| match resolved
+    {
+        Ok(point) => point,
+        Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => None,
+        Err(error) => {
+            issues.push(fields::info_issue(
+                branch_refno,
+                object_refno,
+                &format!("adapter.pass_through_{side}_unreadable"),
+                format!("the {side} port of a pass-through member could not be read: {error}"),
+            ));
+            None
+        }
+    };
+    (keep("arrive", arrive), keep("leave", leave))
 }
 
 /// 解一个端口；目录库没开 / 目标不在所钉会话 / 目录链走不到 P 点都算「解不出」——记一条

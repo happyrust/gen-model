@@ -9,7 +9,8 @@
 //!               "support": { "subject_refno": "24383_69033", "subject_noun": "STRU", "name": "/1WCC-R412.006" } }] }
 //! ```
 //!
-//! 视图键随类型：`branch`（管道，`branch_query` 的 `BranchQueryResult` 全量）/ `support` / `civil` / `equipment`。
+//! 视图键随类型：`branch`（管道，`branch_query` 的 `BranchQueryResult` 全量，含 M2a / M2b 的成员字段与 BRAN 级
+//! `flow_direction` / `heat_tracing` / `dmf_walls`）/ `support` / `civil` / `equipment`。
 //! 设备是 `equipment_view` 的全量视图（原点 / 朝向 / 包围盒 / ELCONN / 管口 P1 / 找墙候选，判型说明在 `issues` 最前）；
 //! 支架是 `support_view` 的全量视图（构件、型钢截面、板、目录原语、管道附件、LNKI 墙板、找墙候选）；土建 / 建筑是
 //! `civil_view` 的全量视图（墙板的面 / SPINE、构件的棱线集、楼板旁的墙与门、房间，按标注类型取数）。找墙候选、按名找的
@@ -157,7 +158,30 @@ fn main() -> anyhow::Result<()> {
         let subject_refno = classified.subject_wire_refno();
         let view = match classified.kind {
             SubjectKind::Pipe => match branch_query(&set, classified.subject_refno) {
-                Ok(query) => serde_json::to_value(query)?,
+                Ok(query) => {
+                    let real: Vec<&plant_mbd::BranchMember> = query
+                        .members
+                        .iter()
+                        .filter(|member| !member.refno.contains('~'))
+                        .collect();
+                    let count = |has: fn(&plant_mbd::BranchMember) -> bool| {
+                        real.iter().filter(|member| has(member)).count()
+                    };
+                    eprintln!(
+                        "{raw}: BRAN {subject_refno} E3D members {}, vol {}, catalogue_primitives {}, aconn/lconn {}, \
+                         ipara {}, navigation {}, dmf_targets {}, dmf_walls {}, issues {}",
+                        real.len(),
+                        count(|m| m.vol.is_some()),
+                        count(|m| !m.catalogue_primitives.is_empty()),
+                        count(|m| m.aconn.is_some() && m.lconn.is_some()),
+                        count(|m| !m.ipara.is_empty()),
+                        count(|m| m.navigation.is_some()),
+                        count(|m| !m.dmf_targets.is_empty()),
+                        query.dmf_walls.len(),
+                        query.issues.len()
+                    );
+                    serde_json::to_value(query)?
+                }
                 Err(error) => {
                     eprintln!("{raw}: BRAN {subject_refno}: {error}");
                     continue;
