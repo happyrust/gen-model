@@ -15,6 +15,9 @@ plant3d-web#103 / 计划 `plant3d-web/docs/plans/2026-11-07-mbd-all-annotation-t
 | 支撑 | 24384/48（8000） | /1RX03-PIPEBJ › /1RX03-MSUP | SCTN×3 无 SPRE（只画中心线）、SNOD / SCOJ / SUBJ、PJOI×2；对应 ATTA 24384/2794、2795 |
 | 风管支撑 | 24384/24946 | /1CSV-HVACHB › 24384/24945 | SCTN×2 各带 FITT 端板；SUBS→EXTR→LOOP |
 | 曲墙 | 24381/44303（7997） | /1RB-CIVI › /1RB-WF05 | WALL：DESP=[1500,6000]，JUSL=OBOW；SPINE = POINSP / CURVE(THRU, R=26500) / POINSP；同 CWALL 下 GWALL 44283（NXTR + PLOO） |
+| 整圈弧墙 | 24381/2147（7997） | — | WALL：SPINE = POINSP / CURVE / POINSP / CURVE / POINSP，两段弧同一个圆、并成 360° 一段 |
+| 弧墙 + 埋板 | 24381/4302、FIXING 4305（7997） | — | FIXING `/B_600x300`：GMRE 的正体 SEXT（埋板）与 NGMR 的 NSEX（墙上凹槽）同参数（PAAX X、PBAX Y、PZ −25、PHEI 25、SVER ±150 × ±300），NSEX 拉伸方向的真样本 |
+| 变高墙目录 | 24381/15586、15726（7997） | — | STWALL（属主 `/1SL-WF08-W-C-S8038`、`-S8019`）：SPRE `/NUCLEAR_WALL_SPEC/Sloping_Wall` → SPRF `/Sloping_Wall`，DTRE 键 THK / HEIG / HAUT，截面 SREC `DY = (HAUT − HEIG) / 2`；DESP [150,700,700] / [200,200,200]，HAUT = HEIG |
 | 直墙 + 门 | 24381/37115 | /1RX-ARCHHB › /1RX-FN | STWALL 有 POSS / POSE，DESP=[50,1200]；门 FITT 37118 `/R162-M01`（DESP 50,900,2000…，POSL=IBOW） |
 | 楼板 + 负体 | 24381/38614、38695 | /1RX-ARCHHB › /1RX-FN | 38614：PLOO + NXTR×11 + NCYL×7；38695：NBOX×3、NCYL×75、NXTR×50 |
 | 1112 土建 | 17496/106424、80024、118364 | /1RS-CIVI › /1RS-WF05 | STWALL + FITT×4（穿墙件）；FLOOR：NBOX×4 + PFIT×3；GWALL：NBOX + NXTR×3 |
@@ -39,7 +42,9 @@ plant3d-web#103 / 计划 `plant3d-web/docs/plans/2026-11-07-mbd-all-annotation-t
 - **目录图元参数**：`model_catalogue_member(&m)` 只给网格与 `part_record_repeats[i].frame`（解析参数只有 SSLC、LPYR）。要原值：`DbElementParamEnv::new(Some(m), Some(comp)).without_insulation()`，对 GMRE / NGMR 成员 `get_number("PXLE"|"PDIA"|"PHEI"|"PDIS"|"PTDI"…, &env)?.value()`；`comp` 取 `catalogue_point_set(&m)?.component`；轴 `e3d_io::record::axis_spec::direction`（`Pn` 形的轴走 PTSE）；参照私有实现 `catalogue.rs::evaluate_sbox / evaluate_catalogue_cylinder`。设计侧负体直读：NBOX `XLEN/YLEN/ZLEN`，NCYL `DIAM/HEIG`，NPYR `XBOT…HEIG`，NXTR = 环 + HEIG。
 - **型材 / STWALL**：`section_catalogue → evaluate_section_profile → section_placement` 或 `spine_path`，端切 `section_cut_planes`；世界 = `world_matrix(el) * placement.local`；完整范例 `src/web_service/plines.rs::element_dto / section_frame`。STWALL 走同一条链（POSS / POSE、DESP、JUSL）。
 - **PANE / FLOOR / GWALL**：`profile::loop_profile`（顶点 x、y、FRAD，高度，`sjus_drop`）；FRAD 展开 `discretise::flatten_ring`；世界放置 `elmodl::world_with_sjus`（SJUS 只对 PANE、FLOOR、GWALL 生效）。
-- **曲墙 WALL**：`elmodl::wall_local_solid` 私有且只支持 POINSP-CURVE-POINSP；厚 / 高取 SPRE 截面，目录链走不通退回 DESP[厚, 高]；JUSL：OBOW / NA 在 x=0，IBOW 在 x=厚，LMIRR 镜像；SPINE 点取原始 POS，弓高 = r·(1−cos(扫角/2))。
+- **曲墙 WALL**：`elmodl::wall_local_solid` 私有且只支持 POINSP-CURVE-POINSP（含两段弧的整圈）；厚 / 高取 SPRE 截面，目录链走不通退回 DESP[厚, 高]；JUSL：OBOW / NA 在 x=0，IBOW 在 x=厚，LMIRR 镜像；SPINE 点取原始 POS，弓高 = r·(1−cos(扫角/2))。宿主在 `mbd::civil_faces::wall_pieces` 里自己按段建（CT-12）：`section::spine_path` 读出的段里，同一个圆上首尾相接的弧并成一段出 `CurvedWall`，直段出两张大面，整条 SPINE 首末端按 SPINE 的 `DRNS` / `DRNE` 斜切（复用公开的 `section::spine_mitre_plane`），段与段之间平头；多段时土建视图只交最长的那段，找墙每段一个候选。AMS 的 62 堵 WALL 全是弧（7997 单弧 46 + 整圈 2，1112 单弧 14），直线 / 多段 SPINE 没有样本，只有合成单测。
+- **变高 STWALL**：PML `prop haut` = 目录设计表（SPRF 的 `PTDTRE` / `DTRE`，键 `HAUT`）；e3d-io 的 `DbElementParamEnv::new(Some(stwall), Some(sprf))` 求 `AttribRef { name: "RPRO", qualifier: Some("HAUT"), .. }` 就是这条路（PPRO → PURP → DPRO）。e3d-model 只认 SANN 的变截面，SREC 的 `DX` / `DY` 不认，变高墙的网格仍是等截面。
+- **目录 NSEX / PFIT 口径**：宿主按 E3D 的几何——NSEX 位置 = PAAX 轴原点 + 标架 ·（PX, PY, PZ）、沿标架 +Z 拉 |PHEI|（e3d-model `evaluate_sext`，Core3D 的 SEXT 与 NSEX 同一支 QSSEXT）；PFIT 的目录件贴在属主板 SJUS 那一面（`panel_fitting_world`，E3D TTY 1112 PFIT 199/199）。PML 是另一套（构件原点按构件轴偏、沿 −Z 拉；PFIT 用 `pos of PFIT`），plant-mbd 裁决 D-CIVIL-023 / 024。
 - **P 点**：`CataloguePoints.leave(&m, Some(n))` 直接给世界坐标；`catalogue_point_set(&m)` 给局部坐标需乘世界矩阵（范例 `branch_query.rs::catalogue_ppoints`、`src/web_service/ptset.rs:169`）。NOZZ / ELCONN 从 CATR 进目录；CATR=0/0 只能用 POS / ORI。HANG 不能喂 `branch_query`（路由容器但不派生隐式管身，会被拒为 `NotRouteContainer`）。
 - **EQUI 包围盒**：见 §3 SPAMAP（EQUI 本身无条目，取后代的并集），或 e3d-io `spatial::aabb::BuiltInAabb`（只支持 BOX / CYLI）。
 
@@ -90,7 +95,7 @@ fn open(dbs: &[&str]) -> Option<Arc<DbSet>> {
 ## 风险
 
 1. 目录库跨项目（见 §5）。
-2. 可见性：`wall_local_solid`、`evaluate_*`、`member_env`、`catalogue_component`、`resolve_catalogue_axis`、`room_topology` 是私有或 `pub(crate)`；要么给 e3d-model 加公开 API，要么照抄并接受与网格结果慢慢偏离的风险（SCYL 负高度翻轴、CLFL、`Pn` 轴、PARA / DESP 取值规则）。
+2. 可见性：`wall_local_solid`、`evaluate_*`、`member_env`、`catalogue_component`、`resolve_catalogue_axis`、`room_topology` 是私有或 `pub(crate)`；要么给 e3d-model 加公开 API，要么照抄并接受与网格结果慢慢偏离的风险（SCYL 负高度翻轴、CLFL、`Pn` 轴、PARA / DESP 取值规则）。WALL 走了后一条：宿主 `civil_faces::wall_pieces` 小范围自己实现，斜切面用公开的 `section::spine_mitre_plane`，弧墙的内外半径与 `circular_wall_radii` 同口径。
 3. UDA：测试里的 DbSet 不挂 UDA 字典时所有 `:X` 悄悄变 None；AMS 本身没有 `:ZD_*`。
 4. 样本覆盖不全：没有在用 SUPPO、没有 PURP=DOOR、很多 NOZZ 没目录件、MSUP 的 SCTN 只画中心线、SPAMAP 没有容器与负体条目、NOZZ 只有点盒。
 5. 坐标系与时效：POS / ORI / HPOS / POSS 是属主系，必须乘 `world_matrix`；SCTN / STWALL 自身没有 POS / ORI；SPAMAP 是存盘快照、精度 0.1 mm；DbSet 打开时钉住会话，长时间读取要比对 `is_current`。

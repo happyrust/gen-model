@@ -7,20 +7,28 @@
 //!
 //! - **STWALL**：与 SCTN 同一条截面链（`section_catalogue → evaluate_section_profile → section_placement`，两端
 //!   `section_cut_planes`），即画出来的那堵墙的标架。截面外包矩形 `[x0, x1] × [y0, y1]`（已减 `JUSL`、按 `LMIRR`
-//!   镜像）在 `x = x0`、`x = x1` 各出一张大面：竖向 `y0..y1`，沿轴从起端切面到终端切面。PML 用 `prop thk / height`
-//!   与 `ppli na`（L440-524），NA 落在墙面上时两者一样；`prop haut`（变高墙）不接，截面链本身也是等截面。
+//!   镜像）在 `x = x0`、`x = x1` 各出一张大面：起端竖向 `y0..y1`，沿轴从起端切面到终端切面。PML 用 `prop thk / height`
+//!   与 `ppli na`（L440-524），NA 落在墙面上时两者一样。变高墙：目录设计表里有 `HAUT`（PML `prop haut`，L454-458）时
+//!   终端墙顶在 `y0 + HAUT`，两张面的顶边从起端斜到终端（L493-499）。E3D 是同一个意思：AMS 的
+//!   `/NUCLEAR_WALL_SPEC/Sloping_Wall` 截面是一只 `PYLE = HEIG`、`DY = (HAUT − HEIG) / 2` 的 SREC，终端截面长到 HAUT
+//!   （e3d-model 不认 SREC 的 DX / DY，那份网格仍是等截面）。
 //! - **FLOOR / GWALL**：`loop_profile`（第一个 PLOO / LOOP 环的 PAVE / VERT 位置与 FRAD、HEIG、SJUS 下移）放进
 //!   `world_with_sjus`：底面与顶面，逐点 FRAD 进 `radii`；相邻重合（不到 0.1 mm）的点并掉（L743）。FLOOR 上面在前
 //!   （L626-633），厚度是环高。GWALL 另按环的每条边出侧面（不带圆角，L771-810），再按面积挑两张最大的放前面——离
 //!   水平不到 20° 的面面积按 0 计（L816-853）；厚度是两张大面的距离，墙高是那些水平面的高差（与 HEIG 差不到 0.1
 //!   时取 HEIG，L857-862）。边短于 1 mm 的侧面不出（求解器会把它判成退化、连累整个候选）。
-//! - **WALL**：`spine_path` 读 SPINE（POINSP / CURVE / POINSP，THRU / FILL / CENT 都认）：同一个圆上首尾相接的弧
-//!   （单段弧，或两段拼成的整圈）出 [`CurvedWall`]，单段直线按截面出两张大面，别的形状报错。截面同 STWALL
-//!   （`/Single_leaf_wall` 一类：OBOW / NA 在 x = 0、IBOW 在 x = 厚）；弧上截面 x 朝行进方向左手侧（俯视）：绕
-//!   WALL 的 Z 逆时针时内外半径是 `r − x1 / r − x0`，顺时针 `r + x0 / r + x1`（e3d-model `circular_wall_radii`
-//!   同一口径，与 PML 按 `ppli cbow` 在弧内外加减墙厚 L605-609 等价）。弧轴翻到 WALL 的 Z 那一侧（PML
-//!   `Z is arczdir`，L598-603），弧心挪到墙底平面（spine 平面沿 Z 挪 `y0`；Z 朝下的墙挪 `y1`，求解器的墙身一律从
-//!   弧平面往上），墙高 `y1 − y0`。
+//! - **WALL**：`spine_path` 读 SPINE（POINSP / CURVE / POINSP，THRU / FILL / CENT 都认），按段出几何（[`WallPiece`]）：
+//!   同一个圆上首尾相接的几段弧（单段弧、两段拼成的整圈）并成一段、出 [`CurvedWall`]，直段按截面出两张大面。截面同
+//!   STWALL（`/Single_leaf_wall` 一类：OBOW / NA 在 x = 0、IBOW 在 x = 厚）；截面 x 朝行进方向左手侧（俯视，x = WALL
+//!   的 Z × 行进方向），y 沿 WALL 的 Z。弧上绕 WALL 的 Z 逆时针时内外半径是 `r − x1 / r − x0`，顺时针
+//!   `r + x0 / r + x1`（e3d-model `circular_wall_radii` 同一口径，与 PML 按 `ppli cbow` 在弧内外加减墙厚 L605-609
+//!   等价）；弧轴翻到 WALL 的 Z 那一侧（PML `Z is arczdir`，L598-603），弧心挪到墙底平面（spine 平面沿 Z 挪 `y0`；Z 朝下
+//!   的墙挪 `y1`，求解器的墙身一律从弧平面往上），墙高 `y1 − y0`。直段的两张面从段起点到段终点；整条 SPINE 的首端 /
+//!   末端按 SPINE 的 `DRNS` / `DRNE` 斜切（e3d-model `spine_mitre_plane`，即 Core3D `setMitrePlanes`：端向缺席、与切向
+//!   垂直或平行时平头），段与段之间平头（E3D 的 SPINE 扫掠逐段挤出再并起来，拐角不斜接）；弧段的端向不接
+//!   （[`CurvedWall`] 只有径向端）。多段时顶层的面 / 曲墙 / SPINE 点 / `cbow` 取最长的那段（土建视图只交得出一段），
+//!   找墙每段一个候选（[`civil_candidates_of`]）。PML 只会三点定圆（L535-569）：直线 SPINE 在 L544 取 `!poss[3]` 报错，
+//!   多段 SPINE 拿前三个成员的位置定圆、扫角逐点累加，出来的弧是错的（plant-mbd 裁决 D-CIVIL-022）。
 //!
 //! 截面目录链走不通（无 SPRE、链断、目录库没注册、截面没有顶点）时退回 DESP `[厚, 高]` 矩形、原点对齐（仍认
 //! `LMIRR`），并留一条说明；DESP 不满两项就没有这条退路，候选读不成。
@@ -33,7 +41,8 @@
 //! 计划决策 D7：不建 AABB 树，读 E3D 自己的 SPAMAP（[`host::spamap_index`]，按文件 + 会话缓存）。从基准点起五条
 //! 走廊——E / N / W / S 水平、D 向下，各长 [`LOCATE_RAY_MM`]（求解器最外一环），横截面 ±[`LOCATE_CORRIDOR_HALF_WIDTH_MM`]
 //! （求解器的细盒是 ±1 mm，放宽是为了抵 SPAMAP 0.1 mm 的精度与包围盒口径差：多给的候选求解器按环与细盒再筛，少给就
-//! 漏墙）。包围盒碰到水平走廊的 STWALL / GWALL / WALL、碰到向下走廊的 FLOOR 收进来，逐个转成候选；转不成的跳过并
+//! 漏墙）。包围盒碰到水平走廊的 STWALL / GWALL / WALL、碰到向下走廊的 FLOOR 收进来，逐个转成候选（多段 SPINE 的
+//! WALL 每段一个、同一 refno——求解器对 WALL 只按 refno 记进 `near_walls`、取最近的）；转不成的跳过并
 //! 留一条说明。转成之后再拿候选自己的包围盒（[`candidate_aabb`]，与求解器 `locate::prepare` 同一算法）重测一遍
 //! 走廊，不碰的丢掉：E3D 给曲墙记的 SPAMAP 盒比墙大得多（24381/44303 的盒宽 3.9 万 mm，墙是半径 28 m 的四分之一圈），
 //! 只靠 SPAMAP 会多给一大批 WALL。求解器只比 ±1 mm 细盒碰到候选包围盒的那些，走廊又罩住全部细盒，所以这一步丢不掉
@@ -47,13 +56,16 @@
 use std::sync::Arc;
 
 use e3d_io::db_element::{DbElement, DbElementError, DbSet};
+use e3d_io::db_param_env::DbElementParamEnv;
+use e3d_io::record::catalogue_eval::{AttribRef, ParamEnv};
 use e3d_io::refno::RefNo;
 use e3d_model::discretise::FilletVertex;
 use e3d_model::elmodl::world_with_sjus;
 use e3d_model::profile::{ProfileError, loop_profile};
 use e3d_model::section::{
-    SectionChain, SectionCutPlane, SectionCuts, SectionError, SectionProfile, SpineSegment,
-    evaluate_section_profile, section_catalogue, section_cut_planes, section_placement, spine_path,
+    SectionChain, SectionCutPlane, SectionCuts, SectionError, SectionProfile, SpinePath,
+    SpineSegment, evaluate_section_profile, section_catalogue, section_cut_planes,
+    section_placement, spine_mitre_plane, spine_path,
 };
 use e3d_model::transform::world_matrix;
 use glam::{DMat3, DMat4, DQuat, DVec3};
@@ -135,7 +147,7 @@ impl From<DbElementError> for CivilFaceError {
     }
 }
 
-/// 一块墙板 → 找墙候选，见模块文档。
+/// 一块墙板 → 找墙候选，见模块文档。多段 SPINE 的 WALL 取最长的那段（全部段见 [`civil_candidates_of`]）。
 pub fn civil_candidate(set: &Arc<DbSet>, refno: RefNo) -> Result<CivilCandidate, CivilFaceError> {
     civil_candidate_of(&set.element(refno), &mut Vec::new())
 }
@@ -150,18 +162,37 @@ pub struct CivilShape {
     pub curved: Option<CurvedWall>,
     /// 截面外包矩形宽（STWALL / WALL）、FLOOR 的环高、GWALL 两张大面的距离。
     pub thickness: f64,
-    /// 截面外包矩形高（STWALL / WALL）、GWALL 水平面的高差；FLOOR 没有。
+    /// 截面外包矩形高（STWALL / WALL；STWALL 是起端的）、GWALL 水平面的高差；FLOOR 没有。
     pub height: Option<f64>,
+    /// STWALL：终端墙高（目录设计表的 `HAUT`，PML `prop haut`）；表里没有这一键时没有，两端同高。
+    pub height_end: Option<f64>,
     /// STWALL：截面系到世界（列 = 截面 x（厚度向）/ y（高度向）/ 沿轴 z），即 PML 的 `ori of STWALL wrt/*`。
     pub section_frame: Option<DMat4>,
     /// STWALL / WALL：截面外包矩形。
     pub section: Option<SectionBox>,
-    /// WALL：SPINE 上的点（世界 mm）——起点、每段弧的中点、每段的终点。
+    /// WALL：SPINE 上的点（世界 mm）——起点、每段弧的中点、每段的终点；多段时只是最长的那段。
     pub spine: Vec<DVec3>,
-    /// WALL：截面底边中点在 SPINE 起点处的世界位置（PML `pos ppli cbow prop 0`）。
+    /// WALL：截面底边中点在 SPINE 起点处的世界位置（PML `pos ppli cbow prop 0`）；多段时在最长那段的起点。
     pub cbow: Option<DVec3>,
+    /// WALL：SPINE 的各段（单段弧、整圈、单段直线也是一段），顶层的 `faces` / `curved` / `spine` / `cbow` 是其中
+    /// 最长的那段。
+    pub pieces: Vec<WallPiece>,
     /// FLOOR / GWALL：第一个环的高 `HEIG`。
     pub loop_height: Option<f64>,
+}
+
+/// WALL 的一段（[`CivilShape::pieces`]）：直段给两张大面，弧段（同一个圆上首尾相接的几段弧并成一段）给
+/// [`CurvedWall`]。坐标一律世界 mm。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallPiece {
+    pub faces: Vec<CivilFace>,
+    pub curved: Option<CurvedWall>,
+    /// 这一段的 SPINE 点：起点、每段弧的中点、终点。
+    pub spine: Vec<DVec3>,
+    /// 截面底边中点在这一段起点处的位置（同 [`CivilShape::cbow`]）。
+    pub cbow: Option<DVec3>,
+    /// 路径长度（弧按半径 × 扫角），挑最长的那段用。
+    pub length: f64,
 }
 
 /// 一块墙板的几何（不读名字与 UDA），非致命的说明（截面退回 DESP…）追加进 `notes`。
@@ -205,10 +236,12 @@ pub fn civil_shape_of(
         curved: shape.curved,
         thickness: shape.thickness,
         height: shape.height,
+        height_end: shape.height_end,
         section_frame: shape.section_frame,
         section: shape.section,
         spine: shape.spine,
         cbow: shape.cbow,
+        pieces: shape.pieces,
         loop_height: shape.loop_height,
     })
 }
@@ -219,6 +252,35 @@ pub fn civil_candidate_of(
     notes: &mut Vec<String>,
 ) -> Result<CivilCandidate, CivilFaceError> {
     let shape = civil_shape_of(element, notes)?;
+    candidate_from(element, &shape, notes)
+}
+
+/// [`civil_candidate_of`] 的全部段：多段 SPINE 的 WALL 每段一个候选（refno、名字、厚、高都一样），别的墙板只有一个。
+pub fn civil_candidates_of(
+    element: &DbElement,
+    notes: &mut Vec<String>,
+) -> Result<Vec<CivilCandidate>, CivilFaceError> {
+    let shape = civil_shape_of(element, notes)?;
+    let candidate = candidate_from(element, &shape, notes)?;
+    if shape.pieces.len() <= 1 {
+        return Ok(vec![candidate]);
+    }
+    Ok(shape
+        .pieces
+        .iter()
+        .map(|piece| CivilCandidate {
+            faces: piece.faces.clone(),
+            curved: piece.curved.clone(),
+            ..candidate.clone()
+        })
+        .collect())
+}
+
+fn candidate_from(
+    element: &DbElement,
+    shape: &CivilShape,
+    notes: &mut Vec<String>,
+) -> Result<CivilCandidate, CivilFaceError> {
     let refno = element.refno();
     let noun = shape.noun.clone();
     let label = format!("{noun} {}", wire_refno(refno));
@@ -243,12 +305,12 @@ pub fn civil_candidate_of(
         noun,
         name: soft(element.stored_name())?.flatten(),
         owner_name,
-        faces: shape.faces,
+        faces: shape.faces.clone(),
         thickness: Some(snap_to_integer(tidy(thickness), THICKNESS_SNAP)),
         height: shape
             .height
             .map(|height| snap_to_integer(tidy(height), HEIGHT_SNAP)),
-        curved: shape.curved,
+        curved: shape.curved.clone(),
     })
 }
 
@@ -274,10 +336,12 @@ struct Shape {
     curved: Option<CurvedWall>,
     thickness: f64,
     height: Option<f64>,
+    height_end: Option<f64>,
     section_frame: Option<DMat4>,
     section: Option<SectionBox>,
     spine: Vec<DVec3>,
     cbow: Option<DVec3>,
+    pieces: Vec<WallPiece>,
     loop_height: Option<f64>,
 }
 
@@ -449,15 +513,38 @@ fn stwall_shape(
     let placement = section_placement(element, &profile)?;
     let cuts = section_cut_planes(element, &placement)?;
     let to_world = world_matrix(element)? * placement.local;
-    let faces = section_wall_faces(to_world, placement.length, Some(&cuts), section);
+    let height_end = catalogue_property(element, "HAUT")?;
+    let faces = sloped_wall_faces(to_world, placement.length, Some(&cuts), section, height_end);
     Ok(Shape {
         faces: Vec::from(faces),
         thickness: section.width(),
         height: Some(section.height()),
+        height_end,
         section_frame: Some(to_world),
         section: Some(section),
         ..Shape::default()
     })
+}
+
+/// 目录设计表里一个键的值（PML `prop <键> of 墙板`）：截面目录件（SPRF）的 `PTDTRE` / `DTRE` 里 `DKEY` 是这一键的
+/// 那行，走 e3d-io `ATTRIB RPRO <键>` 同一条求值路（PPRO → PURP 指的源 → DPRO）。目录链走不通、表里没有这一键、
+/// 求不出或不是正数都按没有（PML 的 `handle any`）。
+fn catalogue_property(element: &DbElement, key: &str) -> Result<Option<f64>, DbElementError> {
+    let catalogue = match section_catalogue(element) {
+        Ok(SectionChain::Resolved(catalogue)) => catalogue,
+        Ok(_) => return Ok(None),
+        Err(SectionError::Db(error)) => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let env = DbElementParamEnv::new(Some(element.clone()), Some(catalogue.sprf.clone()))
+        .without_insulation();
+    let value = env.attribute_number(&AttribRef {
+        name: "RPRO",
+        subscript: None,
+        qualifier: Some(key),
+        owner_chain: &[],
+    });
+    Ok(value.filter(|value| value.is_finite() && *value > LENGTH_EPS))
 }
 
 /// 直段墙的两张大面：`to_world` 把截面平面 `(x, y)` + 沿轴 `z ∈ [0, length]` 放进世界（`world_matrix ×
@@ -469,7 +556,21 @@ pub fn section_wall_faces(
     cuts: Option<&SectionCuts>,
     section: SectionBox,
 ) -> [CivilFace; 2] {
+    sloped_wall_faces(to_world, length, cuts, section, None)
+}
+
+/// [`section_wall_faces`]，终端墙高 `height_end`（从 `y0` 量起，STWALL 的 `prop haut`）：两张面的顶边从起端的 `y1`
+/// 斜到终端的 `y0 + height_end`（PML L493-499 的 `poss[5..8]`）；`None` 时两端同高。
+pub fn sloped_wall_faces(
+    to_world: DMat4,
+    length: f64,
+    cuts: Option<&SectionCuts>,
+    section: SectionBox,
+    height_end: Option<f64>,
+) -> [CivilFace; 2] {
     let rotation = DMat3::from_mat4(to_world);
+    let [y0, y1] = section.y;
+    let top_end = height_end.map_or(y1, |height| y0 + height);
     let side = |x: f64, outward: f64| {
         let z_at = |y: f64, end: bool| match cuts {
             Some(cuts) if end => cut_z(&cuts.end, x, y).unwrap_or(length),
@@ -478,11 +579,10 @@ pub fn section_wall_faces(
             None => 0.0,
         };
         let point = |y: f64, end: bool| to_world.transform_point3(DVec3::new(x, y, z_at(y, end)));
-        let [y0, y1] = section.y;
         let points = [
             point(y0, false),
             point(y0, true),
-            point(y1, true),
+            point(top_end, true),
             point(y1, false),
         ];
         civil_face(&points, Some(rotation * DVec3::X * outward), Vec::new())
@@ -505,71 +605,115 @@ fn wall_shape(element: &DbElement, label: &str, notes: &mut Vec<String>) -> Resu
     };
     let (section, _) = wall_section(element, label, notes)?;
     let world = world_matrix(element)?;
-    let up = world.transform_vector3(DVec3::Z);
-    let spine = spine_points(&path.segments)
-        .into_iter()
-        .map(|point| world.transform_point3(point))
-        .collect();
-    let cbow = spine_cbow(&path.segments, section).map(|point| world.transform_point3(point));
-    if let Some(arc) = one_circle(&path.segments) {
-        let curved = curved_wall(
-            world.transform_point3(arc.centre),
-            world.transform_vector3(arc.axis),
-            world.transform_point3(arc.start),
-            world.transform_point3(arc.end),
-            arc.sweep,
-            up,
-            section,
-        )
-        .map_err(Failure::Geometry)?;
-        return Ok(Shape {
-            curved: Some(curved),
-            thickness: section.width(),
-            height: Some(section.height()),
-            section: Some(section),
-            spine,
-            cbow,
-            ..Shape::default()
+    let pieces = wall_pieces(&path, world, section).map_err(Failure::Geometry)?;
+    let main = pieces[main_piece(&pieces)].clone();
+    Ok(Shape {
+        faces: main.faces,
+        curved: main.curved,
+        thickness: section.width(),
+        height: Some(section.height()),
+        section: Some(section),
+        spine: main.spine,
+        cbow: main.cbow,
+        pieces,
+        ..Shape::default()
+    })
+}
+
+/// WALL 的 SPINE（`spine_path`，WALL 局部系）按段出几何，`world` 是 WALL 的世界矩阵，见模块文档「WALL」。至少一段；
+/// 一段也走不出来、或哪一段建不起来（直段与 WALL 的 Z 平行、弧的内外半径不成立…）整块报错。
+pub fn wall_pieces(
+    path: &SpinePath,
+    world: DMat4,
+    section: SectionBox,
+) -> Result<Vec<WallPiece>, String> {
+    if path.segments.is_empty() {
+        return Err(if path.problems.is_empty() {
+            "SPINE 一段也走不出来".to_string()
+        } else {
+            path.problems.join("；")
         });
     }
-    match path.segments.as_slice() {
-        [SpineSegment::Straight { start, end }] => {
-            let faces = straight_wall_faces(
-                world.transform_point3(*start),
-                world.transform_point3(*end),
-                up,
-                section,
-            )
-            .map_err(Failure::Geometry)?;
-            Ok(Shape {
-                faces: Vec::from(faces),
-                thickness: section.width(),
-                height: Some(section.height()),
-                section: Some(section),
-                spine,
-                cbow,
-                ..Shape::default()
-            })
-        }
-        segments => {
-            let kinds: Vec<&str> = segments
-                .iter()
-                .map(|segment| match segment {
-                    SpineSegment::Straight { .. } => "直段",
-                    SpineSegment::Arc { .. } => "弧",
-                })
-                .collect();
-            let problems = if path.problems.is_empty() {
-                String::new()
-            } else {
-                format!("；{}", path.problems.join("；"))
-            };
-            Err(Failure::Geometry(format!(
-                "SPINE 走成 {} 段 {kinds:?}，只认同一个圆上的弧或单段直线{problems}",
-                segments.len()
-            )))
+    let up = world.transform_vector3(DVec3::Z);
+    let runs = spine_runs(&path.segments);
+    let last = runs.len() - 1;
+    let mut pieces = Vec::with_capacity(runs.len());
+    for (index, run) in runs.into_iter().enumerate() {
+        let segments = &path.segments[run];
+        let spine = spine_points(segments)
+            .into_iter()
+            .map(|point| world.transform_point3(point))
+            .collect();
+        let cbow = spine_cbow(segments, section).map(|point| world.transform_point3(point));
+        let length = segments.iter().map(SpineSegment::length).sum();
+        let (faces, curved) = match (one_circle(segments), segments) {
+            (Some(arc), _) => {
+                let curved = curved_wall(
+                    world.transform_point3(arc.centre),
+                    world.transform_vector3(arc.axis),
+                    world.transform_point3(arc.start),
+                    world.transform_point3(arc.end),
+                    arc.sweep,
+                    up,
+                    section,
+                )?;
+                (Vec::new(), Some(curved))
+            }
+            (None, [SpineSegment::Straight { start, end }]) => {
+                let end_direction = |drn: DVec3, at_end: bool| {
+                    if at_end {
+                        world.transform_vector3(drn)
+                    } else {
+                        DVec3::ZERO
+                    }
+                };
+                let faces = straight_wall_faces(
+                    world.transform_point3(*start),
+                    world.transform_point3(*end),
+                    up,
+                    section,
+                    end_direction(path.drns, index == 0),
+                    end_direction(path.drne, index == last),
+                )?;
+                (Vec::from(faces), None)
+            }
+            (None, _) => unreachable!("spine_runs 只把同一个圆上的弧并成一组，直段各自一组"),
+        };
+        pieces.push(WallPiece {
+            faces,
+            curved,
+            spine,
+            cbow,
+            length,
+        });
+    }
+    Ok(pieces)
+}
+
+/// 最长的那段（并列取先），见 [`CivilShape::pieces`]。
+pub fn main_piece(pieces: &[WallPiece]) -> usize {
+    let mut best = 0;
+    for (index, piece) in pieces.iter().enumerate() {
+        if piece.length > pieces[best].length + LENGTH_EPS {
+            best = index;
         }
     }
+    best
+}
+
+/// 按行进顺序分组：直段各自一组，同一个圆上首尾相接的连续弧并成一组（[`one_circle`]）。
+fn spine_runs(segments: &[SpineSegment]) -> Vec<std::ops::Range<usize>> {
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let (SpineSegment::Arc { .. }, Some(run)) = (segment, runs.last_mut())
+            && one_circle(&segments[run.start..=index]).is_some()
+        {
+            run.end = index + 1;
+            continue;
+        }
+        runs.push(index..index + 1);
+    }
+    runs
 }
 
 /// SPINE 上的点（WALL 局部系）：起点、每段弧的中点、每段的终点。PML 直取 `members of first spine` 的位置
@@ -729,27 +873,47 @@ pub fn curved_wall(
     })
 }
 
-/// 直 SPINE 的 WALL：截面 x = WALL 的 Z × 行进方向（与弧墙同一套截面系），两张大面同 [`section_wall_faces`]，
-/// 两端平头（SPINE 的 `DRNS` / `DRNE` 不接）。
-fn straight_wall_faces(
+/// 直 SPINE 段的两张大面（入参都在世界系）：截面 x = WALL 的 Z（`up`）× 行进方向（与弧墙同一套截面系），面同
+/// [`section_wall_faces`]。`drns` / `drne` 是这一段起点 / 终点的端向（不在整条 SPINE 首端 / 末端的给零向量）：按
+/// [`spine_mitre_plane`] 定斜切面，缺席、与行进方向垂直或平行时平头。
+pub fn straight_wall_faces(
     start: DVec3,
     end: DVec3,
     up: DVec3,
     section: SectionBox,
+    drns: DVec3,
+    drne: DVec3,
 ) -> Result<[CivilFace; 2], String> {
+    let length = (end - start).length();
     let along = (end - start).try_normalize().ok_or("SPINE 两点重合")?;
     let x_axis = up
         .cross(along)
         .try_normalize()
         .ok_or("SPINE 与 WALL 的 Z 平行，截面朝向定不了")?;
     let y_axis = along.cross(x_axis);
-    let [y0, y1] = section.y;
-    let side = |x: f64, outward: f64| {
-        let at = |base: DVec3, y: f64| base + x_axis * x + y_axis * y;
-        let points = [at(start, y0), at(end, y0), at(end, y1), at(start, y1)];
-        civil_face(&points, Some(x_axis * outward), Vec::new())
+    let to_world = DMat4::from_cols(
+        x_axis.extend(0.0),
+        y_axis.extend(0.0),
+        along.extend(0.0),
+        start.extend(1.0),
+    );
+    let to_local = DMat3::from_cols(x_axis, y_axis, along).transpose();
+    let cut = |drn: DVec3, at: DVec3, z: f64, is_start: bool| SectionCutPlane {
+        point: DVec3::Z * z,
+        normal: spine_mitre_plane(drn, along, at, is_start)
+            .map_or(DVec3::Z, |plane| to_local * plane.normal),
     };
-    Ok([side(section.x[0], -1.0), side(section.x[1], 1.0)])
+    let cuts = SectionCuts {
+        start: cut(drns, start, 0.0, true),
+        end: cut(drne, end, length, false),
+    };
+    Ok(sloped_wall_faces(
+        to_world,
+        length,
+        Some(&cuts),
+        section,
+        None,
+    ))
 }
 
 // ---- 环拉伸（FLOOR / GWALL） ---------------------------------------------------------------------
@@ -1108,12 +1272,14 @@ pub fn locate_candidates(
     }
     found.spamap_hits = hits.len();
     for refno in hits {
-        match civil_candidate_of(&set.element(refno), &mut found.issues) {
-            Ok(candidate) => {
-                let misses = candidate_aabb(&candidate)
-                    .is_some_and(|aabb| !corridors.hit(&aabb).collects(&candidate.noun));
-                if !misses {
-                    found.candidates.push(candidate);
+        match civil_candidates_of(&set.element(refno), &mut found.issues) {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    let misses = candidate_aabb(&candidate)
+                        .is_some_and(|aabb| !corridors.hit(&aabb).collects(&candidate.noun));
+                    if !misses {
+                        found.candidates.push(candidate);
+                    }
                 }
             }
             Err(error) => found
