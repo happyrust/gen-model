@@ -102,10 +102,10 @@ impl BatchItem {
     }
 }
 
-/// 一块渲染好的批：不含 `BEGIN / COMMIT`，也不含 pe 统计观测（那是 `dbnum_stats` 的事）。
+/// 一块渲染好的批：不含 `BEGIN / COMMIT`（那是 `pe_batch` 的事）。
 #[derive(Debug, Clone, Default)]
 pub struct RenderedElementBatch {
-    /// 这一块碰到的全部 `pe` id（`ref0_ref1`），给 `dbnum_stats` 做前后观测。
+    /// 这一块碰到的全部 `pe` id（`ref0_ref1`），只交去校验规范性。
     pub ids: Vec<String>,
     /// 删除块 + 插入块。
     pub sql: String,
@@ -444,8 +444,8 @@ pub fn render_item_transactions_with_limits(
         report.transactions = transactions.len();
     }
 
-    // 事务只包 `BEGIN / COMMIT` 与上限校验（ADR-071 D6：逐笔 pe 统计观测块已退，`dbnum_info_table`
-    // 由任务收尾从目标索引序列化）；`ids` 只交去校验规范性。此前这里按 `StatisticsMode` 分
+    // 事务只包 `BEGIN / COMMIT` 与上限校验（ADR-071 D6：逐笔 pe 统计观测块已退，Ref0 统计随后
+    // 整体退役）；`ids` 只交去校验规范性。此前这里按 `StatisticsMode` 分
     // 「逐笔观测 / 基线延后」两档，两档合一之后那个枚举随 S7 删了。
     fn append(
         items: &[BatchItem],
@@ -794,7 +794,7 @@ mod tests {
             assert!(tx.starts_with("BEGIN TRANSACTION;"));
             assert!(tx.trim_end().ends_with("COMMIT TRANSACTION;"));
         }
-        // 观测块已退（ADR-071 D6）：元素块只有正文，统计由任务收尾从目标索引序列化。
+        // 观测块已退（ADR-071 D6）：元素块只有正文，Ref0 统计已整体退役。
         assert!(
             !txs[1].contains("dbnum_stats_state") && !txs[1].contains("dbnum_info_table"),
             "元素块不得再带 pe 统计观测"

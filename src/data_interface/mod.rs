@@ -3,7 +3,6 @@ pub mod cata_dependency;
 pub mod db_model;
 /// 一个 dbnum 初始化的编排（ADR-077）：解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾。
 pub mod dbnum_initialize;
-pub mod dbnum_stats;
 /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
 /// rocksdb 形态下基线与增量唯一的写法出口。
 pub mod element_batch;
@@ -86,8 +85,8 @@ pub mod dabacon_tag_summary;
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
 
-/// dbnum 任务收尾的一笔控制面事务：模型 / 房间水位 + Ref0 统计，事实全来自任务内存
-/// （ADR-071 D3 / D6）。
+/// dbnum 任务收尾的一笔控制面事务：数据 / 模型 / 房间水位 + 写入标记，事实全来自任务内存
+/// （ADR-071 D3）。
 pub(crate) mod task_end;
 
 /// 一个 dbnum 任务这一版攒下的副作用集合（空间刷新 / 删除、房间清边）——内存里的那本，
@@ -148,8 +147,6 @@ pub mod model_root_ledger;
 /// 强制范围重生成（先删后生成）的未完成留痕（issue #59）：水位不跟着那一删退，进程死在中途时
 /// 只有它记得哪片范围还没补回来；启动就绪后以 `force = false` 续跑。
 pub mod model_scope_regen;
-/// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
-pub mod ref0_snapshot;
 /// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,
 /// increment_window_artifact}.rs`，ADR-071 S7 搬出）。
 pub mod window_landing;

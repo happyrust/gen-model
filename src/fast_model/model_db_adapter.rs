@@ -8870,7 +8870,6 @@ mod tests {
                     catalogue_sessions: None,
                     room_generation: Default::default(),
                 }),
-                info: None,
                 model_base_sesno: Some(0),
                 closes_task: true,
             },

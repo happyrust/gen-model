@@ -1171,7 +1171,7 @@ mod tests {
     /// 压根不该进摄入范围。
     ///
     /// dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的 sys 库都是 8191，而本库的
-    /// 状态层（`dbnum_watermark` 的记录 id、`dbnum_info_table`、`pe.dbnum` 聚合）
+    /// 状态层（`dbnum_watermark` 的记录 id、`pe.dbnum` 聚合）
     /// 全部按裸 dbnum 做键。放进来的实测后果：`dbnum_watermark:8191` 记着 amssys
     /// 的身份，`file_latest_sesno` 却被 zdjsys 的值写脏。
     ///
@@ -2985,8 +2985,8 @@ pub fn is_candidate_db_file(path: &std::path::Path) -> bool {
 /// 与 DICT 目录库的区别是数据域，不是类型高低：DICT 是被主项目依赖的数据，
 /// 跨项目引用是正常业务；SYST/COMM/MISC/GLB/GLOB 描述的是「那个项目自己怎么组织」，
 /// 对本库毫无意义。而且 dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的
-/// sys 库都是 8191，本库的状态层（`dbnum_watermark` 记录 id、`dbnum_info_table`、
-/// `pe.dbnum` 聚合）却全部按裸 dbnum 做键，放进来就是三份数据抢同一行。
+/// sys 库都是 8191，本库的状态层（`dbnum_watermark` 记录 id、`pe.dbnum` 聚合）却全部按裸
+/// dbnum 做键，放进来就是三份数据抢同一行。
 pub const PROJECT_RUNTIME_SYS_TYPES: [&str; 5] = ["SYST", "COMM", "MISC", "GLB", "GLOB"];
 
 /// 这个库是不是「别的项目的运行态系统库」。

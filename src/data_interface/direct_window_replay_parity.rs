@@ -1413,9 +1413,7 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
         assert_eq!(watermark(&db).await, Some(BASE_SESNO));
         assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"));
     }
-    // pe 统计不再随写事务逐笔记账（ADR-071 D6）：终态批次重放两遍，`dbnum_info_table` 一行都不动
-    // ——`count` 由该库任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`），
-    // 这条只跑数据面语句的对拍看不到它。
+    // Ref0 统计已退役（ADR-071 D6）：终态批次重放两遍，`dbnum_info_table` 一行都不出现。
     let mut response = db
         .query("SELECT count() AS n FROM pe GROUP ALL; SELECT count() AS n FROM dbnum_info_table GROUP ALL;")
         .await
@@ -1507,7 +1505,6 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                         room_generation: Default::default(),
                     }),
                     model_base_sesno: None,
-                    info: None,
                     closes_task: true,
                 },
             )
@@ -2084,7 +2081,6 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
             room_generation: Default::default(),
         }),
         model_base_sesno: None,
-        info: None,
         closes_task: true,
     };
     let closing = crate::data_interface::task_end::render_task_end_tail(&end);

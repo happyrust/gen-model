@@ -16,21 +16,21 @@
 //!    missing or empty watermark table), establish each dbnum from the max
 //!    persisted `pe.sesno`. Fill-only, so reruns never overwrite established
 //!    watermarks.
-//! 4. Otherwise (only when a dedicated row is absent) fall back once to the max
-//!    `sesno` in `dbnum_info_table` for this `dbnum`.
+//!
+//! A `dbnum` without a dedicated row is uninitialized. The former fourth source, the
+//! max `sesno` of the per-Ref0 statistics table, retired together with that table
+//! (ADR-071 D6); startup drops it.
 //!
 //! After the state is established (a scan / advance writes `applied_sesno`), reads
 //! use `applied_sesno` directly and never re-mix other sources.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use aios_core::SUL_DB;
 use serde::{Deserialize, Serialize};
 
 /// Authoritative per-`dbnum` state table (extends the legacy watermark record).
 pub const WATERMARK_TABLE: &str = "dbnum_watermark";
-/// Legacy per-`ref_0` element-statistics table, used only for one-time migration.
-pub const INFO_TABLE: &str = "dbnum_info_table";
 
 /// Serializes scan-observation writes against an in-process fast DBNUM delete.
 /// Reads remain unrestricted; normal scans share the read side.
@@ -40,7 +40,7 @@ pub(crate) static DBNUM_STATE_WRITE_GATE: tokio::sync::RwLock<()> =
 /// 进程内水位镜像（共识 d-227：「内存里可以保持住水位，surreal 数据库相当于是一个落盘的
 /// 序列化方案。在比对时，我们都可以使用内存里的缓存。」）。
 ///
-/// 镜像里放的是**库里那一行的原样投影**（[`StateRow`] + `dbnum_info_table` 的旧水位），
+/// 镜像里放的是**库里那一行的原样投影**（[`StateRow`]），
 /// 不是解析完的 [`DbnumState`]：解析要看 `task_registry` 里「该库任务在跑」这类进程态，
 /// 它会在没有任何库写的情况下翻转，缓存解析结果就会把「初始化中」的判定钉死。事实缓存、
 /// 判定现算，判定永远跟着进程态走。
@@ -61,11 +61,10 @@ mod mirror {
     use std::sync::{Arc, LazyLock, Mutex};
     use tokio::sync::watch;
 
-    /// 一格：库里那一行 + info 表旧水位（`None` 行也缓存——未登记的库每轮扫描都会被问到）。
+    /// 一格：库里那一行（`None` 行也缓存——未登记的库每轮扫描都会被问到）。
     #[derive(Debug, Clone, Default)]
     pub(super) struct Facts {
         pub row: Option<StateRow>,
-        pub info_max: Option<i32>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -288,7 +287,6 @@ mod mirror {
 
 const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
-DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
 -- 回退到水位（ADR-072 D2）按 dbnum 谓词删 `inst_info`，而这张表此前一条索引都没有：
 -- 量测里它是唯一一张落 `Iterate Table` 的模型面表（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md`
@@ -301,8 +299,6 @@ DEFINE TABLE IF NOT EXISTS model_scope_regen SCHEMALESS;
 "#;
 
 const CURRENT_DATABASE_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FROM pe \
-     WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;";
-const LEGACY_INFO_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FROM dbnum_info_table \
      WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;";
 
 /// File observation captured during a (read-only) scan.
@@ -406,8 +402,8 @@ pub struct DbnumState {
     /// 下一个任务欠一次（`room_recompute::DurableAlignment::owed`）。是模型水位的属性，不是第三枚水位（W3）。
     #[serde(default)]
     pub model_room_stray_generations: Vec<String>,
-    /// `true` when a watermark could be resolved from any source (record, legacy
-    /// field or info table). `false` means this `dbnum` has never been applied.
+    /// `true` when a watermark could be resolved from the dedicated row (`applied_sesno`
+    /// or the legacy `sesno` field). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
 }
 
@@ -527,8 +523,8 @@ struct DatabaseWatermark {
 /// 存下来的那个时刻**只描述 `applied_sesno` 那一条保存**，所以只有生效水位确实
 /// 取自这一列时才许露出来。
 ///
-/// 生效水位可能来自旧的 `sesno` 字段或 `dbnum_info_table`（见模块头的读取顺序）——
-/// 那两条路解析出来的是另一个会话号，把这一列贴上去就是拿 A 的时刻标注 B。宁可
+/// 生效水位可能来自旧的 `sesno` 字段（见模块头的读取顺序）——
+/// 那条路解析出来的是另一个会话号，把这一列贴上去就是拿 A 的时刻标注 B。宁可
 /// 让界面走「应用时刻无记录」的降级，也不能摆一个对不上的时刻。
 fn applied_time_of(row: &StateRow, effective_applied: Option<i32>) -> Option<String> {
     if effective_applied.is_none() || effective_applied != row.applied_sesno {
@@ -745,57 +741,43 @@ impl ScanVerdict {
     }
 }
 
-/// Resolve the effective applied watermark from the three ordered sources.
+/// Resolve the effective applied watermark from the two ordered sources.
 ///
 /// Pure decision function (ADR-001 §兼容迁移). Priority:
-/// established `applied_sesno` > legacy `dbnum_watermark.sesno` > `dbnum_info_table`
-/// max. Returns `None` when nothing is known (uninitialized `dbnum`).
+/// established `applied_sesno` > legacy `dbnum_watermark.sesno`. Returns `None` when
+/// nothing is known (uninitialized `dbnum`).
 pub fn resolve_migrated_applied_sesno(
     existing_applied: Option<i32>,
     legacy_watermark_sesno: Option<i32>,
-    info_table_max_sesno: Option<i32>,
 ) -> Option<i32> {
-    existing_applied
-        .or(legacy_watermark_sesno)
-        .or(info_table_max_sesno)
+    existing_applied.or(legacy_watermark_sesno)
 }
 
-fn resolve_read_applied(
-    dedicated: Option<(Option<i32>, Option<i32>)>,
-    info_table_max_sesno: Option<i32>,
-) -> Option<i32> {
-    match dedicated {
-        Some((applied, legacy)) => resolve_migrated_applied_sesno(applied, legacy, None),
-        None => resolve_migrated_applied_sesno(None, None, info_table_max_sesno),
-    }
+/// No dedicated row means uninitialized: there is no fallback source left.
+fn resolve_read_applied(dedicated: Option<(Option<i32>, Option<i32>)>) -> Option<i32> {
+    dedicated.and_then(|(applied, legacy)| resolve_migrated_applied_sesno(applied, legacy))
 }
 
-/// A retained initialization is proof that legacy PE/info rows may be partial.
+/// A retained initialization is proof that the legacy PE-seeded `sesno` may be partial.
 /// Only an explicit applied watermark may be used until its attribute commit.
 fn resolve_initializing_applied(
     initializing: bool,
     dedicated: Option<(Option<i32>, Option<i32>)>,
-    info: Option<i32>,
 ) -> Option<i32> {
     if initializing {
         dedicated.and_then(|(applied, _)| applied)
     } else {
-        resolve_read_applied(dedicated, info)
+        resolve_read_applied(dedicated)
     }
 }
 
-fn resolve_dbnum_applied(
-    dbnum: u32,
-    dedicated: Option<(Option<i32>, Option<i32>)>,
-    info: Option<i32>,
-) -> Option<i32> {
+fn resolve_dbnum_applied(dbnum: u32, dedicated: Option<(Option<i32>, Option<i32>)>) -> Option<i32> {
     // 「这个库正在被写」的来源是任务注册表（ADR-071 S5，d-300），不再是发布 run：任务在跑时
-    // 只认专用水位行，不拿 `dbnum_info_table` 里半截基线的 max sesno 当应用水位。
+    // 只认专用行的 `applied_sesno`，不拿旧 `sesno` 列里半截基线的值当应用水位。
     resolve_initializing_applied(
         crate::data_interface::task_registry::TaskRegistry::global()
             .has_running_data_batch_for(dbnum),
         dedicated,
-        info,
     )
 }
 
@@ -923,9 +905,8 @@ const SEED_MARKER: &str = "queue_control:watermark_seed";
 /// 重跑无损：回填是 `??` 填空，绝不覆盖已建立水位，代价只是该库升级后的
 /// 第一次启动多一次 pe 全表聚合（有日志提示）。
 ///
-/// 若不这样判，后果是：pe 源本要救的那类老库（`dbnum_info_table` 缺失或陈旧）
-/// 半途死一次后，下次启动切到 info 源，没播上的 dbnum 以 0 水位被
-/// `needs_initial_load` 判成首次导入，整库全量重解析。
+/// 若不这样判，后果是：半途死一次后下次启动就不再播种，没播上的 dbnum 没有专用行，
+/// 以 0 水位被 `needs_initial_load` 判成首次导入，整库全量重解析。
 fn should_seed_from_current_database(
     watermark_table_missing: bool,
     watermark_rows: usize,
@@ -935,10 +916,8 @@ fn should_seed_from_current_database(
 }
 
 /// 把播种候选分成「可以固化」与「按下不表」两拨。按下不表的只有**任务在飞**的库
-/// （`protected`）——半截基线的 info 表 max sesno 不能当应用水位。此前还按
-/// `count(pe) != sum(dbnum_info_table.count)` 扣一批「可疑库」，那是逐笔观测块时代的对账
-/// （两个数当时都是「pe 行数含墓碑」）；ADR-071 D6 之后 `count` 是活元素数、由任务收尾序列化，
-/// 拿它跟 pe 行数比不再成立，那道对账 2026-09-10 退役。
+/// （`protected`）——半截基线的 max sesno 不能当应用水位。此前还按 pe 行数与 Ref0 统计
+/// 的活元素数对账扣一批「可疑库」，那道对账 2026-09-10 退役，统计表本身 2026-11-07 也退役了。
 fn partition_seedable(
     watermarks: Vec<DatabaseWatermark>,
     suspect: &BTreeSet<u32>,
@@ -953,14 +932,6 @@ fn partition_seedable(
         }
     }
     (seedable, held_back)
-}
-
-fn migration_watermark_source(seed_from_current_database: bool) -> (&'static str, &'static str) {
-    if seed_from_current_database {
-        (CURRENT_DATABASE_WATERMARKS, "现有 PE 数据")
-    } else {
-        (LEGACY_INFO_WATERMARKS, "旧 DBNUM 统计")
-    }
 }
 
 /// 现有水位行数（表不存在时 SurrealDB 对 SELECT 返回空集，得 0）。
@@ -1214,9 +1185,9 @@ impl DbnumState {
     /// Table definitions are idempotent. When the watermark table is absent — or exists but
     /// holds no rows yet (a previous run died between table creation and seeding) — this is
     /// an in-place compatibility upgrade: the durable baseline comes from the maximum `sesno`
-    /// already persisted in `pe` for each `dbnum`. Watermark tables with established rows
-    /// keep their own established/legacy watermarks and use `dbnum_info_table` only as the
-    /// old fallback.
+    /// already persisted in `pe` for each `dbnum`. Once that seeding has completed (rows
+    /// present and the seed marker written), established/legacy watermarks stand on their
+    /// own and there is nothing left to backfill from.
     pub async fn ensure_increment_state_storage() -> anyhow::Result<usize> {
         let mut response = SUL_DB
             .query("INFO FOR DB;")
@@ -1259,24 +1230,28 @@ impl DbnumState {
             .check()
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
 
-        let (source_sql, source_name) = migration_watermark_source(seed_from_current_database);
-        if seed_from_current_database {
-            // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
-            // 现场很容易把首次兼容启动当成卡死。
-            let reason = if watermark_table_missing {
-                "水位表缺失"
-            } else if watermark_rows == 0 {
-                "水位表为空"
-            } else {
-                "播种完成标记缺失（上次播种中断，或首次升级到带标记的版本）"
-            };
-            println!(
-                "增量水位播种开始：{reason}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…"
-            );
+        if !seed_from_current_database {
+            // 播种早已完成：缺专用行的库就是未初始化，没有别的源可回填（Ref0 统计已退役）。
+            Self::invalidate_mirror();
+            println!("增量水位回填检查完成：播种早已完成，无需回填");
+            return Ok(0);
         }
+        let source_name = "现有 PE 数据";
+        // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
+        // 现场很容易把首次兼容启动当成卡死。
+        let reason = if watermark_table_missing {
+            "水位表缺失"
+        } else if watermark_rows == 0 {
+            "水位表为空"
+        } else {
+            "播种完成标记缺失（上次播种中断，或首次升级到带标记的版本）"
+        };
+        println!(
+            "增量水位播种开始：{reason}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…"
+        );
         let seed_started = std::time::Instant::now();
         let mut response = SUL_DB
-            .query(source_sql)
+            .query(CURRENT_DATABASE_WATERMARKS)
             .await
             .map_err(|e| anyhow::anyhow!("读取{source_name}水位失败: {e}"))?
             .check()
@@ -1284,7 +1259,7 @@ impl DbnumState {
         let watermarks: Vec<DatabaseWatermark> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解码{source_name}水位失败: {e}"))?;
-        // 任务在飞的库不播：半截基线的 max sesno 不是应用水位。这一道对 PE 源与旧 info 表源同样适用。
+        // 任务在飞的库不播：半截基线的 max sesno 不是应用水位。
         let protected: BTreeSet<u32> = protected.iter().copied().collect();
         let (watermarks, held_back) = partition_seedable(watermarks, &protected);
         if !held_back.is_empty() {
@@ -1315,12 +1290,10 @@ impl DbnumState {
                 .check()
                 .map_err(|e| anyhow::anyhow!("固化{source_name}水位语句失败: {e}"))?;
         }
-        if seed_from_current_database {
-            // 全部批次成功才落标记；写失败只提示不阻断——后果不过是下次启动
-            // 重跑一遍 fill-only 播种，幂等无损。
-            if let Err(error) = write_seed_marker(source_name, watermarks.len(), &held_back).await {
-                eprintln!("写播种完成标记失败（下次启动会重新播种一遍，幂等无损）: {error:#}");
-            }
+        // 全部批次成功才落标记；写失败只提示不阻断——后果不过是下次启动
+        // 重跑一遍 fill-only 播种，幂等无损。
+        if let Err(error) = write_seed_marker(source_name, watermarks.len(), &held_back).await {
+            eprintln!("写播种完成标记失败（下次启动会重新播种一遍，幂等无损）: {error:#}");
         }
         // 迁移 + 播种动了哪些行不逐个记账：整个镜像作废。
         Self::invalidate_mirror();
@@ -1349,8 +1322,8 @@ impl DbnumState {
     /// 启动统一水化段（ADR-071 D7 / S6）的第一步：把整张登记表从库读回来，**一次性**替换
     /// 进程内水位镜像，再把解析好的状态交给同一段里的后续步骤（模型投影水化、启动核对）。
     ///
-    /// 镜像里每格放的与 [`Self::read`] 按需装载时**一样**：`dbnum_watermark` 那一行的原样投影
-    /// + `dbnum_info_table` 的旧水位（兼容回退用）；两张表各一句聚合读，不逐库点读。
+    /// 镜像里每格放的与 [`Self::read`] 按需装载时**一样**：`dbnum_watermark` 那一行的原样投影；
+    /// 整表一句读，不逐库点读。
     /// 只许在没有写者的时刻调（`run_cli` 里排在任何 worker / watcher 之前）：整表替换不理会
     /// 装载途中的作废，写者一活跃就可能把刚作废的那一格盖回旧值。运行期要读全表用
     /// [`Self::list_registered`]。
@@ -1363,14 +1336,12 @@ impl DbnumState {
     ) -> anyhow::Result<Vec<DbnumState>> {
         let rows = Self::registered_rows_on(db).await?;
         if mirror::enabled() {
-            let info_max = Self::legacy_info_watermarks_on(db).await?;
             mirror::replace(rows.iter().filter_map(|row| {
                 row.dbnum.map(|dbnum| {
                     (
                         dbnum,
                         mirror::Facts {
                             row: Some(row.clone()),
-                            info_max: info_max.get(&dbnum).copied(),
                         },
                     )
                 })
@@ -1401,31 +1372,12 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("解码 DBNUM 注册表失败: {e}"))
     }
 
-    /// `dbnum_info_table` 里每个库的旧水位（`math::max(sesno)`），与 [`Self::read_row`] 第二句
-    /// 同一口径，只是一次聚合全表——水化时给每格镜像配上兼容回退用的 `info_max`。
-    async fn legacy_info_watermarks_on(
-        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    ) -> anyhow::Result<BTreeMap<u32, i32>> {
-        let mut response = db
-            .query(LEGACY_INFO_WATERMARKS)
-            .await
-            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 水位失败: {e}"))?
-            .check()
-            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 水位语句失败: {e}"))?;
-        let rows: Vec<DatabaseWatermark> = response
-            .take(0)
-            .map_err(|e| anyhow::anyhow!("解码旧 DBNUM 水位失败: {e}"))?;
-        Ok(rows.into_iter().map(|row| (row.dbnum, row.sesno)).collect())
-    }
-
-    /// 登记表原样行 → 生效状态（与 [`Self::list_registered`] 一直以来的解析一致：这里没有
-    /// 逐库的 info 表回退，`initialized` 只看专用行）。
+    /// 登记表原样行 → 生效状态（`initialized` 只看专用行）。
     fn states_from_rows(rows: Vec<StateRow>) -> Vec<DbnumState> {
         rows.into_iter()
             .filter_map(|row| {
                 let dbnum = row.dbnum?;
-                let effective =
-                    resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)), None);
+                let effective = resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)));
                 let applied_sesno_time = applied_time_of(&row, effective);
                 let model_sesno_time = model_time_of(&row);
                 Some(DbnumState {
@@ -1457,18 +1409,13 @@ impl DbnumState {
             .collect()
     }
 
-    /// Read the raw stored row + info-table fallback for one `dbnum`.
-    async fn read_row(dbnum: u32) -> anyhow::Result<(Option<StateRow>, Option<i32>)> {
-        // `sesno != NONE`：info 行可能缺 sesno 字段（历史上事件对 sesno=0 的补链
-        // 伪元素写出过无 sesno 的行），混进聚合会让 math::max 整条报错，进而把
-        // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
+    /// Read the raw stored row for one `dbnum`.
+    async fn read_row(dbnum: u32) -> anyhow::Result<Option<StateRow>> {
         let sql = format!(
             "SELECT dbnum, state_revision, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
              applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
              {MODEL_WATERMARK_COLUMNS}, sesno \
-             FROM {WATERMARK_TABLE}:{dbnum};\
-             RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} \
-             WHERE dbnum = {dbnum} AND sesno != NONE));"
+             FROM {WATERMARK_TABLE}:{dbnum};"
         );
         let mut response = SUL_DB
             .query(sql)
@@ -1479,18 +1426,15 @@ impl DbnumState {
         let rows: Vec<StateRow> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解析 DBNUM 状态失败 dbnum={dbnum}: {e}"))?;
-        let info_max: Option<i32> = response
-            .take(1)
-            .map_err(|e| anyhow::anyhow!("解析旧 DBNUM 水位失败 dbnum={dbnum}: {e}"))?;
-        Ok((rows.into_iter().next(), info_max))
+        Ok(rows.into_iter().next())
     }
 
     /// 事实从哪来：镜像开着且命中 → 内存；否则读库，并在没有作废穿插时回填。
-    async fn facts_for(dbnum: u32) -> anyhow::Result<(Option<StateRow>, Option<i32>)> {
+    async fn facts_for(dbnum: u32) -> anyhow::Result<Option<StateRow>> {
         loop {
             match mirror::acquire(dbnum) {
                 mirror::Acquire::Disabled => return Self::read_row(dbnum).await,
-                mirror::Acquire::Hit(facts) => return Ok((facts.row, facts.info_max)),
+                mirror::Acquire::Hit(facts) => return Ok(facts.row),
                 mirror::Acquire::Wait(mut changed) => {
                     changed
                         .changed()
@@ -1498,13 +1442,10 @@ impl DbnumState {
                         .map_err(|_| anyhow::anyhow!("水位镜像 singleflight 通知通道关闭"))?;
                 }
                 mirror::Acquire::Load(ticket) => match Self::read_row(dbnum).await {
-                    Ok((row, info_max)) => {
-                        let facts = mirror::Facts {
-                            row: row.clone(),
-                            info_max,
-                        };
+                    Ok(row) => {
+                        let facts = mirror::Facts { row: row.clone() };
                         if mirror::publish(ticket, facts) {
-                            return Ok((row, info_max));
+                            return Ok(row);
                         }
                         // 装载期间发生写入或清理：旧值既不入缓存，也不参与本次比较。
                     }
@@ -1575,20 +1516,11 @@ impl DbnumState {
     /// Read the effective state for one `dbnum` (with one-time migration applied
     /// in-memory). Returns `None` only when the `dbnum` has no record at all.
     pub async fn read(dbnum: u32) -> anyhow::Result<Option<DbnumState>> {
-        let (row, info_max) = Self::facts_for(dbnum).await?;
-        let Some(row) = row else {
-            // No dedicated record. Still surface a migrated watermark if the info
-            // table knows one (legacy full-parse before the watermark existed).
-            let applied = resolve_dbnum_applied(dbnum, None, info_max);
-            return Ok(applied.map(|applied| DbnumState {
-                dbnum,
-                applied_sesno: applied,
-                initialized: true,
-                ..Default::default()
-            }));
+        let Some(row) = Self::facts_for(dbnum).await? else {
+            return Ok(None);
         };
 
-        let applied = resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)), info_max);
+        let applied = resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)));
         let applied_sesno_time = applied_time_of(&row, applied);
         let model_sesno_time = model_time_of(&row);
         Ok(Some(DbnumState {
@@ -1620,11 +1552,8 @@ impl DbnumState {
     ///
     /// Read-only: never writes, so it is safe to call from preview scanning.
     pub async fn applied_sesno(dbnum: u32) -> anyhow::Result<i32> {
-        let (row, info_max) = Self::facts_for(dbnum).await?;
-        Ok(
-            resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno)), info_max)
-                .unwrap_or(0),
-        )
+        let row = Self::facts_for(dbnum).await?;
+        Ok(resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno))).unwrap_or(0))
     }
 
     /// 读登记身份并对一次观察下裁决（纯读，不写任何东西）。
@@ -1915,7 +1844,6 @@ mod tests {
                 applied_sesno: Some(sesno),
                 ..Default::default()
             }),
-            info_max: None,
         }
     }
 
@@ -2044,7 +1972,7 @@ mod tests {
     }
 
     /// ADR-071 D7 / S6：启动水化 = 反序列化。写库 →（进程重启）→ 水化 → 镜像里每格与库行
-    /// **逐字段**相等（含 info 表旧水位的兼容回退），之后的读命中镜像、不再回库——库里悄悄改了
+    /// **逐字段**相等，之后的读命中镜像、不再回库——库里悄悄改了
     /// 也读不到，直到写者作废那一格。
     #[tokio::test]
     async fn startup_hydration_mirrors_every_registered_row_field_by_field() {
@@ -2054,9 +1982,7 @@ mod tests {
         db.query(
             "CREATE dbnum_watermark:7997 SET dbnum=7997, db_type='DESI', file_name='ams7997', \
              owner_project='AMS', state_revision=9, applied_sesno=26, model_sesno=26;\
-             CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=12;\
-             CREATE dbnum_info_table SET dbnum=8000, sesno=11;\
-             CREATE dbnum_info_table SET dbnum=8000, sesno=15;",
+             CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=12;",
         )
         .await
         .unwrap()
@@ -2088,7 +2014,6 @@ mod tests {
         assert_eq!(row.state_revision, Some(9));
         assert_eq!(row.applied_sesno, Some(26));
         assert_eq!(row.model_sesno, Some(26));
-        assert_eq!(facts.info_max, None, "没有 info 行的库回退值就是 NONE");
 
         let facts = match super::mirror::acquire(8000) {
             super::mirror::Acquire::Hit(facts) => facts,
@@ -2097,11 +2022,6 @@ mod tests {
         let row = facts.row.expect("库里那一行原样在镜像里");
         assert_eq!(row.applied_sesno, Some(12));
         assert_eq!(row.model_sesno, None, "库里没写过的列是「未观察」，不是 0");
-        assert_eq!(
-            facts.info_max,
-            Some(15),
-            "info 表旧水位与 read_row 第二句同一口径：math::max(sesno)"
-        );
 
         // 不经写者作废的库改动，镜像看不见——这正是「比对读镜像」的含义；作废后才回库。
         db.query("UPDATE dbnum_watermark:7997 SET applied_sesno=27;")
@@ -2170,7 +2090,6 @@ mod tests {
     fn startup_schema_covers_every_increment_state_table() {
         for table in [
             WATERMARK_TABLE,
-            INFO_TABLE,
             crate::data_interface::write_state::WRITE_STATE_TABLE,
             "queue_control",
             crate::data_interface::model_scope_regen::SCOPE_REGEN_TABLE,
@@ -2178,6 +2097,12 @@ mod tests {
             assert!(
                 INCREMENT_STATE_SCHEMA.contains(&format!("IF NOT EXISTS {table} ")),
                 "missing startup definition for {table}"
+            );
+        }
+        for retired in ["dbnum_info_table", "dbnum_stats_state"] {
+            assert!(
+                !INCREMENT_STATE_SCHEMA.contains(retired),
+                "Ref0 统计已退役，启动只删表不建表: {retired}"
             );
         }
     }
@@ -2194,24 +2119,18 @@ mod tests {
 
         let missing = !database_has_table(&before, WATERMARK_TABLE);
         let existing = !database_has_table(&after, WATERMARK_TABLE);
-        let seed = should_seed_from_current_database(missing, 0, false);
-        let keep_legacy = should_seed_from_current_database(existing, 7, true);
-        assert!(migration_watermark_source(seed).0.contains("FROM pe"));
+        assert!(should_seed_from_current_database(missing, 0, false));
         assert!(
-            migration_watermark_source(seed)
-                .0
-                .contains("GROUP BY dbnum")
+            !should_seed_from_current_database(existing, 7, true),
+            "播种完成的库不再回填：没有第二个源"
         );
-        assert!(
-            migration_watermark_source(keep_legacy)
-                .0
-                .contains("FROM dbnum_info_table")
-        );
+        assert!(CURRENT_DATABASE_WATERMARKS.contains("FROM pe"));
+        assert!(CURRENT_DATABASE_WATERMARKS.contains("GROUP BY dbnum"));
     }
 
     /// 崩溃窗口：上一轮在建表之后、播种完成之前死掉。空表（一批都没写上）与
     /// 半途表（部分批次写上了，行数 > 0 但完成标记没落）都必须继续走 pe 源；
-    /// 只有「有行且标记在」的库才算播种完成、回到 info 源快路径。
+    /// 只有「有行且标记在」的库才算播种完成、不再播种。
     #[test]
     fn an_interrupted_seed_resumes_from_current_pe_data() {
         // 表缺失：无条件走 pe 源。
@@ -2220,7 +2139,7 @@ mod tests {
         assert!(should_seed_from_current_database(false, 0, false));
         // 部分批次写上了（行数 > 0）但完成标记缺失：继续补跑 pe 源。
         assert!(should_seed_from_current_database(false, 500, false));
-        // 有行且标记在：播种完成，走 info 源快路径。
+        // 有行且标记在：播种完成，不再播种。
         assert!(!should_seed_from_current_database(false, 1, true));
         assert!(!should_seed_from_current_database(false, 300, true));
         // 标记在但表被清空/重建：行数为 0 优先，重新播种（随后标记会被重写）。
@@ -2229,9 +2148,9 @@ mod tests {
         assert!(should_seed_from_current_database(true, 0, true));
     }
 
-    /// 播种只按下「任务在飞」的库（半截基线的 max sesno 不是应用水位）。此前还按
-    /// `count(pe) != sum(dbnum_info_table.count)` 扣一批「可疑库」并在比对失败时整轮不播——那道
-    /// 对账随 ADR-071 D6 退役（`count` 现在是任务收尾序列化的活元素数，与 pe 行数本就不必相等）。
+    /// 播种只按下「任务在飞」的库（半截基线的 max sesno 不是应用水位）。此前还按 pe 行数与
+    /// Ref0 统计对账扣一批「可疑库」并在比对失败时整轮不播——那道对账随 ADR-071 D6 退役，
+    /// 统计表本身后来也退役了。
     #[test]
     fn seeding_holds_back_only_in_flight_dbnums_and_no_longer_reconciles_pe_with_info() {
         let candidates = vec![
@@ -2279,58 +2198,40 @@ mod tests {
         ] {
             assert!(
                 !body.contains(retired),
-                "播种不再拿 dbnum_info_table 对账: {retired}"
+                "播种不再碰 Ref0 统计（对账与回填源都已退役）: {retired}"
             );
         }
     }
 
     #[test]
-    fn migration_prefers_established_applied_over_legacy_and_info() {
+    fn migration_prefers_established_applied_over_legacy() {
         // Already established → never re-mix other sources.
-        assert_eq!(
-            resolve_migrated_applied_sesno(Some(50), Some(99), Some(120)),
-            Some(50)
-        );
+        assert_eq!(resolve_migrated_applied_sesno(Some(50), Some(99)), Some(50));
     }
 
     #[test]
     fn migration_inherits_legacy_watermark_when_not_established() {
-        assert_eq!(
-            resolve_migrated_applied_sesno(None, Some(99), Some(120)),
-            Some(99)
-        );
-    }
-
-    #[test]
-    fn migration_falls_back_to_info_table_only_when_no_watermark() {
-        assert_eq!(
-            resolve_migrated_applied_sesno(None, None, Some(120)),
-            Some(120)
-        );
+        assert_eq!(resolve_migrated_applied_sesno(None, Some(99)), Some(99));
     }
 
     #[test]
     fn migration_none_when_all_sources_absent() {
-        assert_eq!(resolve_migrated_applied_sesno(None, None, None), None);
+        assert_eq!(resolve_migrated_applied_sesno(None, None), None);
     }
 
+    /// 没有专用行、或专用行两列都空的库就是未初始化：失败基线下一轮必须重新入队初始化，
+    /// 不得被任何旁路数据判成 up_to_date（BL-03；旧的 Ref0 统计回退源已退役）。
     #[test]
-    fn an_existing_failed_state_never_inherits_the_info_table_watermark() {
-        assert_eq!(resolve_read_applied(Some((None, None)), Some(120)), None);
-        assert_eq!(resolve_read_applied(None, Some(120)), Some(120));
-        assert_eq!(
-            resolve_read_applied(Some((None, Some(99))), Some(120)),
-            Some(99)
-        );
+    fn without_a_dedicated_watermark_a_dbnum_is_uninitialized() {
+        assert_eq!(resolve_read_applied(None), None);
+        assert_eq!(resolve_read_applied(Some((None, None))), None);
+        assert_eq!(resolve_read_applied(Some((None, Some(99)))), Some(99));
     }
 
     #[test]
     fn migration_preserves_zero_applied() {
         // An established applied_sesno of 0 is a real value, not "absent".
-        assert_eq!(
-            resolve_migrated_applied_sesno(Some(0), Some(99), Some(120)),
-            Some(0)
-        );
+        assert_eq!(resolve_migrated_applied_sesno(Some(0), Some(99)), Some(0));
     }
 
     /// `blocks()` 是阻断与否的唯一权威，自动路径与手动预览都读它，所以每一个变体
@@ -2952,17 +2853,14 @@ mod initializing_watermark_tests {
         let normal: Vec<serde_json::Value> = result.take(1).unwrap();
         assert!(held[0]["applied_sesno"].is_null());
         assert_eq!(normal[0]["applied_sesno"], 12);
+        assert_eq!(resolve_initializing_applied(true, Some((None, Some(105)))), None);
+        assert_eq!(resolve_initializing_applied(true, None), None);
         assert_eq!(
-            resolve_initializing_applied(true, Some((None, Some(105))), Some(105)),
-            None
-        );
-        assert_eq!(resolve_initializing_applied(true, None, Some(105)), None);
-        assert_eq!(
-            resolve_initializing_applied(true, Some((Some(112), Some(105))), Some(105)),
+            resolve_initializing_applied(true, Some((Some(112), Some(105)))),
             Some(112)
         );
         assert_eq!(
-            resolve_initializing_applied(false, Some((None, Some(105))), None),
+            resolve_initializing_applied(false, Some((None, Some(105)))),
             Some(105)
         );
         let (seedable, held) = partition_seedable(

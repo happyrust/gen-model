@@ -363,7 +363,7 @@ mod tests {
             .unwrap();
         assert_eq!(spool.replay(&db).await.unwrap(), 1);
         assert_eq!(spool.replay(&db).await.unwrap(), 0);
-        // 重放收敛到同一行；pe 统计不再随写事务逐笔记账（ADR-071 D6），这里没有任务收尾，info 表无行。
+        // 重放收敛到同一行；Ref0 统计已退役（ADR-071 D6），统计表无行。
         let mut result = db
             .query("SELECT count() AS n FROM pe WHERE dbnum = 7 GROUP ALL; RETURN dbnum_info_table:40.count;")
             .await

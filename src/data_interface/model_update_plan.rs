@@ -2131,7 +2131,7 @@ mod tests {
     ///
     /// 截图里的元素是 PIPE `/1WCC1135`（`24383/66458`）名下的 BRAN `/1WCC1135/B1`
     /// （`24383/66459`），只有一个成员 CAP（`24383/66460`）；`24383` 前缀属 dbnum 7999
-    /// （`dbnum_info_table:24383`）。隐含直管段挂在 BRAN 名下（`inst_relate:24383_66459`）,
+    /// （`refno_route::refno_dbnum`：24383 = 7999 + 2×8192）。隐含直管段挂在 BRAN 名下（`inst_relate:24383_66459`）,
     /// 几何由 HPOS→TPOS 与成员的 arrive/leave 点推导，`update_world_transforms` 够不着。
     ///
     /// 这里只验计划层这一跳——issue #5 的修法就在这一跳上：挪这个 CAP 必须排出该 BRAN 的

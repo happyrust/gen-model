@@ -1283,7 +1283,7 @@ mod tests {
             "{sql}"
         );
         assert!(!sql.contains("DELETE"), "Fresh 只插:\n{sql}");
-        // pe 统计不再逐笔记账（ADR-071 D6）：写事务里没有观测块，`count` 由该库任务收尾从目标索引序列化。
+        // Ref0 统计已退役（ADR-071 D6）：写事务里没有观测块。
         assert!(
             !sql.contains("dbnum_stats_state") && !sql.contains("dbnum_info_table"),
             "写事务不得再带逐笔统计观测:\n{sql}"
@@ -1353,11 +1353,11 @@ mod tests {
             "重跑不翻倍（已有行赢）"
         );
         assert_eq!(response.take::<Option<i64>>(2).unwrap(), Some(184));
-        // 统计不再随写事务逐笔记账（ADR-071 D6）：这里没有任务收尾，info 表就该一行都没有。
+        // Ref0 统计已退役（ADR-071 D6）：写事务不会把统计表写出来。
         assert_eq!(
             response.take::<Option<i64>>(3).unwrap(),
             None,
-            "写事务不再动 dbnum_info_table，统计由任务收尾序列化"
+            "写事务不再动 dbnum_info_table（Ref0 统计已退役）"
         );
     }
 

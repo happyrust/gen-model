@@ -8,7 +8,7 @@
 //!
 //! 两条口径纪律：
 //! - **控制面白名单**（[`CONTROL_PLANE_TABLES`]）只用于「中途 diff」——水位、写入标记、
-//!   队列控制、pe 统计是 I1 明文豁免的落库，不属于「窗口数据」；
+//!   队列控制是 I1 明文豁免的落库，不属于「窗口数据」；
 //!   终态对拍要不要排除它们由调用方决定（水位就该在终态里被**查证**，不是被掩掉）。
 //! - 快照是 `INFO FOR DB` 枚举表名 + 逐表 `SELECT * ORDER BY id` 的 serde 序列化文本：
 //!   两份文本相等 ⇔ 终态逐表相等（F3 口径），差异表名由 [`changed_data_tables`] 给出。
@@ -20,19 +20,10 @@ use surrealdb::engine::any::{Any, connect};
 
 /// 中途 diff 时排除的控制面表（I1 豁免面）。
 ///
-/// `dbnum_info_table` / `dbnum_stats_state` 是 pe 统计（与 PE 写同事务维护，行上带 `updated_at =
-/// time::now()`），逐字节对拍天然不等；它们的正确性由 `dbnum_stats` 自己的测试与
-/// `terminal_production_batches_replay_statistics_before_watermark`（pe 行数 == 统计和）查证。
-///
 /// 第二条异步账的三张表（模型意图队列 / 固定区间恢复记录 / 副作用队列）随 ADR-072 D5 整体退役，
-/// 不再列在这里：库里没有它们，对拍也就没有可掩的。
-pub const CONTROL_PLANE_TABLES: [&str; 5] = [
-    "dbnum_watermark",
-    "dbnum_write_state",
-    "queue_control",
-    "dbnum_info_table",
-    "dbnum_stats_state",
-];
+/// Ref0 统计的两张表（`dbnum_info_table` / `dbnum_stats_state`）随 ADR-071 D6 退役，都不再列在
+/// 这里：库里没有它们，对拍也就没有可掩的。
+pub const CONTROL_PLANE_TABLES: [&str; 3] = ["dbnum_watermark", "dbnum_write_state", "queue_control"];
 
 /// 起一个全新的 `mem://` 实例并切到 `ns`/`db`。**不装 schema**——要生产 schema
 /// 再调 [`init_schema_on`]，两步分开是为了让「无 schema 的裸实例」也能当对照组。
@@ -57,7 +48,7 @@ pub async fn fresh_mem_db(ns: &str, db: &str) -> anyhow::Result<Surreal<Any>> {
 /// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修，且该索引已随
 /// P3 退役——生产与这里共用 `INST_RELATE_INDEX_SQL`（含摘除它的迁移语句），错误显式上抛。
 ///
-/// PE 统计由写入批次显式维护；schema 不安装数据库事件。
+/// schema 不安装数据库事件（旧的统计事件 `update_dbnum_event` 已随 Ref0 统计退役）。
 pub async fn init_schema_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     // 磁盘脚本（CWD 的 resource/surreal，站点扩展）＋内置快照收尾——与 run_cli
     // 同一顺序，同名函数以内置版为准。内置序列自带 D11 的 hd/hh 矫正；这里原先

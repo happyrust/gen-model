@@ -245,10 +245,8 @@ def _wipe_mirroring_reinit(binding, ref0s: list[int]) -> None:
     """`fast_delete::render_delete_phases(ResetForReinit)` 的逐字镜像。
 
     三阶段同序：owner 边 → Ref0 区间（关系表 + noun 表 + pe 收尾）→ 元数据
-    （队列残留 + 统计 + spatial epoch 递增 + 水位清值不删行）。区别仅两处，都比
-    生产口径**多删不少删**：info 行额外按 ref0 记录 id 点名（墓碑创建事件会把
-    info 行的 dbnum MERGE 成 NONE，`WHERE dbnum` 够不着这种被打脏的行）；noun
-    表按当前店内 GROUP BY noun 现查（与生产同源）。
+    （spatial epoch 递增 + 水位清值不删行）。noun 表按当前店内 GROUP BY noun
+    现查（与生产同源）。
     """
     nouns = sorted(
         {
@@ -278,16 +276,10 @@ def _wipe_mirroring_reinit(binding, ref0s: list[int]) -> None:
     # 第二条异步账的三张表（模型意图队列 / 恢复记录 / 副作用队列）随 ADR-072 D5 整体
     # 退役，镜像清库不再点名它们——点名只会把退役表重新建出来。
     metadata = [
-        f"DELETE dbnum_info_table WHERE dbnum = {DBNUM};",
-    ]
-    metadata.extend(f"DELETE dbnum_info_table:{ref0};" for ref0 in ref0s)
-    metadata.append(
-        "UPSERT spatial_epoch:current SET value = (value?:0) + 1, updated_at = time::now();"
-    )
-    metadata.append(
+        "UPSERT spatial_epoch:current SET value = (value?:0) + 1, updated_at = time::now();",
         f"UPDATE dbnum_watermark:{DBNUM} SET applied_sesno = 0, sesno = 0, "
-        f"applied_sesno_time = NONE;"
-    )
+        f"applied_sesno_time = NONE;",
+    ]
     binding.db.query("\n".join(relations))
     binding.db.query("\n".join(ranges))
     binding.db.query("\n".join(metadata))
@@ -384,19 +376,6 @@ def _dump(binding, ref0s: list[int]) -> dict:
     # 模型计划行不进签名：任务的单元清单只在内存（ADR-072 D5），库里没有可比的
     # 「窗口登记 / 结算的计划行」；模型面的终态由 inst_relate / gen_root 那一层回答。
 
-    # dbnum_info_table 按 Ref0 记账（record id 就是 ref0 数字）。dbnum / max_ref1
-    # 两个字段刻意不进签名：update_dbnum_event 对两者都是「最后一个事件说了算」
-    # （墓碑创建时 $value.dbnum 是 NONE、max_ref1 直接覆写不是取 max），谁的语句
-    # 排在末尾就是谁——这是事件实现的既有噪声，与收集口径无关（证据文档点名）。
-    info_from = ", ".join(f"dbnum_info_table:{r}" for r in ref0s)
-    info = {
-        int(row["ref0"]): {"count": row.get("count"), "sesno": row.get("sesno")}
-        for row in _query(
-            binding,
-            f"SELECT record::id(id) AS ref0, count, sesno FROM {info_from};",
-        )
-    } if ref0s else {}
-
     watermark_rows = _query(
         binding,
         f"SELECT applied_sesno, sesno, file_latest_sesno FROM dbnum_watermark:{DBNUM};",
@@ -408,7 +387,6 @@ def _dump(binding, ref0s: list[int]) -> dict:
         "attrs": attrs,
         "owner_edges": owner_edges,
         "ref_edges": ref_edges,
-        "info": info,
         "watermark": _normalize(watermark_rows),
     }
 

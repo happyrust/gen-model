@@ -1,4 +1,4 @@
-//! 库文件清单与 `pe` 统计修复。
+//! 库文件清单。
 //!
 //! 这个模块曾经是 legacy 全量同步的家（`sync_pdms` → `sync_total_async_threaded` →
 //! `bootstrap_sys_metadata`），三样在 2026-09-07 依次退役；同日最后清掉的是 MySQL 那一摊
@@ -9,8 +9,6 @@
 //! 持久层只有 SurrealDB 一个（宪法 I）。
 
 use aios_core::SUL_DB;
-use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// 列出项目 `*000` 目录下需要解析的库文件。
@@ -86,101 +84,7 @@ pub(crate) fn collect_project_db_files(
 // 一起删除：e3d-io 基线与增量同一条失败闸——白名单外的解码失败让这一库的基线失败、清库、
 // 不推水位（退役收口方案 Q3 甲），不再有「拓扑在、属性残」的中间态。
 
-/// 按 Ref0 聚合一个 dbnum 的 pe 统计。**回归测试与生产共用这一份文本。**
-///
-/// 返回行数等于 Ref0 个数，与库里有多少 pe 行无关——这正是它存在的理由，
-/// 见 [`rebuild_dbnum_info_from_pe`] 的注释。
-fn pe_stat_groups_sql(dbnum: u32) -> String {
-    format!(
-        "SELECT string::split(record::id(id), '_')[0] AS ref0, count() AS count, \
-         math::max(sesno ?? 0) AS max_sesno, \
-         math::max(<int> string::split(record::id(id), '_')[1]) AS max_ref1 \
-         FROM pe WHERE dbnum = {dbnum} GROUP BY ref0;"
-    )
-}
-
-/// 补齐文件身份，保留显式批次维护的计数、会话号和更新时间。
-pub(crate) fn stamp_dbnum_info_identity_sql(dbnum: u32, file_name: &str, db_type: &str) -> String {
-    let file_name = file_name.replace('\'', "\\'");
-    let db_type = db_type.replace('\'', "\\'");
-    format!(
-        "UPDATE dbnum_info_table SET file_name = '{file_name}', db_type = '{db_type}' \
-         WHERE dbnum = {dbnum};"
-    )
-}
-
-/// 一个 Ref0 的统计聚合结果（服务端 `GROUP BY` 直接产出，一个 Ref0 一行）。
-#[derive(Deserialize)]
-struct PeStatGroup {
-    /// `record::id(id)` 下划线左半段，仍是字符串：投影里不做 `<int>` 转换，
-    /// 好让形制不对的 id 在 Rust 侧报出原文，而不是在 SurrealQL 里静默成 NONE。
-    ref0: String,
-    count: usize,
-    /// 投影里已经 `sesno ?? 0`，正常永远是数值；留 `Option` 只是不让一个
-    /// 意外的 NONE 把整次重建打成失败。
-    max_sesno: Option<i32>,
-    max_ref1: Option<u64>,
-}
-
-#[cfg(test)]
-mod pe_stat_row_tests {
-    use super::PeStatGroup;
-
-    /// 会话号缺失是历史 pe 行的常态（早于逐元素会话跟踪）。投影里的 `sesno ?? 0`
-    /// 已经把它折平，但聚合列本身仍可能整列缺席（空组、旧引擎），解码不许因此失败。
-    #[test]
-    fn legacy_null_session_is_accepted() {
-        let group: PeStatGroup = serde_json::from_value(serde_json::json!({
-            "ref0": "24384",
-            "count": 3,
-            "max_sesno": null,
-            "max_ref1": null,
-        }))
-        .unwrap();
-
-        assert_eq!(group.ref0, "24384");
-        assert_eq!(group.count, 3);
-        assert_eq!(group.max_sesno.unwrap_or_default(), 0);
-        assert_eq!(group.max_ref1.unwrap_or_default(), 0);
-    }
-}
-
-/// 显式修复统计（`bin/rebuild_dbnum_stats` / 探针）：重建和版本标记同事务提交，保留历史 Ref0 及
-/// 最大编号，并补上文件身份。常态下这张表由 dbnum 任务收尾从目标索引序列化（ADR-071 D6），
-/// 重建口径同为活元素（`!deleted`）——所以不再拿「pe 行数（含墓碑）」对账收敛，那两个数本就不必相等。
-/// 返回本库活的 pe 行数。
-pub async fn rebuild_dbnum_info_from_pe(
-    dbnum: u32,
-    file_name: &str,
-    db_type: &str,
-) -> anyhow::Result<usize> {
-    #[derive(Deserialize)]
-    struct PeCountRow {
-        count: usize,
-    }
-    let sql = format!(
-        "BEGIN TRANSACTION;\n{}\n{}\nCOMMIT TRANSACTION;",
-        crate::data_interface::dbnum_stats::rebuild_body(dbnum),
-        stamp_dbnum_info_identity_sql(dbnum, file_name, db_type)
-    );
-    crate::data_interface::pe_batch::execute_on(&SUL_DB, &sql).await?;
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} AND !deleted GROUP ALL;"
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("read live PE count dbnum={dbnum} failed: {error}"))?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!("read live PE count dbnum={dbnum} statement failed: {error}")
-        })?;
-    let rows: Vec<PeCountRow> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("decode live PE count dbnum={dbnum} failed: {error}"))?;
-    Ok(rows.first().map(|row| row.count).unwrap_or_default())
-}
-
-/// Remove the retired trigger; `dbnum_info_table` is written by the task tail only.
+/// Remove the retired statistics trigger (`update_dbnum_event`) that old databases may still carry.
 pub async fn retire_dbnum_event() -> anyhow::Result<()> {
     crate::data_interface::pe_batch::retire_event_on(&SUL_DB).await
 }
@@ -320,65 +224,4 @@ fn the_legacy_full_sync_entry_point_stays_retired() {
             hit
         );
     }
-}
-
-/// 统计重算必须在服务端按 Ref0 聚合：**返回行数跟着 Ref0 走，不跟着 pe 行数走。**
-///
-/// 现场（2026-08-18，test-increment 副本）：旧写法 `SELECT record::id(id) AS key,
-/// sesno FROM pe WHERE dbnum = N` 把整库拉回客户端，ams7351 的 3,345,853 行把 ws
-/// 连接打死（`receiving from an empty and closed channel`），连带作废前面 2.6 小时
-/// 的全量解析。回退成逐行回读会让本测试变红：那种语句一行 pe 出一行结果，既凑不出
-/// `ref0` / `count` 字段，行数也会是 5 而不是 2。
-#[tokio::test(flavor = "multi_thread")]
-async fn stats_rebuild_aggregates_server_side_one_row_per_ref0() {
-    use surrealdb::engine::any::connect;
-
-    let db = connect("mem://").await.expect("mem boots");
-    db.use_ns("dbnum_stats")
-        .use_db("server_side_aggregate")
-        .await
-        .expect("use db");
-
-    // 两个 Ref0、五行 pe，外加一行别的库（不许混进来）与一行缺 sesno 的历史行。
-    db.query(
-        "CREATE pe:23735_1 SET dbnum = 7351, sesno = 3; \
-         CREATE pe:23735_900 SET dbnum = 7351, sesno = 116; \
-         CREATE pe:23735_12 SET dbnum = 7351; \
-         CREATE pe:25688_7 SET dbnum = 7351, sesno = 40; \
-         CREATE pe:25688_4134 SET dbnum = 7351, sesno = 12; \
-         CREATE pe:99999_1 SET dbnum = 8000, sesno = 230;",
-    )
-    .await
-    .expect("seed transport")
-    .check()
-    .expect("seed pe");
-
-    let groups: Vec<PeStatGroup> = db
-        .query(pe_stat_groups_sql(7351))
-        .await
-        .expect("aggregate transport")
-        .take(0)
-        .expect("decode aggregate");
-
-    assert_eq!(
-        groups.len(),
-        2,
-        "聚合必须一个 Ref0 一行；行数等于 pe 行数就是又把整库拉回客户端了"
-    );
-    let mut by_ref0: BTreeMap<&str, &PeStatGroup> = BTreeMap::new();
-    for group in &groups {
-        by_ref0.insert(group.ref0.as_str(), group);
-    }
-    let first = by_ref0.get("23735").expect("Ref0 23735 分组");
-    assert_eq!(first.count, 3);
-    assert_eq!(first.max_sesno.unwrap_or_default(), 116);
-    assert_eq!(
-        first.max_ref1.unwrap_or_default(),
-        900,
-        "max_ref1 必须是数值最大值：`900` 与 `12` 按字符串比会取反"
-    );
-    let second = by_ref0.get("25688").expect("Ref0 25688 分组");
-    assert_eq!(second.count, 2);
-    assert_eq!(second.max_sesno.unwrap_or_default(), 40);
-    assert_eq!(second.max_ref1.unwrap_or_default(), 4134);
 }

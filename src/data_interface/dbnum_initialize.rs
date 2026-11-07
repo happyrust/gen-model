@@ -15,7 +15,7 @@
 //! * **投影不参与。** 初始化的模型行不进 `ModelMemoryStore`、不登记 `ModelWriteBehind`（ADR-076 D11 / ADR-077 D5）；
 //!   根回执**不落库**（ADR-079：`gen_root` 退役）——两 lane 排空成功后逐根成败进进程内账本
 //!   （`model_root_ledger`），空间树的盒子在内存里攒着、同一刻收敛一次。
-//! * **水位一个写者。** `applied_sesno` + `model_sesno` + 写入标记 `finished` + Ref0 统计在收尾那**一笔**
+//! * **水位一个写者。** `applied_sesno` + `model_sesno` + 写入标记 `finished` 在收尾那**一笔**
 //!   （`task_end::TaskEnd::data`，ADR-077 D7）。这一笔之前库里有行没水位，崩了就是写入标记 `writing` →
 //!   下次整库重来（ADR-073 D3）。
 //!
@@ -306,31 +306,8 @@ pub(crate) async fn initialize(
         log::info!("dbnum={dbnum} 初始化后空间树收敛：{synced} 条进树");
     }
 
-    // ── 收尾一笔（ADR-077 D7）：Ref0 统计 + applied + 写入标记 finished + model ──────────────
+    // ── 收尾一笔（ADR-077 D7）：applied + 写入标记 finished + model ──────────────────────
     crate::data_interface::batch_worker::set_active_task_stage("task_end");
-    let info = {
-        let source = crate::data_interface::ref0_snapshot::SnapshotSource {
-            frozen: Some(frozen.clone()),
-            path: request.file_path.to_path_buf(),
-            file_name: request.file_name.to_owned(),
-            db_type: request.db_type.to_owned(),
-        };
-        match tokio::task::spawn_blocking(move || {
-            crate::data_interface::ref0_snapshot::snapshot_at(&source, target_sesno)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Ref0 统计快照任务异常: {error}"))
-        .and_then(|snapshot| snapshot)
-        {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                warnings.push(format!(
-                    "Ref0 统计快照未取到（数据行与水位不受影响，下次任务再序列化） dbnum={dbnum} sesno={target_sesno}: {error:#}"
-                ));
-                None
-            }
-        }
-    };
     let model_outcome = model.outcome();
     let end = TaskEnd {
         dbnum,
@@ -338,7 +315,6 @@ pub(crate) async fn initialize(
         target_time: request.target_time.clone(),
         data: Some(TaskDataOutcome { confirmed_empty }),
         model: model_outcome.clone(),
-        info,
         // 初始化从 0 起算整库，连续性闸恒真（ADR-092 D2）。
         model_base_sesno: Some(0),
         closes_task: true,
@@ -724,8 +700,8 @@ pub(crate) async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)
 
 /// 初始化直写前清模型面残留（T-D-6）：`Initial` 是 `INSERT IGNORE` 幂等写，旧
 /// `inst_relate` / `tubi_relate` 指针行不清会让新行输掉冲突、几何永久指向旧 mesh。
-/// 残留按本库 Ref0 区间删，与整库模型清理同一份渲染；`pe` 与 `dbnum_info_table`
-/// 都空、圈不到 Ref0 而 `dbnum` 列还点得到残留时拒开工——清不干净不开工。
+/// 残留按本库 Ref0 区间删，与整库模型清理同一份渲染；`pe` 圈不到 Ref0 而 `dbnum` 列
+/// 还点得到残留时拒开工——清不干净不开工。
 /// 返回按 `dbnum` 列看见的残留行数（区间里没带 `dbnum` 列的旧行照删但不进计数）。
 pub(crate) async fn clear_model_face_before_initial_on(
     db: &Surreal<Any>,
@@ -764,14 +740,14 @@ pub(crate) async fn clear_model_face_before_initial_on(
     if ref0s.is_empty() {
         if remaining > 0 {
             anyhow::bail!(
-                "dbnum={dbnum} 仍有 {remaining} 行模型面残留，但 pe 与 dbnum_info_table \
-                 都圈不到本库 Ref0，拒绝 Initial 直写（先人工清模型面）"
+                "dbnum={dbnum} 仍有 {remaining} 行模型面残留，但 pe 圈不到本库 Ref0，\
+                 拒绝 Initial 直写（先人工清模型面）"
             );
         }
         return Ok(0);
     }
     crate::data_interface::fast_delete::wipe_dbnum_model_face_on(db, dbnum).await?;
-    // 区间圈自 pe/统计行，圈外的 `dbnum` 列残留 wipe 够不着——删完复查，清不干净照样拒。
+    // 区间圈自 pe 行，圈外的 `dbnum` 列残留 wipe 够不着——删完复查，清不干净照样拒。
     let leftover = stale_rows(db, dbnum).await?;
     if leftover > 0 {
         anyhow::bail!(

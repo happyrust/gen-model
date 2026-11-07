@@ -933,12 +933,13 @@ pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<Py
 
 // ── sync ────────────────────────────────────────────────────────────────────
 
-/// 给一个从未解析过的 dbnum 补一次全量基线（首次入库），幂等收口水位与生成工作。
+/// 给一个从未解析过的 dbnum 补一次全量基线（首次入库），幂等收口水位。
 ///
 /// 与自动 watcher / 手动更新走同一入口（`initialize_project_dbnum_baseline`）：
-/// 全量解析 → PE/dbnum_info 一致性校验 → 登记模型生成工作 → 水位推进原子收口。
+/// 身份门 → 全量解析 → 核对 `pe` 行数 → 水位一笔收尾；整库模型不在这里生成，
+/// 留给启动核对按凭证缺口排 ModelOnly。
 /// 返回 `{dbnum, planned_roots}`（空库 planned_roots=0）。注意：对已入库的
-/// dbnum 调用会重走收口（重登记生成工作、水位落到文件最新会话），谨慎使用。
+/// dbnum 调用会重走收口（水位落到文件最新会话），谨慎使用。
 #[pyfunction]
 #[pyo3(signature = (dbnum, project=None))]
 pub fn baseline(py: Python<'_>, dbnum: u32, project: Option<String>) -> PyResult<Py<PyAny>> {

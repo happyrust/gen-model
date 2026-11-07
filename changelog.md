@@ -1,5 +1,12 @@
 ## 2026-11-07
 
+### Ref0 统计整体退役：dbnum 归属由 refno 算出（ADR-071 D6 追记）
+
+- **为什么**：refno → dbnum 的规则已经确定（`refno_route::refno_dbnum`），一个库的 Ref0 段从 `pe` 行 id 前缀就能圈出，应用水位只认 `dbnum_watermark`。`dbnum_info_table` / `dbnum_stats_state` 没有读者，却让每个任务收尾多一次走目标索引的 Ref0 快照（阻塞式文件索引遍历）、镜像水化多一次聚合。
+- **改**：删除 `data_interface::ref0_snapshot`、`data_interface::dbnum_stats`、`bin/rebuild_dbnum_stats`；`TaskEnd` 去掉 `info`，收尾一笔只写水位与写入标记；`batch_worker` 去掉 `ref0_snapshot` 阶段；`fast_delete` 只从 `pe` 前缀圈 Ref0，清库不再点名统计行；`dbnum_state` 单库读一条查询、镜像水化少一次聚合，已播种的库缺专用水位行即未初始化（不再从统计回填）；启动 `retire_publish_run_tables` 整表删掉两张统计表，`INCREMENT_STATE_SCHEMA` 不再定义它们；`table_parity::CONTROL_PLANE_TABLES` 收成三张。初始化前清模型面只从 `pe` 圈 Ref0：`pe` 为空而模型面仍有残留时拒绝 `Initial` 直写（T-D-6，先人工清）。`scripts/Test-AmsDbnumIntegrity.ps1` 去掉 pe / 统计对账（表退役后它会恒报 mismatch），只查 pe 有行与 `applied == file_latest`。Python 侧 `sync.baseline` 文档、`test_net_window_ab.py` 的镜像清库与终态签名同步。文档：`CONTEXT.md`、runbook、`web-service-api.md`、ADR-039 作废、ADR-071 D6 追记、`pe-statistics-explicit-maintenance.md` 加退役横幅。
+- **验证**：`cargo +nightly test --lib` 2899 通过、0 失败、127 忽略，含新增 / 改写的 `ref0_ranges_come_from_pe_prefixes_not_from_the_dbnum`、`without_a_dedicated_watermark_a_dbnum_is_uninitialized`、`the_tail_writes_no_ref0_statistics` 与 T-D-6 两条（清得掉就直写、圈不到 Ref0 就拒绝）。集成测试与 bin 本机没编：`cargo check --all-targets` 要替换运行中服务正在用的 `aios-database.exe` 构建产物（os error 5）；这两处只改了一句断言文案与一段文档注释，全 workspace 已无被删项的引用。
+- **没动**：`closes_task`（生产恒为 true，去留另议）；`fast_delete` 没加 refno 硬校验（`pe.dbnum` 按批 / 文件盖，不逐元素解码），规则只在测试里用；`.github/context-cold.md` 是 SigMap 生成物，未手改；历史计划 / 审计 / 发布说明不动。
+
 ### 模型水位连续性闸落地：越线拒盖、任务 Partial（ADR-092 D2）
 
 - **为什么**：`model_sesno = math::max` 没有「本任务模型左端 ≤ 库上当前水位」的闸——一窗计划若从左端 30 起算而库上模型水位才 20，中间 (20,30] 没人算过的根会被这一窗的成功收尾直接盖过去，欠账在库上从此不可见（跳盖）。做法 a（`model_plan_base_sesno` 随 `model_floor` 进规划）把工作树里先落了，闸本身是 WP-C。

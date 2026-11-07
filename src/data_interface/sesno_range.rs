@@ -147,8 +147,7 @@ impl SesnoRangeResolver {
     ///
     /// Delegates to [`DbnumState::applied_sesno`], which reads the single
     /// authoritative `applied_sesno` (with a one-time migration from the legacy
-    /// `dbnum_watermark.sesno`, and — only when no dedicated watermark exists —
-    /// the max `sesno` in `dbnum_info_table`). Per ADR-001 the running path no
+    /// `dbnum_watermark.sesno`; a `dbnum` without a dedicated row reads as 0). Per ADR-001 the running path no
     /// longer takes a cross-table max: `applied_sesno` is the only source.
     pub async fn query_watermark(dbnum: u32) -> anyhow::Result<u32> {
         let applied = crate::data_interface::dbnum_state::DbnumState::applied_sesno(dbnum).await?;

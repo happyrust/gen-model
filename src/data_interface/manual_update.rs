@@ -116,7 +116,7 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
 /// 而水位记录被删、数据还在的情形仍由 cold start 兜住。
 ///
 /// `has_any_data` 是 ADR-021 补上的**数据支撑**维度：`applied_sesno > 0` 而库里连一行
-/// pe 都没有时，水位在撒谎（典型来源是 `dbnum_info_table` 播种回填了另一段历史的统计，
+/// pe 都没有时，水位在撒谎（历史来源是已退役的 Ref0 统计表播种回填了另一段历史的统计，
 /// 2026-08-13 现场 7350 / 7353 / 7741 实测）——增量窗口只会从 `applied + 1` 往后接，
 /// `1..applied` 永远缺失且无人发现，唯一正确的处置是按首次导入重建。
 ///
@@ -7358,9 +7358,8 @@ mod tests {
     /// * **全删**而不是只删高于文件水位的行——留幸存行就要求「幸存行与新文件
     ///   同一段历史」，文件被换成另一段历史时基线完整性校验会把库卡在半修状态
     ///   （2026-08-12 的缝合式对齐正是被这一点淘汰的）；
-    /// * `applied_sesno` 必须是「写 0」而不是删行，且 `dbnum_info_table` 同批
-    ///   清空：行没了或统计还在，读侧迁移/启动播种会把旧水位捞回来
-    ///   （2026-08-04 播种审计第 5 条），首次导入分支就永远轮不到；
+    /// * `applied_sesno` 必须是「写 0」而不是删行：行没了，读侧迁移/启动播种会把
+    ///   旧水位捞回来（2026-08-04 播种审计第 5 条），首次导入分支就永远轮不到；
     /// * 身份字段留在原地，下一轮 classify 才认得这个库（不会误判成首次登记或
     ///   路径迁移）；
     /// * epoch 不递增的话，清库删掉 room_relate / inst_relate 行之后崩溃重启，
@@ -7377,19 +7376,11 @@ mod tests {
 
         let dbnum = 999_999_021u32;
         let ref0 = 4_000_000_021u64;
-        // `dbnum_info_table` 的 id 必须是纯数字 Ref0（`fast_delete::resolve_ref0_ranges`
-        // 逐字校验，见 `fast_delete.rs:156`），所以不能写成
-        // `CREATE dbnum_info_table SET ...`——那样 SurrealDB 会生成随机字符串 id
-        // （`c1eulircy6b5zg40vaov` 这种），整库清理在解析范围时当场 bail。
-        // 取一个不与真库冲突的数字段（真库现用 9304 / 13292 / 14194 …）。
-        let info_id = 9_999_999_021u64;
         let cleanup = format!(
             "DELETE pe:{ref0}_1; DELETE pe:{ref0}_2; \
              DELETE ZZWM:{ref0}_1; DELETE ZZWM:{ref0}_2; \
              DELETE inst_relate:{ref0}_2; \
-             DELETE dbnum_watermark:{dbnum}; \
-             DELETE dbnum_info_table:{info_id}; \
-             DELETE dbnum_info_table WHERE dbnum = {dbnum};"
+             DELETE dbnum_watermark:{dbnum};"
         );
         SUL_DB
             .query(&cleanup)
@@ -7399,8 +7390,8 @@ mod tests {
             .expect("valid pre-clean");
 
         // 库侧状态停在会话 60：sesno=40 的幸存元素 + sesno=60 的「未来」元素
-        // （文件回卷到 50 之后它就是幽灵），幽灵挂着 inst_relate 派生行，统计行记着
-        // 旧水位——realign 之后它们必须全部出清。
+        // （文件回卷到 50 之后它就是幽灵），幽灵挂着 inst_relate 派生行——realign 之后
+        // 它们必须全部出清。
         SUL_DB
             .query(format!(
                 "CREATE pe:{ref0}_1 SET dbnum = {dbnum}, sesno = 40, noun = 'ZZWM', \
@@ -7408,8 +7399,7 @@ mod tests {
                  CREATE pe:{ref0}_2 SET dbnum = {dbnum}, sesno = 60, noun = 'ZZWM', \
                  name = '/zz-realign-ghost'; \
                  CREATE ZZWM:{ref0}_2 SET dbnum = {dbnum}; \
-                 CREATE inst_relate:{ref0}_2 SET dbnum = {dbnum}; \
-                 CREATE dbnum_info_table:{info_id} SET dbnum = {dbnum}, sesno = 40, count = 1;"
+                 CREATE inst_relate:{ref0}_2 SET dbnum = {dbnum};"
             ))
             .await
             .expect("seed fixture")
@@ -7447,20 +7437,13 @@ mod tests {
         let mut response = SUL_DB
             .query(format!(
                 "RETURN [record::exists(pe:{ref0}_1), record::exists(pe:{ref0}_2), \
-                 record::exists(inst_relate:{ref0}_2), record::exists(ZZWM:{ref0}_2)]; \
-                 SELECT count() AS count FROM dbnum_info_table \
-                 WHERE dbnum = {dbnum} GROUP ALL;"
+                 record::exists(inst_relate:{ref0}_2), record::exists(ZZWM:{ref0}_2)];"
             ))
             .await
             .expect("inspect state after wipe")
             .check()
             .expect("valid inspection");
         let exists: Vec<bool> = response.take(0).expect("existence flags");
-        #[derive(serde::Deserialize)]
-        struct CountRow {
-            count: usize,
-        }
-        let info: Vec<CountRow> = response.take(1).expect("info count");
 
         let state = DbnumState::read(dbnum)
             .await
@@ -7479,11 +7462,6 @@ mod tests {
             exists,
             vec![false, false, false, false],
             "整库清空：pe（幸存行也不留）/ 派生行 / noun 行必须全部物理消失"
-        );
-        assert_eq!(
-            info.first().map(|row| row.count).unwrap_or_default(),
-            0,
-            "dbnum_info_table 必须同批清空，否则启动播种会把旧水位灌回来"
         );
         assert_eq!(
             state.applied_sesno, 0,

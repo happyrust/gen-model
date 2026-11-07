@@ -713,8 +713,8 @@ mod tests {
             .soft_delete_missing(&db, 8000, 6, &[refno.to_string()])
             .await
             .unwrap();
-        // A stale read must not restore the tombstone. pe 统计不再随写事务逐笔记账（ADR-071 D6），
-        // 读透这条路上没有任务收尾，`dbnum_info_table` 就该一行都没有。
+        // A stale read must not restore the tombstone. Ref0 统计已退役（ADR-071 D6），
+        // 读透写入不会把 `dbnum_info_table` 写出来。
         execute_serial(&db, &rendered, &source, None, &[])
             .await
             .unwrap();

@@ -170,6 +170,6 @@ Get-Content (Join-Path $SiteDir "baseline.log") | Select-String -Pattern '^(SYSM
 Write-Host "[2/3] 预览扫描登记..."
 Invoke-SiteBin -Exe "manual_scan_probe.exe" -BinArgs @($Project) -LogName "scan.log"
 
-# 3) 验收：pe 条数、dbnum_info_table 统计、水位三项对账。
+# 3) 验收：pe 有行、应用水位对齐文件最新会话。
 Write-Host "[3/3] 验收..."
 & (Join-Path $PSScriptRoot "Test-AmsDbnumIntegrity.ps1") -Dbnums $Dbnum -Endpoint "http://127.0.0.1:$Port/sql" -Database $Project

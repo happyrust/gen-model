@@ -114,6 +114,14 @@ durable ACK（`model_write_behind::await_roots_durable`，阶段 `durable_pendin
 `INFO FOR TABLE pe` 全部退役；基线收尾的 `rebuild_on` 也不再需要。`classify_stats_settlement` / `baseline_stats_need_rebuild` /
 `seed_suspect_dbnums` 三处 `pe_count == info_count` 对账退役——它们只为抓观测漂移，序列化没有漂移可抓。
 
+> **追记 2026-11-07：Ref0 统计整体退役。** dbnum 归属由 refno 直接算出（`refno_route::refno_dbnum`），一个库的
+> Ref0 段从 `pe` 行的 id 前缀圈出，应用水位只认 `dbnum_watermark`——这张表没有读者了。任务收尾不再写它
+> （`TaskEnd` 去掉 `info`），每任务走目标索引的 `ref0_snapshot`、`dbnum_stats` 模块与 `bin/rebuild_dbnum_stats` 删除；
+> 启动由 `retire_publish_run_tables` 整表删掉 `dbnum_info_table` / `dbnum_stats_state`，schema 不再定义它们。
+> 水位回填只剩首次播种从 `pe` 聚合那一条：已播种的库缺专用水位行即未初始化，不再从统计回填。整库清空 /
+> 回退重建不再点名统计行；初始化前清模型面只从 `pe` 圈 Ref0，`pe` 为空而模型面仍有残留时拒绝 `Initial`
+> 直写（T-D-6，先人工清）。开头状态段与 D4 里「收尾一笔含 Ref0 统计」、「后果」里的口径变化一并作废。
+
 ### D7　启动水化 = 反序列化
 
 进程启动把三水位、`gen_root` 凭证、模型投影（`restore_projection_on`）从库反序列化进内存；`.mesh` 照旧在盘。这是「库 = 序列化」

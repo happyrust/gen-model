@@ -75,8 +75,8 @@ powershell -File scripts\Test-AmsDbnumIntegrity.ps1 -Dbnums 8000
 1. `initialize_ams_dbnums` 走的是 `initialize_project_dbnum_baseline`，也就是手动增量更新
    确认执行时用的同一个初始化入口，不是另起的一套：单文件摄入
    （`versioned_db::baseline_ingest::ingest_file`，`Fresh` 只插不删、文件头身份与点名不符
-   一行不落）、`gen_model/gen_mesh=false`；PE 条数、`dbnum_info_table` 统计、本次解析条数
-   三者对不齐就不推进 `applied_sesno`。
+   一行不落）、`gen_model/gen_mesh=false`；PE 条数与本次解析条数
+   对不齐就不推进 `applied_sesno`。
    它**先**把还没有水位的 SYS 库（SYST/COMM/MISC/GLB/GLOB → DICT）建一遍基线再动设计库：
    DESI 解析要靠 `MDB`/`WORL` 定位世界根，库里没有 SYS，每个 dbnum 都会解析出 0 个元素；
    DICT 还要排在 DESI 之前，`ATT_UDA` 的 `UdaKeyMap` 靠它。
@@ -85,7 +85,7 @@ powershell -File scripts\Test-AmsDbnumIntegrity.ps1 -Dbnums 8000
 2. 第 1 步的 `finalize_baseline` 只写 `applied_sesno`/`sesno`，`file_latest_sesno` 是扫描
    观察值、由 `DbnumState::record_scan_observation` 写。跳过这步，验收脚本会报
    `watermark mismatch: applied=34 latest=0`——那是缺一次扫描，不是解析出了问题。
-3. 验收脚本查三项：`pe` 条数、`dbnum_info_table` 统计、水位 `applied == file_latest`。
+3. 验收脚本查两项：`pe` 有行、水位 `applied == file_latest`。
 
 已经有基线的 dbnum 重跑第 1 步是幂等的：设计库看 `needs_initial_load`（水位在位且有数据支撑
 就不重解析），SYS 库看 `applied_sesno > 0` 直接 skip。

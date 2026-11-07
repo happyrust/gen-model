@@ -647,7 +647,7 @@ pub struct DataBatchTaskResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_caught_up_at: Option<String>,
     /// 初始化双 lane 编排（ADR-077）已在任务内直写模型、一笔收尾并收了写入标记：
-    /// 执行体的收尾段（Ref0 统计、模型水位、写入标记兜底）跳过。不进回执。
+    /// 执行体的收尾段（模型水位、写入标记兜底）跳过。不进回执。
     #[serde(skip)]
     pub initialization_closed_task: bool,
     /// 本任务要在本批根刷盘之后、收尾之前用现有几何重算房间边（`RoomOnly`，d-819 / ADR-073 D13）：
@@ -1574,13 +1574,6 @@ async fn execute_frozen_batch(
         .frozen
         .as_ref()
         .and_then(|source| source.commit_token_json().ok());
-    // Ref0 统计快照要用的文件身份（ADR-071 D6）：数据批次应用到哪一版，就按那一版的索引数活元素。
-    let snapshot_source = crate::data_interface::ref0_snapshot::SnapshotSource {
-        frozen: cand.frozen.clone(),
-        path: cand.path.clone(),
-        file_name: cand.file_name.clone(),
-        db_type: cand.db_type.clone(),
-    };
     let body_started = std::time::Instant::now();
     // 房间段要的源身份：本任务冻住的那份文件世代（`cand` 随后被移进执行体，这里留一份）。
     // 整库完成收据那一路随 publish / model_complete 一起退了（ADR-072 D4）：
@@ -1621,49 +1614,9 @@ async fn execute_frozen_batch(
         ));
     }
 
-    // Ref0 统计快照（ADR-071 D6）：数据批次一应用到 `committed_end_sesno`，就按那一版的目标索引
-    // `DbSet@end` 数每个 Ref0 的活元素，经 `task_end` 那一笔按绝对值覆盖 `dbnum_info_table`——
-    // `count` 从此只有这一个写者（逐笔 ±1 观测块已退）。库类型不限（CATA / SYST 的统计也在这张表里），
-    // 与模型 / 房间无关：模型失败不该让统计停在上一版，所以收尾那一笔不管模型成败都带着它。
-    // 快照在这里取、在内存里等到收尾那一笔一起落（ADR-076 D5：中途那一笔已并进收尾，一个任务只写
-    // 一次 `task_end`）。ModelOnly 不动数据行，不做。取不到只留痕、标 Partial：数据行与水位不受影响，
-    // 这一版的统计等下一次该库任务再序列化。
-    // 初始化双 lane 编排（ADR-077 D7）已经在自己那一笔里写了 Ref0 统计、两枚水位与写入标记：
+    // 初始化双 lane 编排（ADR-077 D7）已经在自己那一笔里写了两枚水位与写入标记：
     // 这里的收尾（栅栏、收尾一笔、标记兜底）全部跳过，别在收过的标记后面再写库。
     let initialization_closed_task = result.initialization_closed_task;
-    let mut ref0_snapshot: Option<crate::data_interface::task_end::Ref0Snapshot> = None;
-    if !initialization_closed_task
-        && job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
-        && let Some(committed_end_sesno) = committed_end_sesno
-        && committed_end_sesno > 0
-    {
-        registry.set_stage(&job.task_id, "ref0_snapshot");
-        let source = snapshot_source.clone();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            crate::data_interface::ref0_snapshot::snapshot_at(&source, committed_end_sesno as u32)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Ref0 统计快照任务异常: {error}"))
-        .and_then(|snapshot| snapshot);
-        match snapshot {
-            Ok(snapshot) => {
-                println!(
-                    "Ref0 统计已按会话 {committed_end_sesno} 的索引序列化 dbnum={} Ref0={}（随收尾那一笔落库）",
-                    job.dbnum,
-                    snapshot.rows.len()
-                );
-                ref0_snapshot = Some(snapshot);
-            }
-            Err(error) => {
-                result.status = ManualUpdateStatus::Partial;
-                result.warnings.push(format!(
-                    "Ref0 统计快照未取到（数据行与水位不受影响，下次任务再序列化） dbnum={} \
-                     sesno={committed_end_sesno}: {error:#}",
-                    job.dbnum
-                ));
-            }
-        }
-    }
 
     let work_round_complete =
         if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
@@ -1687,7 +1640,7 @@ async fn execute_frozen_batch(
     let mut write_marker_closed = initialization_closed_task;
 
     // 模型收尾（ADR-076 D2 / D5 / D6；增量路计划 D1–D3）：本任务单元清单里的根**全部拿到 durable
-    // ACK**，`model_sesno` 才随写入标记 `finished`、Ref0 统计在同一笔里盖上——任务说完了，库里就有。
+    // ACK**，`model_sesno` 才随写入标记 `finished` 在同一笔里盖上——任务说完了，库里就有。
     // 栅栏按根不按库：同库别的根（`/model/ensure` 按需生成的）不是本任务的账；非持久档的根从不登记
     // write-behind，栅栏立刻放行，两档走同一段代码。刷不进去有预算（[`DURABLE_FLUSH_BUDGET`]）：
     // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、账本记失败（ADR-079），任务
@@ -1795,11 +1748,11 @@ async fn execute_frozen_batch(
         refresh_equip_derived(registry, job, &mut result).await;
     }
 
-    // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
+    // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished`，
     // 一个写者、一笔事务。`applied_sesno` 不在这里——它由数据尾事务在模型阶段之前盖（ADR-056 D1 /
     // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。这一窗没追平（截断窗口，余量还在
     // 队列里）、非 DESI、或模型没跑时 `model` 为 `None`，没全成时 `all_roots_ok: false`：这一笔只收
-    // 标记、落统计、记根观测，水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
+    // 标记、记根观测，水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
     if !initialization_closed_task {
         registry.set_stage(&job.task_id, "task_end");
         // ADR-092 D1：本任务的模型左端——窗口批取 `execute_one_dbnum` 随批次带回的计划
@@ -1810,7 +1763,6 @@ async fn execute_frozen_batch(
             .as_ref()
             .and_then(|batch| batch.model_base_sesno)
             .or(job.model_start_sesno);
-        let ref0_rows = ref0_snapshot.as_ref().map(|snapshot| snapshot.rows.len());
         match crate::data_interface::task_end::commit_task_end_on(
             &aios_core::SUL_DB,
             &crate::data_interface::task_end::TaskEnd {
@@ -1820,7 +1772,6 @@ async fn execute_frozen_batch(
                 target_time: end_time,
                 model: model_outcome,
                 model_base_sesno,
-                info: ref0_snapshot,
                 closes_task: true,
             },
         )
@@ -1828,12 +1779,6 @@ async fn execute_frozen_batch(
         {
             Ok(receipt) => {
                 write_marker_closed = true;
-                if let Some(rows) = ref0_rows {
-                    println!(
-                        "Ref0 统计已随收尾那一笔落库 dbnum={} Ref0={rows}",
-                        job.dbnum
-                    );
-                }
                 if receipt.blocked_by_data {
                     result.warnings.push(format!(
                         "模型水位被数据水位闸挡下（applied_sesno < {file_latest_sesno}），这一版 model_sesno 未盖 dbnum={}",
@@ -1854,7 +1799,7 @@ async fn execute_frozen_batch(
             Err(error) => {
                 result.status = ManualUpdateStatus::Partial;
                 result.warnings.push(format!(
-                    "任务收尾那一笔未落（模型水位、Ref0 统计随之未落，下次任务再序列化） dbnum={}: {error:#}",
+                    "任务收尾那一笔未落（模型水位随之未盖） dbnum={}: {error:#}",
                     job.dbnum
                 ));
             }
@@ -1868,7 +1813,7 @@ async fn execute_frozen_batch(
     // 库里留下 `writing`，下一次启动把一个数据完全一致的库整个退回 S 重跑。
     //
     // 上面收尾那一笔盖上了就不再来一次；它是唯一带水位的那一笔，这里这一笔只收标记
-    // （`model` / `info` 全 None → 水位那一句只前进 `state_revision`）。
+    // （`model` 为 None → 水位那一句只前进 `state_revision`）。
     if !write_marker_closed
         && let Err(error) = crate::data_interface::task_end::commit_task_end_on(
             &aios_core::SUL_DB,
@@ -1879,7 +1824,6 @@ async fn execute_frozen_batch(
                 target_time: None,
                 model: None,
                 model_base_sesno: None,
-                info: None,
                 closes_task: true,
             },
         )
@@ -5705,7 +5649,6 @@ mod tests {
             target_time: None,
             model: Some(outcome),
             model_base_sesno: None,
-            info: None,
             closes_task: true,
         });
         assert!(
@@ -5740,7 +5683,7 @@ mod tests {
     }
 
     /// ADR-076 D2 / D5（增量路计划 S2）：持久档不再把水位交给 write-behind 代盖——任务先等自己那批根
-    /// 的 durable ACK，再在收尾那一笔里连 `finished`、Ref0 统计一起盖 `model_sesno`。持久 / 非持久
+    /// 的 durable ACK，再在收尾那一笔里连 `finished` 一起盖 `model_sesno`。持久 / 非持久
     /// 的二分消失：非持久档的根从不登记，栅栏立刻放行，两档同一段代码。
     #[test]
     fn the_task_stamps_model_sesno_only_after_its_roots_are_durable() {
@@ -5771,10 +5714,10 @@ mod tests {
             closing.contains("commit_task_end_on("),
             "等完才是收尾那一笔: {closing}"
         );
-        for fact in ["closes_task: true", "info: ref0_snapshot", "model: model_outcome"] {
+        for fact in ["closes_task: true", "model: model_outcome"] {
             assert!(
                 closing.contains(fact),
-                "收尾一笔 = model_sesno + finished + Ref0，少了 `{fact}`: {closing}"
+                "收尾一笔 = model_sesno + finished，少了 `{fact}`: {closing}"
             );
         }
         for retired in [
@@ -5866,8 +5809,8 @@ mod tests {
         );
     }
 
-    /// ADR-076 D5（增量路计划 D4）：一个任务只调一次 `commit_task_end_on`——中途那笔 Ref0 统计已并进
-    /// 收尾。兜底那一笔（W1）只在收尾失败时才走，是同一件事的重试，不是第二个写点。
+    /// ADR-076 D5（增量路计划 D4）：一个任务只调一次 `commit_task_end_on`，没有中途那一笔。
+    /// 兜底那一笔（W1）只在收尾失败时才走，是同一件事的重试，不是第二个写点。
     #[test]
     fn commit_task_end_is_called_once_per_task() {
         let source = include_str!("batch_worker.rs");
@@ -5993,7 +5936,6 @@ mod tests {
             target_time: None,
             model: Some(outcome),
             model_base_sesno: None,
-            info: None,
             closes_task: true,
         });
         assert!(!sql.contains("model_sesno = math::max"), "水位不盖: {sql}");
@@ -6952,7 +6894,7 @@ mod tests {
             2,
             "收口写点恰好两处（收尾 + 兜底）: {body}"
         );
-        // 中途那一笔（Ref0 统计）已并进收尾（ADR-076 D5）：不再有不收标记的写点。
+        // 中途那一笔已并进收尾（ADR-076 D5）：不再有不收标记的写点。
         assert_eq!(
             body.matches("closes_task: false").count(),
             0,

@@ -36,7 +36,6 @@ $failures = [System.Collections.Generic.List[string]]::new()
 $rows = foreach ($dbnum in $Dbnums) {
     $sql = @"
 SELECT count() AS pe_count FROM pe WHERE dbnum = $dbnum GROUP ALL;
-SELECT math::sum(count) AS info_count FROM dbnum_info_table WHERE dbnum = $dbnum GROUP ALL;
 SELECT applied_sesno, file_latest_sesno FROM dbnum_watermark:$dbnum;
 "@
     $response = @()
@@ -58,20 +57,12 @@ SELECT applied_sesno, file_latest_sesno FROM dbnum_watermark:$dbnum;
     } else {
         0
     }
-    $infoCount = if (@($response[1].result).Count) {
-        [int64]$response[1].result[0].info_count
-    } else {
-        0
-    }
-    $watermark = @($response[2].result)
+    $watermark = @($response[1].result)
     $applied = if ($watermark.Count) { [int]$watermark[0].applied_sesno } else { 0 }
     $latest = if ($watermark.Count) { [int]$watermark[0].file_latest_sesno } else { 0 }
 
     if ($peCount -le 0) {
         $failures.Add("dbnum=$dbnum has no PE baseline")
-    }
-    if ($peCount -ne $infoCount) {
-        $failures.Add("dbnum=$dbnum PE/stat mismatch: pe=$peCount info=$infoCount")
     }
     if ($applied -ne $latest) {
         $failures.Add("dbnum=$dbnum watermark mismatch: applied=$applied latest=$latest")
@@ -80,7 +71,6 @@ SELECT applied_sesno, file_latest_sesno FROM dbnum_watermark:$dbnum;
     [pscustomobject]@{
         dbnum             = $dbnum
         pe_count          = $peCount
-        info_count        = $infoCount
         applied_sesno     = $applied
         file_latest_sesno = $latest
     }

@@ -65,11 +65,6 @@ struct Ref0Row {
 }
 
 #[derive(Debug, Deserialize)]
-struct InfoRef0Row {
-    ref0: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct NounRow {
     noun: String,
 }
@@ -137,10 +132,7 @@ fn owner_range_of(ref0: &str) -> String {
     format!("pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_{RANGE_END}, ..]")
 }
 
-fn collect_ref0s(
-    prefix_rows: Vec<Ref0Row>,
-    info_rows: Vec<InfoRef0Row>,
-) -> anyhow::Result<(usize, Vec<String>)> {
+fn collect_ref0s(prefix_rows: Vec<Ref0Row>) -> anyhow::Result<(usize, Vec<String>)> {
     let pe_rows = prefix_rows.iter().map(|row| row.count).sum();
     let mut ref0s = prefix_rows
         .into_iter()
@@ -152,12 +144,6 @@ fn collect_ref0s(
                 .with_context(|| format!("unexpected PE id prefix: {}", row.prefix))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for row in info_rows {
-        if row.ref0.is_empty() || !row.ref0.bytes().all(|b| b.is_ascii_digit()) {
-            bail!("unexpected dbnum_info_table Ref0: {}", row.ref0);
-        }
-        ref0s.push(row.ref0);
-    }
     ref0s.sort_unstable();
     ref0s.dedup();
     Ok((pe_rows, ref0s))
@@ -590,8 +576,7 @@ pub(crate) async fn rollback_to_watermark_on(
 ///
 /// 快删端点（运维排障）删行——库从此回到「从未登记」；回退重建（ADR-021）
 /// **清值不删行**——登记身份必须原地留下，否则下一轮 classify 会把这个库误判
-/// 成首次登记，而且删行会让启动播种从 `dbnum_info_table` 把旧水位灌回来
-/// （2026-08-04 播种审计第 5 条；统计行本身也在同一阶段清空，双保险）。
+/// 成首次登记。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatermarkDisposal {
     DropRow,
@@ -704,10 +689,7 @@ fn render_delete_phases(
     // 逐根凭证行不再有（`gen_root` 退役，ADR-079）：整库 wipe / 删库之后「这根已经生成到 T」的旧说法
     // 只可能活在进程内账本里，由调用方 `model_root_ledger::forget_dbnum` 一页作废（`wipe_dbnum_for_reinit`
     // 的调用方与删库口都做）。
-    let mut metadata = vec![
-        format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
-        format!("DELETE dbnum_stats_state:{dbnum};"),
-    ];
+    let mut metadata = Vec::new();
     match watermark {
         WatermarkDisposal::DropRow => {
             metadata.push(format!("DELETE dbnum_watermark:{dbnum};"));
@@ -807,7 +789,7 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
     Ok(result)
 }
 
-/// 回退整库重建的清库半边（ADR-021）：数据、派生行、noun 行、统计与队列残留
+/// 回退整库重建的清库半边（ADR-021）：数据、派生行、noun 行与队列残留
 /// 全删，但水位行**清值不删行**（登记身份保留、`applied_sesno = 0`）并在同一
 /// 元数据阶段递增 spatial epoch。清完恰好落进 worker 现成的
 /// `needs_initial_load` → `initialize_dbnum_baseline` 分支，由基线按首次导入
@@ -1363,7 +1345,7 @@ async fn wipe_dbnum_rows(
     })
 }
 
-/// `wipe_dbnum_rows_on` 开头那三句：PE 前缀、noun、`dbnum_info_table` 的 Ref0，取并集。
+/// `wipe_dbnum_rows_on` 开头那两句：PE 前缀与 noun。
 /// 整库快删与整库模型清理共用，避免两份圈定。
 pub(crate) async fn collect_dbnum_ref0s_on(
     db: &Surreal<Any>,
@@ -1373,9 +1355,7 @@ pub(crate) async fn collect_dbnum_ref0s_on(
         .query(format!(
             "SELECT string::split(<string>id, '_')[0] AS prefix, count() AS count \
              FROM pe WHERE dbnum = {dbnum} GROUP BY prefix;\n\
-             SELECT noun FROM pe WHERE dbnum = {dbnum} GROUP BY noun;\n\
-             SELECT <string>record::id(id) AS ref0 FROM dbnum_info_table \
-             WHERE dbnum = {dbnum} GROUP BY ref0;"
+             SELECT noun FROM pe WHERE dbnum = {dbnum} GROUP BY noun;"
         ))
         .await
         .context("inspect dbnum rows for fast delete")?
@@ -1387,14 +1367,9 @@ pub(crate) async fn collect_dbnum_ref0s_on(
     let noun_rows = response
         .take::<Vec<NounRow>>(1)
         .context("decode noun groups")?;
-    let info_ref0_rows = response
-        .take::<Vec<InfoRef0Row>>(2)
-        .context("decode dbnum_info_table Ref0 groups")?;
-    // `dbnum_info_table` 的 record id 才是这个 dbnum 所属的 Ref0。不能把 dbnum
-    // 数值直接拼进 record range；例如 dbnum=7333 的真实 Ref0 是 23717/31909。
-    // 同时从 PE 与统计表取并集：正常库由 PE 覆盖，PE 零行的幽灵水位仍能依靠
-    // 启动播种所用的统计行找到 Ref0，继续走同一套 id-range 清理。
-    let (pe_rows, ref0s) = collect_ref0s(prefix_rows, info_ref0_rows)
+    // Ref0 取自本库 PE 行的 id 前缀。不能把 dbnum 数值直接拼进 record range：一个库每个
+    // extent 一个 `word0`，例如 dbnum=7333 的 Ref0 是 23717/31909（「RefNo 库归属」）。
+    let (pe_rows, ref0s) = collect_ref0s(prefix_rows)
         .with_context(|| format!("resolve Ref0 ranges for dbnum {dbnum}"))?;
     let mut noun_tables = noun_rows
         .into_iter()
@@ -1654,7 +1629,7 @@ mod tests {
     }
 
     /// 回退重建变体（ADR-021）：数据阶段与快删完全同源，元数据阶段的差别是
-    /// 承诺——水位行清值不删行（登记身份保留）、统计同批清空、spatial epoch
+    /// 承诺——水位行清值不删行（登记身份保留）、spatial epoch
     /// 同批递增，且水位处置是最后一句（清库的提交点：半途失败时水位未动，
     /// 下一轮仍判回退、幂等重放）。
     #[test]
@@ -1684,8 +1659,8 @@ mod tests {
         assert!(
             metadata
                 .iter()
-                .any(|sql| sql.contains("DELETE dbnum_info_table WHERE dbnum = 7997")),
-            "统计行必须同批清空，否则启动播种会把旧水位灌回来: {metadata:?}"
+                .all(|sql| !sql.contains("dbnum_info_table") && !sql.contains("dbnum_stats_state")),
+            "Ref0 统计已退役（两张表启动时整表删除），清库不再点名它们: {metadata:?}"
         );
         assert!(
             metadata
@@ -2068,30 +2043,39 @@ mod tests {
         assert!(!valid_table_name("lower"));
     }
 
-    /// PE 已空但旧统计仍在时，必须从 `dbnum_info_table` 的 record id 恢复真实
-    /// Ref0，不能把 dbnum 冒充 Ref0，也不能渲染出一组空的 range 删除。
+    /// Ref0 取自 PE 前缀：一个库每个 extent 一个 `word0`，dbnum=7333 的 Ref0 是 23717/31909，
+    /// 两者按位解码都回到 7333（`refno_route`）。不能把 dbnum 冒充 Ref0。
     #[test]
-    fn ghost_watermark_recovers_ref0_ranges_from_info_rows() {
-        let (pe_rows, ref0s) = collect_ref0s(
-            Vec::new(),
-            vec![
-                InfoRef0Row {
-                    ref0: "23717".into(),
-                },
-                InfoRef0Row {
-                    ref0: "31909".into(),
-                },
-            ],
-        )
+    fn ref0_ranges_come_from_pe_prefixes_not_from_the_dbnum() {
+        let (pe_rows, ref0s) = collect_ref0s(vec![
+            Ref0Row {
+                prefix: "pe:31909".into(),
+                count: 2,
+            },
+            Ref0Row {
+                prefix: "pe:23717".into(),
+                count: 3,
+            },
+        ])
         .expect("valid Ref0 rows");
 
-        assert_eq!(pe_rows, 0);
+        assert_eq!(pe_rows, 5);
         assert_eq!(ref0s, vec!["23717", "31909"]);
-        assert!(!ref0s.contains(&"7333".to_string()));
+        for ref0 in &ref0s {
+            let word0: u32 = ref0.parse().unwrap();
+            assert_eq!(
+                crate::data_interface::refno_route::refno_dbnum(aios_core::RefU64::from_two_nums(
+                    word0, 1
+                )),
+                Some(7333),
+                "{ref0}"
+            );
+        }
         let (_, ranges, _) =
             render_delete_phases(7333, &ref0s, &[], WatermarkDisposal::ResetForReinit);
         assert!(ranges.contains(&"DELETE pe:23717_0..23717_9999999999;".into()));
         assert!(ranges.contains(&"DELETE pe:31909_0..31909_9999999999;".into()));
+        assert!(ranges.iter().all(|sql| !sql.contains("pe:7333_")), "{ranges:?}");
     }
 
     /// 模型面的表清单从 `RANGE_TABLES` 滤出来，不另抄一份。整库清库把 `ref_rev` 插回原位，

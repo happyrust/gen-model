@@ -347,7 +347,7 @@ async fn write_through_is_bounded_to_the_database_and_idempotent() {
     assert_eq!(
         count(&db, "dbnum_info_table").await,
         0,
-        "读透写入不在任务尾，不能自行维护 dbnum 统计"
+        "Ref0 统计已退役，读透写入不得把统计表写出来"
     );
     assert_eq!(count(&db, "pe_owner").await, edges_before, "边也不许翻倍");
     assert_eq!(

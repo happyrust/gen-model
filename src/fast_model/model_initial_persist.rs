@@ -4,7 +4,8 @@
 //! （`data_interface::persist_writer`）的事务文本，加上提交成功后进空间树要用的盒子。
 //!
 //! 一根渲成的东西与增量路那一根**同一份行**（`model_db_adapter::render_records`，`WriteMode::Initial`：
-//! 初始化前库里没有旧行，不做整片删、不读 `slice_sources_on`）+ 这一根的两张房间边（`room_stage` 的
+//! 初始化前库里没有旧行，不做整片删、不读 `slice_sources_on`；「没有旧行」由初始化入口先清模型面保证，
+//! 见 `dbnum_initialize::clear_model_face_before_initial`）+ 这一根的两张房间边（`room_stage` 的
 //! 同一套算法，输入只有内存记录与任务开工冻住的计算器）。**没有回执行**（ADR-079：`gen_root` 退役）：
 //! 「这个库整库生成完了」由初始化收尾那一笔盖 `model_sesno` 承诺，逐根成败只进进程内账本；零几何的根
 //! 照样进笔（它的空间盒 / 房间边可能为空，但根名单要算进这一笔的账）。
@@ -495,5 +496,100 @@ mod tests {
             assert!(!sql.contains(forbidden), "{forbidden} in {sql}");
         }
         assert_eq!(slice.transactions[0].roots, vec![ROOT, OTHER]);
+    }
+
+    /// 本库 `pe` 为 0、模型面却留着一行带几何指针、没有 `model_sesno` 的 legacy `inst_relate`（T-D-6）。
+    const LEGACY_POINTER_ROW: &str = "INSERT INTO inst_relate [{id: inst_relate:⟨24383_73948⟩, \
+        in: pe:⟨24383_73948⟩, dbnum: 7997, generic: 'EQUI', aabb: aabb:legacybox, \
+        world_trans: trans:legacytrans}];";
+
+    #[derive(serde::Deserialize)]
+    struct RelationRow {
+        aabb: String,
+        #[serde(default)]
+        model_sesno: Option<i64>,
+    }
+
+    async fn relation_row(db: &Surreal<Any>) -> RelationRow {
+        let rows: Vec<RelationRow> = db
+            .query("SELECT record::id(aabb) AS aabb, model_sesno FROM inst_relate:⟨24383_73948⟩;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        rows.into_iter().next().expect("relation row")
+    }
+
+    /// T-D-6：`Initial` 直写是 `INSERT IGNORE`，不先清就让同 id 的 legacy 行赢（旧盒指针、没有
+    /// `model_sesno`）；初始化入口先清模型面（Ref0 由本库 `pe` 行圈到；Ref0 统计已退役，`pe` 也空时
+    /// 入口拒绝，见下一条）之后，同一笔落得进去。
+    #[tokio::test]
+    async fn the_initial_write_replaces_a_legacy_pointer_row_once_the_entry_clears_the_model_face()
+    {
+        use crate::data_interface::dbnum_initialize::clear_model_face_before_initial_on;
+        let slice = render_slice(
+            7997,
+            &[(ROOT, commit(ROOT, 1))],
+            None,
+            default_transaction_cap(),
+        );
+        let sql = slice.transactions[0].sql.clone();
+
+        let uncleared = database("legacy_uncleared").await;
+        uncleared
+            .query(LEGACY_POINTER_ROW)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        uncleared.query(sql.clone()).await.unwrap().check().unwrap();
+        let stale = relation_row(&uncleared).await;
+        assert_eq!(stale.aabb, "legacybox", "不清就直写：旧指针赢");
+        assert_eq!(stale.model_sesno, None);
+
+        let db = database("legacy_cleared").await;
+        db.query(LEGACY_POINTER_ROW).await.unwrap().check().unwrap();
+        db.query("CREATE pe:⟨24383_73948⟩ SET dbnum = 7997, noun = 'EQUI';")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM pe GROUP ALL;").await,
+            1
+        );
+        let cleared = clear_model_face_before_initial_on(&db, 7997).await.unwrap();
+        assert_eq!(cleared, 1, "清之前模型面只有那一行 legacy");
+        db.query(sql).await.unwrap().check().unwrap();
+        let fresh = relation_row(&db).await;
+        assert_eq!(fresh.aabb, "24383_73948", "关系行换成这次生成的盒指针");
+        assert_eq!(fresh.model_sesno, Some(42));
+    }
+
+    /// 模型面空就什么都不做；圈不到 Ref0（本库 `pe` 一行都没有）时现成的模型面清理一行也删不到，
+    /// 入口拒绝开工、点名，而不是把直写压在旧行上。
+    #[tokio::test]
+    async fn the_entry_refuses_an_initial_write_over_a_model_face_it_cannot_clear() {
+        use crate::data_interface::dbnum_initialize::clear_model_face_before_initial_on;
+        let empty = database("model_face_empty").await;
+        assert_eq!(
+            clear_model_face_before_initial_on(&empty, 7997)
+                .await
+                .unwrap(),
+            0
+        );
+
+        let db = database("legacy_unscoped").await;
+        db.query(LEGACY_POINTER_ROW).await.unwrap().check().unwrap();
+        let error = clear_model_face_before_initial_on(&db, 7997)
+            .await
+            .expect_err("圈不到 Ref0 就拒绝开工");
+        assert!(format!("{error:#}").contains("仍有 1 行"), "{error:#}");
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await,
+            1
+        );
     }
 }

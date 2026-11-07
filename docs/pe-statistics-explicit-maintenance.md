@@ -1,5 +1,11 @@
 # PE 统计的显式维护
 
+> **已退役（2026-11-07，ADR-071 D6 追记）**：Ref0 统计整体删除——`data_interface::dbnum_stats`、
+> `bin/rebuild_dbnum_stats` 与 `dbnum_info_table` / `dbnum_stats_state` 两张表都已不在（两张表启动时由
+> `retire_publish_run_tables` 整表删除）。dbnum 归属由 refno 直接算出（`refno_route::refno_dbnum`），
+> 一个库的 Ref0 段从 `pe` 行的 id 前缀圈出，应用水位只认 `dbnum_watermark`。下文只作历史记录，
+> 不要照着改代码或做运维。
+
 `update_dbnum_event` 已退役。初始化、增量、按需读透及其镜像回放、目录补写、修复硬删使用 `data_interface::dbnum_stats`；调用者提供明确的 PE ID 和写入语句，不解析 SQL 来推断修改目标。
 
 ## 数据约定

@@ -11,9 +11,8 @@
 //!   版本不许被母库的旧版本覆盖。`Replace` 会把这条语义改掉。
 //! * 事务切块按 `tx_limits`（默认 2 MiB / 5000 行 / 1000 元素）；`DbOption::pe_chunk / att_chunk` 不再参与切块。
 //! * **不带 pe 统计观测**：写事务只包 `BEGIN / COMMIT`（2026-09-10 起增量路也是如此，ADR-071 D6）；
-//!   `dbnum_info_table` 由 dbnum 任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`），
-//!   基线与增量同一笔，这里不再有「写者排空后重建统计」的收尾。
-//! * 编排半边（收集 → 队列 → 单写者 → 闭包 → 清库 / 统计收尾）在 [`super::baseline_ingest`]。
+//!   Ref0 统计已整体退役，这里也没有「写者排空后重建统计」的收尾。
+//! * 编排半边（收集 → 队列 → 单写者 → 闭包 → 清库）在 [`super::baseline_ingest`]。
 //! * WORL 作为普通元素写全三样行（legacy 不写它的 `pe` 行），计数口径见
 //!   [`BaselineStats::elements`]。
 
@@ -98,8 +97,8 @@ mod tests {
 
     const DBNUM: i32 = 8000;
 
-    /// 基线事务不带统计观测（ADR-071 D6：统计由任务收尾从目标索引序列化，这里不重建）——三轮
-    /// （基线 + 两次父层补缺重放）之后 pe 仍是 3 行、已有行赢，且**写块自身**不碰统计表。
+    /// 基线事务不带统计观测（Ref0 统计已退役，ADR-071 D6）——三轮（基线 + 两次父层补缺重放）
+    /// 之后 pe 仍是 3 行、已有行赢。
     #[tokio::test]
     async fn baseline_and_parent_gap_replay_keep_actual_pe_counts() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
@@ -124,8 +123,7 @@ mod tests {
         }
         let mut result = db
             .query(
-                "SELECT count() AS n FROM pe WHERE dbnum = 8000 GROUP ALL; RETURN pe:8000_2.sesno; \
-                 SELECT count() AS n FROM dbnum_info_table GROUP ALL;",
+                "SELECT count() AS n FROM pe WHERE dbnum = 8000 GROUP ALL; RETURN pe:8000_2.sesno;",
             )
             .await
             .unwrap();
@@ -139,12 +137,6 @@ mod tests {
             result.take::<Option<i64>>(1).unwrap(),
             Some(5),
             "父层补缺重放：已有行赢（Fresh 只 INSERT IGNORE）"
-        );
-        let info: Vec<Count> = result.take(2).unwrap();
-        assert_eq!(
-            info.first().map_or(0, |count| count.n),
-            0,
-            "基线写块不碰 dbnum_info_table"
         );
     }
 

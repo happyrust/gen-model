@@ -1,8 +1,8 @@
 //! PE 写事务的包装：`BEGIN / COMMIT`、字节 / 写行上限、按上限切块、带重试的执行。
 //!
 //! 原住 `dbnum_stats.rs`——那时每笔事务还带 `dbnum_info_table` 的逐笔 ±1 观测块，包装与统计是一体的。
-//! 2026-09-10（ADR-071 D6 / S7）观测块退役、统计改由任务收尾从目标索引序列化（`ref0_snapshot` →
-//! `task_end`）之后，包装这一半与统计无关，搬到这里；`dbnum_stats.rs` 只剩显式重建。
+//! 2026-09-10（ADR-071 D6 / S7）观测块退役之后，包装这一半与统计无关，搬到这里；
+//! 2026-11-07 Ref0 统计整体退役，`dbnum_stats.rs` 随之删除。
 //! `render` / `transaction` / `batches` 的签名照旧收 `ids`——只做规范性校验（`ref0_ref1`），不再进任何语句。
 
 use surrealdb::{Surreal, engine::any::Any};
@@ -77,8 +77,8 @@ pub async fn retire_event_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     .await
 }
 
-/// 旧库那个 `update_dbnum_event`（由事件维护统计）不许被装回来：它会成为 `dbnum_info_table`
-/// 的第二个写者。启动 `retire_dbnum_event` 删一次；清库 / 暂存收尾路上显式核对一次。
+/// 旧库那个 `update_dbnum_event`（由事件维护统计）不许被装回来：它会把已退役的 Ref0
+/// 统计表重新写出来。启动 `retire_dbnum_event` 删一次；清库 / 暂存收尾路上显式核对一次。
 pub async fn require_no_event_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     let mut response = db.query("INFO FOR TABLE pe;").await?.check()?;
     let info: Option<serde_json::Value> = response.take(0)?;

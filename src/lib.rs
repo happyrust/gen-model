@@ -730,12 +730,15 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
 ///   实时行装（d-21）、拓扑分片只进内存与磁盘工件；
 /// - 逐根凭证那两张（ADR-079）：`gen_root`（凭证 / 发布状态 / 目录落款，逐根成败改进进程内账本、
 ///   目录落款收成水位行上的库级一份）与它旁边的 `root_dependency`（逐根目录依赖）；连同只服务
-///   它们的 `fn::gen_root_*` / `fn::sync_gen_roots` / `fn::sync_root_covers` 函数一起删。
+///   它们的 `fn::gen_root_*` / `fn::sync_gen_roots` / `fn::sync_root_covers` 函数一起删；
+/// - Ref0 统计那两张（ADR-071 D6）：`dbnum_info_table`（每个 Ref0 的活元素数与最大 sesno）/
+///   `dbnum_stats_state`；dbnum 归属由 refno 直接算出（`refno_route::refno_dbnum`），水位只认
+///   `dbnum_watermark`。
 async fn retire_publish_run_tables() {
     if !crate::options::store_mode().is_durable() {
         return;
     }
-    const RETIRED: [&str; 15] = [
+    const RETIRED: [&str; 17] = [
         "model_publish_run",
         "model_publish_fragment",
         "model_publish_ack",
@@ -751,6 +754,8 @@ async fn retire_publish_run_tables() {
         "room_topology_source",
         "gen_root",
         "root_dependency",
+        "dbnum_info_table",
+        "dbnum_stats_state",
     ];
     const RETIRED_FUNCTIONS: [&str; 12] = [
         "gen_root_mdu_types",

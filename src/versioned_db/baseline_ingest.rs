@@ -10,7 +10,7 @@
 //! | 渲染 | [`baseline::render_baseline_batches`] → `element_batch`（`Fresh`，事务不带统计观测） |
 //! | 执行 | [`persist_writer`]（落盘写者：有界队列 → 单写者，含期限与乐观冲突退避重试） |
 //! | CATA 依赖 | [`cata_dependency`]（seed 流式攒、文件收尾一次闭包、同一条 lane） |
-//! | 统计 | **不在这里**：`dbnum_info_table` 由 dbnum 任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`，ADR-071 D6），基线与增量同一笔 |
+//! | 统计 | **没有**：Ref0 统计已整体退役（ADR-071 D6），dbnum 归属由 refno 直接算出（`refno_route::refno_dbnum`） |
 //!
 //! 形状：`spawn_blocking` 里流式收集 → 每块渲成若干笔事务（每条队列消息 = 一笔事务 SQL）→
 //! 属性 lane（[`QUEUE_CAPACITY`] 有界队列 → **单写者**；SurrealDB 2.1 乐观事务下同一面多写者在共享表 /

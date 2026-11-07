@@ -176,7 +176,7 @@ _Avoid_: 行数校验、pe 计数、数据存在性（泛指时）
 _Avoid_: 空库标记、零行豁免、空水位
 
 **幽灵水位 (Ghost Watermark)**：
-`applied_sesno > 0`、该 `dbnum` 在 `pe` 里零行且没有匹配空基线凭据的状态——应用水位声称落库过，库里却没有数据支撑（多由 `dbnum_info_table` 播种回填或历史解析中断留下）。处置是路由到首次导入重建基线，不从水位往后接增量；它不是文件异常，不进 `FileAnomaly`，扫描阶段也不删任何数据。
+`applied_sesno > 0`、该 `dbnum` 在 `pe` 里零行且没有匹配空基线凭据的状态——应用水位声称落库过，库里却没有数据支撑（多由已退役的 Ref0 统计播种回填或历史解析中断留下）。处置是路由到首次导入重建基线，不从水位往后接增量；它不是文件异常，不进 `FileAnomaly`，扫描阶段也不删任何数据。
 _Avoid_: 假水位、虚水位、水位漂移
 
 **模型水位失去支撑 (Unbacked Model Watermark)**——旧章（retired，ADR-079；2026-09-15）：
@@ -296,7 +296,7 @@ _Avoid_: 模型元数据、gen_root 表（已退役）、模型缓存
 _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模型 drain、pending 任务、模型积压
 
 **任务内序列化 (In-Task Serialization)**：
-dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与 Ref0 统计与它同一笔（一个任务只写一次 `task_end`；持久档下这一笔排在本批根的 RocksDB ACK 之后，ADR-076 D5——write-behind 只刷根，不盖水位）。刷盘预算用尽 / 判死的根：放弃、逐出投影、生成根账本记 `failed`（ADR-079），任务 `Partial`、标记照收、模型水位不盖，由下一次该库任务 / 启动核对按水位缺口排 `ModelOnly`（ADR-076 D6 修订 / D8）。
+dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔（一个任务只写一次 `task_end`；持久档下这一笔排在本批根的 RocksDB ACK 之后，ADR-076 D5——write-behind 只刷根，不盖水位）。刷盘预算用尽 / 判死的根：放弃、逐出投影、生成根账本记 `failed`（ADR-079），任务 `Partial`、标记照收、模型水位不盖，由下一次该库任务 / 启动核对按水位缺口排 `ModelOnly`（ADR-076 D6 修订 / D8）。
 _Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次、房间水位、任务末房间段
 
 **落盘写者 (Persist Writer)**：
@@ -308,7 +308,7 @@ _Avoid_: 写者队列、后台写库（它不跨任务）、write-behind（那�
 _Avoid_: 多写者（指同一面）、并发写者（泛指时）、写者数配置
 
 **初始化双 lane (Dual-lane Initialization)**：
-初始化 dbnum 任务的现行形态（`data_interface::dbnum_initialize`，ADR-077）：解析（e3d-io 流式 → 元素批）与生成（`produce_slices` 并行生产者 → 切片 → 渲成 `Initial` 行 + 房间边 + `UPSERT` 回执）并发进行，各走一条写入 lane 直写 RocksDB；模型根从文件枚举（不读 `pe`）、不进模型投影、不登记 write-behind；两 lane 排空、属性面计数核对之后，收尾**一笔**盖 `applied_sesno` + `model_sesno` + 写入标记 `finished` + Ref0 统计（`task_end::TaskEnd::data`）。失败两档：lane 失败（解析器 / 闭包出错、任一写者有失败事务）→ 两 lane 排空 → 整库清 → Err；单根死信 / 模型半边自己的错 → 属性照落、`Partial`、`model_sesno` 不盖。增量路不在其内。
+初始化 dbnum 任务的现行形态（`data_interface::dbnum_initialize`，ADR-077）：解析（e3d-io 流式 → 元素批）与生成（`produce_slices` 并行生产者 → 切片 → 渲成 `Initial` 行 + 房间边 + `UPSERT` 回执）并发进行，各走一条写入 lane 直写 RocksDB；模型根从文件枚举（不读 `pe`）、不进模型投影、不登记 write-behind；两 lane 排空、属性面计数核对之后，收尾**一笔**盖 `applied_sesno` + `model_sesno` + 写入标记 `finished`（`task_end::TaskEnd::data`）。失败两档：lane 失败（解析器 / 闭包出错、任一写者有失败事务）→ 两 lane 排空 → 整库清 → Err；单根死信 / 模型半边自己的错 → 属性照落、`Partial`、`model_sesno` 不盖。增量路不在其内。
 _Avoid_: 基线 + 全量生成根（旧形态：数据先落、读 `pe` 枚举根、再交任务生成）、初始化走投影、先推 applied 再生成、`BaselineOutcome::units`
 
 **写入标记 (Write Marker)**：
@@ -434,7 +434,7 @@ _Avoid_: 会话回放（`collect_changes`，已删）、拿第二套解析器当
 _Avoid_: 暂存写回、journal 重放、应急直写（它已是唯一路径）、direct 模式（那是数据面读路由的名字——2026-09-04 起不设 `AIOS_DATA_READ_MODE` 即 direct、只有显式 `=db` 才退回 legacy，见 ADR-053 / ADR-058 D8——与这条写回路径不是一回事）、逐元素 UPSERT（2026-09-06 起不是它的写法）
 
 **元素批 (Element Batch)**：
-rocksdb 形态下元素数据行（`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner` 边）**唯一**的写法（`data_interface::element_batch`，plan 2026-09-06 §3 D1/D2，共识 d-29）：一块 = 前置块（Add / 墓碑自己的旧出向边）之后，「按 id 批量删边（id 区间）→ `ATT_UDA` → noun 行，再每表一条 `INSERT IGNORE`（边表 `INSERT RELATION IGNORE`）」。**`pe` 行不删**——它是图顶点，删它会级联删掉 `pe_owner` / `ref_rev` / `tubi_relate` 这些别的块、别的窗口、模型面挂在它身上的边——改为一块一条批量 `INSERT INTO pe [..] ON DUPLICATE KEY UPDATE <gen_sur_json 全部字段>` 原地整行替换。两档：`Fresh`（基线 / 父层补缺，只插、已有行赢）与 `Replace`（增量 / 依赖行版本前移）。切块上限 `tx_limits`（2 MiB / 5000 行 / 1000 元素，`DbOption` 三键可调），每笔事务带 pe 统计观测。控制面单行（水位、队列、统计、`datacenter_version`、`cata_dependency_state`）不在此列，仍是尾事务 / 回执块里的点写。
+rocksdb 形态下元素数据行（`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner` 边）**唯一**的写法（`data_interface::element_batch`，plan 2026-09-06 §3 D1/D2，共识 d-29）：一块 = 前置块（Add / 墓碑自己的旧出向边）之后，「按 id 批量删边（id 区间）→ `ATT_UDA` → noun 行，再每表一条 `INSERT IGNORE`（边表 `INSERT RELATION IGNORE`）」。**`pe` 行不删**——它是图顶点，删它会级联删掉 `pe_owner` / `ref_rev` / `tubi_relate` 这些别的块、别的窗口、模型面挂在它身上的边——改为一块一条批量 `INSERT INTO pe [..] ON DUPLICATE KEY UPDATE <gen_sur_json 全部字段>` 原地整行替换。两档：`Fresh`（基线 / 父层补缺，只插、已有行赢）与 `Replace`（增量 / 依赖行版本前移）。切块上限 `tx_limits`（2 MiB / 5000 行 / 1000 元素，`DbOption` 三键可调）。控制面单行（水位、队列、`datacenter_version`、`cata_dependency_state`）不在此列，仍是尾事务 / 回执块里的点写。
 _Avoid_: 逐元素 UPSERT / UPDATE、`ATT_<noun>`（属性表名就是 noun 本身）、删 `pe` 行、`PEJson / AttJson / PERelateJson`（已退役的按表消息）
 
 **墓碑 (Tombstone)**：
