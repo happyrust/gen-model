@@ -142,3 +142,55 @@ gen_history_model = false
 debug_root_refnos = ["17496/201375"]
 
 # debug_root_refnos = ["17496_195578"]
+
+# MBD 统一端点判型（plant3d-web#103）：本样例库的 /1PTU-INST23 里是复制进去的反应堆冷却剂工艺管与设备
+# （Copy-of-1RCS…，通径 20–150），只有 /1TTU-INST23 是仪表管。EM9 管道规则（字高比例 3.0 等）为小口径仪表管设计，
+# 所以管道只把 1TTU 站点判成 em9_pipe；其余规则与缺省表（PML getmbdtype）相同。写了 rules 就整表替换缺省表。
+[mbd_type_rules]
+
+[[mbd_type_rules.rules]]
+subject = "equipment"
+zone_keywords = ["MTGD", "COMM", "CASE", "LIGHT"]
+annotation_type = "em4_equi"
+
+[[mbd_type_rules.rules]]
+subject = "pipe"
+site_keywords = ["1TTU"]
+annotation_type = "em9_pipe"
+
+[[mbd_type_rules.rules]]
+subject = "pipe"
+annotation_type = "em4_pipe"
+
+[[mbd_type_rules.rules]]
+subject = "support"
+site_keywords = ["INST"]
+zone_keywords = ["RACK"]
+annotation_type = "em9_inst_supp"
+
+[[mbd_type_rules.rules]]
+subject = "support"
+site_keywords = ["INST"]
+annotation_type = "em9_pipe_supp"
+
+[[mbd_type_rules.rules]]
+subject = "support"
+annotation_type = "em4_supp"
+
+[[mbd_type_rules.rules]]
+subject = "equipment"
+site_keywords = ["INST"]
+annotation_type = "em9_equi"
+
+[[mbd_type_rules.rules]]
+subject = "equipment"
+annotation_type = "em4_equi"
+
+[[mbd_type_rules.rules]]
+subject = "civil"
+site_keywords = ["ARCH"]
+annotation_type = "arch"
+
+[[mbd_type_rules.rules]]
+subject = "civil"
+annotation_type = "civil"
