@@ -18,12 +18,12 @@ on:
       vendor_ref:
         description: '五个 vendor 仓统一使用的分支或提交'
         required: false
-        default: 'ci/gen-model-linux-20260918'
+        default: 'main'
         type: string
       plant_ui_ref:
         description: 'plant-ui（web_service 内嵌的前端资源）使用的分支或提交'
         required: false
-        default: 'ci/gen-model-linux-20260918'
+        default: 'master'
         type: string
 
 permissions:
@@ -41,8 +41,10 @@ env:
   CARGO_TARGET_DIR: target
   RUST_TOOLCHAIN: nightly-2026-08-02
   PROTOC_ARCHIVE_URL: https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-  VENDOR_REF: ${{ inputs.vendor_ref || 'ci/gen-model-linux-20260918' }}
-  PLANT_UI_REF: ${{ inputs.plant_ui_ref || 'ci/gen-model-linux-20260918' }}
+  # 默认跟各仓主线：推 publish 之前，五个 vendor 仓的 main 与 plant-ui 的 master
+  # 必须已经推到 GitHub，并且能编过被推的这个提交。
+  VENDOR_REF: ${{ inputs.vendor_ref || 'main' }}
+  PLANT_UI_REF: ${{ inputs.plant_ui_ref || 'master' }}
 
 jobs:
   build:

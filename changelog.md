@@ -1,10 +1,11 @@
 ## 2026-11-07
 
-### 比对工具内存约减半；publish 还缺哪些推送（本机检查编译）
+### 比对工具内存约减半；publish 的 vendor 口径改为跟各仓主线
 
-- **比对内存**：e3d-model `d139a9d`（本地提交，未推）把 `rvm_compare` 基准侧面片的连通分量改记成顶点区间，不再按坐标另存一份（解析图元一个分量就是它全部采样点，原先等于基准顶点存了两遍）。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站 `compare.json` 与改前逐字节相同。服务端 rvm-check 在进程内调同一实现，重编后生效；e3d-model 提交号一变，生成器指纹随之变，三库会再整库重排一次。
+- **比对内存**：e3d-model `d139a9d` 把 `rvm_compare` 基准侧面片的连通分量改记成顶点区间，不再按坐标另存一份（解析图元一个分量就是它全部采样点，原先等于基准顶点存了两遍）。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站 `compare.json` 与改前逐字节相同。服务端 rvm-check 在进程内调同一实现，重编后生效；e3d-model 提交号一变，生成器指纹随之变，三库会再整库重排一次。
 - **检查编译**：按 linux-binary 的拉法在临时目录检出本分支，五个 vendor 仓与 plant-ui 取 GitHub 现有版本，用 CI 的 features 跑 `cargo check --bin aios-database`。默认 `VENDOR_REF` 在 e3d-model 仓不存在；plant-mbd 远端 `main` 缺本地未推的 6 个提交，编不过（4 处）；换上本地 plant-mbd 后编过、`Cargo.lock` 不变，其余四仓用远端现有版本即可；old-aios-core `main` 落后 `codex/libgm-snout-caliber` 32 个提交，五仓不能统一取 `main`。明细见跟踪清单第六节「待推送的本地提交」。
-- **没动**：workflow、publish 和任何远端分支。
+- **CI 口径**：linux-binary 默认 `VENDOR_REF=main`、`PLANT_UI_REF=master`；windows-tests 去掉 old-aios-core 的 `codex/libgm-snout-caliber` 钉选。同日推齐各仓主线：plant-mbd `main` 快进到 `3db2d92`（6 个提交，推前测试全过），old-aios-core `main` 快进到 caliber 的 `7c0c54e`，e3d-model `main` 到 `d139a9d`。从 GitHub 取五仓 `main` 与 plant-ui `master` 再做检查编译：通过，`Cargo.lock` 不变。
+- **没动**：`publish`。workflow 改动随本分支进 `refactor`、`publish` 后生效；plant-ui `master` 的内嵌前端比旧 CI 分支新，部署时一起换新。
 
 ### 39 个 SITE 的 RVM 对比全部通过（e3d-model#24 关闭）
 

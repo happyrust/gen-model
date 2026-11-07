@@ -68,7 +68,8 @@
 |---|---|---|---|---|
 | — | gen-model#87 | E3D TTY 写完 L3-DONE 后不退出，后端白等满 1200 s | 已进 refactor，待部署 | `b4b6f725c` 随合并 `da97d03eb` 在 `origin/refactor`：宽限到期强制收尾，并按成功返回；`publish` 还没有 |
 | P3 | gen-model#87 余项 | QUIT 后 `des.exe -tty` 不退出的根因 | 根因未证实 | 包装宏已改成 `QUIT` / `FINISH` / `FINISH`，宽限 60 s → 5 s，只是兜底。2026-11-06 影子工程导出 `24381/106125`（RVM 已写完）后，这三条放在包装宏里等满 90 s、再放进用户宏（`ALPHA LOG END` 之后）都不返回，`FINISH` 没跑到。登录探针能退，真实导出不能。控制台被 `PDMS_HIDECONSOLE` 藏着，没看到提示 |
-| P3 | gen-model#79 | CI 有四道门长期坏掉，还有一次把账户配额撑爆 | 已进本分支，未推 | `windows-tests.yml` 已在 `origin/refactor`。`linux-binary.yml`、`windows-binary.yml` 的 cargo 缓存 key 已去掉 `run_id`（按 `Cargo.lock` 哈希），并且只在 cache miss 时保存。还在 `fix/model-open-issues-1106`，没推、没跑过 CI |
+| P3 | gen-model#79 | CI 有四道门长期坏掉，还有一次把账户配额撑爆 | 已进本分支（已推 origin），未进 `refactor` | `windows-tests.yml` 已在 `origin/refactor`。`linux-binary.yml`、`windows-binary.yml` 的 cargo 缓存 key 已去掉 `run_id`（按 `Cargo.lock` 哈希），并且只在 cache miss 时保存。在 `fix/model-open-issues-1106`，没跑过 CI |
+| — | — | publish 构建拉不到能编过的 vendor（默认 ref 在 e3d-model 不存在，plant-mbd 缺提交） | 已修（本分支），待进 `publish` | linux-binary 默认 `VENDOR_REF=main`、`PLANT_UI_REF=master`，windows-tests 去掉 old-aios-core 的 caliber 钉选；五仓 `main` 已推齐，按 CI 拉法检查编译通过（见第六节） |
 
 ## 六、待推送的本地提交
 
@@ -78,18 +79,13 @@
 |---|---|---|---|
 | gen-model | `refactor`（本地） | `972b06cfa` | feat(mbd): layout_pipe 在 meta.source_version 填入读取版本 |
 | gen-model | `fix/model-open-issues-1106`（worktree `gen-model-fix1106`） | 见分支 | 本清单「三、五」各项的修复，过回归门后并入 `refactor` |
-| e3d-model | `main`（本地） | `d139a9d` | perf(rvm_compare)：基准面片分量只记顶点区间，大 SITE 比对内存约减半 |
-| plant-mbd | `main`（本地，MBD / isodim 工作线） | `5bef17f` … `3db2d92`（6 个） | 本分支编译要用其中 `fff0f6e`（契约 `source_version`）与 `5bef17f`（`adjust_len`） |
-
 `origin/refactor` 比 `origin/publish` 多 11 个提交（含 #87 的修复）。#73 的修复在 `publish` 分支上，但 11-05 的 publish 构建失败，生产仍是 10-26 的 `83aa3c250`。
 
-publish 要能编过还缺的东西（2026-11-07 按 linux-binary 的拉法在临时目录做的检查编译，本分支 `ec387bb4b`，vendor 与 plant-ui 取 GitHub 现有版本，CI 同款 features）：
+publish 构建的 vendor 口径（2026-11-07 定）：linux-binary 默认 `VENDOR_REF=main`、`PLANT_UI_REF=master`，windows-tests 去掉 old-aios-core 的 `codex/libgm-snout-caliber` 钉选，改动在本分支。同日推齐了各仓主线：plant-mbd `main` 快进到 `3db2d92`（MBD / isodim 工作线的 6 个提交，含本分支编译要用的 `fff0f6e` 契约 `source_version` 与 `5bef17f` `adjust_len`；推前 plant-mbd 全部测试通过），old-aios-core `main` 快进到 caliber 的 `7c0c54e`，e3d-model `main` 到 `d139a9d`。之后按 CI 拉法从 GitHub 取五仓 `main` 与 plant-ui `master`，用 CI 同款 features 检查编译通过，`Cargo.lock` 不变；本地未提交的 vendor 改动都用不到。
 
-- linux-binary 默认 `VENDOR_REF=ci/gen-model-linux-20260918`，e3d-model 仓没有这个分支，克隆这一步就失败；五个仓共用一个 ref。
-- plant-mbd 远端 `main`（`63d566e`）编不过（4 处）：本分支用到的 `MbdV2SourceDatabase`、`MbdV2SourceVersion`、`MbdV2Meta.source_version`（`fff0f6e`）和 `BranchMember.adjust_len`（`5bef17f`）只在本地 `main` 未推的 6 个提交里（MBD / isodim 工作线）。
-- 换上本地 plant-mbd `3db2d92` 后编过，`Cargo.lock` 不变。其余四仓用远端现有版本即可：e3d-model `main` `5182aef`、e3d-io `main` `74bd1ee`、e3d-attlib `main` `f37be2e`、old-aios-core `codex/libgm-snout-caliber` `7c0c54e`；本地未提交的 vendor 改动都用不到。
-- old-aios-core `main`（`463d4d5`）比 `codex/libgm-snout-caliber` 落后 32 个提交、编不过（27 处），所以五仓不能统一取 `main`，除非先把它快进。
-- plant-ui 的 CI 分支（`490da62`）内嵌文件齐、能编，但内嵌前端是 10-13 的 0.1.14，比 `master` 旧。
+此前的卡点（同日检查编译查出）：默认 ref `ci/gen-model-linux-20260918` 在 e3d-model 仓不存在，克隆这一步就失败；plant-mbd 远端 `main` 缺上面 6 个提交，编不过（4 处）；old-aios-core 旧 `main` 落后 caliber 32 个提交，编不过（27 处）。
+
+还差：workflow 改动随本分支并入 `refactor`、再进 `publish` 才生效。plant-ui `master` 的内嵌前端比旧 CI 分支（10-13 的 0.1.14）新，下次部署前端会一起换新。以后推 `publish` 之前，各 vendor 仓的 `main` 要先推齐。
 
 ## 回归门（每次合入前跑）
 
@@ -100,7 +96,7 @@ publish 要能编过还缺的东西（2026-11-07 按 linux-binary 的拉法在�
 
 ## 最近进展
 
-- 2026-11-07（比对内存）：e3d-model `d139a9d`（本地提交，未推）让 `rvm_compare` 基准侧面片的连通分量只记顶点区间，不再按坐标另存一份。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站用 `lateral1107` 的生成件重跑比对，`compare.json` 与改前逐字节相同（`D:\e3d-shadow-1106\runs\b39\mem1107`）。e3d-model 回归门（release lib 464 与四道读取守卫）全过。服务端 rvm-check 调同一实现，8022 重编后生效。同日按 CI 拉法做了检查编译，publish 还缺的推送见第六节。
+- 2026-11-07（比对内存）：e3d-model `d139a9d`（已推）让 `rvm_compare` 基准侧面片的连通分量只记顶点区间，不再按坐标另存一份。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站用 `lateral1107` 的生成件重跑比对，`compare.json` 与改前逐字节相同（`D:\e3d-shadow-1106\runs\b39\mem1107`）。e3d-model 回归门（release lib 464 与四道读取守卫）全过。服务端 rvm-check 调同一实现，8022 重编后生效。同日按 CI 拉法做了检查编译，查出 publish 的 vendor 卡点；CI 改为跟各仓主线并推齐各仓 `main`，见第六节。
 - 2026-11-07（SITE RVM 全量）：本机 8022 换成带 e3d-model `5182aef` 内容的二进制（`c4bfd1c2e` 构建），按 `rvm-batch/rerun.ps1` 的口径对 `tree/roots` 下全部 39 个 SITE 逐个跑 `/api/v1/rvm-check/runs`（E3D TTY 当场导出 + 进程内生成 + 比对）：39/39 `succeeded`、判定全部通过；两侧 199192 对，exact 199180，chord 5、reference_artifact 4、film 3（即上表的可接受残差），off、only_baseline、only_generated、kind_differ、unkeyable、容器差异全为 0。结果在 `D:\e3d-shadow-1106\runs\site-rvm-1107\after-lateral.json`。`24381/101405`（34325 对）第一次跑时整机提交额度被其他进程占满，服务以 `alloc_failed` 退出（崩溃笔记留痕）；同一比对用命令行做过，`rvm_compare` 峰值私有内存 7.23 GB，对 11-07 新导出全部 exact；额度回升后服务端重跑通过（678 s）。`rvm_compare` 把基准面片顶点按 f64 存两份，大 SITE 的内存可以再压，记为后续项。
 - 2026-11-07（续）：生成器指纹加 `e3d-io:`、`e3d-attlib:` 两段（`build.rs` `vendor_identity`，ADR-093 追记），单改 e3d-io 的几何修复也会触发整库重排；12 个相关单测通过，本机 8022 首启三库按 `model_generator_changed` 重排（约 10 分钟），再重启不排。8022 现从 `gen-model-fix1106\target\_run\aios-database.exe` 运行，重编不再撞文件锁。#74 本机验收见三节。publish 构建修法要先定 vendor 分支口径，未改 workflow。
 - 2026-11-07：本机 8022 换成本分支 `668ddf89d` 的 debug 二进制（e3d-model `1e56a42`；工作目录、参数、`AIOS_STORE_MODE=rocksdb` 同前，另加 `AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS=1`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=60000`）。#73 首启排三库整库重排，#88 那段在 7997 上 115.8 s 走完，三库约 10 分钟回到 `model_ready`，内存峰值约 1.9 GB；再重启不再排。抽查：#22 的 `24381/129910`、`129911` 两只 RTOR 在库里有几何，网页 `show_refno=24381/129625` 能看到；#24 的 `24381/106125` 仍是 15 条管段记录（含 TUBI 9）；#23 的 `24381/47065` 前后都是 13 条构件记录，零径占位只进 RVM，不进网页用的模型记录。证据在 `target/_verify-1107/`（不入库）。旧二进制（主工作区 `target/debug`，e3d-model `6f2b68a`）若再起，会因落款不一致把三库按旧几何重排，且不带 #88 的修复。

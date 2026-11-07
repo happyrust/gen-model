@@ -121,16 +121,12 @@ jobs:
           repository: happyrust/plant-mbd
           token: ${{ secrets.GH_PAT }}
           path: vendor/plant-mbd
-      # aios_core 的在途工作在 codex/libgm-snout-caliber 分支上（Cargo.toml [patch]
-      # 用本地树、git 依赖 rev 钉在该分支提交），checkout 必须跟着这条分支走，
-      # 不能拿 main。分支合回 main 后把这里的 ref 拿掉。
       - name: Check out vendor/old-aios-core
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
           token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
-          ref: codex/libgm-snout-caliber
 
       # 运行期/编译期路径（include_str!、测试 fixture、schema 目录）走仓内 vendor/shared——
       # 把兄弟 vendor/ 联接进去，和本地 vendor/shared junction 同形状。
@@ -444,14 +440,12 @@ jobs:
           repository: happyrust/plant-mbd
           token: ${{ secrets.GH_PAT }}
           path: vendor/plant-mbd
-      # 同上：aios_core 在途工作在 codex/libgm-snout-caliber 分支上。
       - name: Check out vendor/old-aios-core
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
           token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
-          ref: codex/libgm-snout-caliber
 
       # 同上一个 job：把兄弟 vendor/ 联接到仓内 vendor/shared。
       - name: Link vendor into gen-model/vendor/shared
