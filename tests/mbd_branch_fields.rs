@@ -633,12 +633,14 @@ fn target_of(target: &Option<ConnectionTarget>) -> Option<(&str, &str, ZoneFlags
 }
 
 /// 标签 / 安装角度 / 调整焊的宿主字段在六条金样上的形状：E3D 成员都带正交右手的 ORI，隐式管身一样都没有；连接目标与
-/// 库里的 HREF / TREF / CREF 一一对上，不在 ITUB / INST 区的目标照常有 `connection`；SITE 名都在。
+/// 库里的 HREF / TREF / CREF 一一对上，不在 ITUB / INST 区的目标照常有 `connection`；SITE 名都在。TEE / OLET / VALV 都读
+/// `:YKSX`（金样里有 VALV），AMS 字典没有这个 UDA，一律为空、也不算读坏。
 #[test]
 fn golden_branches_carry_the_tag_host_fields() {
     let Some(set) = set() else {
         return;
     };
+    let mut valves = 0;
     for refno in GOLDEN {
         let query = query(&set, refno);
         let id = &query.branch_refno;
@@ -677,6 +679,7 @@ fn golden_branches_carry_the_tag_host_fields() {
         for member in &query.members {
             let name = format!("{id} {} {:?}", member.refno, member.noun);
             assert!(member.instrument_name.is_none(), "{name}: AMS has no :YKSX");
+            valves += usize::from(member.noun.as_deref() == Some("VALV"));
             assert!(
                 member.stext.is_none() || member.atta_support.is_none(),
                 "{name}: STEX and the support are exclusive"
@@ -728,6 +731,10 @@ fn golden_branches_carry_the_tag_host_fields() {
             }
         }
     }
+    assert!(
+        valves > 0,
+        "the goldens carry VALVs, whose :YKSX is read too"
+    );
 }
 
 /// ITUB 区的仪表管（ams7997 `/仪控ISO测试` › `/1RCV-ITUB-XX`）：24381/575 的 Head 连 PCOM 24381/614、Tail 连 BRAN 24381/583，
