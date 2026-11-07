@@ -179,7 +179,7 @@
 | G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 通过（2026-11-08，2909 过 / 0 失败 / 128 忽略；计数含工作树里其它未提交改动带来的 6 条，见 §8） |
 | G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 通过（2026-11-08，2910 过 / 0 失败 / 128 忽略） |
 | G4 可见性 | 收窄完成；无外部调用；无新增告警 | 通过（2026-11-08，2910 过 / 0 失败 / 128 忽略；告警一项改由调用点核对，见 §8 Phase 4） |
-| G5 留痕 | ADR + CONTEXT + changelog | 未开始 |
+| G5 留痕 | ADR + CONTEXT + changelog | 通过（2026-11-08，ADR-097 已接受；未入库的 2026-10-27 审计稿里还有一处旧说法，见 §8 Phase 5） |
 
 ## 8. 批注处置记录
 
@@ -307,3 +307,15 @@
 - G4：`cargo +nightly test --lib` 2910 过、0 失败、128 忽略，共 3038 条，与 G3 逐条对比没有差异（本阶段不加不减用例）。
   - 定向跑 `model_memory_store` / `projection_removal` / `fast_delete` / `model_db_adapter` / `room_resident` / `cata_dependency`：230 过、0 失败、12 忽略。
   - 四个改动文件 rustfmt 检查通过。
+
+### Phase 5 施工记录（2026-11-08）
+
+- 新 ADR 编号取 ADR-097。ADR-087 在 `changelog.md`、ADR-088 / ADR-096 和源码注释里被当作拟稿引用，留给它；已入库的最大编号是 ADR-096。
+  - `docs/adr/ADR-097-…md`：状态「已接受」。D1–D6 对应入口、锁序、受影响根闭包、退役 / 作废、先持久后投影、凭证；实施约束列的测试名逐个核对过存在。
+- ADR-082 只在「关联」里加一条 2026-11-08 追记，指向 ADR-097，判据与时机不改。顺带注明背景第 1 条点名的 `evict_missing_root` 已没有生产调用方、`clear_dbnum` 只有删除入口调得动。
+- `CONTEXT.md`：在「模型生成执行」一节缓存上限那组之后，补「删除入口」「受影响根」「退役 / 作废」三条，写法同既有词条（定义 + `_Avoid_`）。这个文件里有工作树里与本计划无关的未提交改动，只暂存这三条。
+- `changelog.md`：顶部新增 2026-11-08 一节，按为什么 / 改 / 验证 / 没动写。文件超过编辑工具的大小上限，用脚本在开头插入，核对过只多 9 行。
+- 没改：ADR-073（`invalidate_all_receipts` 在守卫里的说法仍成立）；ADR-080（`evict_missing_root` 出现在当时的并发写入者列表里，属历史叙述）；`CONTEXT.md`「投影 overlay 根数上限」的 `_Avoid_` 里提到的 `evict_missing_root`（讲的是一种叫法，不受影响）。
+- G5：ADR-097 状态「已接受」。`git grep --untracked -n delete_persisted_geometry_root -- docs src CONTEXT.md changelog.md` 剩下的都是历史。
+  - 历史记录：两份 2026-09 的旧计划；契约测试里一处「修前」的说明；本阶段新写的 ADR 背景、术语 `_Avoid_` 和 changelog（都说它已删）。
+  - 另有 `docs/specs/incr-gen-audit/spec.md:175`（R-D-19）把它写在一条 MUST 规则里。这个目录没入库，是 2026-10-27 的审计稿，按审计时的工作树写成，不是本计划的文件，没动；它描述的是改道前的删除路径。

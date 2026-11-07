@@ -1,3 +1,12 @@
+## 2026-11-08
+
+### 投影删除只有一个入口：锁序、受影响根闭包、退役与作废（ADR-097）
+
+- **为什么**：进程内投影里的删除原先有三条路（投影 / 读透、摄入、整库清理），各写各的锁序和收尾。摄入删内层根时不作废外层根的回执，之后读外层根报 `receipt expects 7, store has 3`；锁序靠源码文本守卫钉，改名就红、真弄反了却测不出；存储的删除方法对整个 crate 公开。
+- **改**：新增删除入口 `data_interface::projection_removal`：`remove_subtree` 收投影两路与摄入删除，`clear_dbnum` 收整库清理的投影那一半（整库快删、整库模型清理、回退重建、升级清库）。锁序定在入口里（锁根排序 try-lock → 按 dbnum 升序拿按库生成锁 → 结算、写墓碑、改投影），先持久后投影；受影响根由 `subtree_closure` 在一把读锁里分成被删根（退役）和外层根（作废），`retire_roots` 一把写锁收尾。摄入那路补上按库生成锁与外层根作废，`delete_persisted_geometry_root` 删除。存储的 `retire_roots`、`clear_dbnum` 要入口才造得出的凭证 `RemovalAuthority`；只在测试里用的 7 个存储方法收进 `#[cfg(test)]`，2 个没人调用的删掉。ADR-082 加一条指向追记，`CONTEXT.md` 补「删除入口」「受影响根」「退役 / 作废」。
+- **验证**：`cargo +nightly test --lib` 2910 通过、0 失败、128 忽略，含入口层的锁行为测试（根锁被占即回「正在生成」、同库生成锁被占时挂起）、`deleting_an_inner_root_keeps_the_outer_root_readable`（外层根残缺的复现，已转绿）、`the_subtree_closure_matches_the_per_root_scan`（与旧的逐根扫描逐一比对）、`an_upgrade_wipe_is_refused_while_the_dbnum_is_generating`；各阶段与上一阶段逐条对比，见 `.planning/2026-11-08-projection-store-root-only/task_plan.md` §8。只跑了 `--lib`：集成测试要替换运行中服务占着的产物，本机跑不了，待停机窗口补跑。
+- **没动**：ADR-082 的逐出判据与时机；回执 / ACK 写入接口与外部对 `receipt()` 的读法（第二期）；房间代号簿记留在存储；`generation_root_lock` / `db_generation_lock` 的实现与粒度；整库清理的锁序与「收键 → 删库行 → 删几何」（仍在 `fast_delete`，后者仍按源码先后守卫钉）。
+
 ## 2026-11-07
 
 ### Ref0 统计整体退役：dbnum 归属由 refno 算出（ADR-071 D6 追记）

@@ -407,6 +407,18 @@ _Avoid_: 每窗收尾无条件释放（改默认行为，ADR-082 §不做）、�
 `POST /model/history/generate` 造的每一格 `Historical(<snapshot_key>)` 作用域（一个单元子树在某一会话的完整投影 + `HistoricalModelStore` 里的一份回执）最多同时留几格（`model_historical_snapshots_max`，环境变量 `AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX` 压过；**没写 = 16**，**写 0 = 不限**；内存控制计划 P4 / D4，2026-09-22）。此前只有显式 `DELETE` 或同 key 重生成才丢，没条数上限、没 TTL，`overlay_footprint` 只数 `Current`、`/health` 看不见这几格。设了之后 `generate` 发布第 N+1 格时按**最近一次 generate** 的先后把最旧的那格连回执一起丢（`HistoricalModelStore::publish_capped` → `drop_snapshot`，与 `DELETE` 同一条路），刚发布的永远留，同 key 重生成只刷新序号、不算新格、不顶别人；被顶掉的格再 `query` 是既有的 `SNAPSHOT_NOT_FOUND`（前端重新 `generate` 即可）。按条数不按字节、不做 TTL（d-149 口径）。现值 `/health.model_cache.historical`：回执表的 `snapshots / max_snapshots / evicted_total`（显式 `DELETE` 不计入）+ 投影里每格的 `records / approx_bytes`（`ModelMemoryStore::historical_footprint`，与 overlay 同一把尺）。
 _Avoid_: 快照 TTL、快照落库、把它当成 overlay 根数上限的一部分（那道只数 `Current`）
 
+**删除入口 (Projection Removal Entry)**：
+进程内投影里删东西的唯一入口 `data_interface::projection_removal`（ADR-097）：按子树删走 `remove_subtree`（投影两路与摄入删除），整库清理的投影那一半走 `clear_dbnum`。锁序定在入口里——锁根排序去重后逐个 try-lock，被占就回「正在生成」；再按 dbnum 升序拿按库生成锁；拿齐才结算、写墓碑、改投影，先持久后投影。存储的退役 / 整库清理方法要一张只有入口造得出来的凭证 `RemovalAuthority`，绕过入口编译不过。
+_Avoid_: 逐出（ADR-082 的缓存态收回，不走入口）、`delete_persisted_geometry_root`（已删）、把整库清理的锁序当成入口的（那一套仍在 `fast_delete`）
+
+**受影响根 (Affected Roots)**：
+一次删除碰到的常驻根（有回执或已作废）。在一把读锁里按子树根在每条被删记录祖先链里的位置分成两类（`ModelMemoryStore::subtree_closure`）：**被删根**是子树根及其以下、整根落在删除范围里的根，常驻的子树根自己没有记录也算；**外层根**是删除范围头上、与被删记录共有记录的根。
+_Avoid_: 扫全部根找共享记录（旧投影那路的做法）、只处理被删根本身（旧摄入那路，外层根回执因此残缺）
+
+**退役 / 作废 (Retire / Invalidate)**：
+删除收尾的两种回执语义，在同一把写锁里做（`retire_roots`）。**退役**给被删根：回执、记录、作废标记、点集、包围盒、提交序号一起摘，记录已经没了也摘回执，这根从 `roots()` 里消失。**作废**给外层根：只摘回执与 ACK、记成作废，剩下的记录照旧可显示，下一次 `/model/ensure` 整根重新发布。非删除场景（`model_refresh`、`model_dbnum_ensure`）的作废走公开的 `invalidate_receipt`，不经删除入口。
+_Avoid_: 把作废叫删除（记录还在）、把退役叫逐出（逐出不记成模型删除，库里那份不动）
+
 **几何 CPU 执行域 (Geometry CPU Domain)**：
 几何计算跑的那个私有线程池（线程数 = 几何并发闸额度，**不是**全局 Rayon 池——那个被 `room_model` / `db_model` 的 `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径）。唯一入口 `run_gated_cpu`，只收**同步闭包**：闭包里写不出 `.await`，「攥着许可去 await 另一个过闸子任务」这条会死锁的写法在类型层就不成立。等库、等锁一律留在 async 侧，不占额度。fan-out 宽度只来自 `resident_workers(件数) = min(额度, 件数)` 个**常驻 worker 从共享队列动态领取**，不是静态均分（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿），也不是「每件一个 task 挤信号量」。
 _Avoid_: 线程池（泛指时）、rayon 池、spawn_gated_leaf（已退役）、静态均分
