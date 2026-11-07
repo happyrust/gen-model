@@ -371,7 +371,7 @@ pub fn branch_query_with_diameters(
             None
         };
         let connection = if matches!(noun.as_str(), "TEE" | "OLET") {
-            connection_ref(member.get_element("CREF")?)?
+            connection_ref(member.get_element("CREF")?, false)?
         } else {
             None
         };
@@ -565,8 +565,10 @@ pub fn branch_query_with_diameters(
     // Head / Tail 的连接标签（isoTag L18-77）：HREF / TREF 连到的对象。
     let name = container.stored_name()?;
     let label_bore_text = optional_text(&container, ":ZD_GDWJ")?;
-    let head_connection = connection_ref(container.get_element("HREF")?)?;
-    let tail_connection = connection_ref(container.get_element("TREF")?)?;
+    let in_instrument_zone = ancestor_name_contains(&container, "ZONE", "ITUB")?
+        || ancestor_name_contains(&container, "ZONE", "INST")?;
+    let head_connection = connection_ref(container.get_element("HREF")?, in_instrument_zone)?;
+    let tail_connection = connection_ref(container.get_element("TREF")?, in_instrument_zone)?;
     // 流向 / 伴热与墙体定位的墙板；墙板可能在别的设计库，要赶在下面清点打开过的库之前读。
     let branch_extra = fields::branch_fields(&container, &dmf_targets, &branch_refno, &mut issues);
 
@@ -663,9 +665,11 @@ fn ancestor_name_contains(
 /// PML `isoTag` L37-68 / L107-124：连接对象（HREF / TREF / CREF 的目标）的显示名与备注。
 ///
 /// NOZZ 用喷嘴自己的名字；BRAN 用 BRAN 名；其它构件用属主 BRAN 的名字；备注是那条 BRAN 的 `:ZD_NBBM`。
-/// 目标落在 `*ITUB*` / `*INST*` 区域（仪表管，L50-57 / L102-105）按没有连接。
+/// 目标落在 `*ITUB*` / `*INST*` 区域（仪表管，L50-57 / L102-105）按没有连接。`hide_nozzle`：NOZZ 看的是本 BRAN
+/// 的区域（L37-41），在这两类区里同样不出——PML 写成 `not ITUB OR INST`，按 BRAN 目标的口径修正（plant-mbd D-PIPE-022）。
 fn connection_ref(
     target: Option<e3d_io::db_element::DbElement>,
+    hide_nozzle: bool,
 ) -> Result<Option<ConnectionRef>, BranchQueryError> {
     let Some(target) = target else {
         return Ok(None);
@@ -674,6 +678,9 @@ fn connection_ref(
         return Ok(None);
     };
     if noun == "NOZZ" {
+        if hide_nozzle {
+            return Ok(None);
+        }
         return Ok(pml_name(&target)?.map(|name| ConnectionRef { name, note: None }));
     }
     let bran = if noun == "BRAN" {
