@@ -1024,11 +1024,15 @@ async fn persist_batch(controller: &ModelWriteBehind, dbnum: u32, jobs: Vec<Pers
         let Some(entry) = state.pending.get(&key) else {
             continue;
         };
-        if entry.submission_epoch != job.submission_epoch
-            || entry.identity != job.identity
-            || current.as_ref() != Some(&job.identity)
-        {
+        if entry.submission_epoch != job.submission_epoch || entry.identity != job.identity {
             state.stale_jobs_dropped += 1;
+            continue;
+        }
+        if current.as_ref() != Some(&job.identity) {
+            // 条目还是这一批取走的那份，回执却退役了或换了（按需删除不碰写后台队列）：没有能写的了，出队。
+            // 留着它一直到点，`take_due_roots` 每轮都会再把它取出来，worker 就在它身上空转。
+            state.stale_jobs_dropped += 1;
+            state.pending.remove(&key);
             continue;
         }
         if let Some(candidate) = acknowledgements.get(&packed_refno(root)) {
@@ -2496,5 +2500,65 @@ mod tests {
         controller
             .store
             .retire_deleted_root(ProjectionScope::Current, root);
+    }
+
+    /// 按需删除在写后台写一批的半途摘了其中一根的回执：这批判过期之后，那一根要出队。留着它就一直到点，
+    /// `take_due_roots` 一轮轮把它取出来、每轮都调一次写库口，worker 在它身上空转。同一批里被新一次发布
+    /// 换了身份的那根不同：丢的只是这一批的旧结果，条目照旧排着，等新身份去写。
+    #[tokio::test]
+    async fn a_root_whose_receipt_is_retired_mid_batch_leaves_the_queue() {
+        let retired = RefNo::new(7979, 1);
+        let superseded = RefNo::new(7979, 2);
+        let adapter = Arc::new(RecordingPersistence::new(vec![DurableBatchResult {
+            acknowledged: vec![ack(retired, "retired"), ack(superseded, "old")],
+            ..Default::default()
+        }]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+        store.try_commit_current(vec![commit(retired, "retired"), commit(superseded, "old")]);
+        let now = Instant::now();
+        {
+            let mut state = controller.state();
+            for (root, manifest) in [(retired, "retired"), (superseded, "old")] {
+                let identity = RootIdentity::from(&receipt(manifest));
+                upsert_pending(&mut state, 7979, root, identity, now, None);
+            }
+        }
+        let (dbnum, jobs) = take_due_roots(controller).expect("两根都到点");
+        assert_eq!((dbnum, jobs.len()), (7979, 2));
+
+        store.retire_deleted_root(ProjectionScope::Current, retired);
+        store.try_commit_current(vec![commit(superseded, "new")]);
+        {
+            let mut state = controller.state();
+            let identity = RootIdentity::from(&receipt("new"));
+            upsert_pending(&mut state, 7979, superseded, identity, now, None);
+        }
+        persist_batch(controller, dbnum, jobs).await;
+
+        assert_eq!(adapter.calls_on(7979), 1);
+        assert_eq!(snapshot_for(controller).stale_jobs_dropped, 2);
+        assert!(!store.root_needs_persist(retired));
+        let left = controller
+            .state()
+            .pending
+            .values()
+            .map(|entry| (entry.root, entry.identity.clone(), entry.status))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            left,
+            vec![(
+                superseded,
+                RootIdentity::from(&receipt("new")),
+                PendingStatus::Pending
+            )],
+            "回执没了的那根出队；换了身份的那根照旧排着"
+        );
+        let (_, again) = take_due_roots(controller).expect("新身份照常到点");
+        assert_eq!(
+            again.iter().map(|job| job.root).collect::<Vec<_>>(),
+            vec![superseded],
+            "出队的那根不会再被取出来"
+        );
     }
 }
