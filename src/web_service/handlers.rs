@@ -1461,6 +1461,24 @@ pub struct TreeReq {
     pub identity: ProjectReq,
     #[serde(default)]
     pub refno: Option<String>,
+    /// `/tree/children` 的视图：`1` / `true` 回解析视图（GPWL / GPSET 的 GPITEM 换成 `GPREF` 指向的
+    /// 设计元素），缺省回存储视图。见 [`tree_resolved_view`]。
+    #[serde(default)]
+    pub resolved: Option<String>,
+}
+
+/// `resolved=`：缺省 / 空 / `0` / `false` 是存储视图，`1` / `true` 是解析视图；别的值 400，
+/// 不猜——猜错了前端会把存储视图当解析视图显示。
+fn tree_resolved_view(request: &TreeReq) -> Result<bool, ApiError> {
+    match request.resolved.as_deref().map(str::trim) {
+        None | Some("" | "0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) if value.eq_ignore_ascii_case("false") => Ok(false),
+        Some(value) if value.eq_ignore_ascii_case("true") => Ok(true),
+        Some(value) => Err(ApiError::bad_request(format!(
+            "resolved 只接受 1 / 0 / true / false: {value}"
+        ))),
+    }
 }
 
 fn tree_refno(request: &TreeReq) -> Result<RefU64, ApiError> {
@@ -1537,11 +1555,15 @@ pub async fn tree_children(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     resolve_identity(&state, &request.identity)?;
     let parent = tree_refno(&request)?;
+    let resolved = tree_resolved_view(&request)?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
+    if resolved {
+        return tree_children_resolved(service, parent).await;
+    }
     let worker = service.clone();
     let nodes = tokio::task::spawn_blocking(move || worker.children(parent))
         .await
@@ -1553,8 +1575,58 @@ pub async fn tree_children(
     Ok(Json(json!({
         "source": "direct",
         "parent": RefnoEnum::from(parent).to_pdms_str(),
+        "view": "stored",
         "nodes": nodes,
     })))
+}
+
+/// `/tree/children?resolved=1`：分组父节点的行换成解析成员（契约见
+/// `docs/plans/2026-11-08-gpwl-gpset-group-nodes-dev-plan.md` §2.1）。
+///
+/// 二级成员行加 `via`（经由的 GPITEM）、`secondary: true`、`rule: false`，主链子节点不加；
+/// `unresolved` 只在有坏槽时出现。新增的 refno 字段与 `nodes[].refno` 同一 serde 形状。
+async fn tree_children_resolved(
+    service: std::sync::Arc<crate::data_interface::direct_tree::DirectTreeService>,
+    parent: RefU64,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let worker = service.clone();
+    let layer = tokio::task::spawn_blocking(move || worker.resolved_children(parent))
+        .await
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("tree children 任务异常结束: {error}"))
+        })?
+        .map_err(ApiError::from_domain)?;
+    let mut nodes = tree_nodes_with_dbnum(
+        &service,
+        layer.nodes.iter().map(|row| row.node.clone()).collect(),
+    )?;
+    for (value, row) in nodes.iter_mut().zip(&layer.nodes) {
+        if let (Some(via), Some(object)) = (row.via, value.as_object_mut()) {
+            object.insert("via".into(), json!(RefnoEnum::from(via)));
+            object.insert("secondary".into(), json!(true));
+            object.insert("rule".into(), json!(false));
+        }
+    }
+    let mut body = json!({
+        "source": "direct",
+        "parent": RefnoEnum::from(parent).to_pdms_str(),
+        "view": "resolved",
+        "nodes": nodes,
+    });
+    if !layer.unresolved.is_empty() {
+        body["unresolved"] = layer
+            .unresolved
+            .iter()
+            .map(|slot| {
+                json!({
+                    "via": RefnoEnum::from(slot.via),
+                    "target": slot.target.map(RefnoEnum::from),
+                    "reason": slot.reason.as_str(),
+                })
+            })
+            .collect();
+    }
+    Ok(Json(body))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1689,16 +1761,53 @@ pub async fn tree_ancestors(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let refnos = tokio::task::spawn_blocking(move || service.ancestors(start))
-        .await
-        .map_err(|error| {
-            ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}"))
-        })?
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({
+    let (refnos, secondary_parents) = tokio::task::spawn_blocking(move || {
+        let refnos = service.ancestors(start)?;
+        let secondary_parents = tree_secondary_parents(&service, &refnos);
+        Ok::<_, anyhow::Error>((refnos, secondary_parents))
+    })
+    .await
+    .map_err(|error| {
+        ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}"))
+    })?
+    .map_err(ApiError::from_domain)?;
+    let mut body = json!({
         "source": "direct",
         "refnos": refnos,
-    })))
+    });
+    if let Some(secondary_parents) = secondary_parents {
+        body["secondary_parents"] = Value::Array(secondary_parents);
+    }
+    Ok(Json(body))
+}
+
+/// `/tree/ancestors` 的 `secondary_parents`：主链上每一级被哪些分组经 GPITEM 收录。
+///
+/// 反查表建不出来时只记一条警告并省掉这格：「定位到树」走的是主链，不能被分组层级里的坏数据
+/// 拖垮；省掉而不是回空表，免得前端把「不知道」当成「不在任何分组里」。
+fn tree_secondary_parents(
+    service: &crate::data_interface::direct_tree::DirectTreeService,
+    chain: &[RefnoEnum],
+) -> Option<Vec<Value>> {
+    let mut out = Vec::new();
+    for member in chain {
+        let parents = match service.secondary_parents(member.refno()) {
+            Ok(parents) => parents,
+            Err(error) => {
+                log::warn!("tree ancestors: 分组反查表不可用，省略 secondary_parents: {error:#}");
+                return None;
+            }
+        };
+        for parent in parents {
+            out.push(json!({
+                "member": member,
+                "group": RefnoEnum::from(parent.group),
+                "group_noun": parent.group_noun,
+                "via": RefnoEnum::from(parent.via),
+            }));
+        }
+    }
+    Some(out)
 }
 
 /// `GET /api/v1/spatial/nearby[/refnos]` 的 query 串：身份三格 + 查询参数原文。

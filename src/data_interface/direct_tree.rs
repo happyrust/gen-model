@@ -19,6 +19,10 @@ use super::generation_root::{
     GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
     resolve_element_generation_root,
 };
+use super::group_membership::{
+    GroupIndex, GroupMembers, ResolvedMember, SecondaryParent, UnresolvedSlot, is_group_noun,
+    resolved_members_on,
+};
 use super::mdb_membership::MdbMembership;
 use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
 
@@ -110,6 +114,10 @@ pub struct DirectTreeService {
     /// 一动 `is_current()` 就否、provider 换一整只服务，所以这张表与服务同寿命
     /// 即正确，不需要也不允许跨服务携带。
     children_memo: std::sync::Mutex<HashMap<RefU64, Arc<Vec<EleTreeNode>>>>,
+    /// `resolved_children()` 的整层记忆，与 `children_memo` 分开存、同一寿命理由。
+    resolved_memo: std::sync::Mutex<HashMap<RefU64, Arc<ResolvedChildren>>>,
+    /// 分组二级收录的反查表（[`GroupIndex`]），首次要用时建；钩在冻结会话上，换会话即换服务。
+    group_index: std::sync::Mutex<Option<Arc<GroupIndex>>>,
 }
 
 impl DirectTreeService {
@@ -128,6 +136,8 @@ impl DirectTreeService {
             reader,
             metadata: std::sync::Mutex::new(None),
             children_memo: std::sync::Mutex::new(HashMap::new()),
+            resolved_memo: std::sync::Mutex::new(HashMap::new()),
+            group_index: std::sync::Mutex::new(None),
         })
     }
 
@@ -537,6 +547,110 @@ impl DirectTreeService {
         self.metadata()
             .map(|metadata| metadata.epoch())
             .unwrap_or(0)
+    }
+}
+
+/// 解析视图里的一行：树行本身，加上它经由哪个 GPITEM 解出（`None` = 成员链上的元素本身）。
+#[derive(Debug, Clone)]
+pub struct ResolvedChild {
+    pub node: EleTreeNode,
+    pub via: Option<RefU64>,
+}
+
+/// [`DirectTreeService::resolved_children`] 的一层：解析出的行，与解析不出的 GPITEM 槽。
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedChildren {
+    pub nodes: Vec<ResolvedChild>,
+    pub unresolved: Vec<UnresolvedSlot>,
+}
+
+impl DirectTreeService {
+    /// 解析视图的一层：分组（GPWL / GPSET）父节点的 GPITEM 换成 `GPREF` 指向的设计元素；
+    /// 其余父节点与 [`Self::children`] 逐行相同。存储视图的树 / 子树 / 生成根遍历不经过这里。
+    ///
+    /// 解析成员的 `owner` 是它自己主链上的属主而不是这个分组，所以建行不校验属主；分组行的
+    /// `children_count` 换成它解析后的成员数，展开箭头才与下一层对得上。
+    pub fn resolved_children(&self, parent: RefU64) -> anyhow::Result<Arc<ResolvedChildren>> {
+        if let Some(layer) = self
+            .resolved_memo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resolved children memo lock poisoned"))?
+            .get(&parent)
+            .cloned()
+        {
+            return Ok(layer);
+        }
+        let layer = Arc::new(self.read_resolved_children(parent)?);
+        self.resolved_memo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resolved children memo lock poisoned"))?
+            .insert(parent, layer.clone());
+        Ok(layer)
+    }
+
+    fn read_resolved_children(&self, parent: RefU64) -> anyhow::Result<ResolvedChildren> {
+        if !is_group_noun(&self.noun_of(parent)?) {
+            let nodes = self
+                .children(parent)?
+                .into_iter()
+                .map(|node| ResolvedChild { node, via: None })
+                .collect();
+            return Ok(ResolvedChildren {
+                nodes,
+                unresolved: Vec::new(),
+            });
+        }
+        let GroupMembers {
+            members,
+            unresolved,
+        } = resolved_members_on(self.store.as_ref(), parent)?;
+        let mut nodes = Vec::with_capacity(members.len());
+        for (order, member) in members.into_iter().enumerate() {
+            let expected_owner = match member {
+                ResolvedMember::Owned(_) => Some(parent),
+                ResolvedMember::Reference { .. } => None,
+            };
+            let mut node = self.node(member.element(), expected_owner, order)?;
+            if is_group_noun(&node.noun) {
+                let count = resolved_members_on(self.store.as_ref(), member.element())?
+                    .members
+                    .len();
+                node.children_count = u16::try_from(count).unwrap_or(u16::MAX);
+            }
+            nodes.push(ResolvedChild {
+                node,
+                via: member.via(),
+            });
+        }
+        Ok(ResolvedChildren { nodes, unresolved })
+    }
+
+    /// 收录 `refno` 的分组（经哪个 GPITEM）；不在任何分组里回空表。
+    ///
+    /// 反查表首次调用时从各库 WORLD 扫一遍分组层级建好，之后与服务同寿命。
+    pub fn secondary_parents(&self, refno: RefU64) -> anyhow::Result<Vec<SecondaryParent>> {
+        Ok(self.group_index()?.parents_of(refno).to_vec())
+    }
+
+    fn group_index(&self) -> anyhow::Result<Arc<GroupIndex>> {
+        let mut slot = self
+            .group_index
+            .lock()
+            .map_err(|_| anyhow::anyhow!("group index lock poisoned"))?;
+        if let Some(index) = slot.as_ref() {
+            return Ok(index.clone());
+        }
+        let metadata = self.metadata()?;
+        let mut worlds = Vec::new();
+        for db in self.membership.element_databases() {
+            if db.path.is_none() {
+                continue;
+            }
+            worlds.extend(metadata.worlds.get(&db.dbnum).copied());
+        }
+        let index = Arc::new(GroupIndex::build(self.store.as_ref(), &worlds)?);
+        *slot = Some(index.clone());
+        Ok(index)
     }
 }
 
