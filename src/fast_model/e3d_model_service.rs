@@ -4984,48 +4984,6 @@ fn persisted_world_transform(
     }
 }
 
-/// Remove every projected e3d-model geometry owned by one generation root,
-/// and retire that root's overlay receipt in the same outcome.
-///
-/// Derived geometry (implied tubes) lives under the root's ancestor index, so
-/// it is dropped with the rest of the root. Shared content-addressed `.mesh`
-/// files are not deleted; the durable rows are removed by the caller's
-/// tombstone (`render_spooled_scope_deletion`).
-///
-/// Record removals still go through [`apply_geometry_delta`] so a durable
-/// write-behind sees the deletion. That commit does not replace the resident
-/// receipt. Leaving the receipt in place makes `/model/records` fail with
-/// `memory overlay root … is incomplete: receipt expects N, store has 0`.
-/// The second delete then finds no records and would return `deleted` while
-/// that receipt stays. Retiring the receipt even when the store is already
-/// empty closes that hole.
-pub async fn delete_persisted_geometry_root(root: RefNo) -> anyhow::Result<usize> {
-    let store = ModelMemoryStore::global();
-    let mut by_dbnum = BTreeMap::<u32, Vec<GeometryId>>::new();
-    for record in store.records_of_root(ProjectionScope::Current, root) {
-        by_dbnum
-            .entry(record.dbnum)
-            .or_default()
-            .push(record.geometry_id);
-    }
-
-    let mut removed = 0;
-    for (dbnum, geometry_ids) in by_dbnum {
-        removed += apply_geometry_delta(
-            dbnum,
-            0,
-            Vec::new(),
-            geometry_ids,
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await?
-        .removed;
-    }
-    store.retire_deleted_root(ProjectionScope::Current, root);
-    Ok(removed)
-}
-
 /// Full generation must never regress the projection. With the source pinned to
 /// the file's latest session this only trips when the file itself was rolled
 /// back or replaced, which is a file anomaly, not a window to skip.

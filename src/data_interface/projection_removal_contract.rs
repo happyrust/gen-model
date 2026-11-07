@@ -1,5 +1,6 @@
-//! 删除投影的现行契约（计划 `.planning/2026-11-08-projection-store-root-only`）：统一删除入口之前先把
-//! 现状钉住，入口接手之后这些用例照样要成立。带 `#[ignore]` 的是已经复现、留给后面阶段修的缺口。
+//! 删除投影的契约（计划 `.planning/2026-11-08-projection-store-root-only`）：三条删法都经删除入口
+//! `projection_removal::remove_subtree`，这里钉住它的锁序与结算口径。投影两路删请求节点、锁它头上的生成根；
+//! 摄入形态按生成根整根删（墓碑写库要接库，这里不留墓碑）。
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -13,9 +14,9 @@ use super::fast_delete::{ModelFaceGenerationBusy, wipe_dbnum_model_face};
 use super::manual_update::generation_root_lock;
 use super::mesh_purge::ClearGeometry;
 use super::on_demand_model::ModelGenerationInProgress;
-use super::projection_removal::{RemovalRequest, TombstoneSink, remove_subtree};
+use super::projection_removal::{RemovalReport, RemovalRequest, TombstoneSink, remove_subtree};
 use crate::fast_model::e3d_mesh_store::geometry_record_id;
-use crate::fast_model::e3d_model_service::{delete_persisted_geometry_root, lock_db_generation};
+use crate::fast_model::e3d_model_service::lock_db_generation;
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionCommit, ProjectionScope,
     RootReceipt, packed_refno,
@@ -68,7 +69,7 @@ fn receipt(geometry_count: usize, manifest_hash: &str) -> RootReceipt {
     }
 }
 
-/// 一根盖好回执的投影，名下每个 `sources` 一条记录。
+/// 一根盖好回执的投影，名下每个 `sources` 一条记录；整根提交带一份（空的）点集。
 fn commit_root(store: &ModelMemoryStore, root: RefNo, sources: &[RefNo]) {
     store.try_commit_current(vec![ProjectionCommit {
         upserts: sources
@@ -76,6 +77,7 @@ fn commit_root(store: &ModelMemoryStore, root: RefNo, sources: &[RefNo]) {
             .map(|source| record(*source, &[root]))
             .collect(),
         receipt: Some((root, receipt(sources.len(), "root"))),
+        point_sets: Some(Vec::new()),
         ..Default::default()
     }]);
 }
@@ -84,19 +86,27 @@ fn refno_enum(refno: RefNo) -> RefnoEnum {
     RefnoEnum::from(format!("{}/{}", refno.word0, refno.word1).as_str())
 }
 
-/// S1：嵌套根靠祖先链共享记录，外层根的回执把内层根的记录也数了进去。投影那条路（删除入口
-/// `projection_removal::remove_subtree`）删内层根时把共享记录的外层根一起作废；摄入那条路
-/// （`delete_model_subtree` → `delete_persisted_geometry_root`）只退役被删的根，外层根的回执还按删前的
-/// 条数记着，`/model/records` 读外层根就报 incomplete。
+/// 摄入形态的请求：按生成根整根删，根锁就是这几根。
+fn whole_roots(roots: &[RefNo]) -> RemovalRequest {
+    RemovalRequest {
+        subtrees: roots.iter().copied().map(refno_enum).collect(),
+        lock_roots: Vec::new(),
+        tombstone: TombstoneSink::None,
+    }
+}
+
+/// S1：嵌套根靠祖先链共享记录，外层根的回执把内层根的记录也数了进去。删内层根时共享记录的外层根要一起
+/// 结算：内层根退役，外层根回执作废、自己那几条照旧可显示。修前摄入那条路（`delete_persisted_geometry_root`）
+/// 只退役被删的根，外层根的回执还按删前的条数记着，`/model/records` 读外层根就报 incomplete。
 #[tokio::test]
-#[ignore = "S1：摄入路删内层根不作废外层根的回执，Phase 2 修"]
 async fn deleting_an_inner_root_keeps_the_outer_root_readable() {
     let outer = RefNo::new(24384, 30500);
     let inner = RefNo::new(24384, 30501);
     let store = ModelMemoryStore::global();
+    let scope = ProjectionScope::Current;
     let _cleanup = RetireOnDrop(vec![inner, outer]);
     for root in [inner, outer] {
-        store.retire_deleted_root(ProjectionScope::Current, root);
+        store.retire_deleted_root(scope, root);
     }
 
     let own = (0..3u32)
@@ -130,9 +140,18 @@ async fn deleting_an_inner_root_keeps_the_outer_root_readable() {
         4
     );
 
-    delete_persisted_geometry_root(inner)
+    let report = remove_subtree(whole_roots(&[inner]))
         .await
-        .expect("ingest delete of the inner root");
+        .expect("ingest delete of the inner root")
+        .report;
+    assert_eq!(
+        report,
+        RemovalReport {
+            removed_records: 4,
+            retired_roots: vec![inner],
+            invalidated_roots: vec![outer],
+        }
+    );
 
     assert!(
         overlay_records_under_node(store, inner, inner)
@@ -141,6 +160,85 @@ async fn deleting_an_inner_root_keeps_the_outer_root_readable() {
     );
     if let Err(error) = overlay_records_under_node(store, outer, outer) {
         panic!("删完内层根，外层根读不了：{error:#}");
+    }
+    assert!(
+        store.receipt(scope, outer).is_none(),
+        "外层根回执作废，等下一次整根重新发布"
+    );
+    assert_eq!(
+        store.records_of_root(scope, outer).len(),
+        3,
+        "外层根自己那几条照旧可显示"
+    );
+}
+
+/// 8022 `/test`（24384/26312）：生成后的 overlay 回执还在、记录已被删光时，`/model/records` 报 incomplete；
+/// 再删一次必须把这张回执摘掉，而不是回「删了」却把残缺回执留着。删一个完整的根、再删一次，都不留回执。
+#[tokio::test]
+async fn deleting_a_root_whose_records_are_already_gone_drops_its_receipt() {
+    let root = RefNo::new(24384, 26312);
+    let store = ModelMemoryStore::global();
+    let scope = ProjectionScope::Current;
+    let _cleanup = RetireOnDrop(vec![root]);
+    store.retire_deleted_root(scope, root);
+    let sources = (0..9u32)
+        .map(|index| RefNo::new(24384, 26313 + index))
+        .collect::<Vec<_>>();
+
+    commit_root(store, root, &sources);
+    assert_eq!(
+        overlay_records_under_node(store, root, root)
+            .expect("complete overlay")
+            .len(),
+        9
+    );
+    store.try_commit_current(vec![ProjectionCommit {
+        removals: store
+            .records_of_root(scope, root)
+            .into_iter()
+            .map(|record| record.record_id)
+            .collect(),
+        ..Default::default()
+    }]);
+    let torn = overlay_records_under_node(store, root, root)
+        .expect_err("torn overlay must still be rejected")
+        .to_string();
+    assert!(
+        torn.contains("is incomplete")
+            && torn.contains("expects 9")
+            && torn.contains("store has 0"),
+        "{torn}"
+    );
+
+    let report = remove_subtree(whole_roots(&[root]))
+        .await
+        .expect("delete of the torn root")
+        .report;
+    assert_eq!(
+        report,
+        RemovalReport {
+            removed_records: 0,
+            retired_roots: vec![root],
+            invalidated_roots: Vec::new(),
+        }
+    );
+    assert!(store.receipt(scope, root).is_none(), "残缺回执要摘掉");
+    assert!(
+        overlay_records_under_node(store, root, root)
+            .expect("healed overlay")
+            .is_empty()
+    );
+
+    commit_root(store, root, &sources);
+    for attempt in ["first delete", "delete again"] {
+        remove_subtree(whole_roots(&[root])).await.expect(attempt);
+        assert!(store.receipt(scope, root).is_none(), "{attempt}");
+        assert!(store.records_of_root(scope, root).is_empty(), "{attempt}");
+        assert!(
+            overlay_records_under_node(store, root, root)
+                .expect(attempt)
+                .is_empty()
+        );
     }
 }
 
@@ -162,34 +260,37 @@ async fn a_model_face_wipe_is_refused_while_the_dbnum_is_generating() {
     );
 }
 
-/// 覆盖范围的根正在后台生成（根锁被占），删除入口立刻回「正在生成」、一行不删。同库的生成锁
-/// 这时也被占着：入口要是先排队等它，就会卡住而不是回绝，等完再删会把别人刚发布的根清掉。
+/// 覆盖范围的根正在后台生成（根锁被占），删除入口立刻回「正在生成」、一行不删：删根里的一件、锁它头上的根
+/// （投影两路），和按根整根删（摄入形态），都一样。同库的生成锁这时也被占着：入口要是先排队等它，就会卡住
+/// 而不是回绝，等完再删会把别人刚发布的根清掉。
 #[tokio::test]
 async fn a_removal_is_refused_while_a_covered_root_is_generating() {
     let root = RefNo::new(6918, 200);
+    let piece = RefNo::new(6918, 201);
     let store = ModelMemoryStore::global();
     let _cleanup = RetireOnDrop(vec![root]);
-    commit_root(store, root, &[RefNo::new(6918, 201), RefNo::new(6918, 202)]);
-    let subtree = refno_enum(root);
-    let root_lock = generation_root_lock(&subtree.to_pdms_str());
+    commit_root(store, root, &[piece, RefNo::new(6918, 202)]);
+    let root_lock = generation_root_lock(&refno_enum(root).to_pdms_str());
     let _generating = root_lock.lock().await;
     let _same_dbnum = lock_db_generation(root.dbno()).await;
 
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        remove_subtree(RemovalRequest {
-            subtree,
-            lock_roots: Vec::new(),
+    for request in [
+        RemovalRequest {
+            subtrees: vec![refno_enum(piece)],
+            lock_roots: vec![refno_enum(root).to_pdms_str()],
             tombstone: TombstoneSink::None,
-        }),
-    )
-    .await
-    .expect("根锁被占要立刻回绝，不排队等库级生成锁")
-    .expect_err("the covered root is generating");
-    assert!(
-        error.downcast_ref::<ModelGenerationInProgress>().is_some(),
-        "{error:#}"
-    );
+        },
+        whole_roots(&[root]),
+    ] {
+        let error = tokio::time::timeout(Duration::from_secs(5), remove_subtree(request.clone()))
+            .await
+            .expect("根锁被占要立刻回绝，不排队等库级生成锁")
+            .expect_err("the covered root is generating");
+        assert!(
+            error.downcast_ref::<ModelGenerationInProgress>().is_some(),
+            "{request:?}: {error:#}"
+        );
+    }
     assert_eq!(
         store.records_of_root(ProjectionScope::Current, root).len(),
         2
@@ -197,44 +298,84 @@ async fn a_removal_is_refused_while_a_covered_root_is_generating() {
     assert!(store.receipt(ProjectionScope::Current, root).is_some());
 }
 
-/// 同库有生成在飞（攅着库级生成锁），删除入口排队等它放手再删，不绕过；等的时候投影一条没动。
+/// 同库有生成在飞（攥着库级生成锁），删除入口排队等它放手再删，不绕过；等的时候投影一条没动。删完按位置
+/// 结算：删根里的一件（投影两路的形状），头上的根只少这一件、回执作废；整根删（摄入形态的形状，也是投影两路
+/// 删一个根），这根退役，作废标记、点集都不留。
 #[tokio::test]
 async fn a_removal_waits_for_a_generation_on_the_same_dbnum() {
     let root = RefNo::new(6919, 300);
+    let piece = RefNo::new(6919, 301);
+    let whole = RefNo::new(6919, 310);
     let store = ModelMemoryStore::global();
-    let _cleanup = RetireOnDrop(vec![root]);
-    commit_root(store, root, &[RefNo::new(6919, 301), RefNo::new(6919, 302)]);
-    let generation = lock_db_generation(root.dbno()).await;
+    let scope = ProjectionScope::Current;
+    let _cleanup = RetireOnDrop(vec![root, whole]);
+    commit_root(store, root, &[piece, RefNo::new(6919, 302)]);
+    commit_root(
+        store,
+        whole,
+        &[RefNo::new(6919, 311), RefNo::new(6919, 312)],
+    );
+    let resident =
+        || store.records_of_root(scope, root).len() + store.records_of_root(scope, whole).len();
 
-    let removal = tokio::spawn(remove_subtree(RemovalRequest {
-        subtree: refno_enum(root),
-        lock_roots: Vec::new(),
-        tombstone: TombstoneSink::None,
-    }));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!removal.is_finished(), "同库在生成，删除要排队等");
+    for (request, expected) in [
+        (
+            RemovalRequest {
+                subtrees: vec![refno_enum(piece)],
+                lock_roots: vec![refno_enum(root).to_pdms_str()],
+                tombstone: TombstoneSink::None,
+            },
+            RemovalReport {
+                removed_records: 1,
+                retired_roots: Vec::new(),
+                invalidated_roots: vec![root],
+            },
+        ),
+        (
+            whole_roots(&[whole]),
+            RemovalReport {
+                removed_records: 2,
+                retired_roots: vec![whole],
+                invalidated_roots: Vec::new(),
+            },
+        ),
+    ] {
+        let generation = lock_db_generation(root.dbno()).await;
+        let before = resident();
+        let removal = tokio::spawn(remove_subtree(request));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!removal.is_finished(), "同库在生成，删除要排队等");
+        assert_eq!(resident(), before);
+
+        drop(generation);
+        let report = removal
+            .await
+            .expect("removal task")
+            .expect("removal after the generation")
+            .report;
+        assert_eq!(report, expected);
+    }
     assert_eq!(
-        store.records_of_root(ProjectionScope::Current, root).len(),
-        2
+        store.records_of_root(scope, root).len(),
+        1,
+        "头上的根只少了那一件"
     );
-
-    drop(generation);
-    let report = removal
-        .await
-        .expect("removal task")
-        .expect("removal after the generation");
-    assert_eq!(report.removed_records, 2);
-    assert_eq!(report.invalidated_roots, vec![root]);
+    assert!(store.receipt(scope, root).is_none());
     assert!(
-        store
-            .records_of_root(ProjectionScope::Current, root)
-            .is_empty()
+        store.roots(scope).contains(&root),
+        "作废的根还在投影里，等下一次整根重新发布"
     );
-    assert!(store.receipt(ProjectionScope::Current, root).is_none());
+    assert!(store.records_of_root(scope, whole).is_empty());
+    assert!(
+        !store.roots(scope).contains(&whole),
+        "整根删掉的根退役，连作废标记都不留"
+    );
+    assert!(store.point_sets_of_root(scope, whole).is_none());
 }
 
-/// 删一棵子树要结算的根：外层根、子树里的嵌套根、已作废的根、子树根自己（常驻时）都在；只挂在
-/// 旁支上的根和别处的空根不在。存储在一把读锁里按祖先链反查，结果必须与逐根扫记录一致。
+/// 删一棵子树要结算的根，按祖先链上的位置分两类：整根落在子树里的（子树根自己常驻时、子树里的嵌套根、
+/// 已作废的根）退役，头上的外层根作废；只挂在旁支上的根和别处的空根都不在。存储在一把读锁里按祖先链
+/// 反查，两类合起来必须与逐根扫记录一致；几棵子树一起删时记录去重，已经整根落在某棵子树里的根不再算外层。
 #[test]
 fn the_subtree_closure_matches_the_per_root_scan() {
     let store = ModelMemoryStore::default();
@@ -292,17 +433,42 @@ fn the_subtree_closure_matches_the_per_root_scan() {
         stale,
         RefNo::new(24384, 31099),
     ] {
-        let closure = store.subtree_closure(scope, node);
+        let closure = store.subtree_closure(scope, &[node]);
         assert_eq!(
             ids(closure.records),
             ids(store.records_of_root(scope, node)),
             "{node}"
         );
-        assert_eq!(closure.roots, per_root_scan(&store, node), "{node}");
+        let mut roots = closure.removed_roots;
+        roots.extend(closure.outer_roots);
+        roots.sort_unstable_by_key(|root| packed_refno(*root));
+        assert_eq!(roots, per_root_scan(&store, node), "{node}");
     }
+
+    let classified = |nodes: &[RefNo]| {
+        let closure = store.subtree_closure(scope, nodes);
+        (
+            closure.records.len(),
+            closure.removed_roots,
+            closure.outer_roots,
+        )
+    };
+    assert_eq!(classified(&[zone]), (3, vec![inner, stale], vec![site]));
     assert_eq!(
-        store.subtree_closure(scope, zone).roots,
-        vec![site, inner, stale]
+        classified(&[site]),
+        (4, vec![site, inner, sibling, stale], vec![])
+    );
+    assert_eq!(classified(&[inner]), (1, vec![inner], vec![site]));
+    assert_eq!(classified(&[empty]), (0, vec![empty], vec![]));
+    assert_eq!(
+        classified(&[zone, inner]),
+        (3, vec![inner, stale], vec![site]),
+        "记录去重"
+    );
+    assert_eq!(
+        classified(&[inner, site]),
+        (4, vec![site, inner, sibling, stale], vec![]),
+        "整根落在里面的不再算外层"
     );
 }
 

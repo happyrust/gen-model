@@ -97,10 +97,10 @@ impl AiosDBManager {
     /// - 读透形态：同上，另把同一笔删除渲成墓碑进 mirror spool（它的持久面）；
     /// - 摄入形态走 [`Self::delete_model_subtree`]（库 + 投影 + 账本，过初始化门）。
     ///
-    /// 三路清之前都先对范围内的生成根 `try_generation_root`（投影两路在删除入口 `projection_removal`
-    /// 里拿，摄入形态在 `delete_model_subtree` 里拿），被占就按「正在后台生成」回 409、一行不删。投影删法自己只等库级锁，而同库每一次
-    /// 生成全程都攥着那把锁：不先拿根锁的话，它会排队等完同库任何在飞的生成，再把别人刚发布的
-    /// 那一根清掉重算。根锁清完即放，之后逐根生成各自再拿——与摄入形态同一个窗口。
+    /// 三路清之前都先对范围内的生成根 `try_generation_root`（都在删除入口 `projection_removal` 里拿），
+    /// 被占就按「正在后台生成」回 409、一行不删。拿齐根锁再等库级锁，而同库每一次生成全程都攥着那把锁：
+    /// 不先拿根锁的话，删除会排队等完同库任何在飞的生成，再把别人刚发布的那一根清掉重算。根锁清完即放，
+    /// 之后逐根生成各自再拿。
     ///
     /// 代价（有意为之）：清掉到重新发布之间，这个范围在 `/model/records` 上是空的；某根重算失败时
     /// 它的旧产物也不再保留（原来 `IncompleteRoot::Discard` 会「保旧」），回执按失败报、要重试再点一次。
@@ -154,7 +154,7 @@ impl AiosDBManager {
     ) -> anyhow::Result<()> {
         use crate::data_interface::projection_removal::{self, RemovalRequest, TombstoneSink};
         projection_removal::remove_subtree(RemovalRequest {
-            subtree: requested_refno,
+            subtrees: vec![requested_refno],
             lock_roots: roots.iter().map(|root| root.root.to_pdms_str()).collect(),
             tombstone: if spool_tombstone {
                 TombstoneSink::Spool
@@ -166,17 +166,16 @@ impl AiosDBManager {
         Ok(())
     }
 
-    /// Delete the generated-model data rooted at exactly `requested_refno`.
+    /// 摄入形态的删法（库 + 投影 + 账本，过初始化门）：解出覆盖 `requested_refno` 的生成根，交给删除入口
+    /// `projection_removal::remove_subtree` **整根**删——投影与库里的几何按根结算、墓碑直接写库；`inst_relate`
+    /// 仍按请求的 PE 子树删。入口拿的根锁与库级生成锁随返回值一直攥到账本摘完。
     ///
-    /// Root resolution is used only to share the same concurrency locks as
-    /// generation. The deletion scope remains the requested PE subtree.
-    ///
-    /// 摄入形态的删法（库 + 投影 + 账本，过初始化门）。读透形态没有 `pe` 可解根、也没有权威库可删，
-    /// 转给 [`Self::clear_projected_scope`]（对请求节点 try-lock 后只清投影、进 spool 墓碑）——
-    /// 不在这里另写一份投影删法。HTTP 入口 `DELETE /model/subtree` 不直接调这里，走
+    /// 读透形态没有 `pe` 可解根、也没有权威库可删，转给 [`Self::clear_projected_scope`]（对请求节点 try-lock
+    /// 后只清投影、进 spool 墓碑）。HTTP 入口 `DELETE /model/subtree` 不直接调这里，走
     /// [`Self::clear_model_scope`]（带骨架解出的根与读路由作用域）；这里剩下的直接调用方是增量窗口的
     /// `DeleteCleanup` 与 CLI，都是摄入形态语义。
     pub async fn delete_model_subtree(&self, requested_refno: RefnoEnum) -> anyhow::Result<()> {
+        use crate::data_interface::projection_removal::{self, RemovalRequest, TombstoneSink};
         crate::data_interface::initialization_phase::require_model_generation()?;
 
         if crate::options::data_face().is_read_through() {
@@ -191,39 +190,26 @@ impl AiosDBManager {
         subtree.sort_by_key(RefnoEnum::to_string);
 
         let unit_types = configured_delivery_unit_types();
-        let mut lock_roots = crate::data_interface::generation_root::resolve_generation_roots_on(
+        let mut roots = crate::data_interface::generation_root::resolve_generation_roots_on(
             &SUL_DB,
             &subtree,
             &unit_types,
         )
         .await?
         .into_iter()
-        .map(|root| root.root.to_pdms_str())
+        .map(|root| root.root)
         .collect::<Vec<_>>();
-        if lock_roots.is_empty() {
-            lock_roots.push(requested_refno.to_pdms_str());
+        if roots.is_empty() {
+            roots.push(requested_refno);
         }
-        lock_roots.sort_unstable();
-        lock_roots.dedup();
+        let lock_roots = roots.iter().map(RefnoEnum::to_pdms_str).collect::<Vec<_>>();
 
-        let mut guards = Vec::with_capacity(lock_roots.len());
-        for root in &lock_roots {
-            guards.push(try_generation_root(root)?);
-        }
-
-        for root in &lock_roots {
-            let (word0, word1) = root
-                .split_once('/')
-                .ok_or_else(|| anyhow::anyhow!("invalid generation root {root}"))?;
-            let root = e3d_io::RefNo::new(word0.parse()?, word1.parse()?);
-            crate::fast_model::e3d_model_service::delete_persisted_geometry_root(root).await?;
-            let tombstone = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
-                root,
-                &[root],
-                &[],
-            );
-            SUL_DB.query(tombstone).await?.check()?;
-        }
+        let _removal = projection_removal::remove_subtree(RemovalRequest {
+            subtrees: roots,
+            lock_roots: lock_roots.clone(),
+            tombstone: TombstoneSink::Database,
+        })
+        .await?;
         crate::data_interface::helper::delete_inst_relate_subtree(&[requested_refno], 300).await?;
 
         // 库里没有逐根凭证行可删（`gen_root` 退役，ADR-079）：这些根在进程内账本上的那一条摘掉，
@@ -985,15 +971,27 @@ mod tests {
             .find("resolve_generation_roots_on(")
             .expect("delete must resolve every covered generation root");
         let lock_at = body
-            .find("try_generation_root")
-            .expect("delete must reject roots with active generation");
+            .find("let _removal = projection_removal::remove_subtree(")
+            .expect(
+                "the removal entry rejects roots with active generation and its locks stay held",
+            );
         let delete_at = body
             .find("delete_inst_relate_subtree(&[requested_refno], 300)")
             .expect("delete scope must remain the requested refno subtree");
+        let forget_at = body
+            .find("model_root_ledger::forget_root(")
+            .expect("deleted roots leave the process ledger");
 
         assert!(
-            collect_at < resolve_at && resolve_at < lock_at && lock_at < delete_at,
+            collect_at < resolve_at
+                && resolve_at < lock_at
+                && lock_at < delete_at
+                && delete_at < forget_at,
             "scope discovery, root locking, and exact deletion must stay ordered: {body}"
+        );
+        assert!(
+            body.contains("tombstone: TombstoneSink::Database"),
+            "摄入形态的墓碑直接写库: {body}"
         );
     }
 
@@ -1044,16 +1042,36 @@ mod tests {
         );
 
         let removal = include_str!("projection_removal.rs");
+        let database_sink = removal
+            .split_once("async fn write_database_tombstone(")
+            .expect("写库墓碑自成一个函数")
+            .1
+            .split_once("\n}")
+            .expect("写库墓碑函数有结尾")
+            .0;
+        assert_eq!(
+            removal.matches("SUL_DB").count(),
+            database_sink.matches("SUL_DB").count(),
+            "投影删法不碰 durable 权威库：删除入口只在摄入形态的写库墓碑里碰它: {removal}"
+        );
+        let projected = source
+            .split_once("async fn clear_projected_scope(")
+            .expect("projection clear exists")
+            .1
+            .split_once("pub async fn delete_model_subtree(")
+            .expect("ingest delete follows the projection clear")
+            .0;
         assert!(
-            !removal.contains("SUL_DB"),
-            "投影删法不碰 durable 权威库: {removal}"
+            !projected.contains("TombstoneSink::Database"),
+            "「只写内存」/ 读透不写库墓碑: {projected}"
         );
     }
 
     /// 范围清理只有一份实现（2026-10-10 清理模型计划 G1）：`DELETE /model/subtree` 与 `force = true` 都从
-    /// `clear_model_scope` 进；投影那一路只有 `clear_projected_scope`（先 try-lock 再删），摄入形态的
-    /// `delete_model_subtree` 读透分支也转给它——此前那一支不先对生成根 try-lock，spec §4.5.1 写的
-    /// 「范围内有根正在生成回 409」在读透形态不成立。
+    /// `clear_model_scope` 进；三条删法都经删除入口 `projection_removal::remove_subtree`（先 try-lock 再删）。
+    /// 投影两路从 `clear_projected_scope` 进，摄入形态的 `delete_model_subtree` 自己进、读透分支转给
+    /// `clear_projected_scope`——此前那一支不先对生成根 try-lock，spec §4.5.1 写的「范围内有根正在生成
+    /// 回 409」在读透形态不成立。
     #[test]
     fn scope_cleanup_has_exactly_one_implementation() {
         let source = include_str!("on_demand_model.rs");
@@ -1062,13 +1080,8 @@ mod tests {
             production
                 .matches("projection_removal::remove_subtree(")
                 .count(),
-            1,
-            "投影删法只从 clear_projected_scope 进删除入口: {production}"
-        );
-        assert_eq!(
-            production.matches("try_generation_root(root)").count(),
-            1,
-            "这里只剩摄入形态的 delete_model_subtree 自己拿根锁；投影删法的根锁归删除入口: {production}"
+            2,
+            "删除入口只有两处调用：投影两路的 clear_projected_scope 与摄入形态的 delete_model_subtree: {production}"
         );
         let delete = production
             .split_once("pub async fn delete_model_subtree(")
@@ -1082,8 +1095,8 @@ mod tests {
             "读透分支转给 clear_projected_scope: {delete}"
         );
         assert!(
-            !delete.contains("projection_removal::"),
-            "delete_model_subtree 不直接调删除入口，读透分支经 clear_projected_scope 进: {delete}"
+            !delete.contains("try_generation_root"),
+            "摄入形态的根锁也归删除入口，不再自己拿: {delete}"
         );
     }
 

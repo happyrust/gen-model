@@ -2070,7 +2070,7 @@ mod tests {
         assert!(generation.contains("model_write_behind::publish(vec![commit])?"));
 
         let deletion = include_str!("../data_interface/projection_removal.rs");
-        assert!(deletion.contains("lock_db_generation(node.dbno())"));
+        assert!(deletion.contains("lock_db_generation(dbnum)"));
         assert!(deletion.contains("model_write_behind::publish"));
     }
 

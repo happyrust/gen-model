@@ -1,32 +1,39 @@
-//! 投影删除的入口（`.planning/2026-11-08-projection-store-root-only`）。
+//! 投影删除的入口（`.planning/2026-11-08-projection-store-root-only`）。三条删法都从这里进：「只写内存」与读透
+//! 删请求的子树、墓碑进 spool 或不留；摄入形态按覆盖请求的生成根整根删、墓碑直接写库。
 //!
 //! 锁序在这里定死：先对覆盖范围的生成根逐个 try-lock（排序去重；被占回「正在后台生成」、一行不删），
-//! 再按库排队拿生成锁，拿齐之后才结算受影响的根、落墓碑、发删除。根锁必须先拿：同库每一次生成
-//! 全程都攅着库级锁，反过来会排队等完同库在飞的生成，再把别人刚发布的根清掉。
+//! 再按库号升序拿生成锁，拿齐之后才结算受影响的根、落墓碑、发删除。根锁必须先拿：同库每一次生成
+//! 全程都攥着库级锁，反过来会排队等完同库在飞的生成，再把别人刚发布的根清掉。
+//!
+//! 墓碑先落、投影后改：墓碑落不下就整趟中止，投影一条没动；落下之后进程死了，重启后库里也没有这片产物。
+//! 反过来先改投影，墓碑失败时投影说删了、库里还在，重启又回来。
 
 use aios_core::RefnoEnum;
 use e3d_io::RefNo;
+use tokio::sync::OwnedMutexGuard;
 
 use super::generation_root::refno_to_e3d;
 use super::on_demand_model::try_generation_root;
 use crate::fast_model::model_memory_store::{
-    ModelMemoryStore, ProjectedGeometry, ProjectionCommit, ProjectionScope,
+    ModelMemoryStore, ProjectedGeometry, ProjectionCommit, ProjectionScope, packed_refno,
 };
 
-/// 删掉的投影要不要、往哪里留墓碑。
+/// 删掉的投影要不要、往哪里留墓碑。留的都是同一份渲染（`render_spooled_scope_deletion`，每个子树根一笔事务）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TombstoneSink {
-    /// 同一笔删除渲成 SurrealDB 事务进 mirror spool，由 durable 镜像那条线落到库里（读透形态的持久面）。
+    /// 进 mirror spool，由 durable 镜像那条线落到库里（读透形态的持久面）。
     Spool,
+    /// 直接写进权威库（摄入形态）。
+    Database,
     /// 没有持久面（「只写内存」的库）。
     None,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemovalRequest {
-    /// 删这个节点的子树：投影记录按祖先链取。
-    pub subtree: RefnoEnum,
-    /// 覆盖这片子树的生成根（`to_pdms_str` 形态）；为空就对 `subtree` 自己拿根锁。
+    /// 删这几个节点的子树，投影记录按祖先链取：投影两路是请求节点，摄入形态是覆盖请求的生成根。
+    pub subtrees: Vec<RefnoEnum>,
+    /// 覆盖这片范围的生成根（`to_pdms_str` 形态）；为空就对 `subtrees` 自己拿根锁。
     pub lock_roots: Vec<String>,
     pub tombstone: TombstoneSink,
 }
@@ -34,67 +41,119 @@ pub(crate) struct RemovalRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RemovalReport {
     pub removed_records: usize,
-    /// 回执作废了的根：子树里的根，以及与被删记录有交集的外层根。
+    /// 整根落在删除范围里的根：退役，回执、记录、点集、包围盒、提交序号一起摘。
+    pub retired_roots: Vec<RefNo>,
+    /// 删除范围头上、与被删记录共有记录的根：只少了一部分，回执作废，等下一次整根重新发布。
     pub invalidated_roots: Vec<RefNo>,
 }
 
-/// 只清**进程内投影**里 `subtree` 子树下已发布的产物：记录按祖先链取、隐式管身所在的分支一并重置、
-/// 受影响的根（含与之共有记录的嵌套根）回执作废，让下一次生成必须整根重新发布。
-pub(crate) async fn remove_subtree(request: RemovalRequest) -> anyhow::Result<RemovalReport> {
+/// 删完的结算，连同删除时拿的锁：这个值活着，根锁与生成锁就都还攥着。摄入形态要在同一把锁下删完
+/// `inst_relate`、摘完账本再放——中途放锁，同根的新一次生成刚写下的行与账本会被这些收尾删掉；投影两路拿到就放。
+#[derive(Debug)]
+pub(crate) struct Removal {
+    #[cfg_attr(not(test), allow(dead_code))] // 生产两路只靠它攥锁，结算只有测试读
+    pub report: RemovalReport,
+    _generation_guards: Vec<OwnedMutexGuard<()>>,
+    _root_guards: Vec<OwnedMutexGuard<()>>,
+}
+
+/// 删掉 `subtrees` 子树下已发布的产物：记录按祖先链取、隐式管身所在的分支一并重置；整根落在里面的根退役，
+/// 头上与之共有记录的根回执作废，让下一次生成必须整根重新发布。
+pub(crate) async fn remove_subtree(request: RemovalRequest) -> anyhow::Result<Removal> {
     let mut lock_roots = request.lock_roots;
     if lock_roots.is_empty() {
-        lock_roots.push(request.subtree.to_pdms_str());
+        lock_roots.extend(request.subtrees.iter().map(RefnoEnum::to_pdms_str));
     }
     lock_roots.sort_unstable();
     lock_roots.dedup();
-    let _root_guards = lock_roots
+    let root_guards = lock_roots
         .iter()
         .map(|root| try_generation_root(root))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let node = refno_to_e3d(request.subtree);
-    let _generation_guard =
-        crate::fast_model::e3d_model_service::lock_db_generation(node.dbno()).await;
-    let store = ModelMemoryStore::global();
-    let scope = ProjectionScope::Current;
-    let closure = store.subtree_closure(scope, node);
-    let records = closure.records;
-    let mut affected_roots = closure.roots;
-    if affected_roots.is_empty() {
-        affected_roots.push(node);
-    }
-    let tube_branches = records
-        .iter()
-        .filter(|record| record.tube.is_some())
-        .map(|record| record.source_refno)
+    let mut nodes = request
+        .subtrees
+        .into_iter()
+        .map(refno_to_e3d)
         .collect::<Vec<_>>();
-    if request.tombstone == TombstoneSink::Spool {
-        persist_spooled_tombstone(store, node, &records, &affected_roots, &tube_branches)?;
+    nodes.sort_unstable_by_key(|node| packed_refno(*node));
+    nodes.dedup();
+    let mut dbnums = nodes.iter().map(|node| node.dbno()).collect::<Vec<_>>();
+    dbnums.sort_unstable();
+    dbnums.dedup();
+    let mut generation_guards = Vec::with_capacity(dbnums.len());
+    for dbnum in dbnums {
+        generation_guards
+            .push(crate::fast_model::e3d_model_service::lock_db_generation(dbnum).await);
     }
 
-    crate::fast_model::model_write_behind::publish(vec![ProjectionCommit {
-        tube_branch_resets: tube_branches,
-        removals: records
+    let store = ModelMemoryStore::global();
+    let scope = ProjectionScope::Current;
+    let closure = store.subtree_closure(scope, &nodes);
+    let mut affected_roots = closure.removed_roots.clone();
+    affected_roots.extend(closure.outer_roots.iter().copied());
+    match request.tombstone {
+        TombstoneSink::Spool => {
+            for node in &nodes {
+                let records = records_under(&closure.records, *node).collect::<Vec<_>>();
+                persist_spooled_tombstone(store, *node, &records, &affected_roots)?;
+            }
+        }
+        TombstoneSink::Database => {
+            write_database_tombstone(&nodes, &closure.records, &affected_roots).await?;
+        }
+        TombstoneSink::None => {}
+    }
+
+    let commit = ProjectionCommit {
+        tube_branch_resets: tube_branches(closure.records.iter()),
+        removals: closure
+            .records
             .iter()
             .map(|record| record.record_id.clone())
             .collect(),
         ..Default::default()
-    }])?;
-    for affected in &affected_roots {
-        store.invalidate_receipt(scope, *affected);
+    };
+    // 投影里本来就没有这片就不发：写后台停收之后连空提交也回绝。
+    if !commit.is_empty() {
+        crate::fast_model::model_write_behind::publish(vec![commit])?;
     }
-    Ok(RemovalReport {
-        removed_records: records.len(),
-        invalidated_roots: affected_roots,
+    store.retire_roots(scope, &closure.removed_roots, &closure.outer_roots);
+    Ok(Removal {
+        report: RemovalReport {
+            removed_records: closure.records.len(),
+            retired_roots: closure.removed_roots,
+            invalidated_roots: closure.outer_roots,
+        },
+        _generation_guards: generation_guards,
+        _root_guards: root_guards,
     })
+}
+
+/// `node` 子树下的那几条：几个子树根各落各的墓碑。
+fn records_under(
+    records: &[ProjectedGeometry],
+    node: RefNo,
+) -> impl Iterator<Item = &ProjectedGeometry> {
+    let packed = packed_refno(node);
+    records
+        .iter()
+        .filter(move |record| record.ancestors.contains(&packed))
+}
+
+/// 隐式管身所在的分支（容器 BRAN）：整段重置，与按 id 摘记录一起发。
+fn tube_branches<'a>(records: impl Iterator<Item = &'a ProjectedGeometry>) -> Vec<RefNo> {
+    records
+        .filter(|record| record.tube.is_some())
+        .map(|record| record.source_refno)
+        .collect()
 }
 
 fn persist_spooled_tombstone(
     store: &ModelMemoryStore,
     node: RefNo,
-    records: &[ProjectedGeometry],
+    records: &[&ProjectedGeometry],
     affected_roots: &[RefNo],
-    tube_branches: &[RefNo],
 ) -> anyhow::Result<()> {
     let option = aios_core::get_db_option();
     let mut sessions = records
@@ -127,7 +186,7 @@ fn persist_spooled_tombstone(
     let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
         node,
         affected_roots,
-        tube_branches,
+        &tube_branches(records.iter().copied()),
     );
     super::mirror_spool::MirrorSpool::for_process(
         &option.surreal_ns,
@@ -140,5 +199,22 @@ fn persist_spooled_tombstone(
         format!("model-tombstone:{node}"),
         vec![transaction],
     )?;
+    Ok(())
+}
+
+/// 摄入形态的墓碑：与 spool 同一份渲染，逐个子树根直接写进权威库。整个入口只有这里碰权威库。
+async fn write_database_tombstone(
+    nodes: &[RefNo],
+    records: &[ProjectedGeometry],
+    affected_roots: &[RefNo],
+) -> anyhow::Result<()> {
+    for node in nodes {
+        let tombstone = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+            *node,
+            affected_roots,
+            &tube_branches(records_under(records, *node)),
+        );
+        aios_core::SUL_DB.query(tombstone).await?.check()?;
+    }
     Ok(())
 }

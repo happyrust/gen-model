@@ -176,7 +176,7 @@
 |---|---|---|
 | G0 钉现状 | 0-A / 0-B / 0-C 入库；`cargo test --lib` 绿；生产代码零改动 | 通过（2026-11-08，2900 过 / 0 失败 / 128 忽略） |
 | G1 入口就位 | P 路走入口；G0 测试绿 | 通过（2026-11-08，2903 过 / 0 失败 / 128 忽略） |
-| G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 未开始 |
+| G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 通过（2026-11-08，2909 过 / 0 失败 / 128 忽略；计数含工作树里其它未提交改动带来的 6 条，见 §8） |
 | G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 未开始 |
 | G4 可见性 | 收窄完成；无外部调用；无新增告警 | 未开始 |
 | G5 留痕 | ADR + CONTEXT + changelog | 未开始 |
@@ -225,3 +225,44 @@
 - G1：`cargo +nightly test --lib` 2903 过、0 失败、128 忽略（比 G0 多 3 条：1-C 一条、1-D 两条）。S1 单跑仍报 `receipt expects 7, store has 3`，ignore 保持到 Phase 2。
   - 之后又跑了两轮全量（中间只补了上面那条 `SUL_DB` 断言、理了格式），都是 2902 过、`mesh_lod1::tests::prepare_writes_every_canonical_lod1_once_and_reuses_afterwards` 1 条失败。失败的是往临时目录写粗网格：`written=230 failed=4`。
   - 这条用例单独连跑两次都是 12/12 通过，而本机临时目录所在盘只剩约 2.3 GB。判定为并行全量下的写盘环境问题，与本阶段无关；腾出空间后应复跑一次确认。
+
+### Phase 2 施工记录（2026-11-08）
+
+- 2-A：`delete_model_subtree` 改走入口。
+  - 解出覆盖请求的生成根（解不出就用请求节点），以 `RemovalRequest { subtrees: 这些根, lock_roots: 同一批, tombstone: TombstoneSink::Database }` 整根删。`RemovalRequest.subtree` 随之改成 `subtrees`（D 路一次删多根），投影两路传 `vec![requested_refno]`。
+  - 补上的两样：按库生成锁（D 路原先只拿根锁）；受影响根闭包（外层根作废）。S1 由此修好。
+  - 删除范围仍是整根，与改道前一致；旧文档写的“删除范围仍是请求的 PE 子树”与代码不符，已改。`inst_relate` 仍按请求的 PE 子树删。
+  - 锁一直攥到账本摘完：入口返回 `Removal`，里面带根锁与按库生成锁；D 路用 `let _removal = …` 接住，删完 `inst_relate`、摘完账本才放，与改道前根锁的持有范围相同。投影两路拿到就放。
+  - 新增 `TombstoneSink::Database`：与 spool 同一份渲染（`render_spooled_scope_deletion`），逐个子树根直接写库。入口里只有 `write_database_tombstone` 碰 `SUL_DB`。
+  - 墓碑渲染参数与 P 路对齐：受影响根由 `[root]` 改为闭包（渲染里没用这个参数，SQL 不变）；管身分支由空改为从被删记录里取，多出这些分支 `tubi_relate` 行及其盒、变换的点删，与 P 路相同。
+- 2-B：收尾按 Q2 统一。
+  - `subtree_closure` 改收多个节点，按子树根在记录祖先链里的位置分两类：子树根及其以下的根整根落在里面，退役；以上的是外层根，作废。常驻的子树根自己没有记录也算退役。多个节点时，一个根只要对某个节点整根落在里面就退役，不再算外层。
+  - 存储新增 `retire_roots(scope, removed, outer)`：一把写锁里退役被删根（回执、记录、点集、包围盒、提交序号一起摘），作废外层根（摘回执、记作废、摘 ACK）。`ScopeState` 上补一个 `invalidate_receipt`，外面同名方法改为转调它。
+  - P 路一起切过来：请求恰好是整根时，这根退役而不是作废，0-B 记下的 S2 残留随之清掉；请求在根里面时，根照旧作废。
+- 2-C：D 路改成「先落墓碑、后改投影」，与 P 路同序。旧序是逐根先删投影、摘回执，再写库墓碑。
+  - 没有新增的崩溃窗口：投影与账本都在进程内，崩了就没了。崩在墓碑之后，重启后库里已经没有这片，正是这次删除要的结果；崩在墓碑之前，什么都没删。
+  - 失败面变小：墓碑写不进去就整趟中止，投影一条没动。旧序下墓碑失败会留下「投影说删了、库里还在」，重启后又回来。
+  - 墓碑落下之后发布失败（写后台停收）：投影还在、库里已删，调用方拿到错误，重试幂等。P 路一直是这个顺序。
+  - 投影里本来就没有这片时不发删除提交：写后台停收后连空提交也回绝，不跳过的话，CLI 这类投影为空的删除会失败。旧 D 路也只对有记录的库发提交。
+- 2-D：`delete_persisted_geometry_root` 连同文档删掉。
+  - 它那条修法（记录已为 0 也摘回执）由闭包分类保留：常驻的子树根没有记录也算退役。
+  - `model_record_reader.rs` 里的 `second_delete_of_overlay_root_24384_26312_does_not_report_incomplete` 调的正是这个函数，改写成契约模块里的 `deleting_a_root_whose_records_are_already_gone_drops_its_receipt`，断言不变：残缺根先报 incomplete，入口删一次、再删一次都不留回执和记录。
+  - 外面那个 `retire_deleted_root(scope, root)` 生产代码已不用，改为 `#[cfg(test)]`；4-B 再收可见性。
+- 测试：
+  - S1 去掉 ignore 并转绿：删内层根结算为删 4 条、退役内层根、作废外层根；外层根读得出来，回执已作废，自有的 3 条还在。
+  - 1-D 补上 D 路形态（整根、根锁为空）。单测没有库，用 `TombstoneSink::None` 代替 `Database`。
+    - `a_removal_is_refused_while_a_covered_root_is_generating`：「根内的一块 + 根锁」和「整根」两种请求都在 5 秒内回「正在生成」。
+    - `a_removal_waits_for_a_generation_on_the_same_dbnum`：两种请求都先挂起、记录不动；放手后分别结算为「删 1 条、作废所在的根」和「删 2 条、退役这一根」。退役的根不再出现在 `roots()` 里、点集也摘了；作废的根还在 `roots()` 里，剩下的 1 条也还在。
+  - `the_subtree_closure_matches_the_per_root_scan` 增加分类断言：退役与作废合起来等于旧的逐根扫描；嵌套、整根、空根、多节点去重等六种组合逐一核对。
+- Q4 文本守卫：
+  - `forced_regeneration_clears_the_requested_scope_before_generating`：入口文件里的 `SUL_DB` 只许出现在 `write_database_tombstone` 里；`clear_projected_scope` 不许请求 `TombstoneSink::Database`。
+  - `scope_cleanup_has_exactly_one_implementation`：入口调用恰好两处（投影两路、D 路）；D 路不再自己 `try_generation_root`。
+  - `subtree_delete_locks_covered_generation_roots_but_deletes_the_requested_scope`：钉住 D 路顺序「收子树 → 解根 → `let _removal = projection_removal::remove_subtree(` → `delete_inst_relate_subtree` → `model_root_ledger::forget_root(`」，以及 `tombstone: TombstoneSink::Database`。
+  - `production_current_projection_writes_use_admission_and_generation_fence`：删除那一半随入口改为按库号循环拿锁，断言 `lock_db_generation(dbnum)`。
+- 告警：`Removal.report` 生产两路都不读（只靠 `Removal` 攥锁），非测试构建会报 never read；按 `src/lib.rs` 里已有的写法加 `#[cfg_attr(not(test), allow(dead_code))]`。测试构建里这字段有人读，本机只能跑 `cargo test --lib`，看不到这一条。
+- G2：`cargo +nightly test --lib` 2909 过、0 失败、128 忽略，共 3037 条；本 crate 没有新增告警。
+  - 与 G1 逐条对比。本阶段的变化：S1 去掉 ignore 转绿；读取器里的旧用例换成入口用例，一删一增。
+  - 另外 6 条（5 过，1 忽略）是工作树里与本计划无关的未提交改动带进来的（`group_membership` 与 `direct_tree`）。对应 G1 口径是 2904 过、127 忽略。
+  - 「删内层根之后外层根不再报 incomplete」由 S1 在单测里钉住；未做 L2。
+  - 上一轮失败的 `mesh_lod1::tests::prepare_writes_every_canonical_lod1_once_and_reuses_afterwards` 这次也过了。
+  - 第一次全量没编译过：工作树里的 `direct_tree.rs` 正改到一半（`ResolvedChildren` 已引用、尚未定义），它存盘之后重跑即上面的结果。

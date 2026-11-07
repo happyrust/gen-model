@@ -729,6 +729,15 @@ impl ScopeState {
         removed
     }
 
+    /// 只摘回执与 ACK、记录留着；摘之前有回执的记为已作废（仍算常驻根）。
+    fn invalidate_receipt(&mut self, root: RefNo) {
+        let packed = packed_refno(root);
+        if self.receipts.remove(&packed).is_some() {
+            self.invalidated_roots.insert(packed);
+        }
+        self.publication_acks.remove(&packed);
+    }
+
     /// 这枚 ACK 是不是 F3 的证据（ADR-073 F3；d-149 补丁 2026-09-22）：房间代号是本进程这一世写进
     /// `model_room_stray_generations` 的代号之一（`stray_generations_written`），而库上最近一次盖章
     /// （`stamped_room_generations`）不是这一代。`room_recompute::request_for_task` 靠「本进程写过的根 ACK 都在
@@ -833,13 +842,16 @@ pub struct ProjectedRootBounds {
     pub has_invalid_bounds: bool,
 }
 
-/// 删一棵子树要结算的投影（[`ModelMemoryStore::subtree_closure`]）。
+/// 删几棵子树要结算的投影（[`ModelMemoryStore::subtree_closure`]）。根都是常驻的（有回执或已作废），
+/// 按打包 refno 升序（与 [`ModelMemoryStore::roots`] 同序）。
 #[derive(Debug, Clone, Default)]
 pub struct SubtreeClosure {
-    /// 祖先链经过子树根的记录，按 record_id 升序（与 [`ModelMemoryStore::records_of_root`] 同一份）。
+    /// 祖先链经过任一子树根的记录，按 record_id 升序、去重（只删一棵时与 [`ModelMemoryStore::records_of_root`] 同一份）。
     pub records: Vec<ProjectedGeometry>,
-    /// 与这些记录有交集的常驻根（有回执或已作废），按打包 refno 升序（与 [`ModelMemoryStore::roots`] 同序）。
-    pub roots: Vec<RefNo>,
+    /// 整根落在子树里的根：子树根自己，以及记录的祖先链上排在子树根之前的根。名下一条不剩，退役。
+    pub removed_roots: Vec<RefNo>,
+    /// 子树根头上、与被删记录共有记录的根：只少了一部分，回执作废。已在 `removed_roots` 里的不重复列。
+    pub outer_roots: Vec<RefNo>,
 }
 
 /// 写后台控制器当前不收件，这一批投影原样退回。没有任何一部分被装进 overlay。
@@ -1745,31 +1757,48 @@ impl ModelMemoryStore {
             .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
     }
 
-    /// 删 `node` 子树要结算的投影：祖先链经过它的记录，以及与这些记录有交集的常驻根。嵌套根靠祖先链
-    /// 共享记录，所以外层根、子树里的根都在内；`node` 自己常驻也在内，哪怕名下一条记录都没有。
+    /// 删 `nodes` 这几棵子树要结算的投影：祖先链经过它们的记录，以及与这些记录有交集的常驻根。嵌套根靠
+    /// 祖先链共享记录，按链上的位置分两类：链由近到远，排在子树根之前（含子树根自己）的根整根落在子树里，
+    /// 之后的是头上的外层根。子树根自己常驻也算落在里面，哪怕名下一条记录都没有。
     /// 一把读锁里按记录的祖先链反查，不逐根扫记录。
-    pub fn subtree_closure(&self, scope: ProjectionScope<'_>, node: RefNo) -> SubtreeClosure {
+    pub fn subtree_closure(&self, scope: ProjectionScope<'_>, nodes: &[RefNo]) -> SubtreeClosure {
         let scopes = self.read();
         let Some(state) = scopes.get(&scope.key()) else {
             return SubtreeClosure::default();
         };
-        let records = state
-            .record_ids_under(node)
-            .into_iter()
-            .filter_map(|record_id| state.geometries.get(&record_id).cloned())
-            .collect::<Vec<_>>();
-        let roots = records
-            .iter()
-            .flat_map(|record| record.ancestors.iter().copied())
-            .chain(std::iter::once(packed_refno(node)))
-            .filter(|packed| {
-                state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed)
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
-            .collect();
-        SubtreeClosure { records, roots }
+        let resident = |packed: &i64| {
+            state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed)
+        };
+        let mut records = BTreeMap::new();
+        let mut removed = BTreeSet::new();
+        let mut outer = BTreeSet::new();
+        for node in nodes {
+            let packed_node = packed_refno(*node);
+            if resident(&packed_node) {
+                removed.insert(packed_node);
+            }
+            for record_id in state.record_ids_under(*node) {
+                let Some(record) = state.geometries.get(&record_id) else {
+                    continue;
+                };
+                // 链里找不到子树根（索引与链对不上）就整条当外层：作废只摘回执，退役会把那根名下的记录全清掉。
+                let split = record
+                    .ancestors
+                    .iter()
+                    .position(|packed| *packed == packed_node)
+                    .map_or(0, |position| position + 1);
+                let (inside, above) = record.ancestors.split_at(split);
+                removed.extend(inside.iter().copied().filter(|packed| resident(packed)));
+                outer.extend(above.iter().copied().filter(|packed| resident(packed)));
+                records.entry(record_id).or_insert_with(|| record.clone());
+            }
+        }
+        let unpack = |packed: i64| RefNo::new((packed >> 32) as u32, packed as u32);
+        SubtreeClosure {
+            records: records.into_values().collect(),
+            outer_roots: outer.difference(&removed).copied().map(unpack).collect(),
+            removed_roots: removed.into_iter().map(unpack).collect(),
+        }
     }
 
     /// Called only after source absence and output deletion have succeeded.
@@ -1787,12 +1816,36 @@ impl ModelMemoryStore {
     /// 删掉一根的进程内投影：记录与回执同一把写锁。记录已经没了也要摘回执。
     ///
     /// 返回摘掉的记录数。没有这个投影域时是 0。
+    #[cfg(test)]
     pub(crate) fn retire_deleted_root(&self, scope: ProjectionScope<'_>, root: RefNo) -> usize {
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&scope.key()) else {
             return 0;
         };
         state.retire_deleted_root(root)
+    }
+
+    /// 一次删除的结算（[`Self::subtree_closure`] 分好的两类根），同一把写锁：`removed` 整根退役——记录、回执、
+    /// 作废标记、点集、包围盒、提交序号一起摘，记录已经没了也要摘回执；`outer` 只作废回执（同
+    /// [`Self::invalidate_receipt`]），剩下的记录照旧可显示。返回退役时摘掉的记录数。
+    pub(crate) fn retire_roots(
+        &self,
+        scope: ProjectionScope<'_>,
+        removed: &[RefNo],
+        outer: &[RefNo],
+    ) -> usize {
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&scope.key()) else {
+            return 0;
+        };
+        let retired = removed
+            .iter()
+            .map(|root| state.retire_deleted_root(*root))
+            .sum();
+        for root in outer {
+            state.invalidate_receipt(*root);
+        }
+        retired
     }
 
     /// 这根最近一次整根提交带来的路由成员 P 点集（`pe_ptset` 行的来源）。`None` = 本进程这一世没有带着点集提交过
@@ -1907,11 +1960,7 @@ impl ModelMemoryStore {
     /// must retry publication instead of treating the in-memory rows as done.
     pub fn invalidate_receipt(&self, scope: ProjectionScope<'_>, root: RefNo) {
         if let Some(state) = self.write().get_mut(&scope.key()) {
-            if state.receipts.contains_key(&packed_refno(root)) {
-                state.invalidated_roots.insert(packed_refno(root));
-            }
-            state.receipts.remove(&packed_refno(root));
-            state.publication_acks.remove(&packed_refno(root));
+            state.invalidate_receipt(root);
         }
     }
 
