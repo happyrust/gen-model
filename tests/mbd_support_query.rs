@@ -14,8 +14,10 @@ use std::sync::{Arc, OnceLock};
 use aios_database::mbd::object::{MbdTypeRules, classify_with, layout_classified};
 use aios_database::mbd::support_geometry::{cut_ring, pad_section};
 use aios_database::mbd::support_query::{
-    SupportQueryError, locate_base, named_with_prefix, query_support,
+    CutlSource, SupportQueryError, cutl_note, locate_base, named_exactly, named_with_prefix,
+    query_support, resolve_cutl,
 };
+use aios_database::options::{MbdTypeRuleConfig, MbdTypeRulesConfig, default_mbd_type_rules};
 use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
 use glam::{DVec2, DVec3};
@@ -160,6 +162,44 @@ fn locate_base_follows_the_support_type() {
         Some(DVec3::splat(200.0))
     );
     assert_eq!(locate_base(AnnotationType::Em4Supp, &empty), None);
+}
+
+/// 仪表支架的墙装判据（`instSupport.pmlobj:4199-4209`）：读得到的 `CUTL` 优先，0 照样是 0；读不到退回两端距离；
+/// 两样都没有就空着（求解器按 0 算）。说明只点读不到的根数。
+#[test]
+fn cutl_prefers_the_attribute_and_falls_back_to_the_end_distance() {
+    assert_eq!(
+        resolve_cutl(Some(0.0), Some(1500.0)),
+        (Some(0.0), CutlSource::Attribute)
+    );
+    assert_eq!(
+        resolve_cutl(Some(1480.0), Some(1500.0)),
+        (Some(1480.0), CutlSource::Attribute)
+    );
+    assert_eq!(
+        resolve_cutl(None, Some(1500.0)),
+        (Some(1500.0), CutlSource::Distance)
+    );
+    assert_eq!(
+        resolve_cutl(Some(f64::NAN), Some(1500.0)),
+        (Some(1500.0), CutlSource::Distance)
+    );
+    assert_eq!(resolve_cutl(None, None), (None, CutlSource::Missing));
+
+    assert_eq!(cutl_note(0, 0), None);
+    let note = cutl_note(4, 0).expect("note");
+    assert!(
+        note.contains("4 根 SCTN 读不到 CUTL") && note.contains("4 根按两端距离"),
+        "{note}"
+    );
+    assert!(!note.contains("空着"), "{note}");
+    let note = cutl_note(1, 2).expect("note");
+    assert!(
+        note.contains("3 根 SCTN")
+            && note.contains("1 根按两端距离")
+            && note.contains("2 根两端也读不到"),
+        "{note}"
+    );
 }
 
 // ---- AMS 样本 ------------------------------------------------------------------------------------
@@ -467,6 +507,28 @@ fn ams_frame_support_with_its_hanger() {
     }
     assert_inside(bbox, pcla.apos.unwrap(), 1.0);
     assert!(view.concretes.is_empty());
+    // EM4 不读 `cutl`：读不到 CUTL 不点名，视图照旧。
+    assert!(
+        !view.issues.iter().any(|issue| issue.contains("CUTL")),
+        "{:?}",
+        view.issues
+    );
+    // 全库按名（PML `name of $!name`）是精确查：前缀不算。
+    let mut issues = Vec::new();
+    assert_eq!(
+        named_exactly(&set, "/1WCC-R412.006", &mut issues).expect("NAME tables"),
+        [r(24383, 69033)]
+    );
+    assert_eq!(
+        named_exactly(&set, "/1WCC-R412.006/REST", &mut issues).expect("NAME tables"),
+        [r(24383, 69027)]
+    );
+    assert!(
+        named_exactly(&set, "/1WCC-R412.00", &mut issues)
+            .expect("NAME tables")
+            .is_empty()
+    );
+    assert!(issues.is_empty(), "{issues:?}");
     // AMS 字典没有 `:ZD_*` / `:SUPP-ADLONGTH`。
     assert!(view.function_code.is_none());
     assert!(
@@ -629,9 +691,76 @@ fn ams_instrument_pipe_support() {
         view.civil_candidates.is_empty(),
         "instrument pipe supports do not locate"
     );
+    assert!(
+        !view.issues.iter().any(|issue| issue.contains("CUTL")),
+        "仪表管支架不读 cutl：{:?}",
+        view.issues
+    );
     assert_laid_out(&data);
     let (_, same, _) = read(&set, r(24381, 177946));
     assert_eq!(same.subject_refno, "24381_177936");
+}
+
+/// AMS 没有仪表支架（INST + RACK）样本：规则表只留一条「支架 → em9_inst_supp」，把 /1WCC-R412.006 当仪表支架读。
+/// E3D 3.1 的 SCTN 模板里没有 `CUTL`（E3D 现算的伪属性），STRU 下 4 根槽钢都按两端距离给，视图点一句。
+#[test]
+fn ams_frame_support_read_as_an_instrument_rack_notes_the_cutl_fallback() {
+    let Some(set) = sample_set() else {
+        return;
+    };
+    let config = MbdTypeRulesConfig {
+        rules: vec![MbdTypeRuleConfig {
+            subject: "support".to_string(),
+            site_keywords: Vec::new(),
+            zone_keywords: Vec::new(),
+            annotation_type: "em9_inst_supp".to_string(),
+        }],
+        ..default_mbd_type_rules()
+    };
+    let (rules, warnings) = MbdTypeRules::from_config(&config);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let classified = classify_with(&set, r(24383, 69033), &rules).expect("classifies");
+    assert_eq!(classified.annotation_type, AnnotationType::Em9InstSupp);
+    let view = query_support(&set, &classified).expect("support view");
+    let sctns = members(&view, "SCTN");
+    assert_eq!(sctns.len(), 4);
+    for sctn in &sctns {
+        assert!(sctn.in_stru);
+        let section = sctn.section.as_ref().expect("section");
+        let distance =
+            DVec3::from_array(section.posstart).distance(DVec3::from_array(section.posend));
+        assert!(
+            sctn.cutl
+                .is_some_and(|cutl| (cutl - distance).abs() < 0.01 && cutl > 0.0),
+            "{}: cutl {:?} vs |POSE − POSS| {distance}",
+            sctn.refno,
+            sctn.cutl
+        );
+        let (word0, word1) = sctn.refno.split_once('_').expect("w0_w1");
+        let element = set.element(RefNo::new(word0.parse().unwrap(), word1.parse().unwrap()));
+        assert!(
+            !element.has_attribute("CUTL").unwrap(),
+            "{}: the SCTN template now carries CUTL, read it instead of the distance",
+            sctn.refno
+        );
+    }
+    let expected = cutl_note(4, 0).expect("note");
+    assert_eq!(
+        view.issues
+            .iter()
+            .filter(|issue| **issue == expected)
+            .count(),
+        1,
+        "{:?}",
+        view.issues
+    );
+    let data = layout_classified(&set, &classified, "24383_69033").expect("layout");
+    eprintln!(
+        "as em9_inst_supp: primitives {:?} issues {:?}",
+        primitive_kinds(&data),
+        rule_ids(&data)
+    );
+    assert!(!data.primitives.is_empty());
 }
 
 #[test]

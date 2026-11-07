@@ -2275,8 +2275,9 @@ fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec
 /// （plant3d-web#103 M7，判型逻辑在 `crate::mbd::object`）。缺省见 [`default_mbd_type_rules`]。
 ///
 /// 判定分两步。先按模型结构认出对象族（`subject`）与归属对象，这一步不看配置以外的名字：BRAN 及其成员 →
-/// `pipe`；SUPPO、或「支架区」里 ZONE 一级的 STRU / REST 及其下属 → `support`；EQUI 及其 NOZZ / ELCONN /
-/// 图元 → `equipment`；WALL / GWALL / STWALL / FLOOR 及其下的 FITT / 负体 → `civil`。支架区 = ZONE 的 NAME
+/// `pipe`；SUPPO、UDET 支架 `:SUPP`（判规则的 ZONE 名取它属主的名字）、或「支架区」里 ZONE 一级的 STRU / REST
+/// 及其下属 → `support`；EQUI 及其 NOZZ / ELCONN / 图元 → `equipment`；WALL / GWALL / STWALL / FLOOR 及其下的
+/// FITT / 负体 → `civil`。支架区 = ZONE 的 NAME
 /// 含 `support_zone_keywords` 之一，或 PURP 属于 `support_zone_purposes`；ZONE 一级的 STRU / REST 名字含
 /// `support_exclude_keywords` 之一的不算支架（PML 支架窗体对名字含 `CIV` 的 STRU 报「Select Supp pls」）。
 /// 再按 `rules` 的顺序取第一条 `subject` 相同、`site_keywords` 与 `zone_keywords` 都命中的规则（各自为空 =
@@ -2330,8 +2331,12 @@ pub struct MbdTypeRuleConfig {
 /// 规则只在同一 `subject` 内比先后。getmbdtype 先判「ZONE 名含 MTGD / COMM / CASE / LIGHT → EQUI」（L16-27），
 /// 那一档在这里只给设备生效、出 EM4（PML 连 SITE 名都不看）；HVAC 属主的 BRAN 在结构判那一步就挡掉了，
 /// 管道只剩 INST → EM9、其余 EM4（L36-44 的 PIPE / ELEC / 都不含）；支架按 L48-61 的 INST + 属主 ZONE 名含
-/// RACK；设备的 HVACEQUI / ELECEQUI（L71-74）这一版窗体都没有，按 EM4 设备；getmbdtype 没有土建分支（L80-90
-/// 整段注释掉），按窗体 markArchForm / markCivilForm 以 SITE 名含 ARCH 分。
+/// RACK（`:SUPP` 支架看它属主的名字）；设备的 HVACEQUI / ELECEQUI（L71-74）这一版窗体都没有，按 EM4 设备；
+/// getmbdtype 没有土建分支（L80-90 整段注释掉），按窗体 markArchForm / markCivilForm 以 SITE 名含 ARCH 分。
+///
+/// 决定（plant3d-web#103）：ELEC 站点的 BRAN 维持 `em4_pipe`，HVACEQUI / ELECEQUI 维持 `em4_equi`，不收窄成不可
+/// 标注。getmbdtype 给它们的 ELEC / HVACEQUI / ELECEQUI 对应 EM5（暖通）/ EM8（电气）窗体，那是 MBD 模块之外的
+/// 非目标；AMS 的 EM4 管道金样 `24383_99996` 就在 `/1RX-ELECBJ` 站点下，是真管道，收窄会把它拒掉。
 pub fn default_mbd_type_rules() -> MbdTypeRulesConfig {
     let words = |items: &[&str]| {
         items

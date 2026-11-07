@@ -5,10 +5,15 @@
 //!
 //! PML `function/export/getmbdtype.pmlfnc` 加各窗体 `addonece` 的取对象口径，分两步：
 //!
-//! 1. **结构**：沿属主链（含自身）认对象族与归属对象，先中者为准——
+//! 1. **结构**（[`structural_match`]，纯逻辑，吃属主链各级的 [`LinkFacts`]）：沿属主链（含自身）认对象族与归属对象，
+//!    先中者为准——
 //!    - BRAN → `pipe`，归属 BRAN，管件 / ATTA 等成员上溯到它；属主是 HVAC 的 BRAN 不可标注（风管不出管道尺寸，
 //!      与 `/pipe` 的 `NotPipeRoute` 同一道门）；
 //!    - SUPPO → `support`，归属 SUPPO；
+//!    - UDET 支架 `:SUPP`（[`udet_support`]，getmbdtype L48-61 `name of :supp of`）→ `support`，归属那一级（基于 ZONE
+//!      的 UDET，归属类型报 [`UDET_SUPPORT`]），选中它本身也算；判规则用的区名是它的属主名（L52
+//!      `name of owner of $!supp`），不是它自己。`UDTYPE` 翻成 `:名` 查 `DbSet` 里挂着的 DICT 库的 UDET 表
+//!      （[`udet_catalog`]），链上没有一级设了 `UDTYPE` 就不查表；
 //!    - EQUI → `equipment`，归属 EQUI，NOZZ / ELCONN / SUBE / 图元上溯到它（设备窗体的 `equi` 导航）；
 //!    - WALL / GWALL / STWALL / FLOOR → `civil`，归属那块墙板，门窗 FITT、负体上溯到它（土建窗体按这四类上溯）；
 //!    - 支架区（[`MbdTypeRules::is_support_zone`]）里 ZONE 一级的 STRU / REST 及其下属（FRMW / SCTN / PANE / HANG /
@@ -23,17 +28,22 @@
 //! 这里只对 EQUI 名下的元素生效，BRAN 落在这种区里照样按管道判——设备窗体收到 BRAN 本来也只会报
 //! 「Select equi pls」。
 //!
-//! UDET 支架（`:SUPP`）还认不出：`UDTYPE` 翻成 `:名` 要 DICT 库里的 UDET 表（`e3d_model::udet::UdetCatalog`），
-//! AMS 里没有这种支架。
+//! AMS 里没有 `:SUPP`（guide §1），它的判定与取名只有合成测试；离线开库（`tests/common/mbd_db.rs`）不挂 DICT 库，
+//! UDET 表是空的，认不出 `:SUPP`。
 //!
 //! # 支架归属（[`support_parts`]，PML `function/marksupport/getsuppname.pmlfnc`）
 //!
 //! - 有 SUPPO（风管支架那一支，L80-91）：归属 SUPPO，STRU 取它第一个 STRU 成员，「REST」取第一个 SUPC 成员。
-//! - 没有 SUPPO：PML 先取 `zone of`（L60-77，那是 `:SUPP` 一个支架自成一区的建法）；AMS 的支架区里是成对的 ZONE 级
-//!   STRU + REST，走 PML 按名字配对的那一支（L22-58）：REST 名取 `/REST` 之前的部分得支架名 S，配对的 STRU 依次找
-//!   `S/STRU`、`S`；反过来 STRU 名取 `/STRU` 之前得 S，REST 依次找 `S/REST`、`S`。只在**同一 ZONE 的成员**里找
-//!   （PML 是全库按名查，这里不做全树扫）。归属对象是 STRU；选中 REST / HANG / PCLA 而配不到 STRU 时 REST 自己当
-//!   归属对象，并在视图 `issues` 里留一条（入口转成 `data.view_issue` 告警）。
+//! - 在 `:SUPP` 里（L60-69：`zone of` 在 `:SUPP` 支架里就是 `:SUPP` 这一级）：归属 `:SUPP`，支架名是它的名字，STRU /
+//!   REST 取它第一个 STRU / REST 成员，整个支架是它的全部后代。
+//! - 都没有：AMS 的支架区里是成对的 ZONE 级 STRU + REST（对它们取 `zone of` 拿到的是整个支架区，不是一个支架），走
+//!   PML 按名字配对的那一支（L22-58，取名见 [`pair_names`]）：REST 名取 `/REST` 之前的部分得支架名 S，配对的 STRU
+//!   依次找 `S/STRU`、`S`；反过来 STRU 名取 `/STRU` 之前得 S，REST 依次找 `S/REST`、`S`。PML 是全库按名查
+//!   （`name of $!name`）；这里先在同一 ZONE 的成员里依次找，都没有再全库按名依次找（[`resolve_pair`]；全库那一步查
+//!   `DbSet` 里各 DESI 库的 NAME 表，表按库文件 + 会话缓存，不做全树扫）。同区先找，同区成对的支架结果与只在同区找
+//!   时一样；与 PML 只差一种情形：同区有 `S`、别处另有 `S/STRU` 时这里取同区的 `S`。只认类型对得上的（PML 不看类型，
+//!   REST 名不带 `/REST` 时 `S` 就是 REST 自己）。归属对象是 STRU；选中 REST / HANG / PCLA 而配不到 STRU 时 REST
+//!   自己当归属对象，并在视图 `issues` 里留一条（入口转成 `data.view_issue` 告警）。
 //!
 //! # 出包（[`layout_classified`]）
 //!
@@ -46,11 +56,13 @@
 //! `meta.source_version`：管道取 BRAN 的读取版本（所在库与读过的各库，与 `layout_pipe` 同一口径），其余类型取
 //! 归属对象所在的库。
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use e3d_io::db_element::{DbElement, DbElementError, DbSet};
+use e3d_io::db_element::{DbElement, DbElementError, DbSet, DbSource};
+use e3d_io::record::descriptor::DescriptorValue;
 use e3d_io::refno::RefNo;
 use e3d_model::category::{RouteDiscipline, route_discipline};
+use e3d_model::udet::UdetCatalog;
 use plant_mbd::{
     AnnotationType, CivilQueryResult, EquipmentQueryResult, InMemoryMbdSource, MbdV2PipeData,
     MbdV2Subject, ObjectLayoutRequest, SupportQueryResult, layout_object,
@@ -58,8 +70,8 @@ use plant_mbd::{
 
 use super::civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil_with};
 use super::equipment_query::{EquipmentQueryError, query_equipment};
-use super::host::{self, ChainLink, HostError, soft};
-use super::support_query::{SupportQueryError, query_support};
+use super::host::{self, ChainLink, HostError, noun_of, soft};
+use super::support_query::{SupportQueryError, name_index, named_exactly, query_support};
 use super::{
     BranchQueryError, SOURCE_TO_DESIGN_MM_TO_M, branch_query_with_diameters, pipe_source_version,
     wire_refno,
@@ -74,8 +86,12 @@ pub const CIVIL_NOUNS: [&str; 4] = ["WALL", "GWALL", "STWALL", "FLOOR"];
 pub const SUPPORT_ROOT_NOUNS: [&str; 2] = ["STRU", "REST"];
 /// PML 各窗体把标注存在名为 `<对象名>-MBD` 的 STRU 里（支架窗体遇到它直接 return），它不是支架。
 pub const MBD_AID_SUFFIX: &str = "-MBD";
+/// UDET 支架的类型名（getmbdtype `name of :supp of`、mbdStru `acttype eq ':SUPP'`），也是它的归属类型。
+pub const UDET_SUPPORT: &str = ":SUPP";
 /// 自身就是层级容器、没有标注的类型。
 const CONTAINER_NOUNS: [&str; 5] = ["WORL", "SITE", "ZONE", "PIPE", "HVAC"];
+/// 设计元素身上指向 UDET 定义的字（`e3d_model::udet`）。
+const UDTYPE: &str = "UDTYPE";
 
 /// 结构判出的对象族，与 `[[mbd_type_rules.rules]]` 的 `subject` 一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -276,17 +292,243 @@ fn typed_rules(configured: &[MbdTypeRuleConfig], warnings: &mut Vec<String>) -> 
     rules
 }
 
+// ---- 结构判（纯逻辑） ------------------------------------------------------------------------------
+
+/// 属主链上一级的判型事实：基础名词（[`host::noun_of`] 的写法）、UDET 名（`UDTYPE` 经 DICT 库的 UDET 表翻成的
+/// `:名`，没派生或表里没有是 `None`）、存名。[`structural_match`] / [`udet_support`] 只看这些，合成测试直接造。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkFacts {
+    pub noun: String,
+    pub udet: Option<String>,
+    pub name: Option<String>,
+}
+
+/// 属主链里的 UDET 支架（[`udet_support`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdetSupport {
+    /// `:SUPP` 那一级在链里的下标（链含自身，0 = 选中的元素）。
+    pub level: usize,
+    /// 判规则用的区名：getmbdtype L52 `name of owner of $!supp`（`:SUPP` 基于 ZONE，挂在真正的区下面）。
+    pub zone_name: Option<String>,
+}
+
+/// [`structural_match`] 的结果：先中的对象族，与归属那一级在链里的下标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuralMatch {
+    /// BRAN（属主是 HVAC 的由调用方挡掉）。
+    Pipe(usize),
+    /// SUPPO（风管支架）。
+    Suppo(usize),
+    /// UDET 支架 `:SUPP`。
+    UdetSupport(UdetSupport),
+    Equipment(usize),
+    /// WALL / GWALL / STWALL / FLOOR。
+    Civil(usize),
+    /// 上面几族都不中，选中的元素自己是层级容器（WORL / SITE / ZONE / PIPE / HVAC）。
+    Container,
+    /// 都不中：交给支架区那一步（ZONE 一级的 STRU / REST）。
+    Other,
+}
+
+/// 结构判（模块文档「判型」第 1 步）：按 BRAN、SUPPO、`:SUPP`、EQUI、墙板的先后认对象族（不看远近）。`:SUPP` 排在
+/// EQUI 前面同 getmbdtype（L48 先于 L64）；选中 `:SUPP` 本身（基础名词 ZONE）是支架，不是容器。
+pub fn structural_match(chain: &[LinkFacts]) -> StructuralMatch {
+    let first = |nouns: &[&str]| {
+        chain
+            .iter()
+            .position(|link| nouns.contains(&link.noun.as_str()))
+    };
+    if let Some(level) = first(&["BRAN"]) {
+        return StructuralMatch::Pipe(level);
+    }
+    if let Some(level) = first(&["SUPPO"]) {
+        return StructuralMatch::Suppo(level);
+    }
+    if let Some(found) = udet_support(chain) {
+        return StructuralMatch::UdetSupport(found);
+    }
+    if let Some(level) = first(&["EQUI"]) {
+        return StructuralMatch::Equipment(level);
+    }
+    if let Some(level) = first(&CIVIL_NOUNS) {
+        return StructuralMatch::Civil(level);
+    }
+    if chain
+        .first()
+        .is_some_and(|target| CONTAINER_NOUNS.contains(&target.noun.as_str()))
+    {
+        return StructuralMatch::Container;
+    }
+    StructuralMatch::Other
+}
+
+/// getmbdtype L48 `name of :supp of $!item`：属主链（含自身）上第一个 UDET 名是 `:SUPP` 的一级（不分大小写）。
+pub fn udet_support(chain: &[LinkFacts]) -> Option<UdetSupport> {
+    let level = chain.iter().position(|link| {
+        link.udet
+            .as_deref()
+            .is_some_and(|udet| udet.trim().eq_ignore_ascii_case(UDET_SUPPORT))
+    })?;
+    Some(UdetSupport {
+        level,
+        zone_name: chain.get(level + 1).and_then(|owner| owner.name.clone()),
+    })
+}
+
+// ---- 支架配对的取名（纯逻辑） ------------------------------------------------------------------------
+
+/// PML getsuppname L22-58 的取名：ZONE 级 STRU / REST 的名字 → 支架名与依次要找的配对名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairNames {
+    /// 支架名 S（PML `suppname`）：STRU 名取 `/STRU` 之前、REST 名取 `/REST` 之前的部分，没有这段就是名字本身。
+    pub base: String,
+    /// 配对件的类型：STRU 配 REST，REST 配 STRU。
+    pub pair_noun: &'static str,
+    /// 依次要找的名字：`S/REST`（或 `S/STRU`），再 `S`。
+    pub candidates: [String; 2],
+}
+
+/// `own_noun` 只认 STRU / REST（别的给 `None`）；后缀按第一次出现截（PML `before`），大小写照原样比。
+pub fn pair_names(own_noun: &str, own_name: &str) -> Option<PairNames> {
+    let (own_suffix, pair_suffix, pair_noun) = match own_noun {
+        "STRU" => ("/STRU", "/REST", "REST"),
+        "REST" => ("/REST", "/STRU", "STRU"),
+        _ => return None,
+    };
+    let base = own_name
+        .find(own_suffix)
+        .map_or(own_name, |at| &own_name[..at])
+        .to_string();
+    Some(PairNames {
+        candidates: [format!("{base}{pair_suffix}"), base.clone()],
+        base,
+        pair_noun,
+    })
+}
+
+/// 配对件在哪一层找到（[`resolve_pair`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairScope {
+    /// 同一 ZONE 的成员。
+    Zone,
+    /// 全库按名（PML `name of $!name`）。
+    Database,
+}
+
+/// 配对的先后：先在同一 ZONE 的成员里依次找 `candidates`，都没有再全库按名依次找；`lookup` 只交类型对得上的。
+/// 同区先找，同区成对的结果与只在同区找时一样，也省掉绝大多数查表。
+pub fn resolve_pair<T, E>(
+    plan: &PairNames,
+    mut lookup: impl FnMut(PairScope, &str) -> Result<Option<T>, E>,
+) -> Result<Option<(T, PairScope)>, E> {
+    for scope in [PairScope::Zone, PairScope::Database] {
+        for name in &plan.candidates {
+            if let Some(found) = lookup(scope, name)? {
+                return Ok(Some((found, scope)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+// ---- UDET 表 ---------------------------------------------------------------------------------------
+
+/// 属主链各级的判型事实（[`LinkFacts`]）。链上有一级设了 `UDTYPE` 才查 UDET 表（[`udet_catalog`]）。
+pub fn chain_facts(
+    set: &Arc<DbSet>,
+    chain: &[ChainLink],
+) -> Result<Vec<LinkFacts>, DbElementError> {
+    let mut facts = Vec::with_capacity(chain.len());
+    let mut derived = Vec::with_capacity(chain.len());
+    for link in chain {
+        derived.push(udtype_key(&link.element)?.is_some());
+        facts.push(LinkFacts {
+            noun: link.noun.clone(),
+            udet: None,
+            name: soft(link.element.stored_name())?.flatten(),
+        });
+    }
+    if !derived.contains(&true) {
+        return Ok(facts);
+    }
+    let catalog = udet_catalog(set)?;
+    for ((fact, link), derived) in facts.iter_mut().zip(chain).zip(derived) {
+        if derived {
+            let noun = catalog.display_noun(&link.element)?;
+            fact.udet = noun.starts_with(':').then_some(noun);
+        }
+    }
+    Ok(facts)
+}
+
+/// 元素的 `UDTYPE`（UDET 定义的键）：模板里没有、没写、为 0 都是 `None`。
+fn udtype_key(element: &DbElement) -> Result<Option<u32>, DbElementError> {
+    if !soft(element.has_attribute(UDTYPE))?.unwrap_or(false) {
+        return Ok(None);
+    }
+    Ok(match soft(element.attribute(UDTYPE))?.flatten() {
+        Some(DescriptorValue::Word { raw, .. }) if raw != 0 => Some(raw),
+        _ => None,
+    })
+}
+
+type UdetKey = Vec<(u32, DbSource)>;
+type UdetSlots = Vec<(UdetKey, Arc<UdetCatalog>)>;
+
+/// UDET 表的缓存槽位：一个进程里同时在用的 MDB 视图没几份。
+const UDET_CACHE_SLOTS: usize = 8;
+
+fn udet_slots() -> MutexGuard<'static, UdetSlots> {
+    static SLOTS: OnceLock<Mutex<UdetSlots>> = OnceLock::new();
+    SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `DbSet` 里挂着的 DICT 库（`build_set` 按 MDB 声明挂进来）的 UDET 表，按这几个库的文件身份缓存在进程里；一个
+/// DICT 库都没挂就是空表，认不出任何 UDET。
+pub fn udet_catalog(set: &Arc<DbSet>) -> Result<Arc<UdetCatalog>, DbElementError> {
+    let mut dicts: Vec<u32> = set
+        .db_numbers()
+        .into_iter()
+        .filter(|dbnum| {
+            set.db_type(*dbnum)
+                .is_some_and(|db_type| db_type.eq_ignore_ascii_case("DICT"))
+        })
+        .collect();
+    dicts.sort_unstable();
+    let mut key = Vec::with_capacity(dicts.len());
+    for dbnum in &dicts {
+        key.push((*dbnum, set.metadata(*dbnum)?.source));
+    }
+    if let Some((_, hit)) = udet_slots().iter().find(|(slot, _)| *slot == key) {
+        return Ok(hit.clone());
+    }
+    let catalog = Arc::new(UdetCatalog::scan(set, &dicts)?);
+    let mut slots = udet_slots();
+    if let Some((_, cached)) = slots.iter().find(|(slot, _)| *slot == key) {
+        return Ok(cached.clone());
+    }
+    slots.push((key, catalog.clone()));
+    if slots.len() > UDET_CACHE_SLOTS {
+        slots.remove(0);
+    }
+    Ok(catalog)
+}
+
 /// [`classify`] 的结果。
 #[derive(Debug, Clone)]
 pub struct Classified {
     pub annotation_type: AnnotationType,
     pub kind: SubjectKind,
-    /// 归属对象（BRAN / SUPPO / STRU / REST / EQUI / WALL / GWALL / STWALL / FLOOR）。
+    /// 归属对象（BRAN / SUPPO / `:SUPP` / STRU / REST / EQUI / WALL / GWALL / STWALL / FLOOR）。
     pub subject_refno: RefNo,
+    /// [`host::noun_of`] 的写法；UDET 支架是 [`UDET_SUPPORT`]（库里的基础名词是 ZONE）。
     pub subject_noun: String,
     /// 归属对象的 NAME 原文（`/…`），没存名是 `None`。
     pub subject_name: Option<String>,
-    /// 属主链上 SITE / ZONE 的 NAME 原文。
+    /// 属主链上 SITE / ZONE 的 NAME 原文；`:SUPP` 支架的 ZONE 名取它属主的名字（getmbdtype L52）。
     pub site_name: Option<String>,
     pub zone_name: Option<String>,
     /// 判型留下的非致命说明（目前只有「REST 配不到 STRU」），进占位视图的 `issues`。
@@ -425,47 +667,52 @@ pub fn classify_with(
         Err(error) => return Err(error.into()),
     }
     let chain = host::owner_chain(&element)?;
+    let facts = chain_facts(set, &chain)?;
     let target = &chain[0];
-    let site_name = match chain.iter().find(|link| link.noun == "SITE") {
-        Some(site) => soft(site.element.stored_name())?.flatten(),
-        None => None,
-    };
-    let zone_index = chain.iter().position(|link| link.noun == "ZONE");
-    let zone_name = match zone_index {
-        Some(index) => soft(chain[index].element.stored_name())?.flatten(),
-        None => None,
-    };
-    let first = |nouns: &[&str]| {
-        chain
-            .iter()
-            .find(|link| nouns.contains(&link.noun.as_str()))
-    };
+    let site_name = facts
+        .iter()
+        .find(|link| link.noun == "SITE")
+        .and_then(|site| site.name.clone());
+    let zone_index = facts.iter().position(|link| link.noun == "ZONE");
+    let mut zone_name = zone_index.and_then(|index| facts[index].name.clone());
 
-    let (kind, subject, notes) = if let Some(bran) = first(&["BRAN"]) {
-        if route_discipline(&bran.element)? == RouteDiscipline::Hvac {
-            return Err(not_annotatable(
-                target,
-                format!("{} 的属主是 HVAC，风管不出管道尺寸标注", describe(bran)),
-            ));
+    let (kind, subject, notes) = match structural_match(&facts) {
+        StructuralMatch::Pipe(level) => {
+            let bran = &chain[level];
+            if route_discipline(&bran.element)? == RouteDiscipline::Hvac {
+                return Err(not_annotatable(
+                    target,
+                    format!("{} 的属主是 HVAC，风管不出管道尺寸标注", describe(bran)),
+                ));
+            }
+            (SubjectKind::Pipe, bran.clone(), Vec::new())
         }
-        (SubjectKind::Pipe, bran.clone(), Vec::new())
-    } else if let Some(suppo) = first(&["SUPPO"]) {
-        (SubjectKind::Support, suppo.clone(), Vec::new())
-    } else if let Some(equi) = first(&["EQUI"]) {
-        (SubjectKind::Equipment, equi.clone(), Vec::new())
-    } else if let Some(wall) = first(&CIVIL_NOUNS) {
-        (SubjectKind::Civil, wall.clone(), Vec::new())
-    } else if CONTAINER_NOUNS.contains(&target.noun.as_str()) {
-        let reason = if matches!(target.noun.as_str(), "PIPE" | "HVAC") {
-            "它是 BRAN 的容器，请选其中一条 BRAN".to_string()
-        } else {
-            "层级容器没有标注，请选其中的构件".to_string()
-        };
-        return Err(not_annotatable(target, reason));
-    } else {
-        match zone_support(&chain, zone_index, zone_name.as_deref(), rules)? {
-            ZoneSupport::Root { subject, notes } => (SubjectKind::Support, subject, notes),
-            ZoneSupport::Refused(reason) => return Err(not_annotatable(target, reason)),
+        StructuralMatch::Suppo(level) => (SubjectKind::Support, chain[level].clone(), Vec::new()),
+        StructuralMatch::UdetSupport(found) => {
+            zone_name = found.zone_name;
+            let subject = ChainLink {
+                element: chain[found.level].element.clone(),
+                noun: UDET_SUPPORT.to_string(),
+            };
+            (SubjectKind::Support, subject, Vec::new())
+        }
+        StructuralMatch::Equipment(level) => {
+            (SubjectKind::Equipment, chain[level].clone(), Vec::new())
+        }
+        StructuralMatch::Civil(level) => (SubjectKind::Civil, chain[level].clone(), Vec::new()),
+        StructuralMatch::Container => {
+            let reason = if matches!(target.noun.as_str(), "PIPE" | "HVAC") {
+                "它是 BRAN 的容器，请选其中一条 BRAN".to_string()
+            } else {
+                "层级容器没有标注，请选其中的构件".to_string()
+            };
+            return Err(not_annotatable(target, reason));
+        }
+        StructuralMatch::Other => {
+            match zone_support(&chain, zone_index, zone_name.as_deref(), rules)? {
+                ZoneSupport::Root { subject, notes } => (SubjectKind::Support, subject, notes),
+                ZoneSupport::Refused(reason) => return Err(not_annotatable(target, reason)),
+            }
         }
     };
 
@@ -559,51 +806,72 @@ fn zone_support(
                 element: stru,
                 noun: "STRU".to_string(),
             },
-            notes: Vec::new(),
+            notes: parts.notes,
         });
     }
     let base = parts.name.unwrap_or_default();
+    let mut notes = parts.notes;
+    notes.push(format!(
+        "{} 在 {} 与全库都配不到 STRU（按名找过 {base}/STRU、{base}），以 REST 为归属对象",
+        describe(root),
+        describe(zone)
+    ));
     Ok(ZoneSupport::Root {
         subject: root.clone(),
-        notes: vec![format!(
-            "{} 在 {} 里配不到 STRU（找过 {base}/STRU、{base}），以 REST 为归属对象",
-            describe(root),
-            describe(zone)
-        )],
+        notes,
     })
 }
 
 /// 一个支架的几个部分（PML getsuppname 回的 `[suppname, struname, restname]`）。
 #[derive(Clone)]
 pub struct SupportParts {
-    /// PML `suppname`：SUPPO 的名字；ZONE 级支架是 STRU / REST 名去掉 `/STRU` / `/REST` 之后的部分。
+    /// PML `suppname`：SUPPO / `:SUPP` 的名字；ZONE 级支架是 STRU / REST 名去掉 `/STRU` / `/REST` 之后的部分。
     pub name: Option<String>,
     pub suppo: Option<DbElement>,
+    /// UDET 支架 `:SUPP`（基于 ZONE），整个支架是它的全部后代。
+    pub supp: Option<DbElement>,
     pub stru: Option<DbElement>,
     /// REST；风管支架（SUPPO）是第一个 SUPC 成员。
     pub rest: Option<DbElement>,
+    /// 取支架时的非致命说明（全库按名配对时有库的 NAME 表读不动），进视图 `issues`。
+    pub notes: Vec<String>,
 }
 
 impl SupportParts {
-    /// 归属对象：SUPPO，否则 STRU，否则 REST。
+    /// 归属对象：SUPPO，否则 `:SUPP`，否则 STRU，否则 REST。
     pub fn root(&self) -> Option<&DbElement> {
         self.suppo
             .as_ref()
+            .or(self.supp.as_ref())
             .or(self.stru.as_ref())
             .or(self.rest.as_ref())
     }
 }
 
-/// PML `getsuppname` 的移植（不判支架区，那是 [`classify`] 的事；配对口径见模块文档）。元素不在 SUPPO 之下、
-/// 也不在 ZONE 一级的 STRU / REST 之下时给 `None`。
+/// PML `getsuppname` 的移植（不判支架区，那是 [`classify`] 的事；口径见模块文档「支架归属」）：SUPPO、`:SUPP`、
+/// ZONE 一级的 STRU / REST 依次认。都不在之下时给 `None`。
 pub fn support_parts(element: &DbElement) -> Result<Option<SupportParts>, DbElementError> {
     let chain = host::owner_chain(element)?;
     if let Some(suppo) = chain.iter().find(|link| link.noun == "SUPPO") {
         return Ok(Some(SupportParts {
             name: soft(suppo.element.stored_name())?.flatten(),
             suppo: Some(suppo.element.clone()),
+            supp: None,
             stru: suppo.element.members_of_type("STRU")?.into_iter().next(),
             rest: suppo.element.members_of_type("SUPC")?.into_iter().next(),
+            notes: Vec::new(),
+        }));
+    }
+    let facts = chain_facts(element.db_set(), &chain)?;
+    if let Some(found) = udet_support(&facts) {
+        let supp = &chain[found.level].element;
+        return Ok(Some(SupportParts {
+            name: facts[found.level].name.clone(),
+            suppo: None,
+            supp: Some(supp.clone()),
+            stru: supp.members_of_type("STRU")?.into_iter().next(),
+            rest: supp.members_of_type("REST")?.into_iter().next(),
+            notes: Vec::new(),
         }));
     }
     let Some(zone_index) = chain
@@ -617,28 +885,22 @@ pub fn support_parts(element: &DbElement) -> Result<Option<SupportParts>, DbElem
     if !SUPPORT_ROOT_NOUNS.contains(&root.noun.as_str()) {
         return Ok(None);
     }
-    let root_name = soft(root.element.stored_name())?.flatten();
+    let root_name = facts[zone_index - 1].name.clone();
     zone_level_parts(&chain[zone_index].element, root, root_name).map(Some)
 }
 
-/// ZONE 级 STRU / REST 按名字配对（PML getsuppname L22-58）。
+/// ZONE 级 STRU / REST 按名字配对（PML getsuppname L22-58，取名 [`pair_names`]、先后 [`resolve_pair`]）。
 fn zone_level_parts(
     zone: &DbElement,
     root: &ChainLink,
     root_name: Option<String>,
 ) -> Result<SupportParts, DbElementError> {
-    let (own_suffix, pair_suffix, pair_noun) = if root.noun == "STRU" {
-        ("/STRU", "/REST", "REST")
-    } else {
-        ("/REST", "/STRU", "STRU")
-    };
-    let base = root_name.as_deref().map(|name| {
-        name.find(own_suffix)
-            .map_or(name, |at| &name[..at])
-            .to_string()
-    });
-    let pair = match base.as_deref() {
-        Some(base) => find_pair(zone, base, pair_suffix, pair_noun)?,
+    let plan = root_name
+        .as_deref()
+        .and_then(|name| pair_names(&root.noun, name));
+    let mut notes = Vec::new();
+    let pair = match &plan {
+        Some(plan) => find_pair(zone, plan, &mut notes)?,
         None => None,
     };
     let (stru, rest) = if root.noun == "STRU" {
@@ -647,40 +909,77 @@ fn zone_level_parts(
         (pair, Some(root.element.clone()))
     };
     Ok(SupportParts {
-        name: base,
+        name: plan.map(|plan| plan.base),
         suppo: None,
+        supp: None,
         stru,
         rest,
+        notes,
     })
 }
 
-/// ZONE 成员里类型为 `noun` 的 `base + suffix`，没有再找 `base` 本身（PML 的先后）。
+/// 配对件，先后见 [`resolve_pair`]。两步都查 NAME 表（[`named_in`]，每个名字查一次）：同区那一步只留属主是本区的，
+/// 全库那一步取第一个。本区所在库没有可读的 NAME 表时，同区那一步退回逐个成员比名字（[`host::member_named`]）。
 fn find_pair(
     zone: &DbElement,
-    base: &str,
-    suffix: &str,
-    noun: &str,
+    plan: &PairNames,
+    notes: &mut Vec<String>,
 ) -> Result<Option<DbElement>, DbElementError> {
-    let preferred = format!("{base}{suffix}");
-    let mut fallback = None;
-    for member in zone.members()? {
-        let Some(name) = soft(member.stored_name())?.flatten() else {
-            continue;
+    let set = zone.db_set();
+    let indexed = matches!(name_index(set, zone.db_no()), Ok(Some(_)));
+    let mut looked_up: Vec<(String, Vec<(DbElement, bool)>)> = Vec::new();
+    let found = resolve_pair(plan, |scope, name| {
+        if scope == PairScope::Zone && !indexed {
+            return host::member_named(zone, name, plan.pair_noun);
+        }
+        let at = match looked_up.iter().position(|(seen, _)| seen == name) {
+            Some(at) => at,
+            None => {
+                let hits = named_in(set, zone, name, plan.pair_noun, notes)?;
+                looked_up.push((name.to_string(), hits));
+                looked_up.len() - 1
+            }
         };
-        if name != preferred && name != base {
-            continue;
-        }
-        if soft(host::noun_of(&member))?.as_deref() != Some(noun) {
-            continue;
-        }
-        if name == preferred {
-            return Ok(Some(member));
-        }
-        if fallback.is_none() {
-            fallback = Some(member);
+        Ok(looked_up[at]
+            .1
+            .iter()
+            .find(|(_, in_zone)| scope == PairScope::Database || *in_zone)
+            .map(|(element, _)| element.clone()))
+    })?;
+    Ok(found.map(|(element, _)| element))
+}
+
+/// 全库按名（PML `name of $!name`）：`DbSet` 里各 DESI 库的 NAME 表精确查 `name`（[`named_exactly`]，库号升序），
+/// 留类型是 `noun`、在所钉会话里存名确是 `name` 的，各带一个「是不是 `zone` 的直属成员」。NAME 表读不动的库各留
+/// 一句话（同一句不重复）。
+fn named_in(
+    set: &Arc<DbSet>,
+    zone: &DbElement,
+    name: &str,
+    noun: &str,
+    notes: &mut Vec<String>,
+) -> Result<Vec<(DbElement, bool)>, DbElementError> {
+    let mut issues = Vec::new();
+    let refnos = named_exactly(set, name, &mut issues)?;
+    for issue in issues {
+        if !notes.contains(&issue) {
+            notes.push(issue);
         }
     }
-    Ok(fallback)
+    let mut hits = Vec::new();
+    for refno in refnos {
+        let element = set.element(refno);
+        if soft(noun_of(&element))?.as_deref() != Some(noun)
+            || soft(element.stored_name())?.flatten().as_deref() != Some(name)
+        {
+            continue;
+        }
+        let in_zone = soft(element.owner())?
+            .flatten()
+            .is_some_and(|owner| owner.refno() == zone.refno());
+        hits.push((element, in_zone));
+    }
+    Ok(hits)
 }
 
 fn not_annotatable(target: &ChainLink, reason: String) -> ObjectQueryError {
@@ -794,8 +1093,8 @@ pub fn civil_view(
     Ok(view)
 }
 
-/// 支架三类的真视图：[`query_support`] 读归属支架（SUPPO，或 ZONE 级 STRU + REST），判型的 `notes` 排在读取器的
-/// 问题之前（统一端点与 `examples/mbd_object_dump` 共用）。
+/// 支架三类的真视图：[`query_support`] 读归属支架（SUPPO、`:SUPP`，或 ZONE 级 STRU + REST），判型的 `notes` 排在
+/// 读取器的问题之前（统一端点与 `examples/mbd_object_dump` 共用）。
 pub fn support_view(
     set: &Arc<DbSet>,
     classified: &Classified,

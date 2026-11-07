@@ -1,16 +1,23 @@
 //! MBD 统一端点的判型与宿主读取件（plant3d-web#103 M7）。
 //!
 //! 前半不开库：缺省规则表（PML getmbdtype + 窗体口径）逐条、`[mbd_type_rules]` 经 `config` 读进来再覆盖、坏规则
-//! 跳过并点名。后半开 AvevaMarineSample（`common/mbd_db.rs`，缺样本整体 SKIP）：guide §1 的样本对象逐个判型、
-//! 支架按名配对、宿主读取件（属主名、UDA、世界坐标、目录参数、SPAMAP 候选、source_version）。
+//! 跳过并点名；UDET 支架 `:SUPP` 的判定（AMS 没有样本，合成属主链）与 ZONE 级 STRU / REST 配对的取名、先后。后半开
+//! AvevaMarineSample（`common/mbd_db.rs`，缺样本整体 SKIP）：guide §1 的样本对象逐个判型、支架按名配对（支架区里
+//! 每个 STRU / REST 与只在同区找的旧口径逐个对照）、宿主读取件（属主名、UDA、世界坐标、目录参数、SPAMAP 候选、
+//! source_version）。
 
 #[path = "common/mbd_db.rs"]
 mod mbd_db;
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use aios_database::mbd::civil_faces::design_dbs;
 use aios_database::mbd::host::{self, Aabb};
-use aios_database::mbd::object::{MbdTypeRules, SubjectKind, parse_annotation_type};
+use aios_database::mbd::object::{
+    LinkFacts, MbdTypeRules, PairNames, PairScope, StructuralMatch, SubjectKind, UDET_SUPPORT,
+    UdetSupport, pair_names, parse_annotation_type, resolve_pair, structural_match, udet_support,
+};
 use aios_database::mbd::{ObjectQueryError, classify_with, support_parts};
 use aios_database::options::{
     MbdTypeRulesConfig, default_mbd_type_rules, effective_mbd_type_rules,
@@ -274,6 +281,248 @@ fn aabb_distance_and_containment() {
     assert_eq!(aabb.union(&other).max, DVec3::new(10.0, 20.0, 30.0));
 }
 
+// ---- 不开库：UDET 支架与配对取名（纯逻辑） ---------------------------------------------------------
+
+fn link(noun: &str, udet: Option<&str>, name: Option<&str>) -> LinkFacts {
+    LinkFacts {
+        noun: noun.to_string(),
+        udet: udet.map(str::to_string),
+        name: name.map(str::to_string),
+    }
+}
+
+/// `:SUPP` 支架（基于 ZONE 的 UDET，挂在真正的区下面）：getmbdtype L48 `name of :supp of` 找到它，L52 拿它属主的名字
+/// 判 RACK；选中它本身也是支架。合成属主链 SCTN → FRMW → STRU → `:SUPP` → ZONE → SITE → WORL。
+#[test]
+fn udet_supports_are_found_on_the_owner_chain_and_typed_by_their_owner_zone() {
+    let chain = [
+        link("SCTN", None, None),
+        link("FRMW", None, None),
+        link("STRU", None, Some("/RS-01/STRU")),
+        link("ZONE", Some(":SUPP"), Some("/RS-01")),
+        link("ZONE", None, Some("/1TFA-RACK-01")),
+        link("SITE", None, Some("/1TTU-INST23")),
+        link("WORL", None, None),
+    ];
+    let inside = UdetSupport {
+        level: 3,
+        zone_name: Some("/1TFA-RACK-01".to_string()),
+    };
+    assert_eq!(udet_support(&chain), Some(inside.clone()));
+    assert_eq!(
+        structural_match(&chain),
+        StructuralMatch::UdetSupport(inside)
+    );
+    // 选中 `:SUPP` 本身：基础名词是 ZONE，但它是支架、不是层级容器。
+    assert_eq!(
+        structural_match(&chain[3..]),
+        StructuralMatch::UdetSupport(UdetSupport {
+            level: 0,
+            zone_name: Some("/1TFA-RACK-01".to_string()),
+        })
+    );
+    // UDET 名不分大小写；别的 UDET（YCYK 的 `:SDS_Supp`）、没派生的 ZONE 都不是。
+    let mut lower = chain.clone();
+    lower[3].udet = Some(":supp".to_string());
+    assert_eq!(udet_support(&lower).map(|found| found.level), Some(3));
+    let mut other = chain.clone();
+    other[3].udet = Some(":SDS_Supp".to_string());
+    assert_eq!(udet_support(&other), None);
+    let mut plain = chain.clone();
+    plain[3].udet = None;
+    assert_eq!(udet_support(&plain), None);
+    assert_eq!(structural_match(&plain), StructuralMatch::Other);
+    assert_eq!(UDET_SUPPORT, ":SUPP");
+
+    // 规则只看 SITE 与 `:SUPP` 属主的名字：INST + RACK 是仪表支架，INST 是仪表管支架，其余 EM4。`:SUPP` 自己的名字
+    // 含 RACK 不算。
+    let rules = MbdTypeRules::defaults();
+    let typed = |chain: &[LinkFacts]| {
+        let found = udet_support(chain).expect(":SUPP on the chain");
+        let site = chain
+            .iter()
+            .find(|link| link.noun == "SITE")
+            .and_then(|site| site.name.as_deref());
+        rules.annotation_type(SubjectKind::Support, site, found.zone_name.as_deref())
+    };
+    assert_eq!(typed(&chain), Some(Em9InstSupp));
+    let mut pipe_supp = chain.clone();
+    pipe_supp[3].name = Some("/RACK-S-01".to_string());
+    pipe_supp[4].name = Some("/1TFA-LX-SUPP".to_string());
+    assert_eq!(typed(&pipe_supp), Some(Em9PipeSupp));
+    let mut plant = chain.clone();
+    plant[5].name = Some("/1WCC-PIPEBJ".to_string());
+    assert_eq!(typed(&plant), Some(Em4Supp));
+}
+
+/// 结构判按对象族的先后（不看远近）：BRAN > SUPPO > `:SUPP` > EQUI > 墙板；`:SUPP` 里的 BRAN 仍是管道，`:SUPP` 里的
+/// EQUI 是支架（getmbdtype L48 先于 L64）。
+#[test]
+fn structural_match_keeps_getmbdtype_precedence() {
+    let supp = || link("ZONE", Some(":SUPP"), Some("/S-1"));
+    let zone = || link("ZONE", None, Some("/Z"));
+    let site = || link("SITE", None, Some("/SITE"));
+    let cases: Vec<(Vec<LinkFacts>, StructuralMatch)> = vec![
+        (
+            vec![
+                link("ELBO", None, None),
+                link("BRAN", None, Some("/B")),
+                link("PIPE", None, None),
+                supp(),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::Pipe(1),
+        ),
+        (
+            vec![
+                link("NOZZ", None, None),
+                link("EQUI", None, None),
+                supp(),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::UdetSupport(UdetSupport {
+                level: 2,
+                zone_name: Some("/Z".to_string()),
+            }),
+        ),
+        (
+            vec![
+                link("STRU", None, None),
+                link("SUPPO", None, None),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::Suppo(1),
+        ),
+        (
+            vec![
+                link("NOZZ", None, None),
+                link("EQUI", None, None),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::Equipment(1),
+        ),
+        (
+            vec![
+                link("FITT", None, None),
+                link("STWALL", None, None),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::Civil(1),
+        ),
+        (vec![zone(), site()], StructuralMatch::Container),
+        (
+            vec![link("PIPE", None, None), zone(), site()],
+            StructuralMatch::Container,
+        ),
+        (
+            vec![
+                link("HANG", None, None),
+                link("REST", None, None),
+                zone(),
+                site(),
+            ],
+            StructuralMatch::Other,
+        ),
+    ];
+    for (chain, expected) in cases {
+        let nouns: Vec<&str> = chain.iter().map(|link| link.noun.as_str()).collect();
+        assert_eq!(structural_match(&chain), expected, "{nouns:?}");
+    }
+}
+
+/// getsuppname L22-58 的取名：REST 名取 `/REST` 之前得 S，STRU 依次找 `S/STRU`、`S`；反过来同理。
+#[test]
+fn pair_names_follow_getsuppname() {
+    assert_eq!(
+        pair_names("REST", "/1WCC-R512.008/REST"),
+        Some(PairNames {
+            base: "/1WCC-R512.008".to_string(),
+            pair_noun: "STRU",
+            candidates: [
+                "/1WCC-R512.008/STRU".to_string(),
+                "/1WCC-R512.008".to_string()
+            ],
+        })
+    );
+    // AMS 的 STRU 名不带 `/STRU`：S 就是它自己。
+    assert_eq!(
+        pair_names("STRU", "/1WCC-R412.006"),
+        Some(PairNames {
+            base: "/1WCC-R412.006".to_string(),
+            pair_noun: "REST",
+            candidates: [
+                "/1WCC-R412.006/REST".to_string(),
+                "/1WCC-R412.006".to_string()
+            ],
+        })
+    );
+    // 后缀按第一次出现截（PML `before`）；大小写照原样比（PML `match`）。
+    assert_eq!(
+        pair_names("REST", "/A/REST/B").map(|plan| plan.base),
+        Some("/A".to_string())
+    );
+    assert_eq!(
+        pair_names("REST", "/a/rest").map(|plan| plan.base),
+        Some("/a/rest".to_string())
+    );
+    assert_eq!(pair_names("FRMW", "/A/STRU"), None);
+}
+
+/// 配对的先后：同区依次找 `S/STRU`、`S`，都没有再全库依次找。与 PML（全库按名）只差一种情形：同区有 `S`、别处另有
+/// `S/STRU` 时取同区的 `S`。
+#[test]
+fn pairs_are_looked_up_in_the_zone_first_then_across_the_databases() {
+    let plan = pair_names("REST", "/S/REST").unwrap();
+    let resolve = |zone: &[&'static str], elsewhere: &[&'static str]| {
+        let mut asked = Vec::new();
+        let found = resolve_pair(&plan, |scope, name| {
+            asked.push((scope, name.to_string()));
+            let hit = zone.iter().find(|candidate| **candidate == name).copied();
+            Ok::<_, ()>(match scope {
+                PairScope::Zone => hit,
+                PairScope::Database => hit.or_else(|| {
+                    elsewhere
+                        .iter()
+                        .find(|candidate| **candidate == name)
+                        .copied()
+                }),
+            })
+        })
+        .unwrap();
+        (found, asked)
+    };
+    let (found, asked) = resolve(&["/S/STRU", "/S"], &[]);
+    assert_eq!(found, Some(("/S/STRU", PairScope::Zone)));
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        resolve(&["/S"], &["/S/STRU"]).0,
+        Some(("/S", PairScope::Zone)),
+        "同区先找"
+    );
+    assert_eq!(resolve(&[], &["/S"]).0, Some(("/S", PairScope::Database)));
+    assert_eq!(
+        resolve(&[], &["/S", "/S/STRU"]).0,
+        Some(("/S/STRU", PairScope::Database)),
+        "全库那一步也是 S/STRU 优先"
+    );
+    let (found, asked) = resolve(&[], &[]);
+    assert_eq!(found, None);
+    assert_eq!(
+        asked,
+        [
+            (PairScope::Zone, "/S/STRU".to_string()),
+            (PairScope::Zone, "/S".to_string()),
+            (PairScope::Database, "/S/STRU".to_string()),
+            (PairScope::Database, "/S".to_string()),
+        ]
+    );
+}
+
 // ---- 开库：AMS 样本 -------------------------------------------------------------------------------
 
 /// 7997 / 7999 / 8000 / 1112：guide §1 的样本对象分布在这四座库里。
@@ -425,7 +674,8 @@ fn support_parts_pair_stru_and_rest_by_name() {
             "{}",
             wire(input)
         );
-        assert!(parts.suppo.is_none());
+        assert!(parts.suppo.is_none() && parts.supp.is_none());
+        assert!(parts.notes.is_empty(), "{:?}", parts.notes);
         assert_eq!(
             parts.stru.as_ref().map(|e| e.refno()),
             Some(r(24383, 69033))
@@ -457,6 +707,95 @@ fn support_parts_pair_stru_and_rest_by_name() {
             .unwrap()
             .is_none()
     );
+}
+
+/// 全库按名配对不改同区成对的结果：样本库每个支架区里 ZONE 一级的 STRU / REST，与只在同区找的旧口径（同区成员按
+/// 名一张表，`S/…` 优先、再 `S`，类型对得上）逐个对照。同区配得到的必须一样；同区配不到、全库配到的打印出来。
+#[test]
+fn ams_support_zone_pairs_match_the_in_zone_rule() {
+    let Some(set) = sample_set() else {
+        return;
+    };
+    let rules = MbdTypeRules::defaults();
+    let started = std::time::Instant::now();
+    let (mut checked, mut unpaired) = (0usize, 0usize);
+    let mut across = Vec::new();
+    let mut mismatches = Vec::new();
+    for dbnum in design_dbs(&set) {
+        let world = set.metadata(dbnum).expect("metadata").world;
+        for site in set.element(world).members().expect("sites") {
+            for zone in site.members().expect("zones") {
+                if host::noun_of(&zone).unwrap() != "ZONE" {
+                    continue;
+                }
+                let zone_name = zone.stored_name().unwrap();
+                let purpose = host::optional_text(&zone, "PURP").unwrap();
+                if !rules.is_support_zone(zone_name.as_deref(), purpose.as_deref()) {
+                    continue;
+                }
+                let members: Vec<_> = zone.members().expect("zone members").collect();
+                let mut by_name: HashMap<String, Vec<(String, RefNo)>> = HashMap::new();
+                for member in &members {
+                    if let Some(name) = member.stored_name().unwrap() {
+                        by_name
+                            .entry(name)
+                            .or_default()
+                            .push((host::noun_of(member).unwrap(), member.refno()));
+                    }
+                }
+                for member in &members {
+                    let noun = host::noun_of(member).unwrap();
+                    let Some(name) = member.stored_name().unwrap() else {
+                        continue;
+                    };
+                    let Some(plan) = pair_names(&noun, &name) else {
+                        continue;
+                    };
+                    let in_zone = plan.candidates.iter().find_map(|candidate| {
+                        by_name
+                            .get(candidate)?
+                            .iter()
+                            .find(|(noun, _)| noun == plan.pair_noun)
+                            .map(|(_, refno)| *refno)
+                    });
+                    let parts = support_parts(member)
+                        .expect("support parts")
+                        .expect("ZONE-level STRU / REST");
+                    let paired = if noun == "STRU" {
+                        parts.rest
+                    } else {
+                        parts.stru
+                    };
+                    let paired = paired.map(|element| element.refno());
+                    checked += 1;
+                    match (in_zone, paired) {
+                        (Some(expected), Some(got)) if expected == got => {}
+                        (None, Some(got)) => across.push(format!(
+                            "{noun} {name} ({}) in {:?} -> {}",
+                            wire(member.refno()),
+                            zone_name,
+                            wire(got)
+                        )),
+                        (None, None) => unpaired += 1,
+                        (expected, got) => mismatches.push(format!(
+                            "{noun} {name} ({}): in-zone {:?}, now {:?}",
+                            wire(member.refno()),
+                            expected.map(wire),
+                            got.map(wire)
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{checked} ZONE-level STRU / REST in support zones, {unpaired} unpaired, {} paired across zones in {} ms: {:#?}",
+        across.len(),
+        started.elapsed().as_millis(),
+        &across[..across.len().min(20)]
+    );
+    assert!(checked > 1000, "only {checked} supports checked");
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
 #[test]
