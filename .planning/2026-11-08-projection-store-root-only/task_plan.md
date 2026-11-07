@@ -156,7 +156,7 @@
 - 不重塑回执 / ACK 写入接口，不改外部 13 个文件对 `receipt()` 的读法（Q5 第二期）。
 - 不搬房间簿记（Q3 若批注改选「搬」，单列 Phase）。
 - 不动 `generation_root_lock`（`manual_update.rs:2708`）与 `db_generation_lock`（`e3d_model_service.rs:1960`）的实现和粒度；锁粒度归候选 1（dbnum 任务）。
-- 不碰 Ref0 统计退役的 T-D-6（另行拍板）。
+- 不碰 Ref0 统计退役的 T-D-6（已完成，见 ADR-088 追记）。
 - 不清理工作树里其它未提交改动；未经授权不提交。
 
 ## 6. 风险登记
