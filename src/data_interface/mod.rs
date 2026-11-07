@@ -302,6 +302,10 @@ pub mod table_parity;
 #[cfg(test)]
 mod direct_window_replay_parity;
 
+/// 删除投影的现行契约：统一删除入口接手前后都要成立。
+#[cfg(test)]
+mod projection_removal_contract;
+
 pub mod staging;
 
 /// old-pdms-io 退出护栏（`docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md` §0；

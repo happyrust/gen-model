@@ -1,0 +1,206 @@
+# Plannator 开发计划：投影存储只认「根」——删除只有一个入口
+
+> 计划 ID：`2026-11-08-projection-store-root-only`
+> 创建：2026-11-08
+> 状态：**approved**（2026-11-08 plannotator 门禁第 1 轮通过，批注已处置，见 §8）
+> 上游：2026-11-07 架构审核候选「【Strong】投影存储只认『根』」（本地 HTML 报告，未入库）+ 2026-11-08 源码核对（本文 §2）
+> 范围仓库：`gen-model`（分支 `refactor`；Ref0 统计退役已单独提交 `5117dda11`，工作树另有用户自己的未提交改动，本计划不碰）
+
+## 0. 拍板前提
+
+- 用户给定的约束：纯进程内改动；**ADR-082 的逐出规则原样保留**（候选、排除项、先后序、时机都不改）。
+
+### 0.1 拍板结果（门禁第 1 轮未批注，按推荐项执行）
+
+| # | 问题 | 推荐（本计划按此写） | 另一选择 |
+|---|---|---|---|
+| Q1 | 锁序放哪 | 存储外的**删除入口模块**。存储模块文档规定「不认识数据库、不渲染 SQL」，墓碑那一半本就进不去；存储保持同步 | 放进 `ModelMemoryStore` 内部：存储变 async，并依赖 `manual_update` / `e3d_model_service` 的锁注册表 |
+| Q2 | 删除时的回执语义 | 两条路统一：**被删的根全清**（现 `retire_deleted_root` 语义），**与它共享记录的外层根作废回执**（现 `invalidate_receipt` 语义） | 投影那路保留「全部只作废」，摄入那路只补外层根 |
+| Q3 | 房间代号簿记 | **留在存储里**，字段私有，对外只保留现有事件入口与房间模块在用的读口；ADR-082 D1 的房间证据排除仍在同一把写锁里判 | 搬到房间模块，由房间模块向存储注入「逐出否决」判据（单列 Phase） |
+| Q4 | 源码文本守卫 | 能换成行为测试的全换并删旧守卫；换不了的（「收键 → 删库行 → 删几何」顺序）保留并注明原因 | 全部保留，只新增行为测试 |
+| Q5 | 本期范围 | **只做删除入口 + 可见性收窄**；回执 / ACK 写入接口重塑、外部 `receipt()` 读者改造放第二期 | 一期并做写入接口重塑 |
+
+## 1. 权威来源（按证据强度）
+
+1. 源码（当前工作树）：`src/fast_model/model_memory_store.rs`、`src/data_interface/on_demand_model.rs`、`src/fast_model/e3d_model_service.rs`、`src/data_interface/fast_delete.rs`、`src/fast_model/model_write_behind.rs`、`src/fast_model/model_record_reader.rs`。
+2. ADR-082（进程内缓存按数量设上限；D1 逐出规则及 2026-09-22 房间证据补丁）。
+3. 源码注释引用的 ADR-079（`gen_root` 退役、生成根账本只在进程内）、ADR-080 D2（`CommitScope::WholeRoot` 是唯一拿缺席推删除的地方）、ADR-073 F3（房间 stray 代号）。
+
+## 2. 基线结论（2026-11-08 源码核对）
+
+### 2.1 公开面
+
+- `model_memory_store.rs` 共 4391 行，生产部分 L1–1996。正则数得 60 个公开函数，其中 6 个是 serde 辅助。
+- `ModelMemoryStore`（L1016，进程级 `static STORE`，`global()` 在 L1181）有 48 个 pub / pub(crate) 方法。
+- 其中 13 个在生产代码里没有外部调用：`room_baseline_known`、`room_member_records`、`room_snapshot`、`ack_rooms`、`evict_missing_root`、`restore_dbnum`、`snapshot_dbnum`、`forget_retired_root`、`pending_roots_of_dbnum`、`invalidate_publication_ack`、`invalidate_all_receipts`、`invalidate_receipts_of_dbnum`、`reset`。
+- 回执 / ACK 状态机直接暴露：`receipt()` 有 13 个文件在读；`invalidate_receipt` 有 3 个外部调用方（`model_dbnum_ensure`、`on_demand_model`、`model_refresh`）；`record_publication_ack`、`root_needs_persist` 由 `model_write_behind` 直接驱动。
+
+### 2.2 三条删除路径对照
+
+| | P 投影 / 读透 | D 摄入 | F 整库快删 |
+|---|---|---|---|
+| 入口 | `on_demand_model.rs` `clear_projected_scope` + `delete_projected_subtree`（L148–271） | `delete_model_subtree`（L282–336）→ `e3d_model_service.rs` `delete_persisted_geometry_root`（L4983–5021） | `fast_delete.rs` `wipe_dbnum_model_face`（L1128）/ `wipe_dbnum_for_upgrade`（L832） |
+| 锁 | 逐根 `try_generation_root` → `lock_db_generation(dbnum)` | 只有逐根 try-lock；`apply_geometry_delta`（L4344）→ `apply_geometry_delta_on`（L4606）不拿按库生成锁 | `try_lock_db_generation` → `DATA_COMMIT_SERIAL` → `DBNUM_STATE_WRITE_GATE` |
+| 受影响根 | 扫全部根，找与被删记录共享记录的根（O(根数 × 记录数)） | 只处理被删根本身 | 整库 |
+| 回执收尾 | `invalidate_receipt`：删回执 + ACK、标失效；点集 / 包围盒 / 提交序号留着 | `retire_deleted_root`（L703–739）：记录、管身分支记录、点集、ACK、序号、失效标记、包围盒、回执全清；只剩回执时推进 epoch | `clear_dbnum` |
+| 持久面 | 先写 spool 墓碑，再 `model_write_behind::publish` 删除提交 | 先改进程内（删除提交 + 退役），再把墓碑 SQL 直接打到 `SUL_DB` | 收键 → 删库行 → 删几何 |
+
+### 2.3 锁序靠源码文本守卫
+
+- `fast_delete.rs` L2201–2222（及 L2374）：按字符串在函数体里的位置判「生成锁 → 收键 → 删库行 → 删几何」。
+- `on_demand_model.rs` L1160–1240：数 `try_generation_root(root)`、`.delete_projected_subtree(` 的出现次数，判「先锁后删」「只有一份实现」。
+- `model_write_behind.rs` L2073–2085：断言 `e3d_model_service.rs` 含 `db_generation_lock(dbnum).lock_owned()`、`on_demand_model.rs` 含 `lock_db_generation(root.dbno())`。
+- 后果：改变量名就红；把锁序真弄反、只要字符串还在，就测不出来。
+
+### 2.4 回执残留的修法只在 D 路
+
+`e3d_model_service.rs` L4991–4997 记着的 `/model/records` 报 `receipt expects N, store has 0`，修法是 `retire_deleted_root` 在记录已为 0 时也摘回执。P 路走的是另一套 `invalidate_receipt`。
+
+### 2.5 房间簿记与 ADR-082 的耦合
+
+- `ScopeState` 里的 `room_changes` / `room_baselines` / `stray_generations_written` / `stamped_room_generations`（L359–370），镜像的是库上 `model_room_generation` / `model_room_stray_generations` 两列。
+- ADR-082 D1 的 2026-09-22 补丁要求：逐出候选排除 `ack_is_stray_room_evidence` 与 `ack_owes_room_edges` 两类。这个判断在同一把写锁里做，依赖的就是这几格簿记。
+- 外部入口：`note_stray_generation_written`（`model_db_adapter`）、`note_room_generation_stamped`（`room_recompute`、`task_end`）、`clear_stamped_room_generations`（`handlers`）、`stray_generations_written`（`room_recompute`）、`room_records_for_members`（`room_model`、`spatial_rooms`、`aabb_tree`）。
+
+### 2.6 待确认的两处差异（Phase 0 已定性，详见 §8）
+
+- **S1（缺陷，Phase 0 已复现）**：记录按祖先链挂到根上，嵌套根会共享记录。D 路删内层根 B 时，不会作废外层根 A 的回执。A 之后读 `/model/records` 报 `receipt expects N, store has M`（`model_record_reader.rs:41`），用例实测为 `receipt expects 7, store has 3`。
+- **S2（差异，Phase 0 定性为残留）**：P 路删根后点集 / 包围盒 / 提交序号仍留在存储里。读者逐个核过（`point_sets_of_root` → `pe_ptset` 行；`root_bounds` → 空间分支查询），没有可观察的错误。
+
+## 3. 目标形状
+
+### 3.1 删除入口（新模块，暂名 `fast_model::projection_removal`）
+
+- 对外只有两个入口：`remove_roots(RemovalRequest) -> RemovalReport` 和 `clear_dbnum(...)`。投影、摄入、整库快删三条路都从这里进。
+- `RemovalRequest`：投影域、要删的根（解根仍在调用方）、墓碑去向 `TombstoneSink::{Spool, Database, None}`。
+- 内部固定顺序：
+  1. 逐根 try-lock，按根排序去重，被占就回 409，一行不删；
+  2. 按库生成锁，多库时按 dbnum 升序拿；
+  3. 一次读锁内算出受影响根的闭包；
+  4. 写墓碑（spool 或直接写库）；
+  5. 删除提交进存储与 write-behind，按 Q2 的语义退役或作废回执。
+- 「只有一份实现」不再靠数字符串，而是靠可见性：存储的退役 / 删除方法只对入口模块可见。
+
+### 3.2 存储只按根说话
+
+- 本期保留的对外面：生成提交、记 ACK（write-behind）、按根读视图（`records_of_root` / `root_snapshot` / `roots`）、「这根完整吗 / 新吗」、逐出入口（仍由 write-behind 调）、房间事件与房间读口。
+- 新增 `retire_roots(scope, removed, affected)`：一把写锁内完成 Q2 语义，取代删除场景下的 `retire_deleted_root` + 逐个 `invalidate_receipt`。
+- 非删除场景的作废（`model_refresh`、`model_dbnum_ensure` 换源快照时）本期保留 `invalidate_receipt`。
+
+## 4. 施工阶段
+
+### Phase 0 — 钉现状（只加测试，不改生产代码）
+
+**为什么先做**：后面每一步都是并发路径上的重构。先把「锁被占时应该发生什么」「S1 / S2 到底是不是问题」写成可执行的测试，重构才有底。
+
+| 批次 | 内容 | 验收 |
+|---|---|---|
+| 0-A S1 复现 | 构造外层根 A 与内层根 B 共享记录的投影，走 D 路删 B，断言 A 的完整性判定 | 复现：以 `#[ignore = "S1，Phase 2 修"]` 入库并记入 §7；未复现：删去 S1，在 §8 记一笔 |
+| 0-B S2 定性 | P 路删根后查 `point_sets_of_root` / `root_bounds` / 下一次落库 | 写清有无可观察后果，结论进 §8 |
+| 0-C 锁的行为测试 | ② 按住按库生成锁，整库模型面清理回 `ModelFaceGenerationBusy`。①（逐根锁被占时 P / D 路都回「正在生成」且一行不删）和 ③（按库生成锁被占时 P 路等待而不是绕过）挪到 1-D 对入口写，理由见 §8 | 在现有代码上全绿，重构全程保持绿 |
+
+**阶段门 G0**：0-A / 0-B / 0-C 入库；`cargo test --lib` 全绿（S1 若复现，只允许这一条 ignore）；生产代码零改动。
+
+### Phase 1 — 引入删除入口，P 路先走（纯重构）
+
+| 批次 | 内容 |
+|---|---|
+| 1-A | 新建删除入口模块：`RemovalRequest` / `TombstoneSink` / `remove_roots`，语义与现 P 路逐位一致（本阶段仍用作废语义） |
+| 1-B | `clear_projected_scope` / `delete_projected_subtree` 收成调入口的薄壳 |
+| 1-C | 受影响根的计算下沉到存储（一次读锁、按记录反查根），结果与现在的 O(根数 × 记录数) 扫描一致 |
+| 1-D | 入口层的锁行为测试（原 0-C ①③）：逐根锁被占，入口回「正在生成」且一行不删；按库生成锁被占，入口等待而不是绕过。D 路请求的同款断言在 Phase 2 改道时补上 |
+
+**阶段门 G1**：G0 的测试与 1-D 全绿；`on_demand_model.rs` 里的文本守卫按 Q4 处理；`cargo test --lib` 全绿。
+
+### Phase 2 — D 路改道 + 回执语义统一（本计划唯一的行为改动阶段）
+
+| 批次 | 内容 |
+|---|---|
+| 2-A | `delete_model_subtree` 的逐根循环改走 `remove_roots(TombstoneSink::Database)`：补上按库生成锁与受影响根闭包（修 S1） |
+| 2-B | 存储新增 `retire_roots`，按 Q2 统一：被删根全清、外层根作废。P 路一并切过来，按 0-B 的结论处理 S2 |
+| 2-C | 核对「先持久、后进程内」的顺序：P 路现在就是这样，D 路反过来。确认 D 路改序不引入新的崩溃窗口再改；有疑义就保持现序，并在 §8 记录 |
+| 2-D | `delete_persisted_geometry_root` 删除或收成入口内部函数；L4991–4997 那条修法（记录为 0 也摘回执）用测试保留 |
+
+**阶段门 G2**：S1 的测试去掉 ignore 并转绿；0-C 与 1-D 全绿（含 D 路请求）；`cargo test --lib` 全绿；删内层根之后，外层根的 `/model/records` 不再报 incomplete（单测或 L2 任一）。
+
+### Phase 3 — 整库快删的存储部分收进入口
+
+| 批次 | 内容 |
+|---|---|
+| 3-A | `wipe_dbnum_model_face` / `wipe_dbnum_for_upgrade` 的存储部分改调入口的 `clear_dbnum`。「按库生成锁 → `DATA_COMMIT_SERIAL` → `DBNUM_STATE_WRITE_GATE`」与「收键 → 删库行 → 删几何」两个顺序原样保留 |
+| 3-B | `fast_delete.rs` L2201 / L2374 的文本守卫按 Q4 处理 |
+
+**阶段门 G3**：0-C ② 绿；快删相关单测全绿；`cargo test --lib` 全绿。
+
+### Phase 4 — 收窄可见性
+
+| 批次 | 内容 |
+|---|---|
+| 4-A | §2.1 的 13 个方法：只在测试里用的改 `#[cfg(test)]`，只在本文件内用的收成私有，确认没人用的删掉 |
+| 4-B | 删除类变更方法（`retire_deleted_root`、新 `retire_roots`）只对入口模块可见；`invalidate_receipt` 保留给非删除场景 |
+| 4-C | 房间簿记按 Q3：字段保持私有，对外只留 §2.5 列的事件与读口；没有外部调用的房间方法一并收窄 |
+
+**阶段门 G4**：`rg` 确认被收窄的方法没有外部调用；`cargo test --lib` 全绿；本 crate 无新增告警。
+
+### Phase 5 — 文档与术语
+
+- 新 ADR：「投影删除只有一个入口：锁序、受影响根闭包、退役与作废」。ADR-082 只加指向追记，判据不改。
+- `CONTEXT.md` 补术语：「删除入口」「受影响根」「退役 / 作废」。
+- `changelog.md` 新条目，写法为为什么 / 改 / 验证 / 没动。
+
+**阶段门 G5**：ADR 状态「已接受」；`rg -n "delete_persisted_geometry_root" docs src` 只剩历史记录。
+
+## 5. 不做什么（本计划明确排除）
+
+- 不改 ADR-082 的逐出判据与时机（D1 的候选、房间证据排除、`commit_ticks` 先后序、write-behind 触发点都原样）。
+- 不重塑回执 / ACK 写入接口，不改外部 13 个文件对 `receipt()` 的读法（Q5 第二期）。
+- 不搬房间簿记（Q3 若批注改选「搬」，单列 Phase）。
+- 不动 `generation_root_lock`（`manual_update.rs:2708`）与 `db_generation_lock`（`e3d_model_service.rs:1960`）的实现和粒度；锁粒度归候选 1（dbnum 任务）。
+- 不碰 Ref0 统计退役的 T-D-6（另行拍板）。
+- 不清理工作树里其它未提交改动；未经授权不提交。
+
+## 6. 风险登记
+
+| # | 风险 | 缓解 |
+|---|---|---|
+| R1 | 锁序改错：死锁，或 409 变多 | Phase 0 的行为测试先行；多库按 dbnum 升序拿锁；不改锁的实现 |
+| R2 | 统一语义后，外层根在删除后变成「需重算」，`/model/ensure` 多跑一次 | 这正是 P 路现在的行为；G2 前用单测钉住期望 |
+| R3 | D 路改成先持久后内存，引入新的崩溃窗口 | 2-C 先核对再动；有疑义保持现序 |
+| R4 | 本计划的改动和工作树里用户自己的未提交改动搅在一起 | Ref0 清理已单独提交（`5117dda11`，按块暂存，用户的改动没进）；每个 Phase 单独提交，只暂存本计划改的块 |
+| R5 | 本机跑不了 `cargo check --all-targets`：cargo 是第三方 fork，构建目录改不了，而且要替换运行中服务占着的 `aios-database.exe` 产物 | 各门以 `cargo test --lib` 为准；集成测试在服务停机窗口补跑 |
+| R6 | 删掉文本守卫后，失去「只有一份实现」的约束 | 改用可见性约束：退役 / 删除方法只对入口模块可见 |
+
+## 7. 门禁表
+
+| 门 | 条件 | 状态 |
+|---|---|---|
+| G0 钉现状 | 0-A / 0-B / 0-C 入库；`cargo test --lib` 绿；生产代码零改动 | 通过（2026-11-08，2900 过 / 0 失败 / 128 忽略） |
+| G1 入口就位 | P 路走入口；G0 测试绿 | 未开始 |
+| G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 未开始 |
+| G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 未开始 |
+| G4 可见性 | 收窄完成；无外部调用；无新增告警 | 未开始 |
+| G5 留痕 | ADR + CONTEXT + changelog | 未开始 |
+
+## 8. 批注处置记录
+
+### 第 1 轮（2026-11-08）
+
+- 结果：`approved`，附 3 条批注（`.gate-result.json` 只留本地、不入库：批注里原样带着删掉的那三行）。
+- 处置：3 条都是删掉 §0 里的对话引述，三行已删；§0 只留约束与拍板表。
+- Q1–Q5 未被批注，按推荐项执行。
+- 重跑门禁：`plannotator annotate .planning\2026-11-08-projection-store-root-only\task_plan.md --gate --json --result-file .planning\2026-11-08-projection-store-root-only\.gate-result-r2.json`
+
+### Phase 0 施工记录（2026-11-08）
+
+- 测试放在新模块 `src/data_interface/projection_removal_contract.rs`。存储和读取器文件里有未提交的改动，测试不放进去，提交才能干净分开。生产代码零改动。
+- 0-A S1：已复现。用例 `deleting_an_inner_root_keeps_the_outer_root_readable` 在全局投影里放外层根（自有 3 条）和内层根（4 条，祖先链经过外层根），回执分别是 7 和 4。走 `delete_persisted_geometry_root` 删内层根后，读外层根报 `memory overlay root 24384/30500 is incomplete: receipt expects 7, store has 3`。按 `#[ignore]` 入库，Phase 2 去掉 ignore 转绿。
+- 0-B S2：定性为残留，没有可观察的错误。
+  - P 路删根后，这根的作废标记、包围盒缓存、点集、提交序号都还在存储里。
+  - `pe_ptset` 行只给有回执的根渲染，重生成时点集整批替换，残留的点集不会被读出来。
+  - `spatial_branches.rs:111` 遍历 `root_bounds`：这根仍被算作「投影里的根」，但取它的记录为空，不出候选。
+  - Phase 0 不为残留单独写测试。2-B 把 P 路切到退役语义时，直接断言被删根「全清」。
+- 0-C：② 入库（`a_model_face_wipe_is_refused_while_the_dbnum_is_generating`，dbnum 取 6917，别的用例不生成这个库）。①③ 挪到 1-D，原因：
+  - `clear_projected_scope` / `delete_projected_subtree` / `try_generation_root` 都是私有的，D 路在拿锁前先读库；现在写只能靠数据库夹具或源码文本守卫。
+  - 锁原语本身已有 `active_generation_root_is_rejected_instead_of_queued` 覆盖。
+  - 入口建好后对入口写，P / D 两种请求共用一套断言。
+- G0：`cargo +nightly test --lib` 2900 过、0 失败、128 忽略（上次基线 2899 / 127；新增两条，S1 是唯一新增的 ignore）。
