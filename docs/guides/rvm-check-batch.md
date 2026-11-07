@@ -56,6 +56,50 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 `compare-failed` `commit-guard` `timeout`；`--stage export` / `generate` 单步成功记 `exported` /
 `generated`。只有 `pass` / `empty`（单步时 `exported` / `generated`）算干净。
 
+## 结果入库：`rvm_check_run` / `rvm_check_mismatch`
+
+跑完缺省把每个根写进 `DbOption.toml` 指的那台 SurrealDB（`src/rvm_check/store.rs`；页面上的单根比对
+也写同两张表）。`--no-store` 关掉；`store_mode` 为 mem 时没有可写的持久库，自动跳过并说明。
+表是 SCHEMALESS 的，首次用到时建表建索引。
+
+| 表 | 一行是什么 | 关键字段 |
+|---|---|---|
+| `rvm_check_run` | 一次比对（一个根） | `run_id`（页面是任务号；批量是 `<batch_id>/<tag>/<w0_w1>`，`batch_id` = 产物目录最后两级）、`source`（page / batch）、`refno` `dbnum` `noun` `name`、`verdict`（pass / kind_differ / fail）、`status`（更细的终态）、`stage` `message`、`counts`、`mismatch_total` `mismatch_by_kind` `mismatch_by_category`、`seconds` `gen_peak_private_mb`、`gen_ledger`（生成侧 `report.json` 的账本计数：skipped / evidence_pending / centreline_only / unknown_nouns …）、`artifact_dir` `files`、`finished_at` `finished_unix_ms` |
+| `rvm_check_mismatch` | 一条差异 | `run_id` `refno` `dbnum` `seq`、`category`（off / kind_differ / only_baseline / only_generated / unkeyable_* / container_* / `stage_failure` / `centreline_only`）、**`reason_kind`**（原因种类）、**`reason`**（带数值的一句话）、`severity`（error / warning / info）、`name` `noun` `max_axis_delta_mm` `baseline_kinds` `generated_kinds` `baseline_aabb` `generated_aabb` |
+
+`reason_kind` 是比 `category` 细一档的归因（`rvm_check::report::reason`）：
+
+| 原因种类 | 含义 |
+|---|---|
+| `aabb_shifted` | 尺寸一致、位置整体偏移（reason 里给出三轴偏移量） |
+| `aabb_axes_swapped` | 两根轴长互换——局部标架转了 90° |
+| `aabb_one_axis_size` | 只有一根轴长度不同（端面偏移、长度算错一类） |
+| `generated_larger` / `generated_smaller` | 生成体整体包住基准 / 被基准包住（多出 / 缺一块） |
+| `aabb_off` | 以上都不是的一般超差 |
+| `container_tube_mismatch` | 包围盒在容差内，是容器组内隐式管逐根账把它判成 off 的 |
+| `facet_vs_analytic` / `primitive_count_differs` / `primitive_kind_differs` | 图元种类：面片对解析图元 / 条数不同 / 种类不同 |
+| `missing_implied_tube` / `missing_named_element` / `missing_unnamed_element` | 只在基准（E3D 有、我们没有） |
+| `extra_implied_tube` / `extra_in_generated` | 只在生成 |
+| `unkeyable_baseline` / `unkeyable_generated` | 发不出主键（reason 抄的是比对器给的括号说明） |
+| `container_tube_off` / `container_tube_missing_in_generated` / `container_tube_extra_in_generated` | 容器组内逐根账 |
+| `centreline_only` | E3D 只画中心线（`info`，不进判据，只记账） |
+| `generate_timeout` / `generate_commit_guard` / `generate_panic` / `generate_unbalanced` / `e3d_export_no_file` / `e3d_launcher_missing` / `compare_panic` / `baseline_missing` … | 某一步没跑完（`category = stage_failure`，由阶段与报错文本认） |
+
+服务端查询（都是 GET，参数即过滤条件，不给就不限）：
+
+```text
+/api/v1/rvm-check/history?refno=24383/73927&dbnum=7999&verdict=fail&batch_id=…&before=<finished_unix_ms>&limit=50
+/api/v1/rvm-check/mismatches?run_id=…&refno=…&dbnum=…&category=off&reason_kind=aabb_shifted&noun=CTRAY&severity=error&limit=500&offset=0
+/api/v1/rvm-check/reasons?dbnum=7022            → 按 reason_kind / category / severity 的计数，多的在前
+```
+
+直接查库的写法一样：
+
+```sql
+SELECT reason_kind, noun, count() AS n FROM rvm_check_mismatch WHERE dbnum = 7022 AND severity = 'error' GROUP BY reason_kind, noun;
+SELECT run_id, verdict, mismatch_by_kind FROM rvm_check_run WHERE refno = '23406/1' ORDER BY finished_unix_ms DESC;
+```
+
 ## 2026-11-07 实测（AMS 九库 19 根，本机 32 核 / 64 GB）
 
 全部 `pass`（`/1AXIS` 为 `empty`）：both 243,522 / exact 243,522，off、only_*、unkeyable、

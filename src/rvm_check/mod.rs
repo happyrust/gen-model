@@ -26,12 +26,13 @@ pub mod batch;
 mod config;
 #[path = "macro.rs"]
 mod export_macro;
-mod report;
+pub mod report;
+pub mod store;
 
 pub use config::{ProjectDefaults, ResolvedTools, project_defaults, resolve_tools};
 pub use report::{
-    RvmCheckReport, RvmCounts, RvmMismatch, RvmTimingsMs, RvmVerdict, failed_report, judge_compare,
-    judge_report, verdict_message,
+    Judgement, RvmCheckReport, RvmCounts, RvmMismatch, RvmTimingsMs, RvmVerdict, failed_report,
+    judge_compare, judge_report, judge_report_full, verdict_message,
 };
 
 const STAGE_RESOLVE: &str = "resolve";
@@ -271,13 +272,75 @@ fn try_login_now(spec: &RunSpec, notes: &mut Vec<String>) -> bool {
     }
 }
 
+/// [`execute`] 的结果：页面报告（差异清单截到页面上限），加上**不截断**的差异清单给入库用
+/// （[`store`]）。
+pub struct ExecuteOutcome {
+    pub report: RvmCheckReport,
+    pub mismatches: Vec<RvmMismatch>,
+    pub task_dir: PathBuf,
+}
+
+impl ExecuteOutcome {
+    fn failed(report: RvmCheckReport, task_dir: PathBuf) -> Self {
+        Self {
+            report,
+            mismatches: Vec::new(),
+            task_dir,
+        }
+    }
+
+    /// 入库用的事实。`started_at` 由调用方给（任务登记时刻）。
+    pub fn run_facts(
+        &self,
+        task_id: &str,
+        project: &str,
+        spec: &RunSpec,
+        started_at: Option<String>,
+    ) -> store::RunFacts {
+        let report = &self.report;
+        store::RunFacts {
+            run_id: task_id.to_string(),
+            source: store::SOURCE_PAGE,
+            batch_id: None,
+            project: project.to_string(),
+            e3d_project: spec.e3d_project.clone(),
+            e3d_mdb: spec.e3d_mdb.clone(),
+            refno: spec.refno.clone(),
+            dbnum: report.dbnum,
+            db_type: report.db_type.clone(),
+            sesno: report.sesno,
+            noun: report.noun.clone(),
+            name: report.name.clone(),
+            verdict: report.verdict.clone(),
+            status: report.verdict.clone(),
+            stage: report.stage.clone(),
+            message: report.message.clone(),
+            counts: report.counts.clone(),
+            mismatches: self.mismatches.clone(),
+            centreline_only_baseline: report.centreline_only_baseline.clone(),
+            e3d_export_by: report.e3d_export_by.clone(),
+            seconds: store::StageSeconds {
+                resolve: report.timings_ms.resolve as f64 / 1000.0,
+                generate: report.timings_ms.generate_ours as f64 / 1000.0,
+                e3d_export: report.timings_ms.e3d_export as f64 / 1000.0,
+                compare: report.timings_ms.compare as f64 / 1000.0,
+            },
+            gen_peak_private_mb: None,
+            artifact_dir: Some(self.task_dir.clone()),
+            files: report.files.clone(),
+            started_at,
+            finished_at: chrono::Local::now(),
+        }
+    }
+}
+
 /// 整段比对。调用方放在 `spawn_blocking` 里。返回的报告已经是终态。
 pub fn execute(
     tree: &DirectTreeService,
     tasks: &TaskRegistry,
     task_id: &str,
     spec: &RunSpec,
-) -> RvmCheckReport {
+) -> ExecuteOutcome {
     let _guard = pipeline_lock();
     let started = Instant::now();
     let mut timings = RvmTimingsMs::default();
@@ -289,11 +352,14 @@ pub fn execute(
         Ok(resolved) => resolved,
         Err(message) => {
             timings.resolve = elapsed_ms(started);
-            return failed_report(
-                STAGE_RESOLVE,
-                &spec.refno,
-                redact(&message, &spec.password),
-                timings,
+            return ExecuteOutcome::failed(
+                failed_report(
+                    STAGE_RESOLVE,
+                    &spec.refno,
+                    redact(&message, &spec.password),
+                    timings,
+                ),
+                task_dir,
             );
         }
     };
@@ -332,7 +398,7 @@ pub fn execute(
         report.message = redact(&message, &spec.password);
         report.timings_ms.generate_ours = elapsed_ms(ours_started);
         report.files = existing_files(&task_dir);
-        return report;
+        return ExecuteOutcome::failed(report, task_dir);
     }
     report.timings_ms.generate_ours = elapsed_ms(ours_started);
 
@@ -346,7 +412,7 @@ pub fn execute(
             report.message = redact(&message, &spec.password);
             report.timings_ms.e3d_export = elapsed_ms(export_started);
             report.files = existing_files(&task_dir);
-            return report;
+            return ExecuteOutcome::failed(report, task_dir);
         }
     }
     report.timings_ms.e3d_export = elapsed_ms(export_started);
@@ -354,15 +420,18 @@ pub fn execute(
     tasks.set_stage(task_id, STAGE_COMPARE);
     tasks.set_units_done(task_id, 4);
     let compare_started = Instant::now();
+    let mut mismatches_all = Vec::new();
     match compare_rvms(&task_dir) {
-        Ok((verdict, counts, mismatches, centreline, truncated)) => {
-            report.verdict = verdict.as_str().to_string();
-            report.message = verdict_message(verdict, &counts);
+        Ok(judgement) => {
+            let (page_mismatches, truncated) = judgement.page_mismatches();
+            report.verdict = judgement.verdict.as_str().to_string();
+            report.message = verdict_message(judgement.verdict, &judgement.counts);
             report.stage = STAGE_COMPARE.to_string();
-            report.counts = counts;
-            report.mismatches = mismatches;
+            report.counts = judgement.counts;
+            report.mismatches = page_mismatches;
             report.mismatches_truncated = truncated;
-            report.centreline_only_baseline = centreline;
+            report.centreline_only_baseline = judgement.centreline_only_baseline;
+            mismatches_all = judgement.mismatches;
         }
         Err(message) => {
             report.stage = STAGE_COMPARE.to_string();
@@ -371,7 +440,11 @@ pub fn execute(
     }
     report.timings_ms.compare = elapsed_ms(compare_started);
     report.files = existing_files(&task_dir);
-    report
+    ExecuteOutcome {
+        report,
+        mismatches: mismatches_all,
+        task_dir,
+    }
 }
 
 pub fn task_state_for(report: &RvmCheckReport) -> TaskState {
@@ -440,7 +513,10 @@ fn session_project_dir(spec: &RunSpec, node: &ResolvedNode) -> PathBuf {
 
 /// `target` 在 MDB 顺序的 SITE 根表里排第几（1 起）；不在表里（不是 SITE 根）为 `None`。
 fn world_ordinal(sites: &[RefU64], target: RefU64) -> Option<usize> {
-    sites.iter().position(|site| *site == target).map(|at| at + 1)
+    sites
+        .iter()
+        .position(|site| *site == target)
+        .map(|at| at + 1)
 }
 
 pub(crate) fn resolve_node(
@@ -639,9 +715,7 @@ fn session_note(evidence: &E3dProcessEvidence) -> String {
     )
 }
 
-pub(crate) fn compare_rvms(
-    task_dir: &Path,
-) -> Result<(RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool), String> {
+pub(crate) fn compare_rvms(task_dir: &Path) -> Result<Judgement, String> {
     let baseline = task_dir.join("e3d.rvm");
     let generated = task_dir.join("ours").join("generated.rvm");
     let out = task_dir.join("compare.json");
@@ -665,7 +739,7 @@ pub(crate) fn compare_rvms(
             .flush()
             .map_err(|error| format!("写 compare.json 失败：{error}"))?;
     }
-    Ok(judge_report(&report))
+    Ok(judge_report_full(&report))
 }
 
 pub(crate) fn driver_for(spec: &RunSpec) -> E3dDriver {
@@ -960,8 +1034,18 @@ mod tests {
     #[test]
     fn unnamed_site_ordinal_counts_every_world_in_mdb_order() {
         let roots = [
-            "14195/1", "14195/2", "15201/535", "23705/1", "23705/289", "23713/2343",
-            "23714/1", "23717/2", "23734/1", "23737/1", "24381/46775", "24381/79977",
+            "14195/1",
+            "14195/2",
+            "15201/535",
+            "23705/1",
+            "23705/289",
+            "23713/2343",
+            "23714/1",
+            "23717/2",
+            "23734/1",
+            "23737/1",
+            "24381/46775",
+            "24381/79977",
         ]
         .map(|text| RefU64::from_str_refno(text).unwrap());
         let at = |text: &str| world_ordinal(&roots, RefU64::from_str_refno(text).unwrap());
@@ -981,13 +1065,47 @@ mod tests {
         std::fs::copy(&fixture, task_dir.join("e3d.rvm")).unwrap();
         std::fs::copy(&fixture, task_dir.join("ours").join("generated.rvm")).unwrap();
 
-        let (verdict, counts, mismatches, _, _) = compare_rvms(&task_dir).unwrap();
+        let judgement = compare_rvms(&task_dir).unwrap();
         let wrote_json = task_dir.join("compare.json").is_file();
         let _ = std::fs::remove_dir_all(&task_dir);
-        assert_eq!(verdict, RvmVerdict::Pass, "{mismatches:?}");
-        assert!(counts.both > 0);
-        assert_eq!(counts.off, 0);
+        assert_eq!(
+            judgement.verdict,
+            RvmVerdict::Pass,
+            "{:?}",
+            judgement.mismatches
+        );
+        assert!(judgement.counts.both > 0);
+        assert_eq!(judgement.counts.off, 0);
         assert!(wrote_json);
+    }
+
+    /// 红的那条路：两份不相干的 RVM 全是 only_*，入库的差异清单要**全量**（不受页面 400 条上限），
+    /// 每条带原因种类；页面那份截断。
+    #[test]
+    fn the_full_mismatch_list_survives_for_storage_while_the_page_copy_is_capped() {
+        let rvm_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/rvm");
+        let report = e3d_model::rvm_compare::compare_rvm_files(
+            &rvm_dir.join("1RCV0101-B1.rvm"),
+            &rvm_dir.join("1RS-WF03-W-C-RR001.rvm"),
+        )
+        .unwrap();
+        let judgement = judge_report_full(&report);
+        assert_eq!(judgement.verdict, RvmVerdict::Fail);
+        let expected = report.only_baseline.len()
+            + report.only_generated.len()
+            + report.unkeyable_baseline.len()
+            + report.unkeyable_generated.len();
+        assert_eq!(judgement.mismatches.len(), expected);
+        assert!(
+            judgement
+                .mismatches
+                .iter()
+                .all(|row| !row.reason_kind.is_empty() && !row.reason.is_empty()),
+            "每条差异都要有原因种类"
+        );
+        let (page, truncated) = judgement.page_mismatches();
+        assert_eq!(truncated, expected > 400);
+        assert_eq!(page.len(), expected.min(400));
     }
 
     /// 进程内从结构体判色与读落盘 JSON 判色必须一个口径：同一份报告两条路得同一结果，

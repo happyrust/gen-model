@@ -164,6 +164,10 @@ struct RvmCheckArgs {
     /// E3D 密码；不给时读环境变量 RVM_CHECK_PASSWORD。只进登录串，不落盘。
     #[arg(long)]
     password: Option<String>,
+    /// 不把结果写进库（缺省跑完写 `rvm_check_run` / `rvm_check_mismatch`，连 DbOption.toml 指的那台
+    /// SurrealDB；`store_mode` 为 mem 时自动跳过）。
+    #[arg(long)]
+    no_store: bool,
     /// 内部用：子进程模式，只生成 --only 指定的根。
     #[arg(long, hide = true)]
     child: bool,
@@ -323,6 +327,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         min_commit_free_gb: args.min_commit_free_gb,
         gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
         e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
+        store: !args.no_store,
     })?;
     if !outcome.clean {
         std::process::exit(1);

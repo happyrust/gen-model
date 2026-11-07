@@ -576,6 +576,10 @@ async fn serve_with_ready(
             "/api/v1/rvm-check/runs/{id}/files/{name}",
             get(rvm_check::get_file),
         )
+        // 库里的比对结果（`rvm_check_run` / `rvm_check_mismatch`，页面与批量命令都写）。
+        .route("/api/v1/rvm-check/history", get(rvm_check::history))
+        .route("/api/v1/rvm-check/mismatches", get(rvm_check::mismatches))
+        .route("/api/v1/rvm-check/reasons", get(rvm_check::reasons))
         .route(
             "/api/v1/tasks/{id}/changes",
             get(handlers::task_changes),

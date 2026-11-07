@@ -143,42 +143,109 @@ pub async fn start_run(
     );
     let tasks = state.tasks;
     let tree_provider = state.direct_tree.clone();
+    let project = state.identity.project.clone();
     let task_for_run = task_id.clone();
+    let started_at = chrono::Local::now().to_rfc3339();
     tokio::spawn(async move {
         let tree = match tree_provider.get().await {
             Ok(tree) => tree,
             Err(error) => {
-                finish_failed(
-                    tasks,
-                    &task_for_run,
-                    &spec.refno,
-                    format!("模型树还没准备好：{error:#}"),
-                );
+                let message = format!("模型树还没准备好：{error:#}");
+                finish_failed(tasks, &task_for_run, &spec.refno, message.clone());
+                store_failed_run(&task_for_run, &project, &spec, message, started_at).await;
                 return;
             }
         };
         let task_inside = task_for_run.clone();
-        let refno = spec.refno.clone();
+        let spec_inside = spec.clone();
         let joined = tokio::task::spawn_blocking(move || {
-            crate::rvm_check::execute(tree.as_ref(), tasks, &task_inside, &spec)
+            crate::rvm_check::execute(tree.as_ref(), tasks, &task_inside, &spec_inside)
         })
         .await;
         match joined {
-            Ok(report) => {
-                let state = task_state_for(&report);
-                let value = serde_json::to_value(&report)
+            Ok(outcome) => {
+                let state = task_state_for(&outcome.report);
+                let value = serde_json::to_value(&outcome.report)
                     .unwrap_or_else(|_| json!({"verdict": "fail", "message": "报告无法序列化"}));
                 tasks.finish(&task_for_run, state, value);
+                let facts = outcome.run_facts(&task_for_run, &project, &spec, Some(started_at));
+                store_run(facts).await;
             }
-            Err(error) => finish_failed(
-                tasks,
-                &task_for_run,
-                &refno,
-                format!("比对任务异常结束：{error}"),
-            ),
+            Err(error) => {
+                let message = format!("比对任务异常结束：{error}");
+                finish_failed(tasks, &task_for_run, &spec.refno, message.clone());
+                store_failed_run(&task_for_run, &project, &spec, message, started_at).await;
+            }
         }
     });
     Ok((StatusCode::ACCEPTED, Json(json!({ "task_id": task_id }))))
+}
+
+/// 落库。失败只记日志：任务结果已经在注册表与产物目录里，库里少一行不改变页面的结论。
+async fn store_run(facts: crate::rvm_check::store::RunFacts) {
+    let run_id = facts.run_id.clone();
+    match crate::rvm_check::store::persist_facts(&facts).await {
+        Ok((mismatches, rows)) => log::info!(
+            "[rvm-check.store] {run_id} 已入库：verdict={} 差异 {mismatches} 行（含记账共 {rows} 行）",
+            facts.verdict
+        ),
+        Err(error) => log::warn!("[rvm-check.store] {run_id} 没有入库：{error:#}"),
+    }
+}
+
+/// 还没进 [`crate::rvm_check::execute`] 就失败的那两条路（模型树没好、任务线程异常）也要留一行。
+async fn store_failed_run(
+    task_id: &str,
+    project: &str,
+    spec: &crate::rvm_check::RunSpec,
+    message: String,
+    started_at: String,
+) {
+    let report = failed_report("resolve", &spec.refno, message, Default::default());
+    let outcome = crate::rvm_check::ExecuteOutcome {
+        report,
+        mismatches: Vec::new(),
+        task_dir: spec.tools.work_dir.join(task_id),
+    };
+    store_run(outcome.run_facts(task_id, project, spec, Some(started_at))).await;
+}
+
+/// `GET /api/v1/rvm-check/history?refno=&dbnum=&verdict=&status=&source=&batch_id=&before=&limit=`：
+/// 库里的历次比对，最新在前。
+pub async fn history(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::RunFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    let runs = crate::rvm_check::store::list_runs(&filter)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(json!({ "count": runs.len(), "runs": runs })))
+}
+
+/// `GET /api/v1/rvm-check/mismatches?run_id=&refno=&dbnum=&batch_id=&category=&reason_kind=&noun=&severity=&limit=&offset=`：
+/// 差异明细（每条带 `category` / `reason_kind` / `reason`）。
+pub async fn mismatches(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::MismatchFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    let rows = crate::rvm_check::store::list_mismatches(&filter)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(json!({ "count": rows.len(), "rows": rows })))
+}
+
+/// `GET /api/v1/rvm-check/reasons?…`（条件同 `mismatches`）：按原因种类汇总的计数，多的在前。
+pub async fn reasons(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::MismatchFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    let kinds = crate::rvm_check::store::reason_summary(&filter)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(json!({ "count": kinds.len(), "kinds": kinds })))
 }
 
 pub async fn get_run(

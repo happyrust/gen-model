@@ -77,6 +77,9 @@ pub struct BatchOptions {
     pub min_commit_free_gb: f64,
     pub gen_timeout: Duration,
     pub e3d_timeout: Duration,
+    /// 跑完把每根的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`（[`super::store`]）。
+    /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，自动跳过。
+    pub store: bool,
 }
 
 /// `--child`：只为给定的根做生成，产物落在与父进程同一套目录里，别的什么都不写。
@@ -92,6 +95,29 @@ pub struct BatchOutcome {
     pub summary_path: PathBuf,
     pub clean: bool,
     pub records: Vec<RootRecord>,
+    /// 这一批在库里的编号（`rvm_check_run.batch_id`）；没入库时也给，便于对照产物目录。
+    pub batch_id: String,
+    /// 入库结果：`Some(Ok((根数, 行数)))` / `Some(Err(原因))` / 没开入库时 `None`。
+    pub stored: Option<Result<(usize, usize), String>>,
+}
+
+/// 库里的批次编号：产物目录最后两级路径（`rvm-check-batch/20261107-full`），续跑同一目录就是同一批。
+pub fn batch_id_for(out_root: &Path) -> String {
+    let mut parts: Vec<String> = out_root
+        .components()
+        .rev()
+        .take(2)
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    parts.reverse();
+    if parts.is_empty() {
+        out_root.display().to_string()
+    } else {
+        parts.join("/")
+    }
 }
 
 /// 根的终态。`pass` / `empty` 是干净的；`exported` / `generated` 只在对应单步模式下出现。
@@ -176,6 +202,12 @@ pub struct RootRecord {
     pub mismatches_truncated: bool,
     #[serde(default)]
     pub centreline_only_baseline: usize,
+    /// 不截断的差异清单，只给入库用（[`super::store`]）；不进 `run.json`。
+    #[serde(skip)]
+    pub mismatches_all: Vec<RvmMismatch>,
+    /// 只画中心线的基准成员名，同样只给入库用。
+    #[serde(skip)]
+    pub centreline_names: Vec<String>,
 }
 
 /// 枚举出来的一个根。
@@ -664,17 +696,51 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         })
         .collect();
 
-    let summary = Summary::build(opts, &spec, &dbnums, &baseline_source, records.clone());
+    let batch_id = batch_id_for(&out_root);
+    let summary = Summary::build(
+        opts,
+        &spec,
+        &dbnums,
+        &baseline_source,
+        &batch_id,
+        records.clone(),
+    );
     let summary_path = out_root.join("summary.json");
     write_json(&summary_path, &summary)?;
     let table = summary.table();
     std::fs::write(out_root.join("summary.txt"), &table)?;
     println!("\n{table}");
     println!("summary.json: {}", summary_path.display());
+
+    // 入库：续跑跳过的根上次已经写过（且手里只剩截断的清单），不重写。
+    let stored = if opts.store {
+        let facts: Vec<super::store::RunFacts> = records
+            .iter()
+            .filter(|record| !record.resumed)
+            .map(|record| record.run_facts(&batch_id, &spec))
+            .collect();
+        let outcome =
+            super::store::persist_batch_blocking(&facts).map_err(|error| format!("{error:#}"));
+        match &outcome {
+            Ok((runs, rows)) => println!(
+                "结果已入库 {}：batch_id {batch_id}，{runs} 个根、{rows} 行 → rvm_check_run / rvm_check_mismatch\
+                 （查询：GET /api/v1/rvm-check/history?batch_id=…、/mismatches、/reasons）",
+                aios_core::get_db_option().get_version_db_conn_str()
+            ),
+            Err(error) => eprintln!(
+                "结果没有入库（产物目录里的 JSON 仍完整；加 --no-store 可关掉这一步）：{error}"
+            ),
+        }
+        Some(outcome)
+    } else {
+        None
+    };
     Ok(BatchOutcome {
         summary_path,
         clean: summary.clean,
         records,
+        batch_id,
+        stored,
     })
 }
 
@@ -697,6 +763,104 @@ impl RootRecord {
             mismatches: Vec::new(),
             mismatches_truncated: false,
             centreline_only_baseline: 0,
+            mismatches_all: Vec::new(),
+            centreline_names: Vec::new(),
+        }
+    }
+
+    /// 入库用的事实。`run_id = <batch_id>/<tag>/<w0_w1>`；续跑拿到的记录只剩截断过的清单，
+    /// 调用方不会拿它来覆盖库里完整的那一份。
+    pub(crate) fn run_facts(&self, batch_id: &str, spec: &RunSpec) -> super::store::RunFacts {
+        use super::store::{RunFacts, SOURCE_BATCH, StageSeconds};
+        let refno = self.refno.trim_start_matches('=').to_string();
+        let verdict = match self.status.as_str() {
+            status::PASS | status::EMPTY | status::EXPORTED | status::GENERATED => {
+                super::report::VERDICT_PASS
+            }
+            status::KIND_DIFFER => super::report::VERDICT_KIND,
+            _ => super::report::VERDICT_FAIL,
+        };
+        let stage = match self.status.as_str() {
+            status::NO_BASELINE => "e3d_export",
+            status::GEN_FAILED | status::COMMIT_GUARD | status::TIMEOUT => "generate_ours",
+            status::COMPARE_FAILED => "compare_failed",
+            status::EXPORTED => "e3d_export",
+            status::GENERATED => "generate_ours",
+            _ => "compare",
+        };
+        let seconds = |stage: &Option<StageRecord>| stage.as_ref().map_or(0.0, |s| s.seconds);
+        let finished_at = self
+            .compare
+            .as_ref()
+            .or(self.generate.as_ref())
+            .or(self.export.as_ref())
+            .and_then(|stage| chrono::DateTime::parse_from_rfc3339(&stage.finished).ok())
+            .map(|time| time.with_timezone(&chrono::Local))
+            .unwrap_or_else(chrono::Local::now);
+        let dir = PathBuf::from(&self.dir);
+        let mut files = Vec::new();
+        for (name, path) in [
+            ("e3d.rvm", dir.join("e3d.rvm")),
+            ("generated.rvm", dir.join("ours").join("generated.rvm")),
+            ("compare.json", dir.join("compare.json")),
+            ("run.json", dir.join("run.json")),
+        ] {
+            if path.is_file() {
+                files.push(name.to_string());
+            }
+        }
+        let message = if self.status == status::COMMIT_GUARD
+            || self.status == status::TIMEOUT
+            || self.status == status::GEN_FAILED
+        {
+            // 生成那一段的说明比终态行更具体（退出码、stderr 尾巴）。
+            self.generate
+                .as_ref()
+                .map(|g| g.message.clone())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| self.message.clone())
+        } else {
+            self.message.clone()
+        };
+        RunFacts {
+            run_id: format!("{batch_id}/{}/{}", self.tag, refno.replace('/', "_")),
+            source: SOURCE_BATCH,
+            batch_id: Some(batch_id.to_string()),
+            project: spec.project_name.clone(),
+            e3d_project: spec.e3d_project.clone(),
+            e3d_mdb: spec.e3d_mdb.clone(),
+            refno,
+            dbnum: Some(self.dbno),
+            db_type: Some("DESI".to_string()),
+            sesno: None,
+            noun: Some(self.noun.clone()),
+            name: (!self.name.is_empty()).then(|| self.name.clone()),
+            verdict: verdict.to_string(),
+            status: self.status.clone(),
+            stage: stage.to_string(),
+            message,
+            counts: self.counts.clone().unwrap_or_default(),
+            mismatches: if self.mismatches_all.is_empty() {
+                self.mismatches.clone()
+            } else {
+                self.mismatches_all.clone()
+            },
+            centreline_only_baseline: self.centreline_names.clone(),
+            e3d_export_by: self
+                .export
+                .as_ref()
+                .and_then(|e| e.exit.as_str().map(str::to_string)),
+            seconds: StageSeconds {
+                resolve: 0.0,
+                generate: seconds(&self.generate),
+                e3d_export: seconds(&self.export),
+                compare: seconds(&self.compare),
+            },
+            gen_peak_private_mb: self.generate.as_ref().and_then(|g| g.peak_private_mb),
+            artifact_dir: Some(dir),
+            files,
+            started_at: None,
+            finished_at,
         }
     }
 
@@ -980,20 +1144,24 @@ fn process_root(
     }
     let started = Instant::now();
     match compare_rvms(&job.dir) {
-        Ok((verdict, counts, mismatches, centreline, truncated)) => {
-            record.message = verdict_message(verdict, &counts);
+        Ok(judgement) => {
+            let verdict = judgement.verdict;
+            record.message = verdict_message(verdict, &judgement.counts);
             record.status = match verdict {
-                RvmVerdict::Pass if counts.both == 0 => status::EMPTY,
+                RvmVerdict::Pass if judgement.counts.both == 0 => status::EMPTY,
                 RvmVerdict::Pass => status::PASS,
                 RvmVerdict::KindDiffer => status::KIND_DIFFER,
                 RvmVerdict::Fail => status::FAIL,
             }
             .to_string();
             record.compare = Some(StageRecord::new(0, started, ""));
-            record.counts = Some(counts);
-            record.mismatches = mismatches;
+            let (page_mismatches, truncated) = judgement.page_mismatches();
+            record.counts = Some(judgement.counts);
+            record.mismatches = page_mismatches;
             record.mismatches_truncated = truncated;
-            record.centreline_only_baseline = centreline.len();
+            record.centreline_only_baseline = judgement.centreline_only_baseline.len();
+            record.mismatches_all = judgement.mismatches;
+            record.centreline_names = judgement.centreline_only_baseline;
         }
         Err(message) => {
             record.status = status::COMPARE_FAILED.to_string();
@@ -1195,6 +1363,8 @@ struct DbSummary {
 #[derive(Serialize)]
 struct Summary {
     generated_at: String,
+    /// 库里 `rvm_check_run.batch_id` 的取值（[`batch_id_for`]）。
+    batch_id: String,
     stage: Stage,
     out: String,
     dbnums: Vec<u32>,
@@ -1239,6 +1409,7 @@ impl Summary {
         spec: &RunSpec,
         dbnums: &[u32],
         baseline: &str,
+        batch_id: &str,
         roots: Vec<RootRecord>,
     ) -> Self {
         let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -1291,6 +1462,7 @@ impl Summary {
         }
         Self {
             generated_at: chrono::Local::now().to_rfc3339(),
+            batch_id: batch_id.to_string(),
             stage: opts.stage,
             out: opts.out.display().to_string(),
             dbnums: dbnums.to_vec(),
@@ -1518,11 +1690,12 @@ mod tests {
             min_commit_free_gb: 1.5,
             gen_timeout: Duration::from_secs(1),
             e3d_timeout: Duration::from_secs(1),
+            store: false,
         };
         let spec = RunSpec {
             install_dir: PathBuf::new(),
             projects_dir: PathBuf::new(),
-            project_name: String::new(),
+            project_name: "AvevaMarineSample".to_string(),
             project_dir: PathBuf::new(),
             project_evar: PathBuf::new(),
             e3d_project: "AMS".to_string(),
@@ -1532,8 +1705,16 @@ mod tests {
             refno: String::new(),
             tools: super::super::resolve_tools(),
         };
-        let summary = Summary::build(&opts, &spec, &[7999], "test", vec![pass, fail]);
+        let summary = Summary::build(
+            &opts,
+            &spec,
+            &[7999],
+            "test",
+            "rvm-check-batch/t",
+            vec![pass.clone(), fail.clone()],
+        );
         assert!(!summary.clean);
+        assert_eq!(summary.batch_id, "rvm-check-batch/t");
         assert_eq!(summary.totals.both, 14);
         assert_eq!(summary.totals.off, 1);
         assert_eq!(summary.status_counts.get("pass"), Some(&1));
@@ -1544,5 +1725,39 @@ mod tests {
         let table = summary.table();
         assert!(table.contains("NOT CLEAN"));
         assert!(table.contains("=1/3"));
+
+        // 入库事实：run_id 按批次 / tag / 根拼，refno 去掉 `=`，终态映射到三色 + 阶段。
+        let facts = pass.run_facts("rvm-check-batch/t", &spec);
+        assert_eq!(facts.run_id, "rvm-check-batch/t/ams7999/1_2");
+        assert_eq!(facts.refno, "1/2");
+        assert_eq!(facts.verdict, "pass");
+        assert_eq!(facts.project, "AvevaMarineSample");
+        assert_eq!(facts.gen_peak_private_mb, Some(900));
+        assert_eq!(facts.seconds.generate, 2.5);
+        let mut guarded = RootRecord::new(&job(7999, "1/4"));
+        guarded.status = status::COMMIT_GUARD.to_string();
+        guarded.message = "x".to_string();
+        guarded.generate = Some(StageRecord {
+            exit: status::COMMIT_GUARD.into(),
+            message: "可提交内存余量低于 1.5 GB，已杀掉生成子进程".to_string(),
+            ..StageRecord::default()
+        });
+        let facts = guarded.run_facts("b", &spec);
+        assert_eq!(facts.verdict, "fail");
+        assert_eq!(facts.stage, "generate_ours");
+        assert!(facts.message.contains("可提交内存"));
+        let (row, rows) = super::super::store::build_rows(&facts);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason_kind, "generate_commit_guard");
+        assert_eq!(row.mismatch_by_kind["generate_commit_guard"], 1);
+    }
+
+    #[test]
+    fn batch_ids_are_the_last_two_path_components() {
+        assert_eq!(
+            batch_id_for(Path::new(r"D:\x\output\rvm-check-batch\20261107-full")),
+            "rvm-check-batch/20261107-full"
+        );
+        assert_eq!(batch_id_for(Path::new("single")), "single");
     }
 }

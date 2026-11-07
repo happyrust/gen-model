@@ -63,6 +63,66 @@ pub struct RvmMismatch {
     pub generated_kinds: Vec<String>,
     pub baseline_aabb: Option<[f64; 6]>,
     pub generated_aabb: Option<[f64; 6]>,
+    /// 原因种类（[`reason`] 模块的常量之一）：比 `category` 细一档，按几何形态归因——位置偏移、
+    /// 轴长互换、生成体偏大 / 偏小、容器管身账、面片 vs 解析图元……查库时按它分组。
+    #[serde(default)]
+    pub reason_kind: String,
+    /// 原因的一句话说明（含具体数值）。
+    #[serde(default)]
+    pub reason: String,
+    /// `error` / `warning`：种类不一致只是黄，其余都是红。
+    #[serde(default)]
+    pub severity: String,
+}
+
+/// 原因种类的全部取值。一条差异一个；判法在 [`classify_pair`] / [`classify_single`]。
+pub mod reason {
+    pub const ERROR: &str = "error";
+    pub const WARNING: &str = "warning";
+    pub const INFO: &str = "info";
+
+    /// 包围盒：尺寸一致、位置整体偏移。
+    pub const AABB_SHIFTED: &str = "aabb_shifted";
+    /// 包围盒：两根轴的长度互换（局部标架转了 90°）。
+    pub const AABB_AXES_SWAPPED: &str = "aabb_axes_swapped";
+    /// 包围盒：只有一根轴长度不同（端面偏移、长度算错一类）。
+    pub const AABB_ONE_AXIS: &str = "aabb_one_axis_size";
+    /// 包围盒：生成体整体包住基准（多出一块）。
+    pub const GENERATED_LARGER: &str = "generated_larger";
+    /// 包围盒：基准整体包住生成体（缺一块）。
+    pub const GENERATED_SMALLER: &str = "generated_smaller";
+    /// 包围盒：以上都不是的一般超差。
+    pub const AABB_OFF: &str = "aabb_off";
+    /// 包围盒在容差内，是容器组内隐式管逐根账把它判成 off 的。
+    pub const CONTAINER_TUBE_MISMATCH: &str = "container_tube_mismatch";
+    /// 图元种类：一侧写面片、一侧写解析图元。
+    pub const FACET_VS_ANALYTIC: &str = "facet_vs_analytic";
+    /// 图元种类：种类集合相同、条数不同。
+    pub const PRIMITIVE_COUNT_DIFFERS: &str = "primitive_count_differs";
+    /// 图元种类：种类集合不同。
+    pub const PRIMITIVE_KIND_DIFFERS: &str = "primitive_kind_differs";
+    /// 只在基准：E3D 的隐式管身（`TUBE n of …`）。
+    pub const MISSING_IMPLIED_TUBE: &str = "missing_implied_tube";
+    /// 只在基准：命名元素（`/NAME`）。
+    pub const MISSING_NAMED_ELEMENT: &str = "missing_named_element";
+    /// 只在基准：无名元素（`NOUN n of OWNER`）。
+    pub const MISSING_UNNAMED_ELEMENT: &str = "missing_unnamed_element";
+    /// 只在生成：隐式管身。
+    pub const EXTRA_IMPLIED_TUBE: &str = "extra_implied_tube";
+    /// 只在生成：其余。
+    pub const EXTRA_IN_GENERATED: &str = "extra_in_generated";
+    /// 基准成员发不出主键。
+    pub const UNKEYABLE_BASELINE: &str = "unkeyable_baseline";
+    /// 生成元素发不出主键（属主无名）。
+    pub const UNKEYABLE_GENERATED: &str = "unkeyable_generated";
+    /// 容器组内一根管身超差。
+    pub const CONTAINER_TUBE_OFF: &str = "container_tube_off";
+    /// 容器组内 E3D 多画一条记录。
+    pub const CONTAINER_TUBE_MISSING: &str = "container_tube_missing_in_generated";
+    /// 容器组内我们多画一根。
+    pub const CONTAINER_TUBE_EXTRA: &str = "container_tube_extra_in_generated";
+    /// 基准成员只有中心线（E3D 画线、我们不画），不进判据，只记账。
+    pub const CENTRELINE_ONLY: &str = "centreline_only";
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -163,6 +223,10 @@ struct PairFacts {
     verdict: String,
     kinds_differ: bool,
     max_axis_delta_mm: Option<f64>,
+    /// `reference_artifact` / `film` 判过的件才有：滤掉薄片 / 膜之后的差。
+    significant_max_axis_delta_mm: Option<f64>,
+    /// `local` / `world`；缺局部帧时按世界系比，旋转差会被算成尺寸差。
+    comparison_frame: Option<String>,
     baseline_kinds: Vec<String>,
     generated_kinds: Vec<String>,
     baseline_aabb: Option<[f64; 6]>,
@@ -242,6 +306,13 @@ impl JudgeFacts {
                     verdict: verdict.to_string(),
                     kinds_differ,
                     max_axis_delta_mm: pair.get("max_axis_delta_mm").and_then(Value::as_f64),
+                    significant_max_axis_delta_mm: pair
+                        .get("significant_max_axis_delta_mm")
+                        .and_then(Value::as_f64),
+                    comparison_frame: pair
+                        .get("comparison_frame")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     baseline_kinds: string_array(pair.get("baseline_kinds")),
                     generated_kinds: string_array(pair.get("generated_kinds")),
                     baseline_aabb: arr6(pair.get("baseline_aabb")),
@@ -311,6 +382,8 @@ impl JudgeFacts {
                     verdict: pair.verdict.to_string(),
                     kinds_differ,
                     max_axis_delta_mm: Some(pair.max_axis_delta_mm),
+                    significant_max_axis_delta_mm: pair.significant_max_axis_delta_mm,
+                    comparison_frame: Some(pair.comparison_frame.to_string()),
                     baseline_kinds: pair.baseline_kinds.clone(),
                     generated_kinds: pair.generated_kinds.clone(),
                     baseline_aabb: Some(pair.baseline_aabb),
@@ -332,21 +405,68 @@ impl JudgeFacts {
     }
 }
 
+/// 一次判色的完整结果：差异清单**不截断**（入库要全量），页面与 `run.json` 用
+/// [`Judgement::page_mismatches`] 取截到 [`MISMATCH_LIMIT`] 的那一份。
+#[derive(Clone, Debug)]
+pub struct Judgement {
+    pub verdict: RvmVerdict,
+    pub counts: RvmCounts,
+    pub mismatches: Vec<RvmMismatch>,
+    pub centreline_only_baseline: Vec<String>,
+}
+
+impl Judgement {
+    /// 页面那一份：最多 [`MISMATCH_LIMIT`] 条，以及是否截过。
+    pub fn page_mismatches(&self) -> (Vec<RvmMismatch>, bool) {
+        let truncated = self.mismatches.len() > MISMATCH_LIMIT;
+        (
+            self.mismatches
+                .iter()
+                .take(MISMATCH_LIMIT)
+                .cloned()
+                .collect(),
+            truncated,
+        )
+    }
+
+    /// 旧形态的五元组（截断后的差异清单），给还按元组读的调用方。
+    pub fn into_tuple(self) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
+        let (mismatches, truncated) = self.page_mismatches();
+        (
+            self.verdict,
+            self.counts,
+            mismatches,
+            self.centreline_only_baseline,
+            truncated,
+        )
+    }
+}
+
 /// 从 `rvm_compare` 的 JSON 取值。缺 `by_noun` 或一件都没配上，判红。
 pub fn judge_compare(
     value: &Value,
 ) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
-    judge(JudgeFacts::from_value(value))
+    judge_compare_full(value).into_tuple()
 }
 
 /// 进程内刚算完的报告直接判色，口径与 [`judge_compare`] 读落盘 JSON 完全一致。
 pub fn judge_report(
     report: &CompareReport,
 ) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
+    judge_report_full(report).into_tuple()
+}
+
+/// [`judge_compare`] 的不截断版。
+pub fn judge_compare_full(value: &Value) -> Judgement {
+    judge(JudgeFacts::from_value(value))
+}
+
+/// [`judge_report`] 的不截断版。
+pub fn judge_report_full(report: &CompareReport) -> Judgement {
     judge(JudgeFacts::from_report(report))
 }
 
-fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
+fn judge(facts: JudgeFacts) -> Judgement {
     let JudgeFacts {
         mut counts,
         only_baseline,
@@ -371,6 +491,8 @@ fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<Str
             mismatches.push(pair_mismatch(pair, "kind_differ"));
         }
         for (generated, row_verdict, max_axis_delta_mm) in &pair.container_rows {
+            let (reason_kind, reason) =
+                classify_container_row(row_verdict, generated.as_deref(), *max_axis_delta_mm);
             mismatches.push(RvmMismatch {
                 category: format!("container_{row_verdict}"),
                 name: generated
@@ -382,6 +504,9 @@ fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<Str
                 generated_kinds: Vec::new(),
                 baseline_aabb: None,
                 generated_aabb: None,
+                reason_kind: reason_kind.to_string(),
+                reason,
+                severity: reason::ERROR.to_string(),
             });
         }
     }
@@ -397,9 +522,6 @@ fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<Str
     for name in &unkeyable_generated {
         mismatches.push(named("unkeyable_generated", name));
     }
-
-    let truncated = mismatches.len() > MISMATCH_LIMIT;
-    mismatches.truncate(MISMATCH_LIMIT);
 
     let structural = counts.off
         + counts.only_baseline
@@ -423,7 +545,301 @@ fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<Str
     } else {
         RvmVerdict::Pass
     };
-    (verdict, counts, mismatches, centreline, truncated)
+    Judgement {
+        verdict,
+        counts,
+        mismatches,
+        centreline_only_baseline: centreline,
+    }
+}
+
+// ============================================================================
+// 差异归因：category 之下再分一档「原因种类」
+// ============================================================================
+
+fn fmt_mm(value: f64) -> String {
+    if value.abs() >= 100.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn fmt_kinds(kinds: &[String]) -> String {
+    let mut counted: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for kind in kinds {
+        *counted.entry(kind.as_str()).or_default() += 1;
+    }
+    counted
+        .into_iter()
+        .map(|(kind, n)| {
+            if n > 1 {
+                format!("{kind}×{n}")
+            } else {
+                kind.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 一对配上的件：`off` 按两只盒的形态归因；`kind_differ` 按两侧图元种类归因。
+fn classify_pair(pair: &PairFacts, category: &str) -> (&'static str, String) {
+    if category == "kind_differ" {
+        return classify_kinds(&pair.baseline_kinds, &pair.generated_kinds);
+    }
+    let tolerance = e3d_model::rvm_compare::chord_tolerance_mm(&pair.noun);
+    let delta = pair.max_axis_delta_mm.unwrap_or(f64::NAN);
+    let frame_note = match pair.comparison_frame.as_deref() {
+        Some("world") => "；缺局部帧，按世界系比较（旋转差会表现为尺寸差）",
+        _ => "",
+    };
+    let significant_note = pair
+        .significant_max_axis_delta_mm
+        .map(|value| format!("；滤掉断开薄片后仍差 {} mm", fmt_mm(value)))
+        .unwrap_or_default();
+    let has_container_problem = !pair.container_rows.is_empty();
+
+    // 包围盒本身在容差内：是容器组内逐根账把它判成 off 的。
+    if delta.is_finite() && delta <= tolerance && has_container_problem {
+        return (
+            reason::CONTAINER_TUBE_MISMATCH,
+            format!(
+                "包围盒在容差内（最大轴差 {} mm ≤ {} mm），容器组内隐式管逐根账有 {} 行 off / 多画 / 少画",
+                fmt_mm(delta),
+                fmt_mm(tolerance),
+                pair.container_rows.len()
+            ),
+        );
+    }
+    let (Some(b), Some(g)) = (pair.baseline_aabb, pair.generated_aabb) else {
+        return (
+            reason::AABB_OFF,
+            format!(
+                "包围盒最大轴差 {} mm（容差 {} mm）{significant_note}{frame_note}",
+                fmt_mm(delta),
+                fmt_mm(tolerance)
+            ),
+        );
+    };
+    let axis = ["X", "Y", "Z"];
+    let size_b: [f64; 3] = std::array::from_fn(|i| b[i + 3] - b[i]);
+    let size_g: [f64; 3] = std::array::from_fn(|i| g[i + 3] - g[i]);
+    let centre_b: [f64; 3] = std::array::from_fn(|i| (b[i] + b[i + 3]) / 2.0);
+    let centre_g: [f64; 3] = std::array::from_fn(|i| (g[i] + g[i + 3]) / 2.0);
+    let size_delta: [f64; 3] = std::array::from_fn(|i| size_g[i] - size_b[i]);
+    let centre_delta: [f64; 3] = std::array::from_fn(|i| centre_g[i] - centre_b[i]);
+    let within = |value: f64| value.abs() <= tolerance;
+    let sizes_match = size_delta.iter().all(|d| within(*d));
+    let centres_match = centre_delta.iter().all(|d| within(*d));
+    let tail = format!(
+        "（最大轴差 {} mm，容差 {} mm）{significant_note}{frame_note}",
+        fmt_mm(delta),
+        fmt_mm(tolerance)
+    );
+
+    if sizes_match && !centres_match {
+        return (
+            reason::AABB_SHIFTED,
+            format!(
+                "尺寸一致、位置偏移 ({}, {}, {}) mm{tail}",
+                fmt_mm(centre_delta[0]),
+                fmt_mm(centre_delta[1]),
+                fmt_mm(centre_delta[2])
+            ),
+        );
+    }
+    // 两根轴长互换：局部标架转了 90°。只看长度不等的那两根。
+    for (p, q) in [(0usize, 1usize), (0, 2), (1, 2)] {
+        let third = 3 - p - q;
+        let swapped = within(size_g[p] - size_b[q])
+            && within(size_g[q] - size_b[p])
+            && within(size_delta[third])
+            && !within(size_delta[p])
+            && !within(size_delta[q]);
+        if swapped {
+            return (
+                reason::AABB_AXES_SWAPPED,
+                format!(
+                    "{}/{} 轴长互换：基准 {}×{}，生成 {}×{}（局部标架绕 {} 转了 90°）{tail}",
+                    axis[p],
+                    axis[q],
+                    fmt_mm(size_b[p]),
+                    fmt_mm(size_b[q]),
+                    fmt_mm(size_g[p]),
+                    fmt_mm(size_g[q]),
+                    axis[third]
+                ),
+            );
+        }
+    }
+    let differing: Vec<usize> = (0..3).filter(|i| !within(size_delta[*i])).collect();
+    if differing.len() == 1 {
+        let i = differing[0];
+        return (
+            reason::AABB_ONE_AXIS,
+            format!(
+                "仅 {} 轴长度不同：基准 {}、生成 {}（差 {} mm）{tail}",
+                axis[i],
+                fmt_mm(size_b[i]),
+                fmt_mm(size_g[i]),
+                fmt_mm(size_delta[i])
+            ),
+        );
+    }
+    let generated_contains =
+        (0..3).all(|i| g[i] <= b[i] + tolerance && g[i + 3] >= b[i + 3] - tolerance);
+    let baseline_contains =
+        (0..3).all(|i| b[i] <= g[i] + tolerance && b[i + 3] >= g[i + 3] - tolerance);
+    let sizes = format!(
+        "基准 {}×{}×{}，生成 {}×{}×{}",
+        fmt_mm(size_b[0]),
+        fmt_mm(size_b[1]),
+        fmt_mm(size_b[2]),
+        fmt_mm(size_g[0]),
+        fmt_mm(size_g[1]),
+        fmt_mm(size_g[2])
+    );
+    if generated_contains && !baseline_contains {
+        return (
+            reason::GENERATED_LARGER,
+            format!("生成体整体包住基准（多出一块）：{sizes}{tail}"),
+        );
+    }
+    if baseline_contains && !generated_contains {
+        return (
+            reason::GENERATED_SMALLER,
+            format!("基准整体包住生成体（缺一块）：{sizes}{tail}"),
+        );
+    }
+    (reason::AABB_OFF, format!("包围盒超差：{sizes}{tail}"))
+}
+
+fn classify_kinds(baseline: &[String], generated: &[String]) -> (&'static str, String) {
+    let is_facet = |kind: &String| kind == "FacetGroup";
+    let detail = format!(
+        "E3D [{}] / 生成 [{}]",
+        fmt_kinds(baseline),
+        fmt_kinds(generated)
+    );
+    let baseline_facets = !baseline.is_empty() && baseline.iter().all(is_facet);
+    let generated_facets = !generated.is_empty() && generated.iter().all(is_facet);
+    if baseline_facets != generated_facets
+        && (baseline_facets || generated_facets)
+        && !(baseline.iter().any(is_facet) && generated.iter().any(is_facet))
+    {
+        let note = if baseline_facets {
+            "E3D 写面片、我们写解析图元"
+        } else {
+            "E3D 写解析图元、我们写面片"
+        };
+        return (reason::FACET_VS_ANALYTIC, format!("{note}：{detail}"));
+    }
+    let mut b_set: Vec<&String> = baseline.iter().collect();
+    let mut g_set: Vec<&String> = generated.iter().collect();
+    b_set.sort();
+    b_set.dedup();
+    g_set.sort();
+    g_set.dedup();
+    if b_set == g_set {
+        return (
+            reason::PRIMITIVE_COUNT_DIFFERS,
+            format!(
+                "图元种类相同、条数不同（E3D {} 条 / 生成 {} 条）：{detail}",
+                baseline.len(),
+                generated.len()
+            ),
+        );
+    }
+    (
+        reason::PRIMITIVE_KIND_DIFFERS,
+        format!("图元种类不同：{detail}"),
+    )
+}
+
+/// 单侧件：按名字形态分「隐式管 / 命名元素 / 无名元素」，`unkeyable_*` 把括号里的原因抄过来。
+fn classify_single(category: &str, name: &str) -> (&'static str, String, &'static str) {
+    let trimmed = name.trim();
+    // `only_generated` 的写法是 `<refno 路径> <noun> <key>`，路径本身带空格（`/GENERATED/TUBI 1 of BRAN /X`），
+    // 所以不按位置取 noun，只看有没有 TUBI / TUBE 这个词。
+    let is_tube = trimmed
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("TUBI") || token == "TUBE");
+    match category {
+        "only_baseline" => {
+            let kind = if trimmed.starts_with("TUBE ") || trimmed.starts_with("TUBI ") {
+                reason::MISSING_IMPLIED_TUBE
+            } else if trimmed.starts_with('/') {
+                reason::MISSING_NAMED_ELEMENT
+            } else {
+                reason::MISSING_UNNAMED_ELEMENT
+            };
+            (
+                kind,
+                format!("E3D 导出有、生成侧没有：{trimmed}"),
+                reason::ERROR,
+            )
+        }
+        "only_generated" => {
+            let kind = if is_tube {
+                reason::EXTRA_IMPLIED_TUBE
+            } else {
+                reason::EXTRA_IN_GENERATED
+            };
+            (
+                kind,
+                format!("生成侧多出、E3D 导出没有：{trimmed}"),
+                reason::ERROR,
+            )
+        }
+        "unkeyable_baseline" => {
+            let detail = trimmed
+                .rsplit_once('（')
+                .map(|(_, tail)| tail.trim_end_matches('）').to_string())
+                .unwrap_or_else(|| "发不出主键".to_string());
+            (
+                reason::UNKEYABLE_BASELINE,
+                format!("基准成员发不出主键：{detail}"),
+                reason::ERROR,
+            )
+        }
+        "unkeyable_generated" => (
+            reason::UNKEYABLE_GENERATED,
+            format!("生成元素发不出主键（属主无名）：{trimmed}"),
+            reason::ERROR,
+        ),
+        _ => (reason::AABB_OFF, trimmed.to_string(), reason::ERROR),
+    }
+}
+
+fn classify_container_row(
+    row_verdict: &str,
+    generated: Option<&str>,
+    max_axis_delta_mm: Option<f64>,
+) -> (&'static str, String) {
+    match row_verdict {
+        "off" => (
+            reason::CONTAINER_TUBE_OFF,
+            format!(
+                "容器组内这根管身与 E3D 记录的包围盒差 {} mm：{}",
+                max_axis_delta_mm
+                    .map(fmt_mm)
+                    .unwrap_or_else(|| "?".to_string()),
+                generated.unwrap_or("?")
+            ),
+        ),
+        "only_baseline" => (
+            reason::CONTAINER_TUBE_MISSING,
+            "E3D 在容器组里多画了一条记录，我们没有对应的管身".to_string(),
+        ),
+        _ => (
+            reason::CONTAINER_TUBE_EXTRA,
+            format!(
+                "我们多画了一根管身，E3D 容器组里没有对应记录：{}",
+                generated.unwrap_or("?")
+            ),
+        ),
+    }
 }
 
 pub fn verdict_message(verdict: RvmVerdict, counts: &RvmCounts) -> String {
@@ -450,6 +866,7 @@ pub fn verdict_message(verdict: RvmVerdict, counts: &RvmCounts) -> String {
 }
 
 fn pair_mismatch(pair: &PairFacts, category: &str) -> RvmMismatch {
+    let (reason_kind, reason) = classify_pair(pair, category);
     RvmMismatch {
         category: category.to_string(),
         name: pair.name.clone(),
@@ -459,10 +876,19 @@ fn pair_mismatch(pair: &PairFacts, category: &str) -> RvmMismatch {
         generated_kinds: pair.generated_kinds.clone(),
         baseline_aabb: pair.baseline_aabb,
         generated_aabb: pair.generated_aabb,
+        reason_kind: reason_kind.to_string(),
+        reason,
+        severity: if category == "kind_differ" {
+            reason::WARNING
+        } else {
+            reason::ERROR
+        }
+        .to_string(),
     }
 }
 
 fn named(category: &str, name: &str) -> RvmMismatch {
+    let (reason_kind, reason, severity) = classify_single(category, name);
     RvmMismatch {
         category: category.to_string(),
         name: name.to_string(),
@@ -472,6 +898,9 @@ fn named(category: &str, name: &str) -> RvmMismatch {
         generated_kinds: Vec::new(),
         baseline_aabb: None,
         generated_aabb: None,
+        reason_kind: reason_kind.to_string(),
+        reason,
+        severity: severity.to_string(),
     }
 }
 
@@ -577,6 +1006,131 @@ mod tests {
         assert_eq!(mismatches.len(), 1);
         assert_eq!(mismatches[0].category, "kind_differ");
         assert_eq!(mismatches[0].baseline_kinds, vec!["Cylinder".to_string()]);
+        assert_eq!(mismatches[0].reason_kind, reason::PRIMITIVE_KIND_DIFFERS);
+        assert_eq!(mismatches[0].severity, reason::WARNING);
+    }
+
+    /// 原因种类按两只盒的形态归因：整体平移、两轴互换、单轴长度、包含关系、一般超差；
+    /// 包围盒在容差内却因容器账判 off 的单列；种类差异再分面片 vs 解析 / 条数 / 种类。
+    #[test]
+    fn mismatches_carry_a_reason_kind_derived_from_the_two_boxes() {
+        let pair = |key: &str, noun: &str, delta: f64, b: [f64; 6], g: [f64; 6]| {
+            serde_json::json!({
+                "key": key, "noun": noun, "verdict": "off", "kind_match": true,
+                "max_axis_delta_mm": delta, "comparison_frame": "local",
+                "baseline_aabb": b, "generated_aabb": g,
+                "baseline_kinds": ["Box"], "generated_kinds": ["Box"]
+            })
+        };
+        let value = serde_json::json!({
+            "by_noun": { "SJOI": tally(0, 0, 6, 0, 0) },
+            "pairs": [
+                // 尺寸一致、沿 X 挪了 109 mm（7356 SJOI 端面偏移那一类）。
+                pair("shift", "SJOI", 109.0, [0.0, 0.0, 0.0, 100.0, 50.0, 20.0], [109.0, 0.0, 0.0, 209.0, 50.0, 20.0]),
+                // X/Y 轴长互换（7333 PCLA 局部标架绕 Z 差 90° 那一类）。
+                pair("swap", "PCLA", 80.0, [0.0, 0.0, 0.0, 100.0, 20.0, 30.0], [0.0, 0.0, 0.0, 20.0, 100.0, 30.0]),
+                // 只有 Z 长度不同。
+                pair("one", "HELE", 40.0, [0.0, 0.0, 0.0, 10.0, 10.0, 100.0], [0.0, 0.0, 0.0, 10.0, 10.0, 140.0]),
+                // 生成体整体包住基准。
+                pair("larger", "FITT", 5.0, [0.0, 0.0, 0.0, 10.0, 10.0, 10.0], [-5.0, -5.0, -5.0, 15.0, 15.0, 15.0]),
+                // 基准整体包住生成体。
+                pair("smaller", "FITT", 5.0, [-5.0, -5.0, -5.0, 15.0, 15.0, 15.0], [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]),
+                // 形状、位置都不同。
+                pair("general", "ATTA", 42.0, [0.0, 0.0, 0.0, 10.0, 20.0, 30.0], [5.0, -7.0, 0.0, 52.0, 9.0, 61.0]),
+            ],
+            "only_baseline": [],
+            "only_generated": []
+        });
+        let (_, _, mismatches, _, _) = judge_compare(&value);
+        let kind_of = |key: &str| {
+            mismatches
+                .iter()
+                .find(|row| row.name == key)
+                .map(|row| (row.reason_kind.as_str(), row.reason.clone()))
+                .unwrap_or_else(|| panic!("没有 {key}"))
+        };
+        let (kind, text) = kind_of("shift");
+        assert_eq!(kind, reason::AABB_SHIFTED, "{text}");
+        assert!(text.contains("109.0"), "{text}");
+        let (kind, text) = kind_of("swap");
+        assert_eq!(kind, reason::AABB_AXES_SWAPPED, "{text}");
+        assert!(text.contains("X/Y") && text.contains("绕 Z"), "{text}");
+        let (kind, text) = kind_of("one");
+        assert_eq!(kind, reason::AABB_ONE_AXIS, "{text}");
+        assert!(text.contains("仅 Z 轴"), "{text}");
+        assert_eq!(kind_of("larger").0, reason::GENERATED_LARGER);
+        assert_eq!(kind_of("smaller").0, reason::GENERATED_SMALLER);
+        assert_eq!(kind_of("general").0, reason::AABB_OFF);
+        assert!(mismatches.iter().all(|row| row.severity == reason::ERROR));
+
+        // 盒在容差内、容器账有问题：原因是容器管身，不是包围盒。
+        let container = serde_json::json!({
+            "by_noun": { "BRAN": tally(0, 0, 1, 0, 0) },
+            "pairs": [{
+                "key": "BRAN /B1", "noun": "BRAN", "verdict": "off", "kind_match": true,
+                "max_axis_delta_mm": 0.01, "comparison_frame": "world",
+                "baseline_aabb": [0, 0, 0, 1, 1, 1], "generated_aabb": [0, 0, 0, 1, 1, 1],
+                "container_tubes": { "tally": { "off": 1 }, "rows": [
+                    { "generated": "/GENERATED/TUBI 2 of BRAN /B1", "baseline_records": [1], "max_axis_delta_mm": 12.0, "verdict": "off" },
+                    { "generated": null, "baseline_records": [2], "max_axis_delta_mm": null, "verdict": "only_baseline" }
+                ] }
+            }],
+            "only_baseline": [], "only_generated": []
+        });
+        let (_, _, mismatches, _, _) = judge_compare(&container);
+        assert_eq!(mismatches[0].reason_kind, reason::CONTAINER_TUBE_MISMATCH);
+        assert_eq!(mismatches[1].category, "container_off");
+        assert_eq!(mismatches[1].reason_kind, reason::CONTAINER_TUBE_OFF);
+        assert_eq!(mismatches[2].reason_kind, reason::CONTAINER_TUBE_MISSING);
+
+        // 种类差异三分法。
+        let kinds = |b: &[&str], g: &[&str]| {
+            classify_kinds(
+                &b.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                &g.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+            .0
+        };
+        assert_eq!(
+            kinds(&["FacetGroup"], &["Cylinder", "Box"]),
+            reason::FACET_VS_ANALYTIC
+        );
+        assert_eq!(
+            kinds(&["Cylinder", "Cylinder"], &["Cylinder"]),
+            reason::PRIMITIVE_COUNT_DIFFERS
+        );
+        assert_eq!(
+            kinds(&["Cylinder"], &["Snout"]),
+            reason::PRIMITIVE_KIND_DIFFERS
+        );
+
+        // 单侧件按名字形态分。
+        assert_eq!(
+            classify_single("only_baseline", "TUBE 3 of BRANCH /X").0,
+            reason::MISSING_IMPLIED_TUBE
+        );
+        assert_eq!(
+            classify_single("only_baseline", "/NAMED").0,
+            reason::MISSING_NAMED_ELEMENT
+        );
+        assert_eq!(
+            classify_single("only_baseline", "BOX 2 of EQUIPMENT /E").0,
+            reason::MISSING_UNNAMED_ELEMENT
+        );
+        assert_eq!(
+            classify_single("only_generated", "/GENERATED/x TUBI TUBI 1 /B").0,
+            reason::EXTRA_IMPLIED_TUBE
+        );
+        assert_eq!(
+            classify_single("only_generated", "/GENERATED/x ELBO ELBO 1 /B").0,
+            reason::EXTRA_IN_GENERATED
+        );
+        let (kind, text, _) = classify_single(
+            "unkeyable_baseline",
+            "/MDS/VH111/80/H2（缺 noun/owner_desc/ordinal，且无同名生成元素）",
+        );
+        assert_eq!(kind, reason::UNKEYABLE_BASELINE);
+        assert!(text.contains("缺 noun/owner_desc/ordinal"), "{text}");
     }
 
     #[test]
@@ -649,7 +1203,10 @@ mod tests {
         let (verdict, counts, mismatches, _, _) = judge_compare(&empty);
         assert_eq!(verdict, RvmVerdict::Pass);
         assert!(mismatches.is_empty());
-        assert_eq!(verdict_message(verdict, &counts), "通过：两侧都没有可比几何");
+        assert_eq!(
+            verdict_message(verdict, &counts),
+            "通过：两侧都没有可比几何"
+        );
 
         let mut ours_only = empty.clone();
         ours_only["only_generated"] = serde_json::json!(["/ONLY-OURS"]);
