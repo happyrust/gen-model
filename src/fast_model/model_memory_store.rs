@@ -833,6 +833,15 @@ pub struct ProjectedRootBounds {
     pub has_invalid_bounds: bool,
 }
 
+/// 删一棵子树要结算的投影（[`ModelMemoryStore::subtree_closure`]）。
+#[derive(Debug, Clone, Default)]
+pub struct SubtreeClosure {
+    /// 祖先链经过子树根的记录，按 record_id 升序（与 [`ModelMemoryStore::records_of_root`] 同一份）。
+    pub records: Vec<ProjectedGeometry>,
+    /// 与这些记录有交集的常驻根（有回执或已作废），按打包 refno 升序（与 [`ModelMemoryStore::roots`] 同序）。
+    pub roots: Vec<RefNo>,
+}
+
 /// 写后台控制器当前不收件，这一批投影原样退回。没有任何一部分被装进 overlay。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayRejected;
@@ -1734,6 +1743,33 @@ impl ModelMemoryStore {
             .copied()
             .find(|packed| state.receipts.contains_key(packed))
             .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
+    }
+
+    /// 删 `node` 子树要结算的投影：祖先链经过它的记录，以及与这些记录有交集的常驻根。嵌套根靠祖先链
+    /// 共享记录，所以外层根、子树里的根都在内；`node` 自己常驻也在内，哪怕名下一条记录都没有。
+    /// 一把读锁里按记录的祖先链反查，不逐根扫记录。
+    pub fn subtree_closure(&self, scope: ProjectionScope<'_>, node: RefNo) -> SubtreeClosure {
+        let scopes = self.read();
+        let Some(state) = scopes.get(&scope.key()) else {
+            return SubtreeClosure::default();
+        };
+        let records = state
+            .record_ids_under(node)
+            .into_iter()
+            .filter_map(|record_id| state.geometries.get(&record_id).cloned())
+            .collect::<Vec<_>>();
+        let roots = records
+            .iter()
+            .flat_map(|record| record.ancestors.iter().copied())
+            .chain(std::iter::once(packed_refno(node)))
+            .filter(|packed| {
+                state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
+            .collect();
+        SubtreeClosure { records, roots }
     }
 
     /// Called only after source absence and output deletion have succeeded.

@@ -2069,11 +2069,8 @@ mod tests {
         assert!(generation.contains("model_write_behind::publish(commits)?"));
         assert!(generation.contains("model_write_behind::publish(vec![commit])?"));
 
-        let deletion = include_str!("../data_interface/on_demand_model.rs")
-            .split_once("#[cfg(test)]")
-            .expect("on-demand tests")
-            .0;
-        assert!(deletion.contains("lock_db_generation(root.dbno())"));
+        let deletion = include_str!("../data_interface/projection_removal.rs");
+        assert!(deletion.contains("lock_db_generation(node.dbno())"));
         assert!(deletion.contains("model_write_behind::publish"));
     }
 

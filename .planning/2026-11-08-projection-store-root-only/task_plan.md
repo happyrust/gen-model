@@ -175,7 +175,7 @@
 | 门 | 条件 | 状态 |
 |---|---|---|
 | G0 钉现状 | 0-A / 0-B / 0-C 入库；`cargo test --lib` 绿；生产代码零改动 | 通过（2026-11-08，2900 过 / 0 失败 / 128 忽略） |
-| G1 入口就位 | P 路走入口；G0 测试绿 | 未开始 |
+| G1 入口就位 | P 路走入口；G0 测试绿 | 通过（2026-11-08，2903 过 / 0 失败 / 128 忽略） |
 | G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 未开始 |
 | G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 未开始 |
 | G4 可见性 | 收窄完成；无外部调用；无新增告警 | 未开始 |
@@ -204,3 +204,24 @@
   - 锁原语本身已有 `active_generation_root_is_rejected_instead_of_queued` 覆盖。
   - 入口建好后对入口写，P / D 两种请求共用一套断言。
 - G0：`cargo +nightly test --lib` 2900 过、0 失败、128 忽略（上次基线 2899 / 127；新增两条，S1 是唯一新增的 ignore）。
+
+### Phase 1 施工记录（2026-11-08）
+
+- 1-A：入口是 `src/data_interface/projection_removal.rs`，和 §3.1 的暂定形状有三处不同。
+  - 模块放在 `data_interface`，不放 `fast_model`：逐根生成锁（`try_generation_root`）、镜像 spool 和 MDB 快照都在这一层，放进 `fast_model` 要反向依赖 `data_interface`。
+  - 函数叫 `remove_subtree`，不叫 `remove_roots`：删的是请求的子树，覆盖它的根只用来加锁（`RemovalRequest { subtree, lock_roots, tombstone }`）。后面各阶段写的 `remove_roots` 都指它。
+  - `TombstoneSink` 现在只有 `Spool` / `None`，`Database` 在 2-A 把 D 路改过来时再加，免得留一个没人构造的分支。
+  - 锁序只在入口里定：根锁排序去重后逐个 try-lock，被占就回 `ModelGenerationInProgress`；再按库排队拿生成锁；拿齐之后才结算受影响的根、写墓碑、发删除提交、作废回执。墓碑渲染和 spool 落盘原样从 P 路搬过来。
+- 1-B：`clear_projected_scope` 只剩解根和组请求；`delete_projected_subtree` 删掉，它的锁序和提交顺序都进了入口。`try_generation_root` 放宽到 `pub(super)`，入口和 D 路共用。
+- 1-C：`ModelMemoryStore::subtree_closure(scope, node)` 在一把读锁里取子树记录，再沿记录的祖先链（加上子树根自己）挑出常驻的根（有回执或已作废）。记录顺序同 `records_of_root`，根的顺序同 `roots`。用例 `the_subtree_closure_matches_the_per_root_scan` 把旧的逐根扫描原样留作对照，在嵌套根、旁支根、空根、已作废的根、非根节点、不存在的节点上逐一比对。
+- 1-D：两条入口层的行为测试，dbnum 取 6918 / 6919，别的用例不生成这两个库。D 路请求的同款断言随 2-A 补。
+  - `a_removal_is_refused_while_a_covered_root_is_generating`：根锁和同库生成锁都被占，入口 5 秒内回「正在生成」，记录和回执都在。入口要是先排队等生成锁，这里就会超时。
+  - `a_removal_waits_for_a_generation_on_the_same_dbnum`：同库生成锁被占时删除挂起、记录不动；放手后删掉 2 条、作废这一根。
+- Q4 文本守卫：
+  - `forced_regeneration_clears_the_requested_scope_before_generating`：去掉对 P 路函数体的文本断言（根锁先于删除、各步骤字串），这些由 1-D 的行为测试接管；「投影删法不碰 durable 权威库」这一条改为断言入口文件不含 `SUL_DB`。2-A 给入口加 `TombstoneSink::Database` 时要重审这一条。
+  - `scope_cleanup_has_exactly_one_implementation`：改数入口调用（`projection_removal::remove_subtree(` 恰好一处）；`try_generation_root(root)` 只剩 D 路一处；并断言 D 路还不调入口，2-A 时反过来。
+  - `production_current_projection_writes_use_admission_and_generation_fence`：删除那一半改读入口文件，仍断言按库生成锁和 `model_write_behind::publish`。
+- 告警：本 crate 没有新增。`RemovalReport` 的字段只在测试里读，但它派生了 `PartialEq`，非测试构建也不报 never read（本机只能跑 `cargo test --lib`，另用 rustc 编了一个同样形状的小样核对；去掉 `PartialEq` 的对照组才报）。
+- G1：`cargo +nightly test --lib` 2903 过、0 失败、128 忽略（比 G0 多 3 条：1-C 一条、1-D 两条）。S1 单跑仍报 `receipt expects 7, store has 3`，ignore 保持到 Phase 2。
+  - 之后又跑了两轮全量（中间只补了上面那条 `SUL_DB` 断言、理了格式），都是 2902 过、`mesh_lod1::tests::prepare_writes_every_canonical_lod1_once_and_reuses_afterwards` 1 条失败。失败的是往临时目录写粗网格：`written=230 failed=4`。
+  - 这条用例单独连跑两次都是 12/12 通过，而本机临时目录所在盘只剩约 2.3 GB。判定为并行全量下的写盘环境问题，与本阶段无关；腾出空间后应复跑一次确认。

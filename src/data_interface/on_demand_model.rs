@@ -97,8 +97,8 @@ impl AiosDBManager {
     /// - 读透形态：同上，另把同一笔删除渲成墓碑进 mirror spool（它的持久面）；
     /// - 摄入形态走 [`Self::delete_model_subtree`]（库 + 投影 + 账本，过初始化门）。
     ///
-    /// 三路清之前都先对范围内的生成根 `try_generation_root`（摄入形态在 `delete_model_subtree`
-    /// 里拿），被占就按「正在后台生成」回 409、一行不删。投影删法自己只等库级锁，而同库每一次
+    /// 三路清之前都先对范围内的生成根 `try_generation_root`（投影两路在删除入口 `projection_removal`
+    /// 里拿，摄入形态在 `delete_model_subtree` 里拿），被占就按「正在后台生成」回 409、一行不删。投影删法自己只等库级锁，而同库每一次
     /// 生成全程都攥着那把锁：不先拿根锁的话，它会排队等完同库任何在飞的生成，再把别人刚发布的
     /// 那一根清掉重算。根锁清完即放，之后逐根生成各自再拿——与摄入形态同一个窗口。
     ///
@@ -143,8 +143,8 @@ impl AiosDBManager {
         }
     }
 
-    /// 「只写内存」/ 读透那一路的范围清理：先对范围内的生成根逐个 `try_generation_root`（没解出根就对
-    /// 请求节点自己拿），被占回 409、一行不删；拿齐再进 [`Self::delete_projected_subtree`]。根锁清完即放。
+    /// 「只写内存」/ 读透那一路的范围清理，交给删除入口 `projection_removal::remove_subtree`：范围内的生成根
+    /// 逐个 try-lock（没解出根就对请求节点自己拿），被占回 409、一行不删；拿齐再等库级锁、清投影。根锁清完即放。
     /// 从 [`Self::clear_model_scope`] 与读透形态的 [`Self::delete_model_subtree`] 两处进，投影删法只有这一条路。
     async fn clear_projected_scope(
         &self,
@@ -152,125 +152,17 @@ impl AiosDBManager {
         roots: &[crate::data_interface::generation_root::GenerationRoot],
         spool_tombstone: bool,
     ) -> anyhow::Result<()> {
-        let mut lock_roots = roots
-            .iter()
-            .map(|root| root.root.to_pdms_str())
-            .collect::<Vec<_>>();
-        if lock_roots.is_empty() {
-            lock_roots.push(requested_refno.to_pdms_str());
-        }
-        lock_roots.sort_unstable();
-        lock_roots.dedup();
-        let _guards = lock_roots
-            .iter()
-            .map(|root| try_generation_root(root))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.delete_projected_subtree(requested_refno, spool_tombstone)
-            .await
-    }
-
-    /// 只清**进程内投影**里 `requested_refno` 子树下已发布的产物：记录按祖先链取、隐式管身所在的分支
-    /// 一并重置、受影响的根（含与之共有记录的嵌套根）回执作废，让下一次生成必须整根重新发布。
-    ///
-    /// `spool_tombstone = true` 时同一笔删除还渲成 SurrealDB 事务进 mirror spool，由 durable 镜像那条线
-    /// 落到库里（读透形态的持久面）；「只写内存」的库没有持久面，给 `false`。
-    async fn delete_projected_subtree(
-        &self,
-        requested_refno: RefnoEnum,
-        spool_tombstone: bool,
-    ) -> anyhow::Result<()> {
-        let root = crate::data_interface::generation_root::refno_to_e3d(requested_refno);
-        let _generation_guard =
-            crate::fast_model::e3d_model_service::lock_db_generation(root.dbno()).await;
-        let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-        let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
-        let records = store.records_of_root(scope, root);
-        let record_ids = records
-            .iter()
-            .map(|record| record.record_id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        let mut affected_roots = store
-            .roots(scope)
-            .into_iter()
-            .filter(|candidate| {
-                *candidate == root
-                    || store
-                        .records_of_root(scope, *candidate)
-                        .iter()
-                        .any(|record| record_ids.contains(&record.record_id))
-            })
-            .collect::<Vec<_>>();
-        if affected_roots.is_empty() {
-            affected_roots.push(root);
-        }
-        let tube_branches = records
-            .iter()
-            .filter(|record| record.tube.is_some())
-            .map(|record| record.source_refno)
-            .collect::<Vec<_>>();
-        if spool_tombstone {
-            let option = aios_core::get_db_option();
-            let mut sessions = records
-                .iter()
-                .map(|record| (record.dbnum, record.source_sesno))
-                .collect::<Vec<_>>();
-            sessions.extend(affected_roots.iter().filter_map(|affected| {
-                store
-                    .receipt(scope, *affected)
-                    .map(|receipt| (affected.dbno(), receipt.source_sesno))
-            }));
-            if sessions.is_empty() {
-                sessions.extend(
-                    crate::data_interface::mdb_memory_store::get(
-                        &option.project_name,
-                        &option.mdb_name,
-                    )
-                    .into_iter()
-                    .flat_map(|snapshot| snapshot.session_fingerprint())
-                    .map(|(dbnum, _, sesno)| (dbnum, sesno)),
-                );
-            }
-            sessions.sort_unstable();
-            sessions.dedup();
-            let source_sesno_epoch = sessions
-                .iter()
-                .map(|(_, sesno)| u64::from(*sesno))
-                .max()
-                .unwrap_or_default();
-            let epoch = crate::data_interface::mdb_memory_store::get(
-                &option.project_name,
-                &option.mdb_name,
-            )
-            .map(|snapshot| snapshot.epoch())
-            .unwrap_or(source_sesno_epoch);
-            let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
-                root,
-                &affected_roots,
-                &tube_branches,
-            );
-            crate::data_interface::mirror_spool::MirrorSpool::for_process(
-                &option.surreal_ns,
-                &option.project_name,
-                &option.mdb_name,
-            )?
-            .persist(
-                epoch,
-                sessions,
-                format!("model-tombstone:{root}"),
-                vec![transaction],
-            )?;
-        }
-
-        crate::fast_model::model_write_behind::publish(vec![
-            crate::fast_model::model_memory_store::ProjectionCommit {
-                tube_branch_resets: tube_branches,
-                removals: record_ids.into_iter().collect(),
-                ..Default::default()
+        use crate::data_interface::projection_removal::{self, RemovalRequest, TombstoneSink};
+        projection_removal::remove_subtree(RemovalRequest {
+            subtree: requested_refno,
+            lock_roots: roots.iter().map(|root| root.root.to_pdms_str()).collect(),
+            tombstone: if spool_tombstone {
+                TombstoneSink::Spool
+            } else {
+                TombstoneSink::None
             },
-        ])?;
-        for affected in affected_roots {
-            store.invalidate_receipt(scope, affected);
-        }
+        })
+        .await?;
         Ok(())
     }
 
@@ -731,7 +623,7 @@ impl std::fmt::Display for ModelStaleAfterGeneration {
 
 impl std::error::Error for ModelStaleAfterGeneration {}
 
-fn try_generation_root(
+pub(super) fn try_generation_root(
     root_refno: &str,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, ModelGenerationInProgress> {
     generation_root_lock(root_refno)
@@ -1136,8 +1028,8 @@ mod tests {
             .split_once("pub async fn clear_model_scope(")
             .expect("clear helper exists")
             .1
-            .split_once("async fn delete_projected_subtree(")
-            .expect("projected delete follows the clear helper")
+            .split_once("pub async fn delete_model_subtree(")
+            .expect("ingest delete follows the clear helpers")
             .0;
         assert!(clear.contains("memory_only_scope()"), "{clear}");
         assert!(clear.contains("is_read_through()"), "{clear}");
@@ -1145,41 +1037,16 @@ mod tests {
             clear.contains(".clear_projected_scope(requested_refno, roots, read_through)"),
             "memory-only / read-through clear the projection: {clear}"
         );
-        let projected_at = clear
-            .find(".delete_projected_subtree(requested_refno, spool_tombstone)")
-            .expect("memory-only / read-through clear the projection");
-        let root_locks_at = clear
-            .find("try_generation_root(root)")
-            .expect("投影删法之前先对范围内的生成根 try-lock，被占回 409（与摄入形态同一个函数）");
-        assert!(
-            root_locks_at < projected_at,
-            "根锁必须在投影删除之前拿齐，否则会排队等完同库在飞的生成、再清掉别人刚发布的根: {clear}"
-        );
         assert!(clear.contains("self.delete_model_subtree(requested_refno)"), "{clear}");
         assert!(
             !clear.contains("require_model_generation()"),
             "只写内存作用域不过初始化门，与同作用域下的生成路径同一口径: {clear}"
         );
 
-        let projected = source
-            .split_once("async fn delete_projected_subtree(")
-            .expect("projected delete exists")
-            .1
-            .split_once("pub async fn delete_model_subtree(")
-            .expect("public delete follows the projected delete")
-            .0;
-        for required in [
-            "lock_db_generation(root.dbno())",
-            "records_of_root(scope, root)",
-            "if spool_tombstone {",
-            "model_write_behind::publish",
-            "invalidate_receipt(scope, affected)",
-        ] {
-            assert!(projected.contains(required), "{required}: {projected}");
-        }
+        let removal = include_str!("projection_removal.rs");
         assert!(
-            !projected.contains("SUL_DB"),
-            "投影删法不碰 durable 权威库: {projected}"
+            !removal.contains("SUL_DB"),
+            "投影删法不碰 durable 权威库: {removal}"
         );
     }
 
@@ -1192,14 +1059,16 @@ mod tests {
         let source = include_str!("on_demand_model.rs");
         let production = source.split_once("#[cfg(test)]").expect("tests follow").0;
         assert_eq!(
-            production.matches(".delete_projected_subtree(").count(),
+            production
+                .matches("projection_removal::remove_subtree(")
+                .count(),
             1,
-            "投影删法只从 clear_projected_scope 进: {production}"
+            "投影删法只从 clear_projected_scope 进删除入口: {production}"
         );
         assert_eq!(
             production.matches("try_generation_root(root)").count(),
-            2,
-            "根锁只在 clear_projected_scope 与摄入形态的 delete_model_subtree 两处拿: {production}"
+            1,
+            "这里只剩摄入形态的 delete_model_subtree 自己拿根锁；投影删法的根锁归删除入口: {production}"
         );
         let delete = production
             .split_once("pub async fn delete_model_subtree(")
@@ -1213,8 +1082,8 @@ mod tests {
             "读透分支转给 clear_projected_scope: {delete}"
         );
         assert!(
-            !delete.contains("delete_projected_subtree("),
-            "delete_model_subtree 不再自己删投影: {delete}"
+            !delete.contains("projection_removal::"),
+            "delete_model_subtree 不直接调删除入口，读透分支经 clear_projected_scope 进: {delete}"
         );
     }
 
