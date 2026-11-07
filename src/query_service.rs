@@ -810,7 +810,10 @@ impl QueryService {
                 .await
                 .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
             let mut roots = tree
-                .generation_roots_in_subtree(refno.refno(), &configured_delivery_unit_types())
+                .resolved_generation_roots_in_subtree(
+                    refno.refno(),
+                    &configured_delivery_unit_types(),
+                )
                 .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
             let root = roots.drain(..).next().ok_or_else(|| {
                 QueryError::new("NOT_FOUND", format!("no generation root for {refno}"))

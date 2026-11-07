@@ -3608,6 +3608,12 @@ pub async fn model_delete_subtree(
         )));
     };
     let refno = RefnoEnum::from(refu);
+    if requested_is_group(&state, refu).await {
+        return Err(ApiError::group_scope(format!(
+            "{} 是分组（GPWL / GPSET）：分组只登记成员、不拥有模型，清理请对成员或它们的主链节点做",
+            query.refno
+        )));
+    }
     // 读路由（与 `model_generate` 同一段）：解不出所属库就不路由，交给清理路径报它该报的错。
     let route = match crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
         std::slice::from_ref(&query.refno),
@@ -3770,6 +3776,17 @@ pub async fn model_generate(
         )));
     };
     let refno = RefnoEnum::from(refu);
+    if requested_is_group(&state, refu).await {
+        if req.force {
+            return Err(ApiError::group_scope(format!(
+                "{} 是分组（GPWL / GPSET）：重新生成要先清理，分组不拥有模型、不做清理；请对成员或它们的主链节点重新生成",
+                req.refno
+            )));
+        }
+        let outcome = generate_group_scope(&state, refno).await;
+        diagnostic.finish(format!("group refno={} ok={}", req.refno, outcome.is_ok()));
+        return outcome.map(Json);
+    }
     // 模型取数源路由（plan 2026-09-06 §8 R1/R2）：这个 refno 所属的库在 rocksdb 里准备好了没有。
     // 没准备好（基线未落 / 初始化发布 run 在飞）就整段按需生成进「只写内存」作用域——不等队列、
     // 不进 durable 队列、不落 rocksdb，投影由 `/model/records` 供数。解不出所属库（不在 MDB）
@@ -4012,6 +4029,264 @@ async fn append_publication_state(
     );
     object.insert("root_summaries".into(), serde_json::json!([summary]));
     Ok(())
+}
+
+/// 请求的 refno 是不是分组（GPWL / GPSET）。判定是软的：目录或 TYPE 读不到就按「不是」走原路径，
+/// 让原路径报它该报的错——分组识别本身不制造新的失败。
+async fn requested_is_group(state: &AppState, refno: RefU64) -> bool {
+    let Ok(tree) = state.direct_tree.get().await else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || {
+        tree.noun_of(refno)
+            .is_ok_and(|noun| crate::data_interface::group_membership::is_group_noun(&noun))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// 分组（GPWL / GPSET）的 `/model/generate`（`force = false`）：分组不拥有模型，生成的是它管到的设计元素的
+/// 生成根（`DirectTreeService::group_generation_scope`）。成员可以经 GPREF 跨库，所以按生成根所属的库分批，
+/// 每批照单根请求的路由走：库没准备好的进「只写内存」作用域，撞上整库任务回 409。一批失败只把它的根记进
+/// `failed_roots`，全部失败才按首错回。空组、成员全解析不出回空范围（`generation_roots: []`），不退回对分组
+/// 本身生成——那条路对分组只会报 `container`。
+async fn generate_group_scope(
+    state: &AppState,
+    refno: RefnoEnum,
+) -> Result<serde_json::Value, ApiError> {
+    use crate::data_interface::direct_tree::GroupGenerationScope;
+    use crate::data_interface::generation_root::GenerationRoot;
+    use crate::data_interface::on_demand_model::{
+        OnDemandModelResult, OnDemandModelStatus, ScopeRootFailure, root_failure_is_retryable,
+    };
+
+    let requested = refno.to_pdms_str();
+    let tree = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
+    let group = refno.refno();
+    let (noun, scope, batches, unrouted) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let unit_types =
+                crate::data_interface::generation_root::configured_delivery_unit_types();
+            let noun = tree.noun_of(group)?;
+            let scope = tree
+                .group_generation_scope(group, &unit_types)?
+                .context("请求的分组展开前已不再是分组")?;
+            let mut batches: Vec<(u32, Vec<GenerationRoot>)> = Vec::new();
+            let mut unrouted = Vec::new();
+            for generation_root in &scope.roots {
+                let Some(dbnum) = tree.dbnum_of(generation_root.root.refno()) else {
+                    unrouted.push(generation_root.root.to_pdms_str());
+                    continue;
+                };
+                match batches.iter_mut().find(|(batch, _)| *batch == dbnum) {
+                    Some((_, roots)) => roots.push(generation_root.clone()),
+                    None => batches.push((dbnum, vec![generation_root.clone()])),
+                }
+            }
+            Ok((noun, scope, batches, unrouted))
+        })
+        .await
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("group generation-scope task failed: {error}"))
+        })?
+        .map_err(ApiError::from_domain)?;
+    let GroupGenerationScope {
+        members,
+        roots,
+        unresolved,
+    } = scope;
+    let mut failed_roots: Vec<ScopeRootFailure> = unrouted
+        .into_iter()
+        .map(|generation_root| ScopeRootFailure {
+            generation_root,
+            error: "生成根所属的库不在当前 MDB 的库目录里".into(),
+            retryable: false,
+        })
+        .collect();
+
+    if !batches.is_empty() {
+        require_room_resident_ready()?;
+    }
+    let mut routed = Vec::with_capacity(batches.len());
+    for (dbnum, batch_roots) in batches {
+        let route = crate::data_interface::model_read_route::route_for(dbnum)
+            .await
+            .map_err(ApiError::from_domain)?;
+        if !route.is_database()
+            && let Some(task) = crate::data_interface::task_registry::TaskRegistry::global()
+                .active_dbnum_model_ensure(dbnum)
+        {
+            return Err(ApiError::conflict(format!(
+                "dbnum={dbnum} 已有整库模型任务 {} 在运行；分组 generate 不与它并发写同一库",
+                task.task_id
+            )));
+        }
+        routed.push((route, batch_roots));
+    }
+
+    let outcomes = if routed.is_empty() {
+        Vec::new()
+    } else {
+        let mgr = state.mgr.clone();
+        let jobs = routed.clone();
+        await_background_without_cancelling(Duration::from_secs(120), async move {
+            let mut outcomes = Vec::with_capacity(jobs.len());
+            for (route, batch_roots) in jobs {
+                let mgr = mgr.clone();
+                let generate = async move {
+                    mgr.ensure_model_scope_generated_from_roots(refno, batch_roots, false)
+                        .await
+                };
+                outcomes.push(if route.is_database() {
+                    generate.await
+                } else {
+                    crate::data_interface::model_read_route::scope_memory_only(
+                        route.dbnum,
+                        generate,
+                    )
+                    .await
+                });
+            }
+            outcomes
+        })
+        .await
+        .map_err(|_| {
+            ApiError::timeout(format!(
+                "分组按需生成超时(120s)，后台继续执行，请稍后查询状态: {requested}"
+            ))
+        })?
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("分组按需生成后台任务异常结束: {error}"))
+        })?
+    };
+
+    let mut model_instance_count = 0;
+    let mut generated_instance_count = 0;
+    let mut cached_root_count = 0;
+    let mut generated_root_count = 0;
+    let mut succeeded = false;
+    let mut first_error = None;
+    let mut routes = Vec::with_capacity(routed.len());
+    for ((route, batch_roots), outcome) in routed.iter().zip(outcomes) {
+        match outcome {
+            Ok(result) => {
+                succeeded = true;
+                model_instance_count += result.model_instance_count;
+                generated_instance_count += result.generated_instance_count;
+                cached_root_count += result.cached_root_count;
+                generated_root_count += result.generated_root_count;
+                failed_roots.extend(result.failed_roots);
+            }
+            Err(error) => {
+                let summary = format!("{error:#}");
+                log::error!(
+                    "分组按需生成一批失败 group={requested} dbnum={}: {summary}",
+                    route.dbnum
+                );
+                let retryable = root_failure_is_retryable(&error);
+                failed_roots.extend(batch_roots.iter().map(|root| ScopeRootFailure {
+                    generation_root: root.root.to_pdms_str(),
+                    error: summary.clone(),
+                    retryable,
+                }));
+                first_error.get_or_insert(error);
+            }
+        }
+        routes.push(json!({
+            "dbnum": route.dbnum,
+            "model_source": route.source.as_str(),
+            "model_source_reason": route.reason.map(|reason| reason.as_str()),
+            "durable": route.is_database(),
+            "generation_roots": batch_roots
+                .iter()
+                .map(|root| root.root.to_pdms_str())
+                .collect::<Vec<_>>(),
+        }));
+    }
+    if !succeeded && !failed_roots.is_empty() {
+        return Err(match first_error {
+            Some(error) => ensure_error(error),
+            None => ApiError::from_domain(anyhow::anyhow!(
+                "分组 {requested} 的生成根都不在当前 MDB 的库目录里"
+            )),
+        });
+    }
+
+    let model_available = model_instance_count > 0;
+    let status = if !model_available {
+        OnDemandModelStatus::NoRenderableGeometry
+    } else if generated_root_count > 0 {
+        OnDemandModelStatus::Generated
+    } else {
+        OnDemandModelStatus::AlreadyAvailable
+    };
+    let result = OnDemandModelResult {
+        requested_refno: requested.clone(),
+        generation_root: requested.clone(),
+        generation_root_noun: noun,
+        status,
+        model_available,
+        model_instance_count,
+        generated_instance_count,
+        generation_root_count: roots.len(),
+        generation_roots: roots.iter().map(|root| root.root.to_pdms_str()).collect(),
+        cached_root_count,
+        generated_root_count,
+        failed_root_count: failed_roots.len(),
+        failed_roots,
+    };
+    let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
+    })?;
+    // 跨库时没有单一的库 / 路由，这几格记 null，逐库的看 `routes`。
+    let single = match routed.as_slice() {
+        [(route, _)] => Some(*route),
+        _ => None,
+    };
+    object.insert("dbnum".into(), json!(single.as_ref().map(|route| route.dbnum)));
+    object.insert(
+        "model_source".into(),
+        json!(single.as_ref().map(|route| route.source.as_str())),
+    );
+    object.insert(
+        "model_source_reason".into(),
+        json!(single
+            .as_ref()
+            .and_then(|route| route.reason.map(|reason| reason.as_str()))),
+    );
+    object.insert(
+        "durable".into(),
+        json!(!routed.is_empty() && routed.iter().all(|(route, _)| route.is_database())),
+    );
+    object.insert("scope_kind".into(), json!("group"));
+    object.insert(
+        "scope_refnos".into(),
+        json!(members
+            .iter()
+            .map(|member| RefnoEnum::from(*member).to_pdms_str())
+            .collect::<Vec<_>>()),
+    );
+    object.insert("unresolved_count".into(), json!(unresolved.len()));
+    object.insert("routes".into(), json!(routes));
+    object.insert(
+        "publication_status".into(),
+        json!(if model_available { "ready" } else { "empty" }),
+    );
+    if crate::options::data_face().is_read_through() {
+        object.insert(
+            "snapshot_epoch".into(),
+            json!(
+                crate::data_interface::mdb_memory_store::get(
+                    &state.identity.project,
+                    &state.identity.mdb,
+                )
+                .map(|snapshot| snapshot.epoch())
+                .unwrap_or_default()
+            ),
+        );
+    }
+    Ok(payload)
 }
 
 fn memory_dbnum_task_error(dbnum: u32, error: anyhow::Error) -> ApiError {
@@ -5302,6 +5577,16 @@ pub async fn model_records(
         .collect::<Result<Vec<_>, _>>()?;
     let limit = request.limit.unwrap_or(1000).clamp(1, 5000);
     let cursor = request.cursor.unwrap_or(0);
+    // 分组只在单根形状里展开：批量形状的 `generation_roots[]` 按约定就是生成根。
+    if !batch {
+        let root = parsed_roots[0];
+        let refno = RefU64::from_two_nums(root.word0, root.word1);
+        if requested_is_group(&state, refno).await {
+            return model_records_of_group(&state, &roots[0], refno, cursor, limit)
+                .await
+                .map(Json);
+        }
+    }
     // 取数源按**根所属的库**选（plan 2026-09-06 §8 R3/R4），不按进程介质：库在 rocksdb 里
     // 准备好了就读库，没准备好就读进程内投影。一批根必须同库，所以一个响应仍只有一个源；
     // 解不出所属库（不在 MDB）或跨库按 400 报。
@@ -5327,6 +5612,77 @@ pub async fn model_records(
     let route = crate::data_interface::model_read_route::route_for(dbnum)
         .await
         .map_err(ApiError::from_domain)?;
+    let CollectedRecords {
+        per_root,
+        durable_fallback_roots,
+        incomplete_roots,
+        source,
+    } = collect_model_records(&route, &roots, &parsed_roots).await?;
+    let page = page_records_across_roots(per_root, cursor, limit);
+    let snapshot =
+        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
+    let session_vector = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.session_fingerprint())
+        .unwrap_or_default();
+    let mut payload = json!({
+        "source": source,
+        "dbnum": dbnum,
+        "model_source": route.source.as_str(),
+        "model_source_reason": route.reason.map(|reason| reason.as_str()),
+        "durable": route.is_database(),
+        "complete": incomplete_roots.is_empty(),
+        "incomplete_roots": incomplete_roots,
+        // GitHub #74：模型落后时投影里没有回执、改从库里 S 时刻那份回读的根（请求里的写法）；库路由恒空。
+        "durable_fallback_roots": durable_fallback_roots,
+        "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
+        "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+        "items": page.items,
+        "total": page.total,
+        "truncated": page.next_cursor.is_some(),
+        "next_cursor": page.next_cursor,
+    });
+    let object = payload
+        .as_object_mut()
+        .expect("model/records payload is a JSON object");
+    if batch {
+        // 批量：回显 `generation_roots`，多一格 `roots`（整批逐根总数，每页都带）。
+        object.insert("generation_roots".into(), json!(roots));
+        object.insert(
+            "roots".into(),
+            json!(
+                page.per_root_total
+                    .iter()
+                    .map(|(root, total)| json!({ "generation_root": root, "total": total }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    } else {
+        // 单根：形状一字不改。
+        object.insert("generation_root".into(), json!(roots[0]));
+    }
+    Ok(Json(payload))
+}
+
+/// `/model/records` 一批同库根的取数结果（[`collect_model_records`]）。
+struct CollectedRecords {
+    per_root: Vec<(
+        String,
+        Vec<crate::fast_model::model_record_reader::ModelRecord>,
+    )>,
+    durable_fallback_roots: Vec<String>,
+    incomplete_roots: Vec<String>,
+    source: &'static str,
+}
+
+/// 按 `route` 取一批同属 `route.dbnum` 的根的记录：每个请求根先按祖先展成要读的生成根、逐根读出，
+/// 并给出这批的来源标签与没发布完的根。单根 / 多根批量请求整批走一次，分组请求按成员所属的库每库一次。
+async fn collect_model_records(
+    route: &crate::data_interface::model_read_route::ModelReadRoute,
+    roots: &[String],
+    parsed_roots: &[e3d_io::refno::RefNo],
+) -> Result<CollectedRecords, ApiError> {
+    let dbnum = route.dbnum;
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
     // 请求里的根按**祖先**理解（ADR-086 D1），与库路由 `durable_scope_reads` 的 `anc CONTAINS` 同口径。库路由天然如此；
@@ -5341,7 +5697,7 @@ pub async fn model_records(
         String,
         Vec<(e3d_io::refno::RefNo, Option<e3d_io::refno::RefNo>)>,
     )> = Vec::with_capacity(roots.len());
-    for (name, root) in roots.iter().zip(&parsed_roots) {
+    for (name, root) in roots.iter().zip(parsed_roots) {
         let under = if route.is_database() || store.receipt(scope, *root).is_some() {
             vec![(*root, None)]
         } else {
@@ -5399,7 +5755,6 @@ pub async fn model_records(
         }
         per_root.push((name.clone(), records));
     }
-    let page = page_records_across_roots(per_root, cursor, limit);
     let source = if route.is_database() && memory_overlay_used {
         "rocksdb+memory-overlay"
     } else if !durable_fallback_roots.is_empty() {
@@ -5434,21 +5789,129 @@ pub async fn model_records(
             })
             .collect::<Vec<_>>()
     };
+    Ok(CollectedRecords {
+        per_root,
+        durable_fallback_roots,
+        incomplete_roots,
+        source,
+    })
+}
+
+/// `/model/records` 的单根是分组（GPWL / GPSET）时的取数（服务端展开）：分组不拥有模型，记录取它管到的
+/// 设计元素（`DirectTreeService::group_scope`）。成员可以经 GPREF 跨库，所以按成员所属的库分批、每批照单根
+/// 请求的路由取（[`collect_model_records`]），再按成员先后合并：同一条记录经两个成员各取到一次（BRAN 和
+/// 它名下的 VALV 都是成员）只留第一次，然后分页。响应在单根形状上多 `expanded_from_group` /
+/// `scope_refnos` / `unresolved_count` / `routes`（逐库的路由与来源）；跨库时顶层 `dbnum` /
+/// `model_source` / `model_source_reason` 记 null，各库来源不一致时 `source` 记 `mixed`，空组记 `none`。
+async fn model_records_of_group(
+    state: &AppState,
+    requested: &str,
+    group: RefU64,
+    cursor: usize,
+    limit: usize,
+) -> Result<serde_json::Value, ApiError> {
+    let tree = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
+    let (scope, batches) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let scope = tree
+            .group_scope(group)?
+            .context("请求的分组展开前已不再是分组")?;
+        let mut batches: Vec<(u32, Vec<String>)> = Vec::new();
+        for &member in &scope.members {
+            let name = RefnoEnum::from(member).to_pdms_str();
+            let Some(dbnum) = tree.dbnum_of(member) else {
+                log::warn!("分组成员 {name} 所属的库不在当前 MDB 的库目录里，不取它的记录");
+                continue;
+            };
+            match batches.iter_mut().find(|(batch, _)| *batch == dbnum) {
+                Some((_, names)) => names.push(name),
+                None => batches.push((dbnum, vec![name])),
+            }
+        }
+        Ok((scope, batches))
+    })
+    .await
+    .map_err(|error| ApiError::from_domain(anyhow::anyhow!("group scope task failed: {error}")))?
+    .map_err(ApiError::from_domain)?;
+
+    let mut by_member = std::collections::HashMap::new();
+    let mut routes = Vec::with_capacity(batches.len());
+    let mut routed = Vec::with_capacity(batches.len());
+    let mut sources = Vec::with_capacity(batches.len());
+    let mut durable_fallback_roots = Vec::new();
+    let mut incomplete_roots = Vec::new();
+    for (dbnum, names) in batches {
+        let route = crate::data_interface::model_read_route::route_for(dbnum)
+            .await
+            .map_err(ApiError::from_domain)?;
+        let parsed = names
+            .iter()
+            .map(|name| crate::fast_model::e3d_model_service::parse_refno(name))
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(ApiError::from_domain)?;
+        let batch = collect_model_records(&route, &names, &parsed).await?;
+        by_member.extend(batch.per_root);
+        durable_fallback_roots.extend(batch.durable_fallback_roots);
+        incomplete_roots.extend(batch.incomplete_roots);
+        routes.push(json!({
+            "dbnum": dbnum,
+            "source": batch.source,
+            "model_source": route.source.as_str(),
+            "model_source_reason": route.reason.map(|reason| reason.as_str()),
+            "durable": route.is_database(),
+        }));
+        sources.push(batch.source);
+        routed.push(route);
+    }
+
+    let scope_refnos = scope
+        .members
+        .iter()
+        .map(|member| RefnoEnum::from(*member).to_pdms_str())
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let per_root = scope_refnos
+        .iter()
+        .filter_map(|name| {
+            let mut records: Vec<crate::fast_model::model_record_reader::ModelRecord> =
+                by_member.remove(name)?;
+            records.retain(|record| {
+                seen.insert((
+                    record.inst.refno,
+                    record
+                        .tube
+                        .as_ref()
+                        .map(|tube| (tube.from.clone(), tube.to.clone(), tube.ordinal)),
+                ))
+            });
+            Some((name.clone(), records))
+        })
+        .collect::<Vec<_>>();
+    let page = page_records_across_roots(per_root, cursor, limit);
+    let source = match sources.split_first() {
+        None => "none",
+        Some((first, rest)) if rest.iter().all(|source| source == first) => *first,
+        Some(_) => "mixed",
+    };
+    let single = match routed.as_slice() {
+        [route] => Some(*route),
+        _ => None,
+    };
     let snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
     let session_vector = snapshot
         .as_ref()
         .map(|snapshot| snapshot.session_fingerprint())
         .unwrap_or_default();
-    let mut payload = json!({
+    Ok(json!({
         "source": source,
-        "dbnum": dbnum,
-        "model_source": route.source.as_str(),
-        "model_source_reason": route.reason.map(|reason| reason.as_str()),
-        "durable": route.is_database(),
+        "dbnum": single.as_ref().map(|route| route.dbnum),
+        "model_source": single.as_ref().map(|route| route.source.as_str()),
+        "model_source_reason": single
+            .as_ref()
+            .and_then(|route| route.reason.map(|reason| reason.as_str())),
+        "durable": !routed.is_empty() && routed.iter().all(|route| route.is_database()),
         "complete": incomplete_roots.is_empty(),
         "incomplete_roots": incomplete_roots,
-        // GitHub #74：模型落后时投影里没有回执、改从库里 S 时刻那份回读的根（请求里的写法）；库路由恒空。
         "durable_fallback_roots": durable_fallback_roots,
         "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
         "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
@@ -5456,27 +5919,12 @@ pub async fn model_records(
         "total": page.total,
         "truncated": page.next_cursor.is_some(),
         "next_cursor": page.next_cursor,
-    });
-    let object = payload
-        .as_object_mut()
-        .expect("model/records payload is a JSON object");
-    if batch {
-        // 批量：回显 `generation_roots`，多一格 `roots`（整批逐根总数，每页都带）。
-        object.insert("generation_roots".into(), json!(roots));
-        object.insert(
-            "roots".into(),
-            json!(
-                page.per_root_total
-                    .iter()
-                    .map(|(root, total)| json!({ "generation_root": root, "total": total }))
-                    .collect::<Vec<_>>()
-            ),
-        );
-    } else {
-        // 单根：形状一字不改。
-        object.insert("generation_root".into(), json!(roots[0]));
-    }
-    Ok(Json(payload))
+        "generation_root": requested,
+        "expanded_from_group": true,
+        "scope_refnos": scope_refnos,
+        "unresolved_count": scope.unresolved.len(),
+        "routes": routes,
+    }))
 }
 
 #[cfg(test)]
@@ -6687,6 +7135,72 @@ mod tests {
             "投影里本身、名下、头上都没有回执，才轮到回读"
         );
         assert!(body.contains("\"durable_fallback_roots\": durable_fallback_roots"));
+    }
+
+    /// 分组（GPWL / GPSET）只登记成员、不拥有模型：清理与 `force` 重新生成对它回 422 `group_scope`，
+    /// 拦在路由与清理之前；不带 `force` 的生成和单根记录改走分组展开。空范围碰不到范围生成——那条路
+    /// 对空根会退回按请求节点生成，对分组就是 `container`。
+    #[test]
+    fn group_requests_are_refused_for_cleanup_and_expanded_for_generate_and_records() {
+        let source = include_str!("handlers.rs");
+        let slice = |start: &str, end: &str| {
+            source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{start} must exist"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{end} must follow {start}"))
+                .0
+        };
+
+        let delete = slice(
+            "pub async fn model_delete_subtree(",
+            "/// POST /api/v1/model/ensure",
+        );
+        let guard = delete
+            .find("requested_is_group(&state, refu).await")
+            .expect("cleanup checks for groups");
+        let refuse = delete
+            .find("ApiError::group_scope(")
+            .expect("cleanup of a group is refused");
+        let route = delete.find("model_read_route::route_for(").expect("route");
+        assert!(guard < refuse && refuse < route, "拦在路由与清理之前: {delete}");
+
+        let generate = slice(
+            "pub async fn model_generate(",
+            "async fn append_publication_state(",
+        );
+        let guard = generate
+            .find("requested_is_group(&state, refu).await")
+            .expect("generate checks for groups");
+        let refuse = generate
+            .find("ApiError::group_scope(")
+            .expect("force on a group is refused");
+        let expand = generate
+            .find("generate_group_scope(&state, refno).await")
+            .expect("a group generates its members");
+        let route = generate.find("model_read_route::route_for(").expect("route");
+        assert!(
+            guard < refuse && refuse < expand && expand < route,
+            "分组走自己的路、不进单根生成: {generate}"
+        );
+
+        let group = slice("async fn generate_group_scope(", "fn memory_dbnum_task_error(");
+        let empty = group
+            .find("if routed.is_empty() {")
+            .expect("an empty scope is answered without generating");
+        let scoped = group
+            .find(".ensure_model_scope_generated_from_roots(")
+            .expect("members generate as a scope");
+        assert!(empty < scoped, "空范围不进范围生成: {group}");
+        assert!(!group.contains("ensure_model_generated("), "{group}");
+
+        let records = slice("pub async fn model_records(", "async fn collect_model_records(");
+        let expand = records
+            .find("model_records_of_group(")
+            .expect("a single group root expands its members");
+        let dbnum = records.find("dbnum_for_roots(").expect("dbnum routing");
+        assert!(expand < dbnum, "分组不按它自己的库取数: {records}");
     }
 
     /// **只有 `mem` 报占位地址。**

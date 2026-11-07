@@ -20,8 +20,8 @@ use super::generation_root::{
     resolve_element_generation_root,
 };
 use super::group_membership::{
-    GroupIndex, GroupMembers, ResolvedMember, SecondaryParent, UnresolvedSlot, is_group_noun,
-    resolved_members_on,
+    GroupIndex, GroupMembers, GroupScope, ResolvedMember, SecondaryParent, UnresolvedSlot,
+    expand_group_on, is_group_noun, resolved_members_on,
 };
 use super::mdb_membership::MdbMembership;
 use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
@@ -564,6 +564,15 @@ pub struct ResolvedChildren {
     pub unresolved: Vec<UnresolvedSlot>,
 }
 
+/// [`DirectTreeService::group_generation_scope`] 的结果：分组管到的设计元素、它们去重后的生成根（按成员
+/// 先后）、展开时遇到的坏槽。
+#[derive(Debug, Clone, Default)]
+pub struct GroupGenerationScope {
+    pub members: Vec<RefU64>,
+    pub roots: Vec<GenerationRoot>,
+    pub unresolved: Vec<UnresolvedSlot>,
+}
+
 impl DirectTreeService {
     /// 解析视图的一层：分组（GPWL / GPSET）父节点的 GPITEM 换成 `GPREF` 指向的设计元素；
     /// 其余父节点与 [`Self::children`] 逐行相同。存储视图的树 / 子树 / 生成根遍历不经过这里。
@@ -651,6 +660,59 @@ impl DirectTreeService {
         let index = Arc::new(GroupIndex::build(self.store.as_ref(), &worlds)?);
         *slot = Some(index.clone());
         Ok(index)
+    }
+
+    /// `root` 是分组（GPWL / GPSET）时展开到的设计元素（口径见 [`expand_group_on`]）；不是分组回 `None`。
+    pub fn group_scope(&self, root: RefU64) -> anyhow::Result<Option<GroupScope>> {
+        if !is_group_noun(&self.noun_of(root)?) {
+            return Ok(None);
+        }
+        expand_group_on(self.store.as_ref(), root).map(Some)
+    }
+
+    /// 分组的生成范围：成员逐个走 [`Self::generation_roots_in_subtree`]，按生成根去重、保留成员先后。
+    ///
+    /// 分组只登记成员、不拥有模型：存储视图下它的子树里只有 GPITEM，直接对它解根什么也解不出。
+    /// 成员全都解析不出或分组是空的，`roots` 就是空表——调用方按空范围回答，不再退回单根生成。
+    /// `root` 不是分组回 `None`。
+    pub fn group_generation_scope(
+        &self,
+        root: RefU64,
+        unit_types: &[String],
+    ) -> anyhow::Result<Option<GroupGenerationScope>> {
+        let Some(GroupScope {
+            members,
+            unresolved,
+        }) = self.group_scope(root)?
+        else {
+            return Ok(None);
+        };
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        for &member in &members {
+            for generation_root in self.generation_roots_in_subtree(member, unit_types)? {
+                if seen.insert(generation_root.root) {
+                    roots.push(generation_root);
+                }
+            }
+        }
+        Ok(Some(GroupGenerationScope {
+            members,
+            roots,
+            unresolved,
+        }))
+    }
+
+    /// [`Self::generation_roots_in_subtree`] 的分组感知版：分组换成它成员的生成根，其余逐字相同。
+    pub fn resolved_generation_roots_in_subtree(
+        &self,
+        root: RefU64,
+        unit_types: &[String],
+    ) -> anyhow::Result<Vec<GenerationRoot>> {
+        match self.group_generation_scope(root, unit_types)? {
+            Some(scope) => Ok(scope.roots),
+            None => self.generation_roots_in_subtree(root, unit_types),
+        }
     }
 }
 

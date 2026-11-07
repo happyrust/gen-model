@@ -218,6 +218,12 @@ impl ApiError {
         Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "container", message)
     }
 
+    /// 分组（GPWL / GPSET）只登记成员、不拥有模型：清理和 `force` 重新生成（先清后生成）都不对它做——
+    /// 清掉的会是别处主链拥有的模型。客户端拿到这条该把操作改对成员或它们的主链节点做。
+    pub fn group_scope(message: impl Into<String>) -> Self {
+        Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "group_scope", message)
+    }
+
     /// 请求本身没错，是数据的前置条件不满足。
     pub fn precondition(message: impl Into<String>) -> Self {
         Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "precondition", message)

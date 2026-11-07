@@ -202,6 +202,44 @@ impl GroupIndex {
     }
 }
 
+/// 一个分组管到的设计元素：生成 / 记录按分组请求时的作用范围。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupScope {
+    /// 非分组的解析成员，按前序（存储原序）首次出现排列、去重。
+    pub members: Vec<RefU64>,
+    /// 一路展开遇到的坏槽；同一个分组只展开一次，它的坏槽也只计一次。
+    pub unresolved: Vec<UnresolvedSlot>,
+}
+
+/// 把 `group` 展开到设计元素：嵌套的 GPWL / GPSET（含经 `GPREF` 引用来的）按前序展开，每个分组只展开
+/// 一次，引用成环也会停；非分组成员原样收下，同一元素经多条路径收录只留第一次。分组本身不进
+/// `members`——它不出几何，交给生成 / 记录的是它管的元素。
+pub fn expand_group_on(store: &dyn TreeStore, group: RefU64) -> anyhow::Result<GroupScope> {
+    let mut scope = GroupScope::default();
+    let mut expanded = HashSet::from([group]);
+    let mut seen = HashSet::new();
+    let top = resolved_members_on(store, group)?;
+    scope.unresolved.extend(top.unresolved);
+    let mut stack = vec![top.members.into_iter()];
+    while let Some(level) = stack.last_mut() {
+        let Some(member) = level.next() else {
+            stack.pop();
+            continue;
+        };
+        let element = member.element();
+        if is_group_noun(&noun_of(store, element)?) {
+            if expanded.insert(element) {
+                let nested = resolved_members_on(store, element)?;
+                scope.unresolved.extend(nested.unresolved);
+                stack.push(nested.members.into_iter());
+            }
+        } else if seen.insert(element) {
+            scope.members.push(element);
+        }
+    }
+    Ok(scope)
+}
+
 fn noun_of(store: &dyn TreeStore, refno: RefU64) -> anyhow::Result<String> {
     Ok(store
         .named_attmap(refno)?
@@ -403,5 +441,52 @@ mod tests {
             "GPWL → GPSET 是主链，不算二级收录"
         );
         assert!(index.parents_of(r(1, 1)).is_empty());
+    }
+
+    #[test]
+    fn expanding_a_gpwl_walks_its_sets_down_to_design_elements() {
+        let scope = expand_group_on(&sample(), r(2, 10)).unwrap();
+        assert_eq!(scope.members, vec![r(1, 3), r(1, 4)]);
+        assert!(scope.unresolved.is_empty());
+    }
+
+    #[test]
+    fn nested_and_cyclic_groups_expand_once_in_preorder() {
+        let mut store = sample();
+        // GPSET 2/11 → ZONE 1/3、GPSET 2/30、BRAN 1/4；GPSET 2/30 → SITE 1/2、BRAN 1/4、回指 GPSET 2/11。
+        store.add(r(2, 11), "GPSET", &[r(2, 12), r(2, 15), r(2, 13)]);
+        store.item(r(2, 15), Some(r(2, 30)));
+        store.add(r(2, 30), "GPSET", &[r(2, 31), r(2, 32), r(2, 33)]);
+        store.item(r(2, 31), Some(r(1, 2)));
+        store.item(r(2, 32), Some(r(1, 4)));
+        store.item(r(2, 33), Some(r(2, 11)));
+        let scope = expand_group_on(&store, r(2, 10)).unwrap();
+        assert_eq!(scope.members, vec![r(1, 3), r(1, 2), r(1, 4)]);
+        assert!(scope.unresolved.is_empty());
+    }
+
+    #[test]
+    fn a_group_of_bad_slots_expands_to_nothing_but_keeps_the_slots() {
+        let mut store = sample();
+        store.foreign.insert(9);
+        store.add(r(2, 11), "GPSET", &[r(2, 20), r(2, 21)]);
+        store.item(r(2, 20), None);
+        store.item(r(2, 21), Some(r(9, 5)));
+        let scope = expand_group_on(&store, r(2, 10)).unwrap();
+        assert!(scope.members.is_empty());
+        assert_eq!(
+            scope
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason)
+                .collect::<Vec<_>>(),
+            vec![UnresolvedReason::GprefMissing, UnresolvedReason::DbNotInMdb]
+        );
+
+        store.add(r(2, 11), "GPSET", &[]);
+        assert_eq!(
+            expand_group_on(&store, r(2, 10)).unwrap(),
+            GroupScope::default()
+        );
     }
 }
