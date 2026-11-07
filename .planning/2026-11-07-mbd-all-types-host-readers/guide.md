@@ -100,7 +100,7 @@ fn open(dbs: &[&str]) -> Option<Arc<DbSet>> {
 `[mbd_type_rules]` 的缺省表照 PML `getmbdtype` 与 `getsuppname`，在 AMS 上补了五条，均已采纳：
 
 1. 支架区除了 ZONE 名含 `SUPP`，也认 `PURP=SUPP`：AMS 的 `/1RX02-LSUP`、`/1RX03-MSUP` 名字里没有 SUPP，四个支架区都只靠 PURP 认得出。
-2. REST / HANG 只在同一 ZONE 里找配对的 STRU：REST 名去掉 `/REST` 得 S，依次找 `S/STRU`、`S`（`getsuppname`）；找不到就以 REST 本身为归属并留一条视图 issue。
+2. REST / HANG 找配对的 STRU：REST 名去掉 `/REST` 得 S，先在同一 ZONE 里依次找 `S/STRU`、`S`，都没有再全库按名依次找（`getsuppname`；查各 DESI 库缓存的 NAME 表，CT-13）；找不到就以 REST 本身为归属并留一条视图 issue。`:SUPP` UDET 支架先找 SUPPO 再取 `:SUPP` 一级（CT-13）。
 3. ZONE 名含 MTGD / COMM / CASE / LIGHT 判设备的那条只对 EQUI 名下元素生效（PML 对区里任何元素都回 EQUI）。
 4. 土建判在支架区之前。
 5. 名字以 `-MBD` 结尾的 STRU（PML 存标注用）与名字含 `CIV` 的 STRU 不算支架。
