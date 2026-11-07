@@ -58,7 +58,9 @@ pub fn wire_refno(refno: RefNo) -> String {
 
 #[derive(Debug)]
 pub enum BranchQueryError {
-    SourceChanged { dbnum: u32 },
+    SourceChanged {
+        dbnum: u32,
+    },
     /// refno 在所钉会话里不存在。
     NotFound {
         refno: RefNo,
@@ -168,7 +170,10 @@ pub struct BranchReadVersion {
     pub databases: Vec<DatabaseReadVersion>,
 }
 
-pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryWithDiameters, BranchQueryError> {
+pub fn branch_query_with_diameters(
+    set: &Arc<DbSet>,
+    refno: RefNo,
+) -> Result<BranchQueryWithDiameters, BranchQueryError> {
     let container = set.element(refno);
     if !container.exists()? {
         return Err(BranchQueryError::NotFound { refno });
@@ -373,7 +378,10 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             ));
         }
 
-        diameters.insert(object_refno.clone(), diameter_evidence(slot_od, arrive.and_then(|point| point.bore)));
+        diameters.insert(
+            object_refno.clone(),
+            diameter_evidence(slot_od, arrive.and_then(|point| point.bore)),
+        );
         members.push(BranchMember {
             refno: object_refno.clone(),
             owner_refno: branch_refno.clone(),
@@ -396,6 +404,9 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
             name,
             stext,
             connection,
+            // TODO(mbd): vendor 47eb83e 给 BranchMember 加了 22 个字段（aconn/lconn/atta_adlongth/atta_support/...），
+            // 宿主尚未从 E3D 读；垫片只为解锁编译，MBD 线补读后删除。
+            ..Default::default()
         });
 
         if station.is_some() {
@@ -504,27 +515,45 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
         if !source.is_current().unwrap_or(false) {
             return Err(BranchQueryError::SourceChanged { dbnum });
         }
-        databases.push(DatabaseReadVersion { dbnum, sesno: source.sesno,
-            db_type: set.db_type(dbnum).unwrap_or_default() });
+        databases.push(DatabaseReadVersion {
+            dbnum,
+            sesno: source.sesno,
+            db_type: set.db_type(dbnum).unwrap_or_default(),
+        });
     }
     databases.sort_by_key(|database| database.dbnum);
-    let sesno = set.pinned_sesno(refno.dbno()).ok_or(BranchQueryError::SourceChanged { dbnum: refno.dbno() })?;
-    let source_version = BranchReadVersion { dbnum: refno.dbno(), sesno, databases };
-    Ok(BranchQueryWithDiameters { result: BranchQueryResult {
-        branch_refno,
-        members,
-        head_pos,
-        head_dir,
-        tail_pos,
-        tail_dir,
-        volume_center: None,
-        name,
-        label_bore_text,
-        head_connection,
-        tail_connection,
-        split_members: None,
-        issues,
-    }, diameters, source_version })
+    let sesno = set
+        .pinned_sesno(refno.dbno())
+        .ok_or(BranchQueryError::SourceChanged {
+            dbnum: refno.dbno(),
+        })?;
+    let source_version = BranchReadVersion {
+        dbnum: refno.dbno(),
+        sesno,
+        databases,
+    };
+    Ok(BranchQueryWithDiameters {
+        result: BranchQueryResult {
+            branch_refno,
+            members,
+            head_pos,
+            head_dir,
+            tail_pos,
+            tail_dir,
+            volume_center: None,
+            name,
+            label_bore_text,
+            head_connection,
+            tail_connection,
+            split_members: None,
+            issues,
+            // TODO(mbd): vendor 47eb83e 给 BranchQueryResult 加了 11 个字段（dmf_walls/document_code/drawing_number/...），
+            // 宿主尚未从 E3D 读；垫片只为解锁编译，MBD 线补读后删除。
+            ..Default::default()
+        },
+        diameters,
+        source_version,
+    })
 }
 
 /// 引用目标在别的库、库没注册 / 元素不在所钉会话：按「没有」，不算错（同 [`catalogue_od`]）。
@@ -651,7 +680,13 @@ fn diameter_evidence(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> Dia
     let catalogue_od_mm = tube_outer_diameter(catalogue_od, None, None);
     let arrive_bore_mm = arrive_bore.filter(|value| value.is_finite() && *value > 0.0);
     DiameterEvidence {
-        source: if catalogue_od_mm.is_some() { "catalogue" } else if arrive_bore_mm.is_some() { "bore-estimate" } else { "missing" },
+        source: if catalogue_od_mm.is_some() {
+            "catalogue"
+        } else if arrive_bore_mm.is_some() {
+            "bore-estimate"
+        } else {
+            "missing"
+        },
         catalogue_od_mm,
         arrive_bore_mm,
     }
@@ -758,6 +793,9 @@ fn push_implied_tube(
         name: None,
         stext: None,
         connection: None,
+        // TODO(mbd): vendor 47eb83e 给 BranchMember 加了 22 个字段（aconn/lconn/atta_adlongth/atta_support/...），
+        // 宿主尚未从 E3D 读；垫片只为解锁编译，MBD 线补读后删除。
+        ..Default::default()
     });
 }
 
