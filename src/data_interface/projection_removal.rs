@@ -53,10 +53,22 @@ pub(crate) struct RemovalReport {
 /// `inst_relate`、摘完账本再放——中途放锁，同根的新一次生成刚写下的行与账本会被这些收尾删掉；投影两路拿到就放。
 #[derive(Debug)]
 pub(crate) struct Removal {
-    #[cfg_attr(not(test), allow(dead_code))] // 生产两路只靠它攥锁，结算只有测试读
     pub report: RemovalReport,
     _generation_guards: Vec<OwnedMutexGuard<()>>,
     _root_guards: Vec<OwnedMutexGuard<()>>,
+}
+
+/// 存储的删除方法（[`ModelMemoryStore::retire_roots`]、[`ModelMemoryStore::clear_dbnum`]）要的凭证。字段私有，
+/// 只有本模块造得出来：入口之外调不动这两个方法。
+#[derive(Debug)]
+pub(crate) struct RemovalAuthority(());
+
+#[cfg(test)]
+impl RemovalAuthority {
+    /// 存储自己的单测直接调删除方法时用。
+    pub(crate) fn for_tests() -> Self {
+        Self(())
+    }
 }
 
 /// 删掉 `subtrees` 子树下已发布的产物：记录按祖先链取、隐式管身所在的分支一并重置；整根落在里面的根退役，
@@ -120,7 +132,12 @@ pub(crate) async fn remove_subtree(request: RemovalRequest) -> anyhow::Result<Re
     if !commit.is_empty() {
         crate::fast_model::model_write_behind::publish(vec![commit])?;
     }
-    store.retire_roots(scope, &closure.removed_roots, &closure.outer_roots);
+    store.retire_roots(
+        &RemovalAuthority(()),
+        scope,
+        &closure.removed_roots,
+        &closure.outer_roots,
+    );
     Ok(Removal {
         report: RemovalReport {
             removed_records: closure.records.len(),
@@ -139,7 +156,7 @@ pub(crate) fn clear_dbnum(dbnum: u32, spool_tombstones: bool) -> anyhow::Result<
     if spool_tombstones {
         spool_dbnum_tombstones(store, dbnum)?;
     }
-    store.clear_dbnum(dbnum);
+    store.clear_dbnum(&RemovalAuthority(()), dbnum);
     Ok(())
 }
 

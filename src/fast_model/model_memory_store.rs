@@ -31,6 +31,7 @@ use e3d_model::primitive_instance::PrimitiveMeshKey;
 use glam::DMat4;
 use serde::{Deserialize, Serialize};
 
+use crate::data_interface::projection_removal::RemovalAuthority;
 use crate::fast_model::e3d_model_service::ModelTarget;
 
 /// 一条记录落在哪个投影域里。
@@ -1034,6 +1035,7 @@ static STORE: OnceLock<ModelMemoryStore> = OnceLock::new();
 impl ModelMemoryStore {
     /// A restored projection has no complete deletion history. Until an exact
     /// room ACK, compare against the complete local membership baseline.
+    #[cfg(test)]
     pub(crate) fn room_baseline_known(&self, dbnum: u32) -> bool {
         self.read()
             .get(&ScopeKey::Current)
@@ -1095,21 +1097,6 @@ impl ModelMemoryStore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn room_member_records(
-        &self,
-        dbnum: u32,
-        members: &BTreeSet<i64>,
-    ) -> Vec<ProjectedGeometry> {
-        let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else {
-            return Vec::new();
-        };
-        members
-            .iter()
-            .flat_map(|member| state.by_source.get(&(dbnum, *member)).into_iter().flatten())
-            .filter_map(|id| state.geometries.get(id).cloned())
-            .collect()
-    }
     /// Ref0 is not a dbnum. Resolve requested sources against the resident
     /// per-db indexes rather than guessing ownership or querying database geometry.
     pub(crate) fn room_records_for_members(
@@ -1135,6 +1122,7 @@ impl ModelMemoryStore {
             .filter_map(|id| state.geometries.get(id).cloned())
             .collect()
     }
+    #[cfg(test)]
     pub(crate) fn room_snapshot(
         &self,
         dbnum: u32,
@@ -1178,6 +1166,7 @@ impl ModelMemoryStore {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn ack_rooms(&self, dbnum: u32, epoch: u64) -> bool {
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
@@ -1319,7 +1308,8 @@ impl ModelMemoryStore {
     /// 不同。但这根的 ACK / 提交序号 / 失效标记要跟回执一起掉（2026-09-22 审核 D3）：此前只删记录与回执，
     /// `publication_acks` / `commit_ticks` 留下孤儿——逐出候选按 `receipts` 迭代，永远收不到它们，
     /// 随源上删根数累积（症状 `/health.model_cache.overlay.acks > roots`）。
-    pub fn evict_missing_root(&self, root: RefNo, expected_epoch: u64) -> bool {
+    #[cfg(test)]
+    pub(crate) fn evict_missing_root(&self, root: RefNo, expected_epoch: u64) -> bool {
         let dbnum = root.dbno();
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&ProjectionScope::Current.key()) else {
@@ -1506,7 +1496,7 @@ impl ModelMemoryStore {
     /// A whole-dbnum reinitialize invalidates the process projection immediately.
     /// The epoch bump also prevents an in-flight database snapshot from restoring
     /// the pre-wipe image after this point.
-    pub fn clear_dbnum(&self, dbnum: u32) {
+    pub(crate) fn clear_dbnum(&self, _authority: &RemovalAuthority, dbnum: u32) {
         let mut scopes = self.write();
         let state = scopes.entry(ProjectionScope::Current.key()).or_default();
         state.room_baselines.remove(&dbnum);
@@ -1637,6 +1627,7 @@ impl ModelMemoryStore {
 
     /// Immutable file view and its version from one read lock. Room consumers
     /// check this epoch again before committing their results.
+    #[cfg(test)]
     pub(crate) fn snapshot_dbnum(&self, dbnum: u32) -> (u64, Vec<ProjectedGeometry>) {
         let scopes = self.read();
         let Some(state) = scopes.get(&ScopeKey::Current) else {
@@ -1761,7 +1752,11 @@ impl ModelMemoryStore {
     /// 祖先链共享记录，按链上的位置分两类：链由近到远，排在子树根之前（含子树根自己）的根整根落在子树里，
     /// 之后的是头上的外层根。子树根自己常驻也算落在里面，哪怕名下一条记录都没有。
     /// 一把读锁里按记录的祖先链反查，不逐根扫记录。
-    pub fn subtree_closure(&self, scope: ProjectionScope<'_>, nodes: &[RefNo]) -> SubtreeClosure {
+    pub(crate) fn subtree_closure(
+        &self,
+        scope: ProjectionScope<'_>,
+        nodes: &[RefNo],
+    ) -> SubtreeClosure {
         let scopes = self.read();
         let Some(state) = scopes.get(&scope.key()) else {
             return SubtreeClosure::default();
@@ -1830,6 +1825,7 @@ impl ModelMemoryStore {
     /// [`Self::invalidate_receipt`]），剩下的记录照旧可显示。返回退役时摘掉的记录数。
     pub(crate) fn retire_roots(
         &self,
+        _authority: &RemovalAuthority,
         scope: ProjectionScope<'_>,
         removed: &[RefNo],
         outer: &[RefNo],
@@ -1939,19 +1935,13 @@ impl ModelMemoryStore {
     }
 
     /// Current-memory roots of one database whose exact receipt has not yet
-    /// been acknowledged by the durable store. This is the write-behind
-    /// pipeline's reconciliation set; it never reads or hydrates RocksDB.
-    pub fn pending_roots_of_dbnum(&self, dbnum: u32) -> Vec<RefNo> {
+    /// been acknowledged by the durable store. Never reads or hydrates RocksDB.
+    #[cfg(test)]
+    pub(crate) fn pending_roots_of_dbnum(&self, dbnum: u32) -> Vec<RefNo> {
         self.roots(ProjectionScope::Current)
             .into_iter()
             .filter(|root| root.dbno() == dbnum && self.root_needs_persist(*root))
             .collect()
-    }
-
-    pub fn invalidate_publication_ack(&self, scope: ProjectionScope<'_>, root: RefNo) {
-        if let Some(state) = self.write().get_mut(&scope.key()) {
-            state.publication_acks.remove(&packed_refno(root));
-        }
     }
 
     /// Remove only the publication marker for a root while retaining its
@@ -1965,11 +1955,11 @@ impl ModelMemoryStore {
     }
 
     /// Invalidate every publication marker in a projection scope without
-    /// discarding the records that are still safe to display.  A source
-    /// snapshot swap uses this as a cheap global fence: the next `ensure`
+    /// discarding the records that are still safe to display: the next `ensure`
     /// must compare against and publish from the new epoch before it can call
     /// the projection current again.
-    pub fn invalidate_all_receipts(&self, scope: ProjectionScope<'_>) -> usize {
+    #[cfg(test)]
+    pub(crate) fn invalidate_all_receipts(&self, scope: ProjectionScope<'_>) -> usize {
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&scope.key()) else {
             return 0;
@@ -2812,7 +2802,7 @@ mod tests {
         );
 
         store.record_publication_ack(ProjectionScope::Current, root, ack);
-        store.clear_dbnum(7997);
+        store.clear_dbnum(&RemovalAuthority::for_tests(), 7997);
         assert!(
             store
                 .publication_ack(ProjectionScope::Current, root)
@@ -2992,7 +2982,7 @@ mod tests {
         assert!(store.receipt(ProjectionScope::Current, root_a).is_some());
         let epoch = store.commit_epoch(7997);
 
-        store.clear_dbnum(7997);
+        store.clear_dbnum(&RemovalAuthority::for_tests(), 7997);
 
         assert!(store.commit_epoch(7997) > epoch);
         assert!(
@@ -4303,7 +4293,7 @@ mod tests {
         assert_eq!(with_more.records, 3);
         assert!(with_more.approx_bytes > with_ack.approx_bytes);
 
-        store.clear_dbnum(7997);
+        store.clear_dbnum(&RemovalAuthority::for_tests(), 7997);
         let cleared = store.overlay_footprint();
         assert_eq!(
             (
@@ -4599,7 +4589,7 @@ mod tests {
             ProjectionScope::Current,
             vec![whole_root("v5", Some(vec![set(5)]))],
         );
-        store.clear_dbnum(7997);
+        store.clear_dbnum(&RemovalAuthority::for_tests(), 7997);
         assert!(
             store
                 .point_sets_of_root(ProjectionScope::Current, root)

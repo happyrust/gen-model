@@ -8428,7 +8428,7 @@ mod tests {
         let store_source = include_str!("model_memory_store.rs");
         for function in [
             "pub(crate) fn restore_dbnum(",
-            "pub fn clear_dbnum(",
+            "pub(crate) fn clear_dbnum(",
             "pub fn invalidate_receipts_of_dbnum(",
         ] {
             let body = store_source
@@ -8445,7 +8445,7 @@ mod tests {
         }
         assert!(
             store_source
-                .split_once("pub fn invalidate_all_receipts(")
+                .split_once("pub(crate) fn invalidate_all_receipts(")
                 .expect("invalidate_all_receipts")
                 .1
                 .split_once("\n    }\n")

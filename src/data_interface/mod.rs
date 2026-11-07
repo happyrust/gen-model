@@ -156,7 +156,7 @@ pub mod update_scope;
 pub mod on_demand_model;
 
 /// 投影删除的入口：根锁 → 库级生成锁 → 结算受影响的根 → 墓碑 → 删除提交，锁序只在这里定。
-mod projection_removal;
+pub(crate) mod projection_removal;
 
 pub(crate) mod on_demand_db;
 

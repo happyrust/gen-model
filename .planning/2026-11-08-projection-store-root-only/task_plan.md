@@ -178,7 +178,7 @@
 | G1 入口就位 | P 路走入口；G0 测试绿 | 通过（2026-11-08，2903 过 / 0 失败 / 128 忽略） |
 | G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 通过（2026-11-08，2909 过 / 0 失败 / 128 忽略；计数含工作树里其它未提交改动带来的 6 条，见 §8） |
 | G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 通过（2026-11-08，2910 过 / 0 失败 / 128 忽略） |
-| G4 可见性 | 收窄完成；无外部调用；无新增告警 | 未开始 |
+| G4 可见性 | 收窄完成；无外部调用；无新增告警 | 通过（2026-11-08，2910 过 / 0 失败 / 128 忽略；告警一项改由调用点核对，见 §8 Phase 4） |
 | G5 留痕 | ADR + CONTEXT + changelog | 未开始 |
 
 ## 8. 批注处置记录
@@ -286,3 +286,24 @@
 - G3：`cargo +nightly test --lib` 2910 过、0 失败、128 忽略，共 3038 条；本 crate 没有新增告警。
   - 与 G2 逐条对比：多出的一条是 `an_upgrade_wipe_is_refused_while_the_dbnum_is_generating`。另有一条忽略的 live 用例改了名（`direct_tree` 里 `ams_group_sets_resolve_to_design_elements` → `aps_group_worlds_are_navigable_in_the_resolved_view`），来自工作树里与本计划无关的未提交改动。
   - 定向跑 `fast_delete` / `projection_removal` / `cata_dependency` / `model_db_adapter`：146 过、0 失败、3 忽略；0-C ② 与新增的升级清库用例都在其中。
+
+### Phase 4 施工记录（2026-11-08）
+
+- 4-B：存储的删除方法只对入口开放，用凭证做。
+  - Rust 的 `pub(in path)` 只接受祖先模块。入口在 `data_interface`、存储在 `fast_model`，共同的祖先只有 `crate`，写不出「只对入口可见」。
+  - 入口里新增 `RemovalAuthority(())`，字段私有，只有入口造得出来。存储的 `retire_roots`、`clear_dbnum` 都要它，收成 `pub(crate)`：入口之外调不动这两个方法，由编译器把住。R6（删掉文本守卫后失去「只有一份实现」的约束）就此收口。
+  - 存储要写得出这个类型名，`data_interface/mod.rs` 里入口模块从私有放宽到 `pub(crate)`；入口里其他项的可见性不变。
+  - 存储自己的单测直接调 `clear_dbnum`（4 处），用 `#[cfg(test)]` 的 `RemovalAuthority::for_tests()`。
+  - `subtree_closure` 只读，不要凭证，从 `pub` 收成 `pub(crate)`；调用方是入口和契约测试。
+  - `model_db_adapter.rs` 里的守卫按签名文本切函数体，`clear_dbnum`、`invalidate_all_receipts` 两处签名文本跟着改。
+- 4-A：§2.1 的 13 个方法逐个核对调用方。
+  - 只在测试里用，加 `#[cfg(test)]`，原来是 `pub` 的一并收成 `pub(crate)`：`room_baseline_known`、`room_snapshot`、`ack_rooms`、`evict_missing_root`、`snapshot_dbnum`、`pending_roots_of_dbnum`、`invalidate_all_receipts`。`snapshot_dbnum` 有 `room_resident` 的测试在用，所以保留 `pub(crate)`。
+  - 没有任何调用方，删掉：`room_member_records`、`invalidate_publication_ack`。
+  - 原样不动：`restore_dbnum` 和 `reset` 动工前就是 `#[cfg(test)]`。`forget_retired_root`、`invalidate_receipts_of_dbnum` 有生产调用（`lib.rs` 的 `targeted_model_refresh`，ws 特性），§2.1 把它们记成「没有外部生产调用」是错的。
+  - `pending_roots_of_dbnum`、`invalidate_all_receipts` 的文档各有半句说生产路径在用（写后台对账、源快照切换），实际只有测试在用，那半句删了。`tests/refno_native_guards.rs` 里禁止生产代码调 `invalidate_all_receipts(` 的守卫照旧成立。
+- 4-C：房间簿记没有另外要收的。`room_baseline_known`、`room_snapshot`、`ack_rooms` 随 4-A 收成测试专用，`room_member_records` 删掉；外部在用的房间方法与 §2.5 一致（另有 `ProjectedGeometry::room_inst`），字段本来就私有。
+- 调用点核对：`cargo test --lib` 带 `cfg(test)` 编译，生产代码误调一个刚收成测试专用的方法也编得过，所以逐个列了调用点。收窄的方法只在 `model_memory_store.rs` 和 `room_resident.rs` 的 `mod tests` 里被调；删掉的两个没有调用点；`retire_roots`、`clear_dbnum` 只有入口在调。
+- 更正：`src/lib.rs` 的 crate 根有 `#![allow(warnings)]`，编译器在本 crate 里不报任何告警。前面各阶段门里「本 crate 没有新增告警」只是没看到告警，说明不了什么；Phase 2 记录里「非测试构建会报 never read」不成立，`Removal.report` 上那条 `cfg_attr` 随本阶段删掉。G4 的告警一项改由上面的调用点核对代替。
+- G4：`cargo +nightly test --lib` 2910 过、0 失败、128 忽略，共 3038 条，与 G3 逐条对比没有差异（本阶段不加不减用例）。
+  - 定向跑 `model_memory_store` / `projection_removal` / `fast_delete` / `model_db_adapter` / `room_resident` / `cata_dependency`：230 过、0 失败、12 忽略。
+  - 四个改动文件 rustfmt 检查通过。
