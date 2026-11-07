@@ -15,10 +15,11 @@
 //! 见 [`super::support_geometry`]）；有 `ARRI` / `LEAV` 的取 `APOS` / `LPOS` / `LDIR`（目录 P 点）；目录 P 点全集（PTSE
 //! 原序，世界系；PTSE 里没有 P0 的目录件补上构件原点、局部 +Z 的 P0——E3D 照样答 `p0 pos / dir`，PML 拿它当管夹点）；
 //! 目录件的 `PARA`、带保温规格（`ISPE`）时的 `IPARA[1]`、`name of cate of catref` 与已求值的几何原语（板上 PFIT 的
-//! 实例标架贴板面，同 e3d-model）；SCTN / GENSEC 的型钢数据、PANE 的板数据；`CUTL`（E3D 现算的伪属性，这里按 `|POSE − POSS|`
-//! 给，只对 SCTN）；`DESP`；UDA `:itemcode`、`:SUPP-ADLONGTH`（型钢）、`:ZD-XCQG`、`:weldTP`（只给 STRU 下 `DBDEPTH >
-//! 7` 的 BOX，WORL 记 0）。包围盒（PML `volume`）先查本库 SPAMAP（[`host::spamap_index`]），没有条目的按已取到的几何点
-//! （截面两端、板两面、原语、P 点）求；材料码表不在宿主，`material_desc` 不给。
+//! 实例标架贴板面，同 e3d-model；带保温时圆柱另带不带保温的 `pdia_bare`，见 [`super::support_geometry`]）；SCTN /
+//! GENSEC 的型钢数据、PANE 的板数据；`CUTL`（E3D 现算的伪属性，这里按 `|POSE − POSS|` 给，只对 SCTN）；`DESP`；UDA
+//! `:itemcode`、`:SUPP-ADLONGTH`（型钢）、`:ZD-XCQG`、`:weldTP`（只给 STRU 下 `DBDEPTH > 7` 的 BOX，WORL 记 0）。
+//! 包围盒（PML `volume`）先查本库 SPAMAP（[`host::spamap_index`]），没有条目的按已取到的几何点（截面两端、板两面、
+//! 原语、P 点）求；材料码表不在宿主，`material_desc` 不给。
 //!
 //! # 管道附件（`pipe_attas`）
 //!
@@ -419,7 +420,9 @@ impl<'a> MemberReader<'a> {
             member.ipara = insulation_parameters(element, eval.component())?;
             if let (Some(world), Some(geometry)) = (world, geometry_set(eval.component())?) {
                 let world = catalogue_world(element, noun, world)?;
-                let mut context = PrimitiveContext::new(element, eval.env(), world);
+                let bare_env = (!member.ipara.is_empty()).then(|| eval.env());
+                let mut context =
+                    PrimitiveContext::new(element, eval.env(), world).with_bare_env(bare_env);
                 for primitive in geometry.members()? {
                     match context.primitive(&primitive) {
                         Ok(primitive) => member.primitives.push(primitive),

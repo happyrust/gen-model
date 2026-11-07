@@ -33,7 +33,9 @@
 //!
 //! - SBOX：中心 `(PX, PY, PZ)`、三向长度 `|PXLE| / |PYLE| / |PZLE|`（沿构件 ORI x / y / z）；
 //! - SCYL / SSCY：中心 `轴原点 + 轴向 · (PDIS + PHEI / 2)`、高 `|PHEI|`；LCYL：中心 `轴原点 + 轴向 · (PBDI + PTDI) / 2`、
-//!   高 `|PTDI − PBDI|`；直径 `|PDIA|`，轴向原样（PAXI）；
+//!   高 `|PTDI − PBDI|`；直径 `|PDIA|`，轴向原样（PAXI）。构件带保温（`ipara` 非空）时另给 `pdia_bare`：`|PDIA|` 在
+//!   不带保温的环境（`IPARAM` 一律答 0）里的值。`CatalogueEval` 的环境本身就不带保温，所以它与直径相同；它告诉求解器
+//!   这是裸径，`!!getPipeMaxdia` 不再扣 `IPARA[1]`（plant-mbd `D-SUPP9-021` / `D-SUPP4-020`）；
 //! - SEXT：`PAAX` 为 x、`PBAX` 正交化为 y、z = x × y 的标架放在 `轴原点 + R · (PX, PY, PZ)`，第一个 SLOO 的 SVER 顶点
 //!   与 PRAD，沿 z 拉伸 `|PHEI|`；
 //! - 型钢 GMSS 的 SPRO（SPVE + PRAD）/ SREC（四角）/ SANN（圆心与直径）落在 `POSS` 截面平面上，拉伸方向与长度取标架
@@ -156,10 +158,12 @@ fn tidy(value: f64) -> f64 {
 
 // ---- 目录原语 ------------------------------------------------------------------------------------
 
-/// 一个设计构件的目录求值上下文：环境、世界矩阵与（按需求的）局部 P 点。
+/// 一个设计构件的目录求值上下文：环境、世界矩阵与（按需求的）局部 P 点；构件带保温时另有不带保温的环境
+/// （`pdia_bare`，见模块文档）。
 pub struct PrimitiveContext<'a> {
     member: &'a DbElement,
     env: &'a DbElementParamEnv,
+    bare_env: Option<&'a DbElementParamEnv>,
     world: DMat4,
     points: Option<Vec<CataloguePoint>>,
 }
@@ -169,9 +173,16 @@ impl<'a> PrimitiveContext<'a> {
         Self {
             member,
             env,
+            bare_env: None,
             world,
             points: None,
         }
+    }
+
+    /// 构件带保温（`ipara` 非空）时给：LCYL / SCYL / SSCY 的 `PDIA` 在这个环境里再求一次，填 `pdia_bare`。
+    pub fn with_bare_env(mut self, bare_env: Option<&'a DbElementParamEnv>) -> Self {
+        self.bare_env = bare_env;
+        self
     }
 
     fn point(&mut self, number: u32) -> Result<Option<CataloguePoint>, DbElementError> {
@@ -278,6 +289,9 @@ impl<'a> PrimitiveContext<'a> {
                 out.axis = self.to_world_dir(direction).map(arr);
                 out.height = Some(height);
                 out.diameter = number(primitive, "PDIA", env)?.map(f64::abs);
+                if let Some(bare_env) = self.bare_env {
+                    out.pdia_bare = number(primitive, "PDIA", bare_env)?.map(f64::abs);
+                }
             }
             "SEXT" => self.sext(primitive, &mut out)?,
             _ => {}
