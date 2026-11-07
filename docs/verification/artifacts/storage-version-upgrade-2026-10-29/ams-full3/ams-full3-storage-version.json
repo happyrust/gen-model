@@ -1,0 +1,2 @@
+[{ id: storage_version:current, rebuild: 数据库架构变了，老数据读不懂。请用 aios-database 升级数据库：POST /api/v1/storage-version/upgrade（默认全部设计库，逐库清空、重新解析、重新生成模型）。升级完成前 rs-server 会拒绝启动；运行期不再做任何版本判断。, shape: 数据库架构 v1。pe_ptset:{pe} = { pe, root, dbnum, noun, ptset: { "<P 号>": { pt: [x,y,z], dir: [x,y,z], bore, noun } }, count, unresolved: [{ number, reason }], sesno, generator, reason, written_at }。坐标是管件局部系，单位 mm。没有行 = 这根还没按本版发布过；有行但 ptset: {} = 这件真没有 P 点（reason 说明）。, version: 1 }]
+

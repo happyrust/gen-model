@@ -180,3 +180,16 @@ publish → R4 删账本退表 → R5 退 `room_published_*` → R6 文档。pub
 
 TaskWriter / 有界通道 / 异步写者（任务与库之间没有队列，d-285 / d-300 原样）；d-427 凭证前移退役与 d-429 逐根房间（同一 worktree 上
 接着做，是本 ADR 的「下一步」）；多写者 / 多进程写同一库；读透形态（`applied` 恒 0）不适用。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-A-11 与「崩溃点 → 恢复」段（审计按 2026-10-27 工作树记的行号）。
+> 本节只追记，D2 / D3 原文不改。
+
+- **T-A-3 · D2 / D3 的「按 sesno 分面回退」已被 ADR-073 D3 取代，读者不要按它实现恢复。**
+  现行：进程死在写库中途（`dbnum_write_state.status=writing`）一律整库 `Reinitialize`，不按 sesno 回退；
+  数据尾已推 `applied_sesno`、`task_end` 未落也同样整库 `Reinitialize`；开工前残留标记就地改意图；正常 `Partial`（标记已
+  `finished`）不触发重建。代码：`startup_reconcile.rs:9-10,92-102`、`batch_worker.rs:1414-1422`、
+  `src/data_interface/write_state.rs:1-5,88-94,372-387`；另见 ADR-073 D3、ADR-076 D8。
+  注释侧的同步过时（`write_state.rs` 里的「三水位」、`lib.rs:1043-1048`）不在 `docs/adr/` 范围内，本次未改。
+

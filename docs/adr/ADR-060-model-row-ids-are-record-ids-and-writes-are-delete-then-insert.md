@@ -224,3 +224,24 @@
   `legacy-v1` / `legacy-instanced-v2` / `legacy-model`，所以改名要另立一条，方案与影响面已在会话里给过。
 - **共享网格的可达性 GC** 仍然没有实现：`inst_geo`、`aabb:<mesh id>`、盘上的 `.mesh` 只增不删
   （N2）。2026-09-04 用户确认这是**设计如此**——它们本来就是为共享而生的内容寻址物，不按根回收。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-D-1 / R-D-2 / R-D-10 / R-D-18 / R-B-15（审计按 2026-10-27 工作树记的行号）。
+> 本节只追记，D4 / D6 / D8 / D11 / N2 原文不改；冲突处以本节为准。
+
+- **T-L-2 · 撞号与引用写法。** 有两份 ADR-060：本文引用写 `ADR-060(行id)`；
+  `ADR-060-model-watermark-is-a-recorded-per-dbnum-promise.md` 写 `ADR-060(水位)`。不带括号的「ADR-060 Dn」视为有歧义。
+- **T-D-3 · D6 的管身重置不走 `pe->tubi_relate` 图遍历。** 现行 `append_tube_branch_reset` 按
+  `in = pe:⟨branch⟩`（`idx_tubi_relate_in`）`SELECT` 先捞指针、先删盒 / 变换，再按 id 删全部 `tubi_relate`
+  （`fast_model/model_db_adapter.rs:3041-3056`，测试 `:3303-3327`）。
+- **T-D-3 · D4 的实施接 ADR-088。** 有回执的根用谓词整片删（`render_slice_delete`）再 `WriteMode::Initial`（只
+  `INSERT IGNORE`），不再按本批 id 点删（`fast_model/model_db_adapter.rs:1893-1943,1997-2001,2185-2238`）；无回执的根
+  仍 `WriteMode::Incremental`（`model_db_adapter.rs:2179-2240,2337-2344`）。
+- **T-D-3 · D8 / D11 的 `gen_root` 凭证行 / 栅栏已被 ADR-079 退役。** 逐根成败只活在进程内账本，库里模型面唯一
+  持久事实是 `dbnum_watermark.model_sesno`（`model_root_ledger.rs:1-16,99-104`；ADR-079 D2 / D3）。
+- **T-D-4 · N2「共享网格只增不删」的清理路径例外。** 增量落库仍只增不删；显式 `mesh_purge` 时：单位键
+  `1` / `2` / `3` 永不删；`tubi_relate.out` 与投影管身键不进收集集；其余本范围 baked `inst_geo` + `.mesh` 按用户口径删、
+  靠重生成补回、不做跨范围引用计数（`mesh_purge.rs:14-27,108-119,154-156,261-276`；
+  `docs/plans/2026-10-22-mesh-purge-*.md` D1 / §7.1）。`mesh_purge.rs` 文件头的回执句不在 `docs/adr/` 范围内，本次未改。
+

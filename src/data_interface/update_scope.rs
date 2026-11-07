@@ -36,6 +36,10 @@ pub struct UpdateScope {
     mdb: String,
     /// MDB 的 CURD 里 STYP=DESI 的那些库号，升序去重。
     desi: BTreeSet<u32>,
+    /// `extra_element_dbnums` 补充成员（ADR-095）：只在请求的就是配置的 MDB 时才有。
+    /// 只进 [`UpdateScope::admits`]，不进 [`UpdateScope::declared_desi`] / [`UpdateScope::declares`]
+    /// ——那两个回答的是「MDB 亲口声明了什么」，预览的 `not_in_project` 与缺件告警靠它。
+    extra: BTreeSet<u32>,
     unrestricted: bool,
     /// 范围没解出名单时那句要说给人听的话。调用方必须把它放进自己的 warnings，
     /// 否则「这次为什么只跑了几个系统库」没有出处。
@@ -199,6 +203,7 @@ impl UpdateScope {
         Ok(Self {
             mdb: name,
             desi,
+            extra: BTreeSet::new(),
             unrestricted: false,
             warning,
         })
@@ -214,7 +219,19 @@ impl UpdateScope {
         fetched: anyhow::Result<(Vec<String>, Vec<u32>)>,
     ) -> anyhow::Result<Self> {
         let (known, dbnos) = fetched?;
-        Self::interpret(name.clone(), known, dbnos, || file_side_declared(&name))
+        let mut scope = Self::interpret(name.clone(), known, dbnos, || file_side_declared(&name))?;
+        let option = aios_core::get_db_option();
+        if name == aios_core::helper::to_e3d_name(&option.mdb_name).as_ref() {
+            scope.extra = crate::options::extra_element_dbnums().into_iter().collect();
+        }
+        Ok(scope)
+    }
+
+    /// 只增不减：补充名单并进放行集合，MDB 声明原样保留。
+    #[cfg(test)]
+    fn with_extra(mut self, extra: &[u32]) -> Self {
+        self.extra.extend(extra.iter().copied());
+        self
     }
 
     /// 直接给一份声明名单，只给测试用：`resolve` 要连真库，而范围门的调用方
@@ -224,6 +241,7 @@ impl UpdateScope {
         Self {
             mdb: mdb.to_string(),
             desi: desi.iter().copied().collect(),
+            extra: BTreeSet::new(),
             unrestricted: false,
             warning: None,
         }
@@ -238,6 +256,7 @@ impl UpdateScope {
         Self {
             mdb: String::new(),
             desi: BTreeSet::new(),
+            extra: BTreeSet::new(),
             unrestricted: true,
             warning: None,
         }
@@ -259,7 +278,8 @@ impl UpdateScope {
     /// 就存在这些库里，[`UpdateScope::resolve`] 读的就是它们。把它们挡在外面，
     /// 以后往 MDB 里加一个库，范围表永远看不见这个新成员——范围定义会自己冻住。
     ///
-    /// 除此之外只认 DESI / ISOD，且必须是本 MDB 声明过的。CATA 文件只进入
+    /// 除此之外只认 DESI / ISOD，且必须是本 MDB 声明过的，或写在 `extra_element_dbnums`
+    /// 补充名单里（ADR-095，只增不减）。CATA 文件只进入
     /// `cata_closure` 的依赖身份清单，供模型生成时按引用读取；它们不进入初始化
     /// 数据批次，也不全量解析属性进持久层（ADR-058 D1）。显式点名入口仍可用
     /// [`UpdateScope::unrestricted`] 执行运维基线。
@@ -270,7 +290,13 @@ impl UpdateScope {
         if self.unrestricted {
             return true;
         }
-        matches!(db_type, "DESI" | "ISOD") && self.desi.contains(&dbnum)
+        matches!(db_type, "DESI" | "ISOD")
+            && (self.desi.contains(&dbnum) || self.extra.contains(&dbnum))
+    }
+
+    /// `extra_element_dbnums` 补充成员，升序。查别的 MDB 或不设限时为空。
+    pub fn extra_dbnums(&self) -> impl Iterator<Item = u32> + '_ {
+        self.extra.iter().copied()
     }
 
     /// MDB 名（已带前导 `/`）。不设限时是空串。
@@ -367,9 +393,59 @@ mod tests {
         UpdateScope {
             mdb: "/ALL".into(),
             desi: desi.iter().copied().collect(),
+            extra: BTreeSet::new(),
             unrestricted: false,
             warning: None,
         }
+    }
+
+    // ---- extra_element_dbnums 补充成员（ADR-095：只增不减）----
+
+    /// 补充库被放行，但不算 MDB 声明。
+    #[test]
+    fn an_extra_dbnum_is_admitted_without_being_declared() {
+        let scope = scope(&[8000]).with_extra(&[251095]);
+        assert!(scope.admits("DESI", 251095));
+        assert!(scope.admits("ISOD", 251095));
+        assert!(!scope.admits("CATA", 251095), "补充名单不放行 CATA");
+        assert!(!scope.declares(251095), "补充成员不是 MDB 声明");
+        assert_eq!(scope.declared_desi().collect::<Vec<_>>(), [8000]);
+        assert_eq!(scope.extra_dbnums().collect::<Vec<_>>(), [251095]);
+    }
+
+    /// 补充名单删不掉 MDB 声明的库：issue #10 的老问题不许回来。
+    #[test]
+    fn the_extra_list_never_removes_a_declared_dbnum() {
+        let scope = scope(&[7997, 8000]).with_extra(&[251095]);
+        assert!(scope.admits("DESI", 7997));
+        assert!(scope.admits("DESI", 8000));
+        assert!(!scope.admits("DESI", 3001));
+    }
+
+    /// 查别的 MDB 时补充名单不生效：名单属于配置的那个 MDB。
+    #[test]
+    fn another_mdb_does_not_inherit_the_extra_list() {
+        let option = aios_core::get_db_option();
+        let configured = aios_core::helper::to_e3d_name(&option.mdb_name).into_owned();
+        let other = if configured == "/OTHER_MDB_X" {
+            "/OTHER_MDB_Y"
+        } else {
+            "/OTHER_MDB_X"
+        };
+        let scope =
+            UpdateScope::finish(other.to_string(), Ok((vec![other.to_string()], vec![8000])))
+                .expect("正常范围");
+        assert_eq!(scope.extra_dbnums().count(), 0);
+        assert!(!scope.admits("DESI", 251095));
+    }
+
+    /// 不设限的点名范围不带补充名单，行为不变。
+    #[test]
+    fn unrestricted_carries_no_extra_list() {
+        let scope = UpdateScope::unrestricted();
+        assert_eq!(scope.extra_dbnums().count(), 0);
+        assert!(scope.admits("DESI", 251095));
+        assert!(!scope.declares(251095));
     }
 
     /// 正常初始化只认 MDB 声明的设计库；CATA 保留在按需依赖清单里。

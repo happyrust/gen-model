@@ -1,0 +1,944 @@
+{
+ "captured_at": "2026-10-29T13:42:49.6017538+08:00",
+ "note": "改动前（rs-server 版函数体生效，gen-model 进程未运行）",
+ "samples": {
+  "cross_room_box": "pe:15516_10",
+  "equi": "pe:24381_100677",
+  "stru": "pe:15516_104",
+  "bran": "pe:24381_100817",
+  "bran_child": "pe:24381_100818",
+  "rest": "pe:23710_1000",
+  "suppo": "pe:23710_22448"
+ },
+ "calls": {
+  "first_child_exclude_type|cross_room_box": {
+   "result": "pe:15516_11",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:15516_10, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|equi": {
+   "result": "pe:24381_100678",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:24381_100677, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|stru": {
+   "result": "pe:15516_105",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:15516_104, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|bran": {
+   "result": "pe:24381_100818",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:24381_100817, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:24381_100818, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|rest": {
+   "result": "pe:23710_1001",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:23710_1000, ['ATTA','GASK']);"
+  },
+  "first_child_exclude_type|suppo": {
+   "result": "pe:23710_22449",
+   "status": "OK",
+   "sql": "RETURN fn::first_child_exclude_type(pe:23710_22448, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|cross_room_box": {
+   "result": "pe:15516_11",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:15516_10, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|equi": {
+   "result": "pe:24381_100694",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:24381_100677, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|stru": {
+   "result": "pe:15516_107",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:15516_104, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|bran": {
+   "result": "pe:24381_100825",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:24381_100817, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:24381_100818, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|rest": {
+   "result": "pe:23710_1001",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:23710_1000, ['ATTA','GASK']);"
+  },
+  "last_child_exclude_type|suppo": {
+   "result": "pe:23710_22449",
+   "status": "OK",
+   "sql": "RETURN fn::last_child_exclude_type(pe:23710_22448, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|cross_room_box": {
+   "result": "pe:15516_12",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:15516_10, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|equi": {
+   "result": "pe:24381_100695",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:24381_100677, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|stru": {
+   "result": "pe:23708_1041",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:15516_104, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:24381_100817, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|bran_child": {
+   "result": "pe:24381_100819",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:24381_100818, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|rest": {
+   "result": "pe:23710_1014",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:23710_1000, ['ATTA','GASK']);"
+  },
+  "next_pe_exclude_type|suppo": {
+   "result": "pe:23710_22458",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe_exclude_type(pe:23710_22448, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:15516_10, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:24381_100677, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|stru": {
+   "result": "pe:15516_98",
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:15516_104, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:24381_100817, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:24381_100818, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:23710_1000, ['ATTA','GASK']);"
+  },
+  "prev_pe_exclude_type|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe_exclude_type(pe:23710_22448, ['ATTA','GASK']);"
+  },
+  "query_tubi_from|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:15516_10);"
+  },
+  "query_tubi_from|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:24381_100677);"
+  },
+  "query_tubi_from|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:15516_104);"
+  },
+  "query_tubi_from|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:24381_100817);"
+  },
+  "query_tubi_from|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:24381_100818);"
+  },
+  "query_tubi_from|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:23710_1000);"
+  },
+  "query_tubi_from|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_from(pe:23710_22448);"
+  },
+  "query_tubi_to|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:15516_10);"
+  },
+  "query_tubi_to|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:24381_100677);"
+  },
+  "query_tubi_to|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:15516_104);"
+  },
+  "query_tubi_to|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:24381_100817);"
+  },
+  "query_tubi_to|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:24381_100818);"
+  },
+  "query_tubi_to|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:23710_1000);"
+  },
+  "query_tubi_to|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::query_tubi_to(pe:23710_22448);"
+  },
+  "pane_size|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:15516_10);"
+  },
+  "pane_size|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:24381_100677);"
+  },
+  "pane_size|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:15516_104);"
+  },
+  "pane_size|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:24381_100817);"
+  },
+  "pane_size|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:24381_100818);"
+  },
+  "pane_size|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:23710_1000);"
+  },
+  "pane_size|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::pane_size(pe:23710_22448);"
+  },
+  "room_code|cross_room_box": {
+   "result": [
+    "1RX-R301"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:15516_10);"
+  },
+  "room_code|equi": {
+   "result": [
+    "1RX-R346"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:24381_100677);"
+  },
+  "room_code|stru": {
+   "result": [
+    "1RX-R301"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:15516_104);"
+  },
+  "room_code|bran": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:24381_100817);"
+  },
+  "room_code|bran_child": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:24381_100818);"
+  },
+  "room_code|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:23710_1000);"
+  },
+  "room_code|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::room_code(pe:23710_22448);"
+  },
+  "get_room_number|cross_room_box": {
+   "result": "R301",
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:15516_10);"
+  },
+  "get_room_number|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:24381_100677);"
+  },
+  "get_room_number|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:15516_104);"
+  },
+  "get_room_number|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:24381_100817);"
+  },
+  "get_room_number|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:24381_100818);"
+  },
+  "get_room_number|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:23710_1000);"
+  },
+  "get_room_number|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_number(pe:23710_22448);"
+  },
+  "get_flan_bolt_list|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:15516_10);"
+  },
+  "get_flan_bolt_list|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:24381_100677);"
+  },
+  "get_flan_bolt_list|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:15516_104);"
+  },
+  "get_flan_bolt_list|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:24381_100817);"
+  },
+  "get_flan_bolt_list|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:24381_100818);"
+  },
+  "get_flan_bolt_list|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:23710_1000);"
+  },
+  "get_flan_bolt_list|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_flan_bolt_list(pe:23710_22448);"
+  },
+  "next_pe|cross_room_box": {
+   "result": "pe:15516_12",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:15516_10);"
+  },
+  "next_pe|equi": {
+   "result": "pe:24381_100695",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:24381_100677);"
+  },
+  "next_pe|stru": {
+   "result": "pe:23708_1041",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:15516_104);"
+  },
+  "next_pe|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:24381_100817);"
+  },
+  "next_pe|bran_child": {
+   "result": "pe:24381_100819",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:24381_100818);"
+  },
+  "next_pe|rest": {
+   "result": "pe:23710_1014",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:23710_1000);"
+  },
+  "next_pe|suppo": {
+   "result": "pe:23710_22458",
+   "status": "OK",
+   "sql": "RETURN fn::next_pe(pe:23710_22448);"
+  },
+  "prev_pe|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:15516_10);"
+  },
+  "prev_pe|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:24381_100677);"
+  },
+  "prev_pe|stru": {
+   "result": "pe:15516_98",
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:15516_104);"
+  },
+  "prev_pe|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:24381_100817);"
+  },
+  "prev_pe|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:24381_100818);"
+  },
+  "prev_pe|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:23710_1000);"
+  },
+  "prev_pe|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_pe(pe:23710_22448);"
+  },
+  "children|cross_room_box": {
+   "result": [
+    "pe:15516_11"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:15516_10);"
+  },
+  "children|equi": {
+   "result": [
+    "pe:24381_100678",
+    "pe:24381_100679",
+    "pe:24381_100681",
+    "pe:24381_100682",
+    "pe:24381_100684",
+    "pe:24381_100686",
+    "pe:24381_100688",
+    "pe:24381_100689",
+    "pe:24381_100690",
+    "pe:24381_100691",
+    "pe:24381_100692",
+    "pe:24381_100693",
+    "pe:24381_100694"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:24381_100677);"
+  },
+  "children|stru": {
+   "result": [
+    "pe:15516_105",
+    "pe:15516_107"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:15516_104);"
+  },
+  "children|bran": {
+   "result": [
+    "pe:24381_100818",
+    "pe:24381_100819",
+    "pe:24381_100820",
+    "pe:24381_100821",
+    "pe:24381_100822",
+    "pe:24381_100823",
+    "pe:24381_100824",
+    "pe:24381_100825",
+    "pe:24381_100826",
+    "pe:24381_100827",
+    "pe:24381_100828",
+    "pe:24381_100829",
+    "pe:24381_100830",
+    "pe:24381_100831"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:24381_100817);"
+  },
+  "children|bran_child": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:24381_100818);"
+  },
+  "children|rest": {
+   "result": [
+    "pe:23710_1001"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:23710_1000);"
+  },
+  "children|suppo": {
+   "result": [
+    "pe:23710_22449"
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::children(pe:23710_22448);"
+  },
+  "next_connect_pe|cross_room_box": {
+   "result": "pe:15516_12",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:15516_10);"
+  },
+  "next_connect_pe|equi": {
+   "result": "pe:24381_100695",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:24381_100677);"
+  },
+  "next_connect_pe|stru": {
+   "result": "pe:23708_1041",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:15516_104);"
+  },
+  "next_connect_pe|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:24381_100817);"
+  },
+  "next_connect_pe|bran_child": {
+   "result": "pe:24381_100819",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:24381_100818);"
+  },
+  "next_connect_pe|rest": {
+   "result": "pe:23710_1014",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:23710_1000);"
+  },
+  "next_connect_pe|suppo": {
+   "result": "pe:23710_22458",
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe(pe:23710_22448);"
+  },
+  "prev_connect_pe|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:15516_10);"
+  },
+  "prev_connect_pe|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:24381_100677);"
+  },
+  "prev_connect_pe|stru": {
+   "result": "pe:15516_98",
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:15516_104);"
+  },
+  "prev_connect_pe|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:24381_100817);"
+  },
+  "prev_connect_pe|bran_child": {
+   "result": "pe:0_0",
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:24381_100818);"
+  },
+  "prev_connect_pe|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:23710_1000);"
+  },
+  "prev_connect_pe|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe(pe:23710_22448);"
+  },
+  "next_connect_pe_data|cross_room_box": {
+   "result": {
+    "id": "pe:15516_10",
+    "next": "pe:15516_12",
+    "next_full_name": "/MDS/FT01/1-SUBS2/ROD",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:15516_10);"
+  },
+  "next_connect_pe_data|equi": {
+   "result": {
+    "id": "pe:24381_100677",
+    "next": "pe:24381_100695",
+    "next_full_name": "/-RX-CUP-001ZV",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:24381_100677);"
+  },
+  "next_connect_pe_data|stru": {
+   "result": {
+    "id": "pe:15516_104",
+    "next": "pe:23708_1041",
+    "next_full_name": "/MDS/FT03H/5",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:15516_104);"
+  },
+  "next_connect_pe_data|bran": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::next_connect_pe_data(pe:24381_100817);"
+  },
+  "next_connect_pe_data|bran_child": {
+   "result": {
+    "id": "pe:24381_100818",
+    "next": "pe:24381_100819",
+    "next_full_name": "/1CUP001VAR",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:24381_100818);"
+  },
+  "next_connect_pe_data|rest": {
+   "result": {
+    "id": "pe:23710_1000",
+    "next": "pe:23710_1014",
+    "next_full_name": "/MDS/VH03/50",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:23710_1000);"
+  },
+  "next_connect_pe_data|suppo": {
+   "result": {
+    "id": "pe:23710_22448",
+    "next": "pe:23710_22458",
+    "next_full_name": "/SUPPORT/HANGERS/PSL/FH01/25",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::next_connect_pe_data(pe:23710_22448);"
+  },
+  "prev_connect_pe_data|cross_room_box": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:15516_10);"
+  },
+  "prev_connect_pe_data|equi": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:24381_100677);"
+  },
+  "prev_connect_pe_data|stru": {
+   "result": {
+    "id": "pe:15516_104",
+    "prev": "pe:15516_98",
+    "prev_full_name": "/MDS/FT03H/3",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:15516_104);"
+  },
+  "prev_connect_pe_data|bran": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:24381_100817);"
+  },
+  "prev_connect_pe_data|bran_child": {
+   "result": {
+    "id": "pe:24381_100818",
+    "prev": "pe:0_0",
+    "prev_full_name": "",
+    "tubi_name": null,
+    "tubi_refno": null,
+    "tubi_spref": null
+   },
+   "status": "OK",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:24381_100818);"
+  },
+  "prev_connect_pe_data|rest": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:23710_1000);"
+  },
+  "prev_connect_pe_data|suppo": {
+   "result": "Expected a record but found NONE",
+   "status": "ERR",
+   "sql": "RETURN fn::prev_connect_pe_data(pe:23710_22448);"
+  },
+  "single_room_code|cross_room_box": {
+   "result": "1RX-R301",
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:15516_10);"
+  },
+  "single_room_code|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:24381_100677);"
+  },
+  "single_room_code|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:15516_104);"
+  },
+  "single_room_code|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:24381_100817);"
+  },
+  "single_room_code|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:24381_100818);"
+  },
+  "single_room_code|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:23710_1000);"
+  },
+  "single_room_code|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::single_room_code(pe:23710_22448);"
+  },
+  "room_height|cross_room_box": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:15516_10);"
+  },
+  "room_height|equi": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:24381_100677);"
+  },
+  "room_height|stru": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:15516_104);"
+  },
+  "room_height|bran": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:24381_100817);"
+  },
+  "room_height|bran_child": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:24381_100818);"
+  },
+  "room_height|rest": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:23710_1000);"
+  },
+  "room_height|suppo": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_height(pe:23710_22448);"
+  },
+  "room_top_height|cross_room_box": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:15516_10);"
+  },
+  "room_top_height|equi": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:24381_100677);"
+  },
+  "room_top_height|stru": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:15516_104);"
+  },
+  "room_top_height|bran": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:24381_100817);"
+  },
+  "room_top_height|bran_child": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:24381_100818);"
+  },
+  "room_top_height|rest": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:23710_1000);"
+  },
+  "room_top_height|suppo": {
+   "result": [
+    null
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::room_top_height(pe:23710_22448);"
+  },
+  "get_world_pos|cross_room_box": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:15516_10);"
+  },
+  "get_world_pos|equi": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:24381_100677);"
+  },
+  "get_world_pos|stru": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:15516_104);"
+  },
+  "get_world_pos|bran": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:24381_100817);"
+  },
+  "get_world_pos|bran_child": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:24381_100818);"
+  },
+  "get_world_pos|rest": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:23710_1000);"
+  },
+  "get_world_pos|suppo": {
+   "result": [
+    []
+   ],
+   "status": "OK",
+   "sql": "RETURN fn::get_world_pos(pe:23710_22448);"
+  },
+  "get_room_code_from_name|cross_room_box": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:15516_10);"
+  },
+  "get_room_code_from_name|equi": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:24381_100677);"
+  },
+  "get_room_code_from_name|stru": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:15516_104);"
+  },
+  "get_room_code_from_name|bran": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:24381_100817);"
+  },
+  "get_room_code_from_name|bran_child": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:24381_100818);"
+  },
+  "get_room_code_from_name|rest": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:23710_1000);"
+  },
+  "get_room_code_from_name|suppo": {
+   "result": null,
+   "status": "OK",
+   "sql": "RETURN fn::get_room_code_from_name(pe:23710_22448);"
+  },
+  "get_mdb_dbnums|ALL|1": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::get_mdb_dbnums('ALL', 1);"
+  },
+  "get_mdb_dbnums|ALL|2": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::get_mdb_dbnums('ALL', 2);"
+  },
+  "get_mdb_dbnums|/ALL|1": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::get_mdb_dbnums('/ALL', 1);"
+  },
+  "get_mdb_dbnums|/ALL|2": {
+   "result": [],
+   "status": "OK",
+   "sql": "RETURN fn::get_mdb_dbnums('/ALL', 2);"
+  }
+ },
+ "room_num_change": {
+  "method": "room_relate 去重 out；旧取法=首条边(按 id 序)的 room_num，新取法=inside_count desc, center_dist asc, room_num asc 的最强边",
+  "components": 108764,
+  "changed": 18316,
+  "note": "计划里此前算的 18218 用的是 (<-room_relate.room_num)[0] 扫描序，口径不同"
+ },
+ "room_edge_coverage": {
+  "total": 167407,
+  "with_inside": 167407,
+  "with_center": 167407,
+  "ratio": 1.0
+ },
+ "nearest_relate_rows": 0
+}

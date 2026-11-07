@@ -126,12 +126,23 @@
 `watch_dbnums=[7352]`）上跑通，未触碰现场 8009/8022：启动点名 → 一键升级 → 写
 `storage_version:current` → `/health` 转绿 → rs-server 启动；删记录后 rs-server exit 1 拒绝，
 `warn` 模式只告警。证据与复现见 `docs/verification/storage-version-upgrade-rehearsal-2026-10-29.md`。
-真库（29 个设计库）升级仍待执行。
+真库规模（20 个主项目归属设计库）升级已于同日下午在 `ams-full3` 副本上验证通过，见下条。
 
 **2026-10-29 旧库副本部分升级**：在 `ams-8009-fresh` 的副本（7997 / 8000 有真实数据、无版本记录，
 MDB 声明 71 库 / 29 个元素库）上显式 `dbnums:[8000]`：202、`full_scope=false`，约 42 秒升级完成（任务 37.4 秒），
 `storage_version:current` 仍空，rs-server 仍 `exit 1` 拒绝——部分范围不写整库记录，符合 D-1/D-4。
 证据见 `docs/verification/storage-version-upgrade-rehearsal-2026-10-29.md` §3.5。
+
+**2026-10-29 旧库副本全范围升级（通过，V1–V3 在真实数据规模上补齐）**：同一副本全量
+请求（不带名单）`requested=20 / full_scope=true`（范围修正：MDB 声明的 29 个元素库中
+9 个归属外部项目、不在本持久库数据域，`declared_dbnums` 按主项目归属收窄为 20），
+约 23 分钟全部 `Succeeded`：`storage_upgrade:current` = `done=[20] failed=[]` →
+`storage_version:current` 落盘 `version=1` → `/health` `caught_up=true /
+upgrade_required=false` → rs-server（18023）`stored=1 expected=1` 正常监听。
+真库规模的「升级→写记录→rs-server 转绿」链路至此完整验证。代价记录：宿主机
+`63GB RAM + 23GB pagefile ≈ 86.4GB` commit 硬上限、基线 ~78GB，前 4 轮被系统内存压力
+随机带走（含现场 8009/8022 两个服务，均已恢复）；成功轮利用现场 aios 冷缓存窗口
+（commit 56–62GB）跑完。证据与失败根因见同文档 §3.6。
 
 ### P4 · 文档
 

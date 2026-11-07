@@ -1,0 +1,23 @@
+24:*** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 7352 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。 ***
+270:数据库架构版本不匹配（库里 none / 期望 1）：请在运维面板或 POST /api/v1/storage-version/upgrade 升级，升级会清空并重新解析、生成以下库：[7352]
+283:初始化完成：项目 AvevaMarineSample，启动总耗时 6.36s
+287:  *** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 7352 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。
+290:  HTTP API：http://127.0.0.1:18022/api/v1（监听 127.0.0.1:18022）
+311:dbnum=5100 初始化完成 耗时=553ms pe=238 worl=1 属性 lane: tx=1 bytes=165225 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+334:dbnum=5101 初始化完成 耗时=230ms pe=2 worl=1 属性 lane: tx=1 bytes=885 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+356:dbnum=6002 初始化完成 耗时=258ms pe=12 worl=1 属性 lane: tx=1 bytes=7985 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+378:dbnum=7006 初始化完成 耗时=533ms pe=295 worl=1 属性 lane: tx=1 bytes=191133 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+400:dbnum=7032 初始化完成 耗时=4739ms pe=4231 worl=1 属性 lane: tx=5 bytes=2430408 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+422:dbnum=7043 初始化完成 耗时=273ms pe=22 worl=1 属性 lane: tx=1 bytes=14750 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+444:dbnum=7049 初始化完成 耗时=322ms pe=84 worl=1 属性 lane: tx=1 bytes=69406 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+466:dbnum=7323 初始化完成 耗时=385ms pe=140 worl=1 属性 lane: tx=1 bytes=118430 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+488:dbnum=7507 初始化完成 耗时=316ms pe=37 worl=1 属性 lane: tx=1 bytes=28116 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+510:dbnum=8189 初始化完成 耗时=235ms pe=3 worl=1 属性 lane: tx=1 bytes=1401 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+532:dbnum=8190 初始化完成 耗时=25525ms pe=267 worl=1 属性 lane: tx=16 bytes=27950245 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+554:dbnum=8191 初始化完成 耗时=1632ms pe=1207 worl=1 属性 lane: tx=2 bytes=800464 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+608:dbnum=250206 初始化完成 耗时=18202ms pe=16990 worl=1 属性 lane: tx=17 bytes=11178778 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+630:dbnum=250215 初始化完成 耗时=349ms pe=20 worl=1 属性 lane: tx=1 bytes=11308 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+652:dbnum=250216 初始化完成 耗时=369ms pe=18 worl=1 属性 lane: tx=1 bytes=11315 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+674:dbnum=250704 初始化完成 耗时=437ms pe=120 worl=1 属性 lane: tx=1 bytes=84320 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+696:dbnum=251047 初始化完成 耗时=401ms pe=94 worl=1 属性 lane: tx=1 bytes=50977 冲突重试=0 超时=0；模型 lane: tx=0 bytes=0 冲突重试=0 超时=0 根=0 失败根=0 记录=0 房间边=0 model_sesno=未盖
+773:dbnum=7352 初始化完成 耗时=1250ms pe=200 worl=1 属性 lane: tx=7 bytes=282820 冲突重试=0 超时=0；模型 lane: tx=2 bytes=106928 冲突重试=0 超时=0 根=32 失败根=0 记录=96 房间边=44 model_sesno=50

@@ -1,0 +1,3 @@
+[mdb-bind] 声明解析完成: project=AvevaMarineSample mdb=ALL sys=D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys declarations=71 problems=0 elapsed_ms=447
+MDB /ALL / AvevaMarineSample / module=DESI：声明 71 个库（按 STYP {1: 29, 2: 26, 4: 5, 7: 5, 8: 6}），其中字典库 6 个：盘上 6 个，缺 0 个
+数据库架构版本不匹配（库里 none / 期望 1）：请在运维面板或 POST /api/v1/storage-version/upgrade 升级，升级会清空并重新解析、生成以下库：[8000]

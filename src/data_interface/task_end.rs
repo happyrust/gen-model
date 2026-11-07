@@ -100,6 +100,13 @@ pub(crate) struct TaskEnd {
     /// `None` = 本任务没有权威的目标索引快照（例如 ModelOnly 任务一个元素都没动），
     /// 此时 `dbnum_info_table` 一行都不碰。
     pub info: Option<Ref0Snapshot>,
+    /// 本任务模型规划的左端（`model_plan_base_sesno` 的返回值，ADR-092 D1）。
+    ///
+    /// 连续性闸（ADR-092 D2）：只有 `model_base_sesno ≤ 库上当前 model_sesno`（`NONE`
+    /// 视为 0）时才盖模型水位、生成器落款与目录章，否则拒盖、任务 Partial
+    /// （`model_watermark_discontinuous`），数据水位照盖。`None` 与 ≤0 等价于
+    /// 「从 0 起算」——初始化 / 整库重排 / 纯数据批的旧路径逐位不变。
+    pub model_base_sesno: Option<i32>,
     /// 这一笔是不是本任务的**收尾**那一笔（ADR-072 D1 / W2）。
     ///
     /// 为真时事务里多一句 `dbnum_write_state:{dbnum} SET status = 'finished'`——全库唯一
@@ -129,6 +136,10 @@ pub(crate) struct TaskEndReceipt {
     pub info_rows: Option<usize>,
     /// 兼容字段名：数据或模型前置水位不足，整条水位更新被挡下。
     pub blocked_by_data: bool,
+    /// ADR-092 D2：连续性闸拒盖——本任务的模型左端越过了库上当前 `model_sesno`，
+    /// 模型水位、生成器落款、目录章都没盖（数据水位照盖）。为真时 `model_sesno`
+    /// 是本笔读到的现值而不是目标值，补救走启动核对 / 稳态补偿。
+    pub model_watermark_discontinuous: bool,
 }
 
 /// 一笔事务的字节上限：Ref0 数量本就是几十到几百量级，超了说明调用方给错了快照，
@@ -150,22 +161,41 @@ fn render_watermark_update(end: &TaskEnd) -> String {
     if let Some(model) = &end.model {
         if end.model_stamps() {
             stamps = true;
+            // ADR-092 D1/D2 连续性闸：本任务模型左端越过库上当前模型水位时拒盖
+            // （`model_base_sesno <= (model_sesno ?: 0)`，NONE 视为 0）。≤0 与没带
+            // 左端的旧路径恒真，渲染出的 SQL 与从前逐位相同。判据落在 SET 表达式里
+            // ——同一笔事务内读判改写，不是「读后写两笔」。
+            let base = end.model_base_sesno.unwrap_or(0).max(0);
+            let gate = |field: &str, expr: String| -> String {
+                if base > 0 {
+                    format!("{field} = IF {base} <= (model_sesno ?: 0) THEN {expr} ELSE {field} END")
+                } else {
+                    format!("{field} = {expr}")
+                }
+            };
             if let Some(time) = end.target_time.as_deref() {
-                sets.push(format!(
-                    "model_sesno_time = IF {target_sesno} >= (model_sesno ?: 0) \
-                     THEN '{}' ELSE model_sesno_time END",
-                    escape_surql_str(time)
+                sets.push(gate(
+                    "model_sesno_time",
+                    format!(
+                        "IF {target_sesno} >= (model_sesno ?: 0) \
+                         THEN '{}' ELSE model_sesno_time END",
+                        escape_surql_str(time)
+                    ),
                 ));
             }
-            sets.push(format!(
-                "model_sesno = math::max([model_sesno ?: 0, {target_sesno}])"
+            sets.push(gate(
+                "model_sesno",
+                format!("math::max([model_sesno ?: 0, {target_sesno}])"),
             ));
-            sets.push("model_settled_at = time::now()".to_owned());
+            sets.push(gate("model_settled_at", "time::now()".to_owned()));
             // GitHub #73：库级生成器落款随 `model_sesno` 同一笔盖——「这个库的几何是哪一版 e3d-model 算的」。
             // 启动 / `update/execute` 拿它与本进程的指纹比，不一致整库重排（`generator_reconcile`）。
-            sets.push(format!(
-                "model_generator = '{}'",
-                escape_surql_str(crate::fast_model::generator_identity::generator_fingerprint())
+            sets.push(gate(
+                "model_generator",
+                format!(
+                    "'{}'",
+                    escape_surql_str(crate::fast_model::generator_identity::generator_fingerprint())
+                ),
             ));
             // 数据库架构版本（`storage_version:current`）**不在这里写**：它是整库一条记录，
             // 只在全新空库初始化完成或全部库升级完成时由 `storage_upgrade` 写。
@@ -175,7 +205,10 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 .as_ref()
                 .filter(|stamps| !stamps.is_empty())
             {
-                sets.push(render_catalogue_stamp_merge(stamps));
+                sets.push(gate(
+                    "model_catalogue_sessions",
+                    catalogue_stamp_merge_expr(stamps),
+                ));
             }
             // 盖章（`Aligned`）/ 清空（`Cleared`）都把「盖章之后按另一代写过根」那一格一并清掉（ADR-073 F3 落库）：
             // 整库 / 定向盖到这一代 = 库上每条边都与这一代一致，此前记的另几代已被覆盖；关着开关这一格也没有意义。
@@ -183,15 +216,15 @@ fn render_watermark_update(end: &TaskEnd) -> String {
             match &model.room_generation {
                 RoomGenerationStamp::Untouched => {}
                 RoomGenerationStamp::Cleared => {
-                    sets.push("model_room_generation = NONE".to_owned());
-                    sets.push("model_room_stray_generations = []".to_owned());
+                    sets.push(gate("model_room_generation", "NONE".to_owned()));
+                    sets.push(gate("model_room_stray_generations", "[]".to_owned()));
                 }
                 RoomGenerationStamp::Aligned(generation) => {
-                    sets.push(format!(
-                        "model_room_generation = '{}'",
-                        escape_surql_str(generation)
+                    sets.push(gate(
+                        "model_room_generation",
+                        format!("'{}'", escape_surql_str(generation)),
                     ));
-                    sets.push("model_room_stray_generations = []".to_owned());
+                    sets.push(gate("model_room_stray_generations", "[]".to_owned()));
                 }
             }
         }
@@ -211,15 +244,14 @@ fn render_watermark_update(end: &TaskEnd) -> String {
         String::new()
     };
     format!(
-        "UPDATE {WATERMARK_TABLE}:{dbnum} SET {}{guard} RETURN id;",
+        "UPDATE {WATERMARK_TABLE}:{dbnum} SET {}{guard} RETURN id, model_sesno;",
         sets.join(", ")
     )
 }
 
-/// 库级目录落款那一句（ADR-079）：`model_catalogue_sessions` 是 `[{ dbnum, session }, …]`，
-/// 合并写——先把点名的目录从旧数组里摘掉，再把新落款并进去；没点名的目录原样保留。
-/// 行上没有这一列（旧行）时从空数组起。
-pub(crate) fn render_catalogue_stamp_merge(stamps: &BTreeMap<u32, u32>) -> String {
+/// `model_catalogue_sessions` 的合并表达式（不含 `field = ` 前缀）：连续性闸（ADR-092 D2）
+/// 把它包进 `IF` 时需要右值本身，[`render_catalogue_stamp_merge`] 则是整句。
+fn catalogue_stamp_merge_expr(stamps: &BTreeMap<u32, u32>) -> String {
     let dbnums = stamps
         .keys()
         .map(u32::to_string)
@@ -231,9 +263,19 @@ pub(crate) fn render_catalogue_stamp_merge(stamps: &BTreeMap<u32, u32>) -> Strin
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "model_catalogue_sessions = array::concat(\
+        "array::concat(\
          (model_catalogue_sessions ?? []).filter(|$stamp| $stamp.dbnum NOT IN [{dbnums}]), \
          [{entries}])"
+    )
+}
+
+/// 库级目录落款那一句（ADR-079）：`model_catalogue_sessions` 是 `[{ dbnum, session }, …]`，
+/// 合并写——先把点名的目录从旧数组里摘掉，再把新落款并进去；没点名的目录原样保留。
+/// 行上没有这一列（旧行）时从空数组起。
+pub(crate) fn render_catalogue_stamp_merge(stamps: &BTreeMap<u32, u32>) -> String {
+    format!(
+        "model_catalogue_sessions = {}",
+        catalogue_stamp_merge_expr(stamps)
     )
 }
 
@@ -310,15 +352,21 @@ pub(crate) async fn commit_task_end_on(
     db: &Surreal<Any>,
     end: &TaskEnd,
 ) -> anyhow::Result<TaskEndReceipt> {
-    let stamped = commit_task_end_via(end, |sql| async move { db.query(sql).await }).await?;
+    let touched_model_sesno = commit_task_end_via(end, |sql| async move { db.query(sql).await }).await?;
 
     DbnumState::invalidate_mirrored_on(db, end.dbnum);
 
+    let stamped = touched_model_sesno.is_some();
     let wanted_stamp = end.model_stamps();
+    let observed_model_sesno = touched_model_sesno.unwrap_or(0);
+    // ADR-092 D2：连续性闸拒盖时水位句照样碰到行（数据闸已过），但 `model_sesno`
+    // 留在现值没到目标——回执如实报，任务由调用方判 Partial。
+    let discontinuous = stamped && wanted_stamp && observed_model_sesno < end.target_sesno;
     // 库上 `model_room_generation` 真盖上 / 真清空之后，告诉投影这一代（d-149 补丁 2026-09-22）：按根数限额逐出
     // 时，ACK 房间代号是本进程写过的 stray 代号、又不是库上这一代的根是 F3 的证据、不进候选；盖到这一代之后
     // 同代的 ACK 才放行。`Untouched` 不说话——普通增量窗口替不了整库。
-    if stamped && wanted_stamp {
+    // 连续性闸拒盖（D2）时房间落款与水位的 SET 全被同一个 IF 拦下，不算「真盖上」，也不许通知。
+    if stamped && wanted_stamp && !discontinuous {
         match end.model.as_ref().map(|model| &model.room_generation) {
             Some(RoomGenerationStamp::Aligned(generation)) => {
                 crate::fast_model::model_memory_store::ModelMemoryStore::global()
@@ -332,20 +380,21 @@ pub(crate) async fn commit_task_end_on(
         }
     }
     Ok(TaskEndReceipt {
-        model_sesno: (stamped && wanted_stamp).then_some(end.target_sesno),
+        model_sesno: (stamped && wanted_stamp).then_some(observed_model_sesno),
         info_rows: end.info.as_ref().map(|snapshot| snapshot.rows.len()),
         blocked_by_data: wanted_stamp && !stamped,
+        model_watermark_discontinuous: discontinuous,
     })
 }
 
 /// 收尾那一笔的发送与回执解读，`run` 是「把这段 SQL 发出去」（生产是 `db.query`；钉用它注入一次冲突）。
-/// 回 `stamped`：水位那一句有没有碰到行（数据水位闸挡下时为假）。
+/// 回水位那一句碰到的行上的 `model_sesno`（`NONE` 归一成 0；数据水位闸挡下 → `None`）。
 ///
 /// 与刷盘那一笔同一个冲突重试（ADR-073 D13 收口总表第 10 行，2026-09-19 晚）：收尾是一笔 `BEGIN … COMMIT`，
 /// 与 write-behind 刷盘的 stray epilogue 同写水位行，两台引擎（surrealkv / rocksdb）都是**谁后提交谁输**、
 /// 输的那一笔整笔零提交；这里的语句都是绝对值的 UPSERT / UPDATE，重发安全。只有「read or write conflict」
 /// 那句才重试（16 次、25 ms 起指数退避），`THROW` / 语法错照旧第一次就报。
-async fn commit_task_end_via<F, Fut>(end: &TaskEnd, mut run: F) -> anyhow::Result<bool>
+async fn commit_task_end_via<F, Fut>(end: &TaskEnd, mut run: F) -> anyhow::Result<Option<i32>>
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = surrealdb::Result<surrealdb::Response>>,
@@ -366,6 +415,7 @@ where
     struct Touched {
         #[allow(dead_code)]
         id: surrealdb::sql::Thing,
+        model_sesno: Option<i32>,
     }
     let dbnum = end.dbnum;
     crate::surreal_retry::retry_surreal_write_operation(
@@ -390,11 +440,16 @@ where
                             .join("; ")
                     );
                 }
-                // 统计块在前，水位那一句是最后一条带回执的语句。
+                // 统计块在前，水位那一句是最后一条带回执的语句；`RETURN id, model_sesno`
+                // 把落笔后行上的模型水位带回来——连续性闸拒盖时它还是旧值（ADR-092 D2）。
                 let touched: Vec<Touched> = response
                     .take(index)
                     .with_context(|| format!("decode task end watermark write of dbnum {dbnum}"))?;
-                Ok::<bool, anyhow::Error>(!touched.is_empty())
+                Ok::<Option<i32>, anyhow::Error>(
+                    touched
+                        .first()
+                        .map(|touched| touched.model_sesno.unwrap_or(0)),
+                )
             }
         },
     )
@@ -427,6 +482,7 @@ mod tests {
                     sesno: 26,
                 }],
             }),
+            model_base_sesno: None,
             closes_task: true,
         }
     }
@@ -444,6 +500,7 @@ mod tests {
         state_revision: Option<u64>,
         model_dead_roots: Option<u32>,
         model_roots_observed_at: Option<i32>,
+        model_generator: Option<String>,
     }
 
     async fn watermark(db: &Surreal<Any>, dbnum: u32) -> WatermarkRow {
@@ -499,7 +556,10 @@ mod tests {
             "room_required_input",
             "room_result_version",
         ] {
-            assert!(!sql.contains(retired), "收尾没有房间那一枚可盖（{retired}）：{sql}");
+            assert!(
+                !sql.contains(retired),
+                "收尾没有房间那一枚可盖（{retired}）：{sql}"
+            );
         }
         assert!(
             !sql.contains("model_room_generation"),
@@ -794,15 +854,22 @@ mod tests {
         });
         let sql = render_task_end_tail(&stamped);
         assert!(
-            sql.contains("$stamp.dbnum NOT IN [7000]") && sql.contains("{ dbnum: 7000, session: 12 }"),
+            sql.contains("$stamp.dbnum NOT IN [7000]")
+                && sql.contains("{ dbnum: 7000, session: 12 }"),
             "{sql}"
         );
         commit_task_end_on(&db, &stamped).await.unwrap();
         assert_eq!(
             stamps(&db).await,
             vec![
-                Stamp { dbnum: 5052, session: 180 },
-                Stamp { dbnum: 7000, session: 12 },
+                Stamp {
+                    dbnum: 5052,
+                    session: 180
+                },
+                Stamp {
+                    dbnum: 7000,
+                    session: 12
+                },
             ]
         );
 
@@ -841,9 +908,18 @@ mod tests {
         assert_eq!(
             stamps(&db).await,
             vec![
-                Stamp { dbnum: 5052, session: 180 },
-                Stamp { dbnum: 7000, session: 12 },
-                Stamp { dbnum: 9000, session: 1 },
+                Stamp {
+                    dbnum: 5052,
+                    session: 180
+                },
+                Stamp {
+                    dbnum: 7000,
+                    session: 12
+                },
+                Stamp {
+                    dbnum: 9000,
+                    session: 1
+                },
             ]
         );
 
@@ -862,7 +938,10 @@ mod tests {
         commit_task_end_on(&db, &fresh).await.unwrap();
         assert_eq!(
             stamps_of(&db, 8001).await,
-            vec![Stamp { dbnum: 7000, session: 12 }]
+            vec![Stamp {
+                dbnum: 7000,
+                session: 12
+            }]
         );
     }
 
@@ -1012,7 +1091,7 @@ mod tests {
         })
         .await
         .expect("the tail must retry past the conflict instead of failing the task");
-        assert!(stamped, "重发那一笔碰到了水位行");
+        assert_eq!(stamped, Some(26), "重发那一笔碰到了水位行并读回盖上的水位");
         assert_eq!(attempts.load(SeqCst), 2, "输一次、重发一次");
 
         #[derive(Debug, serde::Deserialize)]
@@ -1102,6 +1181,7 @@ mod tests {
                 model_sesno: Some(26),
                 info_rows: Some(1),
                 blocked_by_data: false,
+                model_watermark_discontinuous: false,
             }
         );
 
@@ -1122,6 +1202,118 @@ mod tests {
         assert_eq!(vanished.count, Some(0), "快照里没有的 Ref0 清零留行");
     }
 
+    /// ADR-092 D2 连续性闸：模型左端越过库上当前 `model_sesno` 时，水位 / 落款 / 目录章
+    /// 全部条件化拒盖；根观测与 `applied_sesno` 数据闸原样。左端 ≤ 0 与没带左端（`None`）
+    /// 的旧路径渲染出的 SQL 逐位不变。
+    #[test]
+    fn a_task_whose_model_base_overruns_the_watermark_gets_every_stamp_gated() {
+        let mut overrun = end();
+        overrun.model_base_sesno = Some(30);
+        let sql = render_task_end_tail(&overrun);
+        let gate = "30 <= (model_sesno ?: 0)";
+        assert!(
+            sql.contains(&format!(
+                "model_sesno = IF {gate} THEN math::max([model_sesno ?: 0, 26]) ELSE model_sesno END"
+            )),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("model_sesno_time = IF {gate} THEN IF 26 >=")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("model_settled_at = IF {gate} THEN time::now()")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("model_generator = IF {gate} THEN '")),
+            "{sql}"
+        );
+        // 数据水位闸照旧、观测照常落、回执把行上的 model_sesno 带回来。
+        assert!(sql.contains("WHERE (applied_sesno ?: 0) >= 26"), "{sql}");
+        assert!(sql.contains("model_dead_roots = 0"), "{sql}");
+        assert!(sql.contains("model_roots_observed_at = 26"), "{sql}");
+        assert!(sql.contains("RETURN id, model_sesno"), "{sql}");
+
+        // 左端为 0 与没带左端：闸恒真，SQL 与旧版逐位相同。
+        for base in [None, Some(0)] {
+            let mut end = end();
+            end.model_base_sesno = base;
+            let sql = render_task_end_tail(&end);
+            assert!(
+                sql.contains("model_sesno = math::max([model_sesno ?: 0, 26])"),
+                "base={base:?}: {sql}"
+            );
+            assert!(!sql.contains("IF 0 <="), "base={base:?}: {sql}");
+        }
+    }
+
+    /// ADR-092 D2/D3 端到端：左端 30 越过库上 20 → 水位与落款都没盖，回执报
+    /// `model_watermark_discontinuous` 且 `model_sesno` 是读到的现值；左端 20 贴住
+    /// 库上 20 → 正常盖到 26；`model_sesno` 为 `NONE` 的行按 0 判。
+    #[tokio::test]
+    async fn the_continuity_gate_refuses_a_skip_stamp_but_lets_contiguous_ones_through() {
+        let db = database().await;
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        // 跳盖：本任务计划从左端 30 起算，库上模型水位才到 20——中间一段没人算过，拒盖。
+        let mut skipping = end();
+        skipping.model_base_sesno = Some(30);
+        let receipt = commit_task_end_on(&db, &skipping).await.unwrap();
+        assert!(receipt.model_watermark_discontinuous, "{receipt:?}");
+        assert_eq!(receipt.model_sesno, Some(20), "回执带读到的现值");
+        let row = watermark(&db, 8000).await;
+        assert_eq!(row.model_sesno, Some(20), "水位原地");
+        assert_eq!(row.model_generator, None, "落款随水位一起没盖");
+        assert_eq!(row.model_roots_observed_at, Some(26), "观测照常落");
+
+        // 连续：左端贴住库上水位（追平窗），正常盖到目标。
+        let mut contiguous = end();
+        contiguous.model_base_sesno = Some(20);
+        let receipt = commit_task_end_on(&db, &contiguous).await.unwrap();
+        assert!(!receipt.model_watermark_discontinuous, "{receipt:?}");
+        assert_eq!(receipt.model_sesno, Some(26));
+        assert_eq!(watermark(&db, 8000).await.model_sesno, Some(26));
+
+        // `NONE` 视 0：左端 0 / 没带的任务照常盖。
+        db.query("CREATE dbnum_watermark:8001 SET dbnum=8001, applied_sesno=26;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut zero_based = TaskEnd {
+            dbnum: 8001,
+            info: None,
+            model_base_sesno: Some(0),
+            ..end()
+        };
+        let receipt = commit_task_end_on(&db, &zero_based).await.unwrap();
+        assert_eq!(receipt.model_sesno, Some(26));
+        assert_eq!(watermark(&db, 8001).await.model_sesno, Some(26));
+
+        // 「左端越过库上水位」与「欠没欠」分开判：水位拨回 10、左端 15 → 拒盖；
+        // 左端改成 10 贴住库上水位 → 闸放行，正常盖到 26。
+        db.query("UPDATE dbnum_watermark:8001 SET model_sesno = 10;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        zero_based.model_base_sesno = Some(15);
+        let receipt = commit_task_end_on(&db, &zero_based).await.unwrap();
+        assert!(receipt.model_watermark_discontinuous, "{receipt:?}");
+        assert_eq!(watermark(&db, 8001).await.model_sesno, Some(10));
+        zero_based.model_base_sesno = Some(10);
+        let receipt = commit_task_end_on(&db, &zero_based).await.unwrap();
+        assert!(!receipt.model_watermark_discontinuous, "{receipt:?}");
+        assert_eq!(watermark(&db, 8001).await.model_sesno, Some(26));
+    }
+
     /// GitHub #73：库级生成器落款随 `model_sesno` 同一笔盖，写的就是本进程的指纹（逐字相同，启动核对直接比）；
     /// 模型没成一个字不写。
     #[test]
@@ -1134,7 +1326,10 @@ mod tests {
         );
         let stamp = sql.find("model_sesno = math::max").expect("model stamp");
         let generator = sql.find("model_generator = '").expect("generator stamp");
-        assert!(stamp < generator, "落款跟在水位之后、同一句 UPDATE 里: {sql}");
+        assert!(
+            stamp < generator,
+            "落款跟在水位之后、同一句 UPDATE 里: {sql}"
+        );
 
         let mut failed = end();
         failed.model.as_mut().expect("model outcome").all_roots_ok = false;
@@ -1169,7 +1364,11 @@ mod tests {
 
         let row = watermark(&db, 8000).await;
         assert_eq!(row.model_sesno, Some(26), "模型水位盖上");
-        assert_eq!(row.state_revision, Some(8), "一个任务只前进一格 state_revision");
+        assert_eq!(
+            row.state_revision,
+            Some(8),
+            "一个任务只前进一格 state_revision"
+        );
         let status: Option<String> = db
             .query("SELECT VALUE status FROM ONLY dbnum_write_state:8000;")
             .await
@@ -1234,6 +1433,7 @@ mod tests {
                 model_sesno: None,
                 info_rows: Some(1),
                 blocked_by_data: false,
+                model_watermark_discontinuous: false,
             }
         );
 
@@ -1353,6 +1553,7 @@ mod tests {
                 model_sesno: Some(26),
                 info_rows: None,
                 blocked_by_data: false,
+                model_watermark_discontinuous: false,
             }
         );
         let row = watermark(&db, 8000).await;

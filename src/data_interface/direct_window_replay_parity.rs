@@ -1506,6 +1506,7 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                         catalogue_sessions: None,
                         room_generation: Default::default(),
                     }),
+                    model_base_sesno: None,
                     info: None,
                     closes_task: true,
                 },
@@ -2082,6 +2083,7 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
             catalogue_sessions: None,
             room_generation: Default::default(),
         }),
+        model_base_sesno: None,
         info: None,
         closes_task: true,
     };

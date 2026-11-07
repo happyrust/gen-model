@@ -48,6 +48,8 @@ pub const DESI_STYP: i64 = 1;
 /// Isometric element database.  It participates in the source model exactly
 /// like DESI; CATA remains catalogue-only and is deliberately excluded.
 pub const ISOD_STYP: i64 = 6;
+/// Catalogue database（`styp_name` 的 2）。
+pub const CATA_STYP: i64 = 2;
 
 /// SYST 库（dbno 8191）的 WORL：`24575/3`——`24575 = 8191 | 0x4000`，系统元素落在第 2 个 extent，
 /// 不是元素库那种 `primary_extent_ref / 0`。E3D 2.1 + 3.1 全部 14 个 `*sys` 库实测同一位置（2026-09-12）。
@@ -141,6 +143,9 @@ pub struct MdbMembership {
     /// 各 CURD 声明元素上取到的写权限证据（dbnum → [`DbAccess`]）。
     /// 缺席键 = 声明面没留证据，消费方按会话默认可写。
     access: BTreeMap<u32, DbAccess>,
+    /// `extra_element_dbnums` 补充成员（ADR-095），已绑到文件、STYP 按文件头定。与 `databases`
+    /// 分开放：声明口径（预览、缺件告警、`UpdateScope::declared_desi`）只看 CURD，模型面才合并两者。
+    extras: Vec<MdbDatabase>,
     /// Things that went wrong while resolving this list and that a person
     /// should see. They deliberately do not live only in `log::warn!`: the
     /// sandbox and plenty of deployments run `enable_log = false`, the logger
@@ -150,8 +155,19 @@ pub struct MdbMembership {
 
 impl MdbMembership {
     #[cfg(test)]
-    pub(crate) fn test_with_databases(project: &str, mdb: &str, databases: Vec<MdbDatabase>) -> Self {
-        Self { mdb: mdb.into(), project: project.into(), databases, access: BTreeMap::new(), problems: Vec::new() }
+    pub(crate) fn test_with_databases(
+        project: &str,
+        mdb: &str,
+        databases: Vec<MdbDatabase>,
+    ) -> Self {
+        Self {
+            mdb: mdb.into(),
+            project: project.into(),
+            databases,
+            extras: Vec::new(),
+            access: BTreeMap::new(),
+            problems: Vec::new(),
+        }
     }
     pub fn mdb(&self) -> &str {
         &self.mdb
@@ -167,6 +183,16 @@ impl MdbMembership {
 
     pub fn problems(&self) -> &[String] {
         &self.problems
+    }
+
+    /// `extra_element_dbnums` 补充成员（ADR-095），按配置序。
+    pub fn extra_databases(&self) -> &[MdbDatabase] {
+        &self.extras
+    }
+
+    /// 模型面的成员：CURD 声明在前，补充成员在后。
+    pub fn model_databases(&self) -> impl Iterator<Item = &MdbDatabase> {
+        self.databases.iter().chain(self.extras.iter())
     }
 
     /// 该库 CURD 声明元素上的写权限证据。`None` = 声明面没留证据（或测试
@@ -335,7 +361,9 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     // 远程盘上这三段每一段都能卡——只给 bind_declared 打行的话，
     // 前一段静默照旧看不出停在哪（2026-10-15 JEU 现场的教训）。
     let closure_started = Instant::now();
-    report_sys_info(&format!("[mdb-bind] 闭包定位开始: project={project} mdb={mdb}"));
+    report_sys_info(&format!(
+        "[mdb-bind] 闭包定位开始: project={project} mdb={mdb}"
+    ));
     let closure = crate::data_interface::mdb_closure::resolve_for(db_option);
     let plan = closure.watch_dir_plan();
     report_sys_info(&format!(
@@ -355,10 +383,26 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         .map(|entry| (entry.project.clone(), entry.db_dirs.clone()))
         .collect();
     let declaration = crate::data_interface::mdb_closure::declaration(&own_dirs, project, mdb)?;
-    let bound = bind_declared(&declaration.databases, &projects, project)?;
-    let databases = bound.databases;
+    let extra = if aios_core::helper::to_e3d_name(mdb)
+        == aios_core::helper::to_e3d_name(&db_option.mdb_name)
+    {
+        crate::options::extra_element_dbnums()
+    } else {
+        Vec::new()
+    };
+    // 补充成员与声明一起绑：目录只枚举一遍，选主规则也是同一套。
+    let declared_len = declaration.databases.len();
+    let mut to_bind = declaration.databases.clone();
+    to_bind.extend(extra_member_declarations(&declaration.databases, &extra));
+    let bound = bind_declared(&to_bind, &projects, project)?;
+    let mut databases = bound.databases;
+    let (extras, extra_problems) = admit_extra_members(databases.split_off(declared_len), |path| {
+        crate::data_interface::db_file_header::DbFileHeader::read(path)
+            .map(|header| (header.dbnum, header.db_type))
+    });
     let mut problems = declaration.problems.clone();
     problems.extend(bound.problems);
+    problems.extend(extra_problems);
     for db in databases.iter().filter(|db| db.path.is_none()) {
         let reason = db
             .declared_project_code
@@ -383,9 +427,78 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         mdb: declaration.mdb.clone(),
         project: project.to_string(),
         databases,
+        extras,
         access: declaration.access.clone(),
         problems,
     })
+}
+
+/// `extra_element_dbnums` 里 CURD 没声明的库，做成待绑定的声明：项目码留空（= 声明项目），
+/// STYP 暂记 0，绑定后由 [`admit_extra_members`] 按文件头定。已声明的号跳过——只增不减。
+fn extra_member_declarations(declared: &[MdbDatabase], extra: &[u32]) -> Vec<MdbDatabase> {
+    extra
+        .iter()
+        .filter(|dbnum| !declared.iter().any(|db| db.dbnum == **dbnum))
+        .map(|&dbnum| MdbDatabase {
+            dbnum,
+            styp: 0,
+            proj: 0,
+            declared_project_code: None,
+            name: format!("extra_element_dbnums/{dbnum}"),
+            path: None,
+            project: None,
+            shadowed: Vec::new(),
+        })
+        .collect()
+}
+
+/// 绑定后的补充成员按文件头收下：收 DESI / ISOD，以及它们引用、MDB 却没声明的 CATA
+///（251095 的管件 SPRE 指向 251049 /SP_LO），库号必须对得上。没文件、读不动、类型不对的
+/// 各记一条问题，不进成员——补充名单写错了要能被看见，而不是静默少一个库。
+fn admit_extra_members(
+    bound: Vec<MdbDatabase>,
+    mut header: impl FnMut(&Path) -> anyhow::Result<(i32, String)>,
+) -> (Vec<MdbDatabase>, Vec<String>) {
+    let mut admitted = Vec::new();
+    let mut problems = Vec::new();
+    for mut db in bound {
+        let Some(path) = db.path.clone() else {
+            problems.push(format!(
+                "extra_element_dbnums 的 dbnum {} 在声明项目的库目录里没有文件，不进成员",
+                db.dbnum
+            ));
+            continue;
+        };
+        match header(&path) {
+            Ok((dbnum, db_type)) if dbnum == db.dbnum as i32 => {
+                db.styp = match db_type.to_ascii_uppercase().as_str() {
+                    "DESI" => DESI_STYP,
+                    "ISOD" => ISOD_STYP,
+                    "CATA" => CATA_STYP,
+                    other => {
+                        problems.push(format!(
+                            "extra_element_dbnums 的 dbnum {} 是 {other} 库（{}），只收 DESI / ISOD / CATA，不进成员",
+                            db.dbnum,
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
+                admitted.push(db);
+            }
+            Ok((dbnum, _)) => problems.push(format!(
+                "extra_element_dbnums 的 dbnum {} 绑到的 {} 文件头写的是 dbnum {dbnum}，不进成员",
+                db.dbnum,
+                path.display()
+            )),
+            Err(error) => problems.push(format!(
+                "extra_element_dbnums 的 dbnum {} 读不动文件头（{}）：{error:#}，不进成员",
+                db.dbnum,
+                path.display()
+            )),
+        }
+    }
+    (admitted, problems)
 }
 
 /// `project`'s own database directories in `plan` — where its SYS file lives.
@@ -1416,13 +1529,11 @@ impl SysDb {
         let mdb_noun = e3d_attlib::db1_hash("MDB");
         let mdbw_noun = e3d_attlib::db1_hash("MDBW");
         let mdbw = self.set.element(SYS_MDB_WORLD);
-        let mdbw_ok = mdbw
-            .exists()
-            .map_err(|error| anyhow::anyhow!("检查 SYS MDBW {SYS_MDB_WORLD} 是否存在失败: {error}"))?
-            && mdbw
-                .noun_hash()
-                .map_err(|error| anyhow::anyhow!("读 SYS MDBW {SYS_MDB_WORLD} 的 noun 失败: {error}"))?
-                == mdbw_noun;
+        let mdbw_ok = mdbw.exists().map_err(|error| {
+            anyhow::anyhow!("检查 SYS MDBW {SYS_MDB_WORLD} 是否存在失败: {error}")
+        })? && mdbw.noun_hash().map_err(|error| {
+            anyhow::anyhow!("读 SYS MDBW {SYS_MDB_WORLD} 的 noun 失败: {error}")
+        })? == mdbw_noun;
         if !mdbw_ok {
             report_sys_error(&format!(
                 "[SYS 解析] dbno={} 的 {SYS_MDB_WORLD} 不是 MDBW（格式假设被打破），回落到 Named 档全库扫描找 {name}",
@@ -1684,10 +1795,8 @@ impl DirInventory {
                     inventory.dirs_scanned += 1;
                     inventory.entries += entry_count;
                     for path in paths {
-                        let Some(parsed) = path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .and_then(
+                        let Some(parsed) =
+                            path.file_name().and_then(|name| name.to_str()).and_then(
                                 crate::data_interface::extract_family::parse_extract_file_name,
                             )
                         else {
@@ -1707,7 +1816,10 @@ impl DirInventory {
                     ));
                 }
                 Err(error) => {
-                    let problem = format!("库目录 {}（项目 {project}）枚举失败：{error}", dir.display());
+                    let problem = format!(
+                        "库目录 {}（项目 {project}）枚举失败：{error}",
+                        dir.display()
+                    );
                     report_sys_error(&format!("[mdb-bind] {problem}"));
                     inventory.problems.push(problem);
                 }
@@ -1813,10 +1925,7 @@ fn locate_declared(
 /// 纯内存操作：目录枚举在 [`DirInventory::from_dirs`] 已经做完，这里只查索引。
 /// 排序口径不变——`leaves`/`masters` 各自排序、最高 extract 叶胜出、其余全进
 /// `rest`——与枚举先后无关，所以索引化不改动任何选主结果。
-fn pick_within_project(
-    inventory: &DirInventory,
-    dbnum: u32,
-) -> Option<(PathBuf, Vec<PathBuf>)> {
+fn pick_within_project(inventory: &DirInventory, dbnum: u32) -> Option<(PathBuf, Vec<PathBuf>)> {
     let mut masters: Vec<PathBuf> = Vec::new();
     let mut leaves: Vec<(u32, PathBuf)> = Vec::new();
     for (extract, path) in inventory.by_dbnum.get(&dbnum)? {
@@ -2314,6 +2423,63 @@ mod tests {
         );
     }
 
+    // ---- extra_element_dbnums 补充成员（ADR-095）----
+
+    #[test]
+    fn extra_members_skip_declared_dbnums() {
+        let declared = vec![db(8000, DESI_STYP, "*AMS/DESIGN", true)];
+        let extra = extra_member_declarations(&declared, &[8000, 251095]);
+        assert_eq!(
+            extra.iter().map(|db| db.dbnum).collect::<Vec<_>>(),
+            vec![251095]
+        );
+        assert!(extra[0].path.is_none() && extra[0].declared_project_code.is_none());
+    }
+
+    #[test]
+    fn extra_members_are_typed_by_file_header_and_only_design_or_catalogue_pass() {
+        let bound = vec![
+            db(251095, 0, "extra", true),
+            db(251137, 0, "extra", true),
+            db(7000, 0, "extra", true),
+            db(5200, 0, "extra", true),
+            db(9, 0, "extra", false),
+            db(10, 0, "extra", true),
+        ];
+        let (admitted, problems) = admit_extra_members(bound, |path| {
+            let name = path.to_string_lossy();
+            Ok(if name.contains("x251095") {
+                (251095, "DESI".to_string())
+            } else if name.contains("x251137") {
+                (251137, "isod".to_string())
+            } else if name.contains("x7000") {
+                (7000, "CATA".to_string())
+            } else if name.contains("x5200") {
+                (5200, "PROP".to_string())
+            } else {
+                (11, "DESI".to_string())
+            })
+        });
+        assert_eq!(
+            admitted
+                .iter()
+                .map(|db| (db.dbnum, db.styp))
+                .collect::<Vec<_>>(),
+            vec![(251095, DESI_STYP), (251137, ISOD_STYP), (7000, CATA_STYP)]
+        );
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        assert!(problems.iter().all(|p| p.contains("extra_element_dbnums")));
+    }
+
+    #[test]
+    fn model_databases_append_extras_after_the_declaration() {
+        let mut membership = membership();
+        membership.extras = vec![db(251095, DESI_STYP, "extra", true)];
+        assert_eq!(membership.databases().len(), 4, "声明口径不含补充成员");
+        let dbnums: Vec<u32> = membership.model_databases().map(|db| db.dbnum).collect();
+        assert_eq!(dbnums, vec![6002, 8000, 5100, 7323, 251095]);
+    }
+
     fn db(dbnum: u32, styp: i64, name: &str, on_disk: bool) -> MdbDatabase {
         MdbDatabase {
             dbnum,
@@ -2337,6 +2503,7 @@ mod tests {
                 db(5100, DICT_STYP, "*CNPESTD/DICT", true),
                 db(7323, DICT_STYP, "*MASTER/MDSDICT", false),
             ],
+            extras: Vec::new(),
             access: BTreeMap::new(),
             problems: Vec::new(),
         }
@@ -2365,8 +2532,7 @@ mod tests {
             ],
         );
 
-        let refreshed =
-            rebind_phase_line(&after, Some(&before), RebindReason::SystRefresh, 4120);
+        let refreshed = rebind_phase_line(&after, Some(&before), RebindReason::SystRefresh, 4120);
         // 拆开写：下一条用例全仓数这一行的字面量，只许生产代码那一处。
         assert_eq!(
             refreshed,
@@ -2906,3 +3072,8 @@ mod tests {
 #[cfg(test)]
 #[path = "mdb_membership_sys_nav_tests.rs"]
 mod sys_nav_tests;
+
+/// `extra_element_dbnums` 补充成员的真库门（ADR-095）：只在装了 AMS 的机器上手动跑。
+#[cfg(test)]
+#[path = "mdb_membership_extra_live_tests.rs"]
+mod extra_live_tests;

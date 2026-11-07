@@ -169,3 +169,19 @@ A 腿有意不设，考默认档下的设置模式逃生门。Linux 部署（`de
    `the_refusal_banner_says_which_medium_which_routes_why_and_how_to_fix`）。
 6. 服务端源码里不得再有 `options::in_memory_db()`；`effective_store_mode` 保持「env > file > 默认」两参数签名，
    第三层想插队得先改这个签名——那就是在改本文。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-F-1 / R-F-13 / R-F-15（审计按 2026-10-27 工作树）。
+> 本节只追记，标题与 D3 / D5 / D6 原文不改；冲突处以本节为准。
+
+- **T-F-1 · 标题「只由环境变量决定」与初版落地段已不成立（已修订 → D1 三层）。** 裁决三层：`AIOS_STORE_MODE` >
+  `DbOption.toml` 的 `store_mode` > 默认 `rocksdb`；漏设落到 `rocksdb`，不静默落到 `mem`
+  （`options.rs:1247-1258,1280-1313,1323-1327`；ADR-074 D1 / D2）。
+- **T-F-2 · D3 / D5 / D6 的「回填 `mem`」改为回填 `rocksdb`。** 发布包 `Start-AMS.ps1`：给了 `-StoreMode` 就设
+  `AIOS_STORE_MODE`；不给时文件优先；文件也没写就回填 `rocksdb`（2026-10-26；`scripts/New-LocalRelease.ps1:591`、
+  `start-local-release.ps1:36`、`docs/database-storage-modes.md:22-27`）。仓内 `DbOption*.toml` 夹具与出厂模板仍不带未注释的
+  `store_mode =`（`options.rs:3440-3448`）。
+- 源码注释侧同口径的改口（`options.rs:1199-1201,1549-1551` 的「介质唯一的决定者」/「由 `AIOS_STORE_MODE` 决定」，
+  `options.rs:1294-1296,3171-3172` 的「回填 `mem`」）不在 `docs/adr/` 范围内，本次未改。
+

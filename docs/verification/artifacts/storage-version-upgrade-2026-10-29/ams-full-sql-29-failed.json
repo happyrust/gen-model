@@ -1,0 +1,165 @@
+{
+ "storage_version": null,
+ "upgrade": {
+  "done": [
+   1112,
+   7324,
+   7326
+  ],
+  "failed": [
+   {
+    "dbnum": 6003,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7009,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7011,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7015,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7022,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7027,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7048,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 7321,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   },
+   {
+    "dbnum": 250705,
+    "reason": "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）"
+   }
+  ],
+  "full_scope": true,
+  "id": "storage_upgrade:current",
+  "requested": [
+   1112,
+   6003,
+   7009,
+   7011,
+   7015,
+   7022,
+   7027,
+   7048,
+   7321,
+   7324,
+   7326,
+   7327,
+   7329,
+   7330,
+   7331,
+   7332,
+   7333,
+   7334,
+   7350,
+   7352,
+   7353,
+   7354,
+   7356,
+   7741,
+   7997,
+   7998,
+   7999,
+   8000,
+   250705
+  ],
+  "started_at": "2026-10-29T04:36:58.460505800+08:00",
+  "target_version": 1,
+  "tasks": [
+   {
+    "dbnum": 1112,
+    "task_id": "db-20261029-043658-000000"
+   },
+   {
+    "dbnum": 7324,
+    "task_id": "db-20261029-043658-000001"
+   },
+   {
+    "dbnum": 7326,
+    "task_id": "db-20261029-043658-000002"
+   },
+   {
+    "dbnum": 7327,
+    "task_id": "db-20261029-043658-000003"
+   },
+   {
+    "dbnum": 7329,
+    "task_id": "db-20261029-043658-000004"
+   },
+   {
+    "dbnum": 7330,
+    "task_id": "db-20261029-043658-000005"
+   },
+   {
+    "dbnum": 7331,
+    "task_id": "db-20261029-043658-000006"
+   },
+   {
+    "dbnum": 7332,
+    "task_id": "db-20261029-043658-000007"
+   },
+   {
+    "dbnum": 7333,
+    "task_id": "db-20261029-043658-000008"
+   },
+   {
+    "dbnum": 7334,
+    "task_id": "db-20261029-043658-000009"
+   },
+   {
+    "dbnum": 7350,
+    "task_id": "db-20261029-043658-000010"
+   },
+   {
+    "dbnum": 7352,
+    "task_id": "db-20261029-043658-000011"
+   },
+   {
+    "dbnum": 7353,
+    "task_id": "db-20261029-043658-000012"
+   },
+   {
+    "dbnum": 7354,
+    "task_id": "db-20261029-043658-000013"
+   },
+   {
+    "dbnum": 7356,
+    "task_id": "db-20261029-043658-000014"
+   },
+   {
+    "dbnum": 7741,
+    "task_id": "db-20261029-043658-000015"
+   },
+   {
+    "dbnum": 7997,
+    "task_id": "db-20261029-043658-000016"
+   },
+   {
+    "dbnum": 7998,
+    "task_id": "db-20261029-043658-000017"
+   },
+   {
+    "dbnum": 7999,
+    "task_id": "db-20261029-043658-000018"
+   },
+   {
+    "dbnum": 8000,
+    "task_id": "db-20261029-043658-000019"
+   }
+  ]
+ }
+}

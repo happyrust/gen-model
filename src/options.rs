@@ -662,6 +662,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     watch_dbnums: Option<Vec<u32>>,
     #[serde(default)]
+    extra_element_dbnums: Option<Vec<u32>>,
+    #[serde(default)]
     block_file_identity_conflicts: Option<bool>,
     #[serde(default)]
     model_concurrency_mode: Option<String>,
@@ -852,6 +854,10 @@ fn load_ext_fields() -> &'static DbOptionExtFields {
             // [`get_db_option_ext`] / [`watch_dbnums`]，压根不经过 `run_cli`。这一句
             // 是「启动日志里一声不响」的正面修复，它必须挂在取值本身上——谁用到这张
             // 表，谁就一定听得见，不依赖任何人记得去打印它。
+            eprintln!("{notice}");
+        }
+        if let Some(notice) = extra_element_dbnums_notice(fields.extra_element_dbnums.as_deref()) {
+            // 补充成员把 MDB 之外的库拉进范围，是非常规状态：和读坏配置同一处、同一条路出声。
             eprintln!("{notice}");
         }
         fields
@@ -1787,6 +1793,17 @@ pub fn watch_dbnums() -> Vec<u32> {
     normalise_watch_dbnums(load_ext_fields().watch_dbnums.as_deref())
 }
 
+/// 补充成员（`DbOption.toml` 的 `extra_element_dbnums`，**默认空**）：MDB 的 CURD 里没有、
+/// 但要和 MDB 声明的库一样追增量、建模型的设计库，以及它们引用、MDB 也没声明的目录库（CATA
+/// 只进模型面的目录定位，见 ADR-095 D7）。
+///
+/// 只增不减（ADR-095）：它只能往 [`crate::data_interface::update_scope::UpdateScope`] 的
+/// 放行集合里加库，不能把 MDB 声明的库挡掉——那是 issue #10 `manual_db_nums` 的老路。
+/// 去重保序口径与 [`watch_dbnums`] 相同。
+pub fn extra_element_dbnums() -> Vec<u32> {
+    normalise_watch_dbnums(load_ext_fields().extra_element_dbnums.as_deref())
+}
+
 /// `[rvm_check]`。没写这一段时每个路径都是 `None`，由调用方按可执行文件位置补。
 pub fn rvm_check_section() -> RvmCheckSection {
     load_ext_fields().rvm_check.clone().unwrap_or_default()
@@ -1802,6 +1819,23 @@ fn normalise_watch_dbnums(configured: Option<&[u32]>) -> Vec<u32> {
         }
     }
     normalised
+}
+
+/// `extra_element_dbnums` 非空时启动要说的那句话；空表或缺省不出声。
+fn extra_element_dbnums_notice(configured: Option<&[u32]>) -> Option<String> {
+    let dbnums = normalise_watch_dbnums(configured);
+    if dbnums.is_empty() {
+        return None;
+    }
+    let listed = dbnums
+        .iter()
+        .map(|dbnum| dbnum.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "⚠ 补充成员生效：DbOption.toml 的 extra_element_dbnums 把 {} 个 MDB 之外的库加进执行范围：{listed}",
+        dbnums.len()
+    ))
 }
 
 /// 跨项目 DICT/CATA 同 dbnum 的选主顺序。空列表不猜优先级：只有实际发生冲突时
@@ -3286,6 +3320,29 @@ mod tests {
         assert_eq!(
             normalise_watch_dbnums(Some(&[8000, 7998, 8000])),
             vec![8000, 7998]
+        );
+    }
+
+    /// 补充成员缺省即空表、不出声；写了就去重保序，并且启动时必须出声。
+    #[test]
+    fn extra_element_dbnums_default_to_nothing_and_speak_when_set() {
+        assert!(extra_element_dbnums_notice(None).is_none());
+        assert!(extra_element_dbnums_notice(Some(&[])).is_none());
+        let notice =
+            extra_element_dbnums_notice(Some(&[251095, 251137, 251095])).expect("非空名单必须出声");
+        assert!(notice.contains("补充成员生效"), "{notice}");
+        assert!(notice.contains("251095,251137"), "{notice}");
+        assert!(notice.contains("2 个"), "{notice}");
+    }
+
+    /// 补充成员走扩展表反序列化：键名就是字段名。
+    #[test]
+    fn extra_element_dbnums_deserialize_from_the_config_key() {
+        let fields: DbOptionExtFields =
+            toml::from_str("extra_element_dbnums = [251095, 251137]").expect("合法配置");
+        assert_eq!(
+            fields.extra_element_dbnums.as_deref(),
+            Some(&[251095, 251137][..])
         );
     }
 

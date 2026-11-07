@@ -1802,6 +1802,14 @@ async fn execute_frozen_batch(
     // 标记、落统计、记根观测，水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
     if !initialization_closed_task {
         registry.set_stage(&job.task_id, "task_end");
+        // ADR-092 D1：本任务的模型左端——窗口批取 `execute_one_dbnum` 随批次带回的计划
+        // 基线（数据窗左端与 `model_sesno` 取小），ModelOnly 等无窗批回退到入队声明的
+        // `model_start_sesno`；都没带时按 0（闸恒真，旧路径逐位不变）。
+        let model_base_sesno = result
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.model_base_sesno)
+            .or(job.model_start_sesno);
         let ref0_rows = ref0_snapshot.as_ref().map(|snapshot| snapshot.rows.len());
         match crate::data_interface::task_end::commit_task_end_on(
             &aios_core::SUL_DB,
@@ -1811,6 +1819,7 @@ async fn execute_frozen_batch(
                 data: None,
                 target_time: end_time,
                 model: model_outcome,
+                model_base_sesno,
                 info: ref0_snapshot,
                 closes_task: true,
             },
@@ -1829,6 +1838,16 @@ async fn execute_frozen_batch(
                     result.warnings.push(format!(
                         "模型水位被数据水位闸挡下（applied_sesno < {file_latest_sesno}），这一版 model_sesno 未盖 dbnum={}",
                         job.dbnum
+                    ));
+                }
+                // ADR-092 D3：模型左端越过库上模型水位时拒绝盖章——数据水位照盖，
+                // 任务判 Partial，欠账靠启动核对 / 稳态补偿（WP-E）补上，不许跳盖。
+                if receipt.model_watermark_discontinuous {
+                    result.status = ManualUpdateStatus::Partial;
+                    result.warnings.push(format!(
+                        "model_watermark_discontinuous：任务模型左端 {model_base_sesno:?} \
+                         越过库上 model_sesno={:?}，模型水位与落款未盖 dbnum={}",
+                        receipt.model_sesno, job.dbnum
                     ));
                 }
             }
@@ -1859,6 +1878,7 @@ async fn execute_frozen_batch(
                 data: None,
                 target_time: None,
                 model: None,
+                model_base_sesno: None,
                 info: None,
                 closes_task: true,
             },
@@ -3741,6 +3761,7 @@ fn failed_window_result(
             modified_elements: 0,
             deleted_elements: 0,
             credential_advance: None,
+            model_base_sesno: None,
         }),
         units: Vec::new(),
         warnings: std::mem::take(warnings),
@@ -5683,6 +5704,7 @@ mod tests {
             data: None,
             target_time: None,
             model: Some(outcome),
+            model_base_sesno: None,
             info: None,
             closes_task: true,
         });
@@ -5970,6 +5992,7 @@ mod tests {
             data: None,
             target_time: None,
             model: Some(outcome),
+            model_base_sesno: None,
             info: None,
             closes_task: true,
         });
@@ -6555,7 +6578,8 @@ mod tests {
     #[test]
     fn only_the_roots_own_generation_errors_count_towards_the_death_line() {
         use crate::data_interface::model_root_ledger as ledger;
-        let dbnum = 994_101;
+        // 与 `backing_off_roots_skip_generation…` 共用 994_101 时两个并发测试互清账本（flake）。
+        let dbnum = 994_102;
         ledger::forget_dbnum(dbnum);
         for _ in 0..ledger::DEAD_ROOT_STREAK * 2 {
             mark_generation_failed(

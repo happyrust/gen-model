@@ -1,5 +1,19 @@
 ## 2026-11-07
 
+### 模型水位连续性闸落地：越线拒盖、任务 Partial（ADR-092 D2）
+
+- **为什么**：`model_sesno = math::max` 没有「本任务模型左端 ≤ 库上当前水位」的闸——一窗计划若从左端 30 起算而库上模型水位才 20，中间 (20,30] 没人算过的根会被这一窗的成功收尾直接盖过去，欠账在库上从此不可见（跳盖）。做法 a（`model_plan_base_sesno` 随 `model_floor` 进规划）把工作树里先落了，闸本身是 WP-C。
+- **改**：`TaskEnd` 新增 `model_base_sesno`（窗口批由 `execute_one_dbnum` 算出、随 `DataBatchResult` 带给收尾；无窗批回退 `job.model_start_sesno`；初始化 / 整库重排为 0）。`task_end` 的水位句把所有模型落款格包成 `field = IF {base} <= (model_sesno ?: 0) THEN … ELSE field END`（同一笔事务内读判改写，ADR-092 实施约束 2 的条件表达式形态）；`base ≤ 0` 与未带左端的旧路径 SQL 逐位不变。水位句改 `RETURN id, model_sesno`，回执新增 `model_watermark_discontinuous`；拒盖时模型水位 / 生成器落款 / 目录章 / 房间代号全不盖，`applied_sesno` 与根观测照常落，任务判 `Partial` 并在 warnings 带 `model_watermark_discontinuous` 理由与两端值。`window_root_plan.rs` 模块文档「S 是模型水位」改口为「S 是模型左端」。
+- **验证**：`task_end.rs` 新渲染级单测（左端 30 全格条件化、`None`/`0` 逐位不变）与 in-memory 端到端（左端 30 越过库上 20 拒盖且落款未盖、左端 20 贴住放行、`NONE` 视 0、拨低水位重判）。
+- **没动**：`DATA_BATCH_PARK_AFTER`；`DEAD_ROOT_STREAK`；生成根账本不落库。L2 `ams8000-equi-fail-inject` 跳盖用例随 WP-F；稳态补偿（欠账无人排）是 WP-E，见收口计划。
+
+### 稳态模型补偿：周期对账拍补排 ModelOnly（WP-E / ADR-090 D1）
+
+- **为什么**：`startup_model_recovery_plan` 只在启动核对和手动路上跑——「数据追平、模型落后」的库若之后没有新会话、没重启，没有任何一拍会去排它，欠账只在 `/dbnums` 上挂着。
+- **改**：`startup_reconcile::reconcile_model_catch_up` 挂在周期对账那一拍（`increment_manager` 的 `reconcile` 分支、`sweep_watch_dirs` 之后）：范围 = 监听域 ∩ 当前 MDB 的 DESI 成员，稳态判据 `applied_sesno == file_latest_sesno`（文件回退等数据面裁决），水位判据复用 `startup_model_recovery_plan`，入队形状与启动核对逐位相同（`intent=ModelOnly`、左端 `model_sesno`、右端 `applied`、文件名取库上登记值）。三条节流闸任一命中不排：队列已有该库行（任何状态）、欠账根全在退避期（按 `model_root_ledger::deferral(dbnum, root, applied)` 逐根核，空欠账集不算）、数据批次 park。判定抽成纯函数 `steady_catch_up_plan`（水位三格 + 三条事实），真值表单测与生产同一条判据。`/health` 新增 `model_catch_up_enqueued_total`。
+- **验证**：`startup_reconcile` 新增真值表单测（稳态落后排 / 追平不排 / 非稳态不排 / 三条闸各自挡 / 没盖过整库重排）；8/8 通过。
+- **没动**：启动核对路径逐位不变；补偿任务与正常批次共用同一入队口，`AlreadyCovered` 合并仍生效。
+
 ### 显示用粗网格按 L0 键预生成、按盘分拣、可回填（ADR-096）
 
 - **为什么**：`feat/mesh-lod1` 原先每根生成完后用 4 mm 弦高下限把整根再求一遍，产物写在 `lod1/`。审核两处必须改：规范圆柱共用一个 L0 键（`CylinderV3 { segments }`），粗网格段数却按各实例真实半径算，r = 400–5000 mm 下 41 个键里有 14 个会算出两种段数，`ensure_mesh_file` / `repair_mesh_file` 来回重写同一个文件；重求耗时记在 `bake=` 里，看不出粗网格的代价。另外缓存命中的根不再生成，开关之前生成好的库一个粗网格都没有。

@@ -220,3 +220,18 @@ write-behind 现有的退避与死信照用，但重试预算归任务。用尽�
 
 `CONTEXT.md` 的「任务完成」口径要跟着 D1/D5 改一句。本轮没动它——这棵工作树此刻有别的会话在写，`CONTEXT.md` 正压在它们的
 暂存区里。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-A-1 / R-A-2 / R-A-18（审计按 2026-10-27 工作树记的行号，提交后可能漂移）。
+> 本节只追记，D5 原文不改；与 D5 冲突处以本节为准。
+
+- **T-A-1 · D5「三枚水位收尾同笔」已不成立，现行是两个写点（已修订 → ADR-071 D4）。**
+  - `applied_sesno`：稳态 `ApplyWindow` 在数据尾事务 `increment_tail::finalize_attempt` 里单调推进（`math::max`，
+    `src/data_interface/increment_tail.rs:52-84,142-155,214-221`）；只有初始化（`TaskEnd.data = Some`）才在收尾那一笔里
+    与模型水位同写（ADR-077 D7，`src/data_interface/task_end.rs:78-94,270-271`）。
+  - `model_sesno` + `status=finished` + info：只在任务收尾 `task_end::render_mark_finished` 一笔里写，顺序为
+    可选 `applied` 推进 → Ref0 快照 → `status=finished` → `UPDATE dbnum_watermark`（`task_end.rs:269-302,519-532`）；
+    `model_sesno` 仅在 `TaskModelOutcome.all_roots_ok` 时盖（`task_end.rs:116-120,140-213`）。
+  - 没有第三枚房间水位（ADR-073）。
+

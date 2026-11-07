@@ -1,4 +1,4 @@
-# ADR-032：元素 diff 与 core.dll 的两条已知边界（成员级 kind / UDA 旧键归一化）
+# ADR-032：元素 diff 与 core.dll 的已知边界（成员级 kind / UDA 旧键归一化 / 类型变化）
 
 状态：已接受
 日期：2026-08-19
@@ -24,9 +24,9 @@ typed 值。另外 UDA 的 `isUdaUnset`（区分「值是 0」与「从没设过
 
 ## 决策
 
-**两条都记为已知边界，本轮不实现。** 依据是 ADR-002 第 1 条：C/D/E 类「仅在发现与
+**边界 A、B 记为已知边界，本轮不实现。** 依据是 ADR-002 第 1 条：C/D/E 类「仅在发现与
 core.dll 分歧时才对齐，不预先大改」，以及第 2 条的验收口径是「在测试语料上行为一致」
-而非逐码字节一致。两条边界目前都不产生可观测的行为差异。
+而非逐码字节一致。这两条目前都不产生可观测的行为差异。2026-11-04 按同样标准追加边界 C。
 
 ### 边界 A：成员差分只有整表三态，没有逐成员 kind
 
@@ -87,10 +87,32 @@ ityp 数据已在 `output/noun_attr_fields.json`，旧键→新键两侧的定�
 **重新审视的触发条件**：拿到一份跨越 UDA / UDET 重编号的真实前后 DB 对（正对照），
 或在现场观测到这九个属性上的误报。
 
+### 边界 C：类型变化在会话区间收集器上继续比属性
+
+2026-11-04 反编译 `DB_DB::elementsChangedBetween`（`0x58ffc50`）。它对每个索引级变化元素调用
+`attributesChangedBetween`，`ATT_OWNER` 记 `elementIncluded`，其余记 `attributeModified`，
+`primaryList` 为真再比成员表。这个函数不调用 `dealWithChangeType`（`0x5a46460`）。
+`dealWithChangeType` 只从 `DB_Compare::scanNew` 进入；`DB_Compare::scan` 在 core.dll 里的
+调用链是 `RCF_Compare::scan`（`sub_5A97440`）到 Reconfigurer，不是这条会话差分。
+
+`diff_element`（`vendor/e3d-model/src/element_diff.rs`）在 `noun_hash` 不同时置
+`type_changed`，并把 `attributes` 清空。注释把这一条对到 `dealWithChangeType`。
+同一条「引用号还在、noun 变了」的记录：core 的会话收集器继续报变了的属性，
+gen-model 报 `TypeChanged` 并且不再比属性。
+
+不实现的理由和边界 A、B 相同：没有一份存过类型变化的会话窗口，这条分歧还没有
+被语料打到输出上。
+
+规则变化查过，不单列。`elementsChangedBetween` 不调用 `rulesChangedBetween`
+（`0x594cb70`）。gen-model 没有规则字段；规则字节落进具名属性还是 `opaque`
+没有存储布局证据，构不成一条已经能描述输出的分歧。
+
+**重新审视的触发条件**：拿到一份引用号不变、noun 变了的前后会话。
+
 ## 结果 / 约束
 
-- 两条边界从「一行代码注释」升为显式档案：行为不变，但下次有人碰到时能直接查到
+- 三条边界从「一行代码注释」升为显式档案：行为不变，但下次有人碰到时能直接查到
   「已知、已判、为什么没做、什么条件下重做」。
-- 边界 A 有守卫会在被打破时变红；边界 B 靠本 ADR 与 evidence 承接，没有自动门。
+- 边界 A 有守卫会在被打破时变红；边界 B、C 靠本 ADR 与 evidence 承接，没有自动门。
 - 不引入新依赖、不改任何生产判定；净窗口三态、`children_changed` 持久化、DB_UserChanges
   六桶语义与公开 DTO 均未变化。

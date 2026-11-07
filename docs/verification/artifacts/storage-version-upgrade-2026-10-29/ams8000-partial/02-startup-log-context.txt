@@ -1,0 +1,9 @@
+[startup] stage=option-checks event=begin 退役键点名、几何并发闸额度、调度延迟采样、监听范围出声
+*** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 8000 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。 ***
+[startup] stage=db-manager event=begin 初始化 AiosDBManager 并解析 MDB 成员名单（搜索根发现 + SYS 声明 + 逐库绑定）
+[mdb-bind] 声明解析开始: project=AvevaMarineSample mdb=ALL dirs=["D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000"]
+[mdb-bind] 声明解析完成: project=AvevaMarineSample mdb=ALL sys=D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys declarations=71 problems=0 elapsed_ms=447
+MDB /ALL / AvevaMarineSample / module=DESI：声明 71 个库（按 STYP {1: 29, 2: 26, 4: 5, 7: 5, 8: 6}），其中字典库 6 个：盘上 6 个，缺 0 个
+[init] 709 个库被 watch_dbnums 8000 监听限定跳过（来自DbOption.toml 的 watch_dbnums；这是监听限定，不是 MDB 范围判定——这些库在不在 MDB 名单里，本轮没有问过）：DESI:7333、DESI:7997、DESI:7999、DESI:1112、DESI:7327、PADD:251059、DESI:251001、DESI:7326、DESI:7998、PADD:7322、DESI:251006、DESI:251104 …
+数据库架构版本不匹配（库里 none / 期望 1）：请在运维面板或 POST /api/v1/storage-version/upgrade 升级，升级会清空并重新解析、生成以下库：[8000]
+  *** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 8000 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。

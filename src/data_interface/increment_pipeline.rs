@@ -143,6 +143,29 @@ pub struct IncrResult {
     pub warnings: Vec<String>,
 }
 
+/// 这一窗模型规划的左端：`min(数据窗左端, 模型水位)`（ADR-058 D4 修订 / ADR-079）。
+///
+/// 数据窗左端来自「数据面已应用到哪」（`requested_start - 1`），模型左端来自「模型面已
+/// 发布到哪」（`model_floor`，调用方按 `startup_reconcile::startup_model_recovery_plan`
+/// 同一判据算出）。两者不一致时模型必须从更早的那个起算。
+///
+/// **为什么不能只用数据窗左端**：收尾那一笔是
+/// `model_sesno = math::max([model_sesno ?: 0, T])`（`task_end.rs:161`），没有「本任务
+/// 模型左端 ≤ 当前模型水位」的连续性闸。若模型从数据窗左端起算，则 S→T 之间没做完的根
+/// 会被这一窗的成功收尾直接盖过去，欠账从此在库上不可见（账本 `model_root_ledger` 只活
+/// 在进程里）。详见
+/// `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md` 第三节。
+///
+/// `None` / 负数 / 不小于数据左端时一律沿用数据窗左端——旧口径逐位不变，这也是「模型
+/// 已追平」与「非 DESI 库」的正常路径。
+pub(crate) fn model_plan_base_sesno(requested_start: i32, model_floor: Option<i32>) -> u32 {
+    let data_floor = requested_start.saturating_sub(1) as u32;
+    match model_floor {
+        Some(floor) if floor >= 0 && (floor as u32) < data_floor => floor as u32,
+        _ => data_floor,
+    }
+}
+
 impl IncrResult {
     pub fn all_changed_refnos(&self) -> Vec<RefU64> {
         self.successes
@@ -975,7 +998,12 @@ impl IncrementPipeline {
         &self,
         increment_ranges_map: IndexMap<PathBuf, (DbFileHeader, RangeInclusive<i32>, String)>,
     ) -> IncrResult {
-        self.apply_with_precollected(increment_ranges_map, IndexMap::new())
+        // 没有调用方声明模型左端时一律按数据窗左端起算（旧口径），与加这一维之前逐位相同。
+        let with_floor = increment_ranges_map
+            .into_iter()
+            .map(|(path, (header, range, db_type))| (path, (header, range, db_type, None)))
+            .collect();
+        self.apply_with_precollected(with_floor, IndexMap::new())
             .await
     }
 
@@ -989,14 +1017,22 @@ impl IncrementPipeline {
     ///
     /// 交入的结果**仅在恰好覆盖本次要应用的区间时**才被采信：崩溃重放走的是持久化
     /// 的固定区间，可能与 `requested_range` 不同，那种情况永远重新收集。
+    ///
+    /// 元组第四项是**模型左端**（`Option<i32>`）：`Some(s)` 表示这一窗的模型规划要从
+    /// `s` 起算而不是从数据窗左端起算（ADR-058 D4 修订：左端是模型水位）。`None` 沿用
+    /// 数据窗左端——旧口径，也是「模型已追平」时的正常值。见
+    /// `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md` 第三节。
     pub async fn apply_with_precollected(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbFileHeader, RangeInclusive<i32>, String)>,
+        increment_ranges_map: IndexMap<
+            PathBuf,
+            (DbFileHeader, RangeInclusive<i32>, String, Option<i32>),
+        >,
         mut precollected: IndexMap<PathBuf, (RangeInclusive<i32>, CollectedWindow)>,
     ) -> IncrResult {
         let mut result = IncrResult::default();
 
-        for (path, (basic_info, sesno_range, db_type)) in increment_ranges_map {
+        for (path, (basic_info, sesno_range, db_type, model_floor)) in increment_ranges_map {
             let file_name = path
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -1012,7 +1048,14 @@ impl IncrementPipeline {
             let handed_in = precollected.shift_remove(&path);
 
             let (outcome, warnings) = self
-                .apply_one(&path, &basic_info, sesno_range, &db_type, handed_in)
+                .apply_one(
+                    &path,
+                    &basic_info,
+                    sesno_range,
+                    &db_type,
+                    handed_in,
+                    model_floor,
+                )
                 .await;
             result.warnings.extend(warnings);
             match outcome {
@@ -1036,6 +1079,7 @@ impl IncrementPipeline {
         requested_range: RangeInclusive<i32>,
         db_type: &str,
         precollected: Option<(RangeInclusive<i32>, CollectedWindow)>,
+        model_floor: Option<i32>,
     ) -> (anyhow::Result<IncrFileSuccess>, Vec<String>) {
         let mut warnings = Vec::new();
         let outcome = async {
@@ -1067,7 +1111,7 @@ impl IncrementPipeline {
         // Direct DESI uses the same file-pinned S→T root planner as the
         // live e3d-model parity test.  Other modes retain the established
         // CATA temporarily keeps its isolated ref_rev cascade planner.
-        let base_sesno = requested_range.start().saturating_sub(1) as u32;
+        let base_sesno = model_plan_base_sesno(*requested_range.start(), model_floor);
         let mut model_plan = StageTimings::measure(
             &mut timings.plan,
             crate::data_interface::window_root_plan::build_effective_model_update_plan(
@@ -2107,6 +2151,40 @@ impl IncrementPipeline {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    /// 水位跳盖的堵口：模型左端比数据窗左端早时，模型规划必须从模型左端起算。
+    ///
+    /// 收尾那句是 `model_sesno = math::max([model_sesno ?: 0, T])`（`task_end.rs:161`），
+    /// 没有「本任务模型左端 ≤ 当前模型水位」的连续性闸。模型若从数据窗左端起算，S→T
+    /// 之间没做完的根就会被这一窗的成功收尾盖过去，欠账从此在库上不可见。
+    #[test]
+    fn the_model_plan_starts_from_the_model_watermark_when_it_trails_the_data_window() {
+        // 数据窗 26..=40（左端 25），模型水位 20 —— 模型落后，必须从 20 起算。
+        assert_eq!(model_plan_base_sesno(26, Some(20)), 20);
+        // 模型水位 25 恰好等于数据左端：不必提前，也提前不了。
+        assert_eq!(model_plan_base_sesno(26, Some(25)), 25);
+        // 模型水位比数据左端新（不该发生，但不能因此往回走）。
+        assert_eq!(model_plan_base_sesno(26, Some(30)), 25);
+    }
+
+    /// 旧口径逐位不变：没有声明模型左端、或模型从没追平（0 之外没有可用值）时，
+    /// 一律沿用数据窗左端。
+    #[test]
+    fn a_window_without_a_model_floor_keeps_the_data_window_left_edge() {
+        assert_eq!(model_plan_base_sesno(26, None), 25);
+        // 负数（脏数据）不得当成「从 0 起算」把整库重排拖进来。
+        assert_eq!(model_plan_base_sesno(26, Some(-1)), 25);
+        // 首个会话：数据窗 1..=40 → 左端 0，`saturating_sub` 不越界。
+        assert_eq!(model_plan_base_sesno(1, None), 0);
+        assert_eq!(model_plan_base_sesno(1, Some(0)), 0);
+    }
+
+    /// 从没追平过的库（`model_sesno = 0`）按整库重排起算——与启动核对
+    /// `startup_reconcile::startup_model_recovery_plan` 的 `model_never_stamped` 同一处置。
+    #[test]
+    fn a_never_stamped_library_starts_the_model_plan_at_zero() {
+        assert_eq!(model_plan_base_sesno(120, Some(0)), 0);
+    }
 
     /// 失效集必须在「元素 + 属主」之外并入计划层算出的生成根（ADR-010 残余）：
     /// `QUERY_DEEP_CHILDREN_REFNOS` 按子树根为键，漏掉根键的失效等于同根下一次

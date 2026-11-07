@@ -1,20 +1,20 @@
 /// CATA 依赖闭包按需入库：每一批 DESI 写回都把它依赖的目录元素一起写进库（plan 2026-09-06 §3 D5–D7）。
 pub mod cata_dependency;
-pub mod uda_catalog_provider;
-pub mod mdb_read_store;
 pub mod db_model;
+/// 一个 dbnum 初始化的编排（ADR-077）：解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾。
+pub mod dbnum_initialize;
 pub mod dbnum_stats;
 /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
 /// rocksdb 形态下基线与增量唯一的写法出口。
 pub mod element_batch;
+pub mod mdb_read_store;
 /// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
 pub mod pe_batch;
 /// 落盘写者（ADR-077）：按 lane 的有界通道 + 后台单写者，属性 / 模型各一条 lane，不同 lane 并发、同 lane 串行。
 pub mod persist_writer;
-/// 一个 dbnum 初始化的编排（ADR-077）：解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾。
-pub mod dbnum_initialize;
 /// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
 pub mod tx_limits;
+pub mod uda_catalog_provider;
 // pub mod spatial_model;
 pub mod interface;
 pub mod structs;
@@ -64,10 +64,10 @@ pub mod sesno_range;
 /// 数据面的元素记录 `EleData`（自 old-parse-pdms-db `parse::EleData` 原样搬入，e3d-io 收集器的产物）。
 pub mod ele_data;
 
-/// 数据面操作类型与 SurrealQL 渲染（`EleOperationData` 家族，自 old-pdms-io `io.rs` 原样搬入）。
-pub mod ele_ops;
 pub mod direct_pipe_catalog;
 pub mod direct_spec_catalog;
+/// 数据面操作类型与 SurrealQL 渲染（`EleOperationData` 家族，自 old-pdms-io `io.rs` 原样搬入）。
+pub mod ele_ops;
 pub mod pipe_model_adapter;
 
 /// UKEY → UDA 定义 refno（`ATT_UDA` 行 `u` 链接的来源；替代 `aios_core::get_uda_refno` 的逐个点查）。
@@ -125,9 +125,9 @@ pub mod data_face_signature;
 /// 机器级写者锁：按端点 + namespace + database 一台库只许一个写者（2026-09-10 数据窗口计划 §2）。
 pub mod database_writer_lock;
 
-pub mod fast_delete;
 /// 交付删除记录（`datacenter_delete`）的只读读者：`GET /api/v1/datacenter/deletes` 的数据面（spec §4.14）。
 pub mod datacenter_delete_reader;
+pub mod fast_delete;
 
 pub mod manual_update;
 
@@ -197,6 +197,7 @@ pub mod geom_error;
 
 pub mod embedded_surql;
 
+pub(crate) mod generation_flight;
 pub mod generation_root;
 pub(crate) mod room_read_through;
 /// 面板自身的变化 → 本库整库房间归属重算（`RoomOnly`，d-819 / ADR-073 D13）：变更集里的房间定义族
@@ -204,7 +205,6 @@ pub(crate) mod room_read_through;
 pub(crate) mod room_recompute;
 /// 反向传播（ADR-073 D13 反查）：面板变了 → 拿新盒查全局树 / 管身（谁进来）+ 库上名下的成员边（谁离开）→ 折成本库受影响的根，整库重算降为兜底。
 pub(crate) mod room_reverse;
-pub(crate) mod generation_flight;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给
 /// `generation_root` / `model_update_plan` 当契约的，见模块头。
@@ -260,10 +260,10 @@ pub mod startup_reconcile;
 
 pub mod model_concurrency;
 
-pub mod model_rebuild;
 /// 生成器身份核对（GitHub #73）：水位行的库级落款 `model_generator` 与本进程指纹不一致就整库排
 /// `ModelOnly` 起点 0（启动复核与 `update/execute` 两个入口）。
 pub mod generator_reconcile;
+pub mod model_rebuild;
 
 /// 数据库架构版本核对：库里 `storage_version:current.version` 与本进程
 /// `aios_core::model_storage::MODEL_STORAGE_VERSION` 不一致时只点名、不自动升级。
@@ -292,10 +292,10 @@ pub mod task_history_log;
 /// 交付单元开工前 / 收尾后的房间归属快照（单元回执的 `rooms_before` / `rooms_after`，计划 2026-10-24 W1）。
 pub mod unit_room_snapshot;
 
-/// 交付单元开工前 / 收尾后的几何快照（单元回执的 `geometry_before` / `geometry_after` / `geometry_diff`，计划 2026-10-24 W4）。
-pub mod unit_geometry_snapshot;
 /// 一批的元素级变化清单（`GET /tasks/{id}/changes`，计划 2026-10-24 W3）。
 pub mod task_change_list;
+/// 交付单元开工前 / 收尾后的几何快照（单元回执的 `geometry_before` / `geometry_after` / `geometry_diff`，计划 2026-10-24 W4）。
+pub mod unit_geometry_snapshot;
 
 /// 持久层逐表对拍与「mem:// 实例 + 生产 schema」的中性载体（与暂存无关，P3 不删）。
 pub mod table_parity;

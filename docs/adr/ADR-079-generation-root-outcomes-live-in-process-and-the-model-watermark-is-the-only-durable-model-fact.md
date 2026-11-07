@@ -101,3 +101,13 @@ avg 5.5 s；每根落库多一笔 `UPSERT`；回退、清库、删库都要多�
 恢复 `gen_root.surql` 进内置快照、落库适配器的回执收尾段（`render_receipt_with_target`）、`model_watermark.rs` 探针与
 `startup_coverage_floors`，把 `model_root_ledger` 的读者改回读表；`model_catalogue_sessions` 一列留着无害。回滚前要确认没有部署已经跑过
 `retire_publish_run_tables` 删表——删过的库回滚后逐根凭证是空的，等价于「全部根按需懒生成」。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-B-17、「Implementation Decisions」第 8 条与 `review.md` §2.2（审计按 2026-10-27 工作树）。
+> 本节只追记，决策 6 原文不改。
+
+- **T-L-1 · 决策 6 的按需凭证「回执半边等值判」已被 ADR-089 改为 `NotBehind` 问法（已修订 → ADR-089）。**
+  `Generated` 仍参与按需凭证的根级半边（`root_credential_covers`，`model_coverage.rs:83-108`）；账本模块头「不参与任何
+  放行判据」（`model_root_ledger.rs:18-19`）与此不符，以 ADR-089 为准。`NotBehind` 的代码落点本次未复核。
+

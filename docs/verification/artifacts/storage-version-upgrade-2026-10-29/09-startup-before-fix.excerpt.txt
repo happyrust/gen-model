@@ -1,0 +1,6 @@
+25:*** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 7352 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。 ***
+309:数据库架构版本不匹配（库里 none / 期望 1）：请在运维面板或 POST /api/v1/storage-version/upgrade 升级，升级会清空并重新解析、生成以下库：[1112, 6003, 7009, 7011, 7015, 7022, 7027, 7048, 7321, 7324, 7326, 7327, 7329, 7330, 7331, 7332, 7333, 7334, 7350, 7352, 7353, 7354, 7356, 7741, 7997, 7998, 7999, 8000, 250705]
+357:dbnum=7352 初始化完成 耗时=1352ms pe=200 worl=1 属性 lane: tx=7 bytes=282820 冲突重试=0 超时=0；模型 lane: tx=2 bytes=106928 冲突重试=0 超时=0 根=32 失败根=0 记录=96 房间边=44 model_sesno=50
+476:初始化完成：项目 AvevaMarineSample，启动总耗时 55.23s
+480:  *** 本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 watch_dbnums 7352 里的库，其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受限制。限定来自DbOption.toml 的 watch_dbnums——这是被显式收窄的范围，不是完整运行状态。
+483:  HTTP API：http://127.0.0.1:18022/api/v1（监听 127.0.0.1:18022）

@@ -334,6 +334,8 @@ model_target  = 本轮重算出来的（不沿用旧的）
 
 ### D9　开关 `model_unit_level_publish`，**默认关**；开门要过对拍门
 
+> **2026-10-14 覆盖**：默认值已翻成开（文头 ★ 段，`effective_default_on_switch`，未配置即开、只有显式 `false` 才关）；本节标题与正文的「默认关」是 2026-09-16 首版口径，三道门的纪律不变，翻默认后跑验证、不过就回退。
+
 与 `model_transform_cheap_path` 同一纪律（ADR-066 D7）。开门槛三条，缺一不可：
 
 1. **两态对拍全绿**：同一窗分别走 unit 路与 regen 路，两端投影记录按 `GeometryId` 配对、
@@ -541,7 +543,7 @@ ams000 / acp000 / ZDJ000 / acw000）5 个分片，`db_options/DbOption-aps.toml`
 逐根就省不出来（−0.3 s），再加开窗 45.9 s。
 回退的那 572 根还白跑了一次单元路（D8 那 216 根跑完 `execute_plan` 才回退），这一笔探针没计时，只会让单元路更亏。
 
-**D9 决定：不翻，`model_unit_level_publish` 保持默认关。** D9 写明了三道门缺一不可，③ 不过就不是硬开的时候。原因不是 D5 / D7（盖章与
+**D9 决定：不翻，`model_unit_level_publish` 保持默认关。**（翻之前的结论；2026-10-14 已翻成默认开，见文头 ★ 段与 D9 节首的覆盖注）D9 写明了三道门缺一不可，③ 不过就不是硬开的时候。原因不是 D5 / D7（盖章与
 整根刷在逐根那张表里已经含着或两边相同），是**生产方重复规划**——这是本文 D1 实现上的一笔，不是单元级发布本身的代价。
 
 开门前要做的（另开票，见 GitHub #37 收口评论）：
@@ -551,3 +553,25 @@ ams000 / acp000 / ZDJ000 / acw000）5 个分片，`db_options/DbOption-aps.toml`
 3. e3d-model `fix/wall-implicit-frame-host`（`18537eb`）进 vendor main——今天 vendor 里没有它，`fixing_host_frame` 那条 `AboveUnit` 缺口还在，
    开关开着 JLDATU / 墙变了 FIXING 不会被单元规划点名；
 4. 1–3 之后重跑本节两支探针（A6 全语料 + 开窗计时），③ 按「整窗」口径过了再翻。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-P-7 / R-P-12 / R-P-13 / R-P-14 / R-P-15 / R-P-17（审计按 2026-10-27 工作树记的行号）。
+> 本节只追记，D4 / D10 原文不改；冲突处以本节为准。
+
+- **T-C-5 · D4 的重发闸口径是 `receipt ≤ S`，不是「不在 S → 回退」（与 ADR-089 D7 同口径）。**
+  `republish_gate`：`receipt == T` → `SkipAlreadyAtTarget`；`receipt ≤ S` → `Proceed`；否则 `FallbackBaselineMismatch`
+  （`rigid_motion.rs:367-399`）。
+- **T-C-5 · D10「三条都关」的理由改为「C2 关」。** D10 分桶要求三条级联全开、任一关则整窗不点名
+  `no_model_only`（`window_root_plan.rs:1826-1846,1992-2003,2048-2052`）；现行代码默认 C8 开（`options.rs:2415-2444`）、
+  P4 开（`options.rs:2450-2479`）、C2 关（`options.rs:2385-2409`）——默认配置下 D10 不分桶是因为 C2 关，不是三条都关。
+- **T-J-8 · GitHub #76 元数据候选不做种子（接 D10）。** 元数据门放行且档为 `MetadataOnly` / `UnreadAttribute`、变属性不含戳时
+  不做闭包种子；纯戳 / `CacheStamp` 仍做种子（`metadata_only_change_seeds_no_root`，`window_root_plan.rs:380-403,1495-1512`）。
+- **Phase 2 D2（2026-10-27 拍板，→ ADR-090 D2）· C2 `model_structural_connection_cascade` 翻开，带语料门。** 现状：C2 默认 false
+  （`options.rs:2388-2409`），`no_model_only_cascades_off` 任一关则 D10 整窗不分桶（`window_root_plan.rs:1826-1846`）。拍板：
+  翻默认前先过一道与 D9 ③ 同口径的语料门（结构连接级联正确性样本 + 纯戳窗净收益），门过了再改默认值并在此追记；D10 的
+  「三条都开」前置不放宽。
+- **Phase 2 D3（2026-10-27 拍板，→ ADR-090 D3）· DESI 窗 XGEOMETRY 仅观察。** `build_model_update_plan_from_window` 只计数进告警
+  （`window_root_plan.rs:1406,2300-2304`），PE / CATA 路与手动路的门保留（`model_update_plan.rs:961-975`、`manual_update.rs:579`）；
+  升门要先有正样本。核对表 R2 正文随 T-P-7 改口。
+

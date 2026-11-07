@@ -33,6 +33,7 @@ use std::time::Instant;
 use aios_core::options::DbOption;
 use anyhow::Context;
 use e3d_io::refno::RefNo;
+use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::generation_root::GenerationRoot;
@@ -338,6 +339,8 @@ pub(crate) async fn initialize(
         data: Some(TaskDataOutcome { confirmed_empty }),
         model: model_outcome.clone(),
         info,
+        // 初始化从 0 起算整库，连续性闸恒真（ADR-092 D2）。
+        model_base_sesno: Some(0),
         closes_task: true,
     };
     let receipt = crate::data_interface::task_end::commit_task_end_on(&aios_core::SUL_DB, &end)
@@ -717,6 +720,70 @@ pub(crate) async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)
     ))
     .await?;
     Ok((pe_count, root_count))
+}
+
+/// 初始化直写前清模型面残留（T-D-6）：`Initial` 是 `INSERT IGNORE` 幂等写，旧
+/// `inst_relate` / `tubi_relate` 指针行不清会让新行输掉冲突、几何永久指向旧 mesh。
+/// 残留按本库 Ref0 区间删，与整库模型清理同一份渲染；`pe` 与 `dbnum_info_table`
+/// 都空、圈不到 Ref0 而 `dbnum` 列还点得到残留时拒开工——清不干净不开工。
+/// 返回按 `dbnum` 列看见的残留行数（区间里没带 `dbnum` 列的旧行照删但不进计数）。
+pub(crate) async fn clear_model_face_before_initial_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<usize> {
+    if dbnum == 0 {
+        anyhow::bail!("dbnum must be greater than zero");
+    }
+    #[derive(serde::Deserialize)]
+    struct CountRow {
+        count: usize,
+    }
+    async fn stale_rows(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<usize> {
+        let mut total = 0usize;
+        for table in ["inst_relate", "tubi_relate"] {
+            let mut response = db
+                .query(format!(
+                    "SELECT count() AS count FROM {table} WHERE dbnum = {dbnum} GROUP ALL"
+                ))
+                .await
+                .with_context(|| format!("count stale {table} rows for dbnum {dbnum}"))?
+                .check()
+                .with_context(|| format!("count stale {table} statement for dbnum {dbnum}"))?;
+            total += response
+                .take::<Vec<CountRow>>(0)
+                .context("decode stale model-face count")?
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+        }
+        Ok(total)
+    }
+    let (_pe_rows, ref0s, _noun_tables) =
+        crate::data_interface::fast_delete::collect_dbnum_ref0s_on(db, dbnum).await?;
+    let remaining = stale_rows(db, dbnum).await?;
+    if ref0s.is_empty() {
+        if remaining > 0 {
+            anyhow::bail!(
+                "dbnum={dbnum} 仍有 {remaining} 行模型面残留，但 pe 与 dbnum_info_table \
+                 都圈不到本库 Ref0，拒绝 Initial 直写（先人工清模型面）"
+            );
+        }
+        return Ok(0);
+    }
+    crate::data_interface::fast_delete::wipe_dbnum_model_face_on(db, dbnum).await?;
+    // 区间圈自 pe/统计行，圈外的 `dbnum` 列残留 wipe 够不着——删完复查，清不干净照样拒。
+    let leftover = stale_rows(db, dbnum).await?;
+    if leftover > 0 {
+        anyhow::bail!(
+            "dbnum={dbnum} 模型面清理后仍有 {leftover} 行残留在本库 Ref0 圈外，拒绝 Initial 直写"
+        );
+    }
+    Ok(remaining)
+}
+
+/// `clear_model_face_before_initial_on` 的生产入口（`SUL_DB`）。
+pub(crate) async fn clear_model_face_before_initial(dbnum: u32) -> anyhow::Result<usize> {
+    clear_model_face_before_initial_on(&aios_core::SUL_DB, dbnum).await
 }
 
 #[cfg(test)]

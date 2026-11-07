@@ -402,3 +402,18 @@ cohort 收口 → 盖章；尾事务 → 凭证前移 → 盖章（稳态）；�
 ### 读者各自从 `/dbnums` 三列与队列计数拼 `model_in_sync`
 
 拒绝（2026-09-05，D9）。拼的人各拼一份，同一个库在面板与日志上答案不同——共识 d-22 那次事故的形状。判决只能有一处。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-A-2 / R-A-5 / R-A-12 / R-B-15 与 `review.md` §2.2（审计按 2026-10-27 工作树）。
+> 本节只追记，状态行与 D3 / D5 / D6 / D7 / D10 原文不改；冲突处以本节为准。
+
+- **T-L-2 · 撞号与引用写法。** 有两份 ADR-060：本文引用写 `ADR-060(水位)`；
+  `ADR-060-model-row-ids-are-record-ids-and-writes-are-delete-then-insert.md` 写 `ADR-060(行id)`。不带括号的「ADR-060 Dn」视为有歧义。
+- **T-L-1 · 状态行里的 `model_update_pending.rs`，以及 D3 / D5 / D6 / D7 / D10 里的 `gen_root`、`ModelWatermarkProbe`、
+  `startup_coverage_floors`、`legacy_adopted` 判定、`room_sesno` 已全部退役（已修订 → ADR-073 / ADR-079）。**
+  现行：`model_sesno` 只由 `task_end` 在 `all_roots_ok` 时盖（`src/data_interface/task_end.rs:116-120,140-213`）；逐根成败只在
+  进程内账本（`model_root_ledger.rs:1-16,99-104`）；重启后由 `startup_model_recovery_plan` 排 `ModelOnly`
+  （`startup_reconcile.rs:1-6,38-52,618-643`）；判决唯一口径仍是 D9 的 `dbnum_consistency::verdict`
+  （`dbnum_consistency.rs:101-120,155-202`）。
+

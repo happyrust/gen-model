@@ -203,3 +203,17 @@ execute_one_dbnum                 数据窗口：收集 → 依赖块 → 元素
 
 多条模型车道 / 独立模型循环（L1，作废）；数据与模型合一事务；`side_effect_pending` 退役（另议）；初始化并发（Q30 (b)）；
 CATA → dab 反向表级联（另起）。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-A-2 / R-B-15 / R-B-16 与 `review.md` §2.2（审计按 2026-10-27 工作树）。
+> 本节只追记，D2 / D7 原文不改。
+
+- **T-L-1 · D2 / D7 的「`gen_root` 探针推进模型水位」已退役（已修订 → ADR-079）。** 现行：`model_sesno` 由 `task_end` 在
+  `all_roots_ok` 时盖（`src/data_interface/task_end.rs:116-120,140-213`）；逐根结局只在进程内账本，普查三格
+  `settled` / `chasing` / `abandoned`（`model_root_ledger.rs:1-16,36-47,61-97`）。
+- **Phase 2 D1（2026-10-27 拍板，→ ADR-090 D1）· 模型根失败改退避重试，不与数据面 park 对称。** 现状：`Failed` 根 `is_chasing`，
+  下一窗 / 启动对账立即重排、无退避（`model_root_ledger.rs:41-42,66-67`、`window_root_plan.rs:1901,2221,2429`）；数据面
+  `DATA_BATCH_PARK_AFTER = 1` 一次即停（`batch_worker.rs:51`）。拍板：模型面按根指数退避（初值沿用 ADR-073 `RebuildBackoff`），
+  `DEAD_ROOT_STREAK = 5` 判死线不动，数据面不改。GitHub #72 据此改口。
+

@@ -195,3 +195,24 @@ changed; regenerate model")` 只在身份变了 / 回拨时报。登录之后房
   但这些 NOZZ（及 7997 里另两个带 NOZZ 的 EQUI）生成时没有一行 `cata_closure`——不出目录几何，回执里只有字典项（会话 0，按最新会话的锚比，跨登录两次都过）。
   这套工程里「读目录 ∧ 能走刚体路」的根没有样本，Q4 到此为止。顺带抓出并修了 #66（单元房间快照扫 `room_relate` 整表）。
 - ~~**Q5** D6 随本文一起落~~ 一起落了（用户「按推荐」）。
+
+## 实现状态（2026-10-27 追记）
+
+> 本节只追记，D1–D7 原文不改。
+
+- **Phase 2 D4（2026-10-27 拍板，→ ADR-090 D4）· 「同 sesno 换文件」先落文留票，不升格数据面重建。** 路由世代账本的
+  `GenerationChange::FileReplaced`（`db_generation.rs:120-130,199-201`，判据 `FileIdentity{len, modified}` `:33-48`）只触发
+  `lib.rs:2119 targeted_model_refresh`；摔入面 `FileAnomaly`（`dbnum_state.rs:560-592`）无此变体。它与 INC-B07 撤回的同名
+  `FileReplaced` 不是一回事（`tests/fixtures/increment_cases.json:21`）；B07 撤回的理由正是本文 D2——身份不能含 mtime。升格前置见 ADR-090 D4。
+- **2026-10-31 追记 · 同 dbnum 换了文件名是另一份文件（`FileAnomaly::NameChanged`）；INC-B07 撤回的替代物。** 库的身份是
+  dbnum + 约定文件名（与 D2 同一条纪律：身份不含 mtime、也不含长度）。`check_file_against_state`（`dbnum_state.rs:821-836`）在判回退
+  **之前**先判 `stored_path != observed_path && !keeps_file_identity(..)` → `NameChanged { old_path, new_path }`：另一份文件的会话号
+  再小也不许转成整库重建。`keeps_file_identity`（`:862-895`）只认两种迁移：文件名相同（不分大小写）只换目录；母库换成它自己的
+  extract 叶（同前缀同库号，`ams7355` → `ams7355_0001`，ADR-028）——这两种仍是 `PathMigrated`；其余（换前缀、换库号、`_0001` →
+  `_0002`、extract 退回母库、`amssys` → `zdjsys`）都是另一份文件。处置：`scan_gate_for` → `Blocked`（`increment_manager.rs:3444-3447`），控制台
+  一句「F6 文件名与登记不符，跳过该文件」（`:3809-3812`）；不入队、不清库、不改登记，`observed_another_file()`（`dbnum_state.rs:674-682`，
+  与 `ForeignProject` 同档）让观察值也不写（`:1710-1731`）；`requires_reinit` 仍只有 `Rollback`；`manual_scan_probe` 印 `name_changed`。单测
+  `a_renamed_file_is_another_file_not_a_migration`（`dbnum_state.rs:2493-2540`）与 `scan_gate_for` 的 `Blocked` 钉（`increment_manager.rs:515-522`）。
+  **B07 撤回**：「同路径换文件按 `{长度}:{修改时刻}` 判」会把 E3D 每次会话改写文件头误判成换文件并清库（与 D2 冲突），那一版产品侧与回放用例
+  `ams8000-file-replaced` 已撤；`increment_cases.json:21` 的 B07 仍 `todo`，收口为 `wontfix` / `replaced-by-name-changed` 是计划 WP-F F-6。同 sesno
+  换文件（同名同路径）仍按上一条（ADR-090 D4）留票：`NameChanged` 不覆盖它。

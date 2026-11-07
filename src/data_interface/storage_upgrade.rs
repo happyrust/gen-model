@@ -9,8 +9,10 @@
 //! 这里把那条出路做成一次可记账的批处理：
 //!
 //! 1. 名单缺省 = 当前 MDB 声明的全部设计库 ∩ 监听范围；显式名单必须是这个范围的子集；
+//!    整库（`full_scope`）时先清目录库解析行、`cata_dependency_state` 和 `parse_error`；
+//!    部分名单不清这些共享行，因为别的设计库还在用；
 //! 2. 每个库排一条 `intent=reinitialize` 的既有批次（`manual_update` 的逐库入口，
-//!    不在本模块重写清库 / 解析 / 生成）；
+//!    不在本模块重写清库 / 解析 / 生成）。升级进行中的库，worker 会连网格几何一起清；
 //! 3. 进度写在 `storage_upgrade:current`（目标版本、请求名单、完成名单、失败名单、起止时刻）；
 //! 4. 只有**全部请求的库都 `Succeeded` 且请求集就是全范围**时才写
 //!    `storage_version:current`。部分库升级不写——那会把一份仍然老形状的库冒充成新版。
@@ -77,6 +79,12 @@ pub struct StorageUpgradeProgress {
     /// 请求集是否覆盖了开始时的全范围（只有全范围完成才写版本记录）。
     #[serde(default)]
     pub full_scope: bool,
+    /// 整库升级开始前清掉的目录库解析数据。部分名单没有这一格。
+    #[serde(default)]
+    pub shared_wipe: Option<crate::data_interface::fast_delete::SharedParseWipeReport>,
+    /// 批次还在入队。这段时间任务号还没写上，缺任务号不能判失败。
+    #[serde(default)]
+    pub scheduling: bool,
 }
 
 impl StorageUpgradeProgress {
@@ -149,6 +157,26 @@ fn progress_lock_mut() -> std::sync::RwLockWriteGuard<'static, Option<StorageUpg
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 只更新进程内进度。入队前调用，好让同进程的 worker 在回执落库之前就看得到。
+fn publish_progress(progress: &StorageUpgradeProgress) {
+    *progress_lock_mut() = Some(progress.clone());
+    LOADED.store(true, Ordering::SeqCst);
+}
+
+/// 这个库是不是正在进行的升级名单里。是的话清库要连网格几何一起删。
+///
+/// 进度先写在进程内，收尾再落库；进程重启后从 `storage_upgrade:current` 接着看。
+pub async fn purges_geometry(dbnum: u32) -> bool {
+    ensure_loaded().await;
+    purges_geometry_of(last_progress().as_ref(), dbnum)
+}
+
+pub(crate) fn purges_geometry_of(progress: Option<&StorageUpgradeProgress>, dbnum: u32) -> bool {
+    progress.is_some_and(|progress| {
+        progress.finished_at.is_none() && progress.requested.contains(&dbnum)
+    })
+}
+
 /// 是否该写 `storage_version:current`：全部请求库成功，且请求集就是全范围。
 ///
 /// 部分名单即使全部成功也不写——那会把一份仍有老形状库的数据库冒充成新版；
@@ -206,7 +234,9 @@ async fn write_progress(progress: &StorageUpgradeProgress) -> anyhow::Result<()>
 /// 只读一条 `LIMIT 1`：大库上不必数全表；空库上也不会误把「老库但没模型行」当成新库——
 /// 版本记录缺失时，老库同样可能没有 `pe` 行，但那种库确实需要重新初始化，自动写版本
 /// 与人工升级的差别只是少一次点击。判据写进 D-7 的落定说明。
-pub(crate) async fn observe_startup(report: &crate::data_interface::storage_version_reconcile::StorageVersionReport) {
+pub(crate) async fn observe_startup(
+    report: &crate::data_interface::storage_version_reconcile::StorageVersionReport,
+) {
     if report.stored.is_some() {
         FRESH_DATABASE.store(false, Ordering::SeqCst);
         return;
@@ -359,8 +389,10 @@ pub async fn start(
     mdb: Option<&str>,
     requested: &[u32],
     full_scope: bool,
-) -> anyhow::Result<(StorageUpgradeProgress, crate::data_interface::batch_scheduler::ManualEnqueueReceipt)>
-{
+) -> anyhow::Result<(
+    StorageUpgradeProgress,
+    crate::data_interface::batch_scheduler::ManualEnqueueReceipt,
+)> {
     // 上一次升级还在跑时不允许再排一批：两批 reinitialize 叠在同一个库上会把进度账
     // 记到对方头上，而且第二次清库会打断正在解析的那一次。
     ensure_loaded().await;
@@ -369,7 +401,9 @@ pub async fn start(
             && previous.requested.iter().any(|dbnum| {
                 previous
                     .task_for(*dbnum)
-                    .and_then(|task_id| crate::data_interface::task_registry::TaskRegistry::global().get(task_id))
+                    .and_then(|task_id| {
+                        crate::data_interface::task_registry::TaskRegistry::global().get(task_id)
+                    })
                     .is_some_and(|entry| !entry.state.is_terminal())
             })
         {
@@ -380,6 +414,39 @@ pub async fn start(
             );
         }
     }
+
+    let shared_wipe = if full_scope {
+        println!(
+            "存储架构升级：先清目录库解析行、cata_dependency_state 和 parse_error，再逐库重新解析"
+        );
+        Some(
+            crate::data_interface::fast_delete::wipe_shared_parse_rows_for_upgrade()
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("升级前清理目录库解析数据失败，未排重新解析批次: {error:#}")
+                })?,
+        )
+    } else {
+        println!(
+            "存储架构升级：这次只升级部分库 requested={requested:?}，不清目录库解析行、cata_dependency_state 和 parse_error（别的设计库还在用）"
+        );
+        None
+    };
+    // 先让本进程看见「升级进行中」，再入队。worker 可能在回执落库之前就开始清库，
+    // `purges_geometry` 靠这份未结束的进度决定要不要连网格一起删。
+    let mut progress = StorageUpgradeProgress {
+        target_version: aios_core::model_storage::MODEL_STORAGE_VERSION,
+        requested: requested.to_vec(),
+        done: Vec::new(),
+        failed: Vec::new(),
+        started_at: Local::now().to_rfc3339(),
+        finished_at: None,
+        tasks: Vec::new(),
+        full_scope,
+        shared_wipe,
+        scheduling: true,
+    };
+    publish_progress(&progress);
 
     let receipt = mgr
         .enqueue_manual_update_with(
@@ -404,7 +471,8 @@ pub async fn start(
         for row in crate::data_interface::batch_scheduler::BatchScheduler::global().snapshot() {
             if requested.contains(&row.dbnum)
                 && !row.task_id.is_empty()
-                && row.intent == crate::data_interface::batch_queue::BatchIntent::Reinitialize.as_str()
+                && row.intent
+                    == crate::data_interface::batch_queue::BatchIntent::Reinitialize.as_str()
                 && !tasks.iter().any(|task| task.dbnum == row.dbnum)
             {
                 tasks.push(UpgradeTaskRef {
@@ -416,31 +484,30 @@ pub async fn start(
     }
     tasks.sort_by_key(|task| task.dbnum);
     tasks.dedup_by_key(|task| task.dbnum);
-
-    let mut progress = StorageUpgradeProgress {
-        target_version: aios_core::model_storage::MODEL_STORAGE_VERSION,
-        requested: requested.to_vec(),
-        done: Vec::new(),
-        failed: Vec::new(),
-        started_at: Local::now().to_rfc3339(),
-        finished_at: None,
-        tasks,
-        full_scope,
-    };
+    progress.tasks = tasks;
+    progress.scheduling = false;
     for blocked in &receipt.blocked {
         if progress.requested.contains(&blocked.dbnum) {
             progress.mark_failed(blocked.dbnum, blocked.reason.clone());
         }
     }
     for dbnum in requested {
-        if progress.task_for(*dbnum).is_none() && !progress.failed.iter().any(|f| f.dbnum == *dbnum) {
-            progress.mark_failed(*dbnum, "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）");
+        if progress.task_for(*dbnum).is_none() && !progress.failed.iter().any(|f| f.dbnum == *dbnum)
+        {
+            progress.mark_failed(
+                *dbnum,
+                "没有排入重新解析批次（查看 /api/v1/update/execute 回执的 warnings）",
+            );
         }
     }
     write_progress(&progress).await?;
     println!(
         "存储架构升级已排：target={} requested={:?} done={:?} failed={:?} full_scope={}",
-        progress.target_version, progress.requested, progress.done, progress.failed, progress.full_scope
+        progress.target_version,
+        progress.requested,
+        progress.done,
+        progress.failed,
+        progress.full_scope
     );
     Ok((progress, receipt))
 }
@@ -474,7 +541,9 @@ pub async fn reconcile_progress() -> Option<StorageUpgradeProgress> {
                 .find(|row| {
                     row.dbnum == dbnum
                         && !row.task_id.is_empty()
-                        && row.intent == crate::data_interface::batch_queue::BatchIntent::Reinitialize.as_str()
+                        && row.intent
+                            == crate::data_interface::batch_queue::BatchIntent::Reinitialize
+                                .as_str()
                 })
                 .map(|row| row.task_id.clone());
             if let Some(task_id) = task_id.clone() {
@@ -483,6 +552,10 @@ pub async fn reconcile_progress() -> Option<StorageUpgradeProgress> {
             }
         }
         let Some(task_id) = task_id else {
+            // 入队还没写上任务号。这时判失败会把 `finished_at` 填上，worker 就不再连网格一起清。
+            if progress.scheduling {
+                continue;
+            }
             changed |= progress.mark_failed(dbnum, "没有找到重新解析任务");
             continue;
         };
@@ -512,7 +585,8 @@ pub async fn reconcile_progress() -> Option<StorageUpgradeProgress> {
         if should_write_version_record(&progress) {
             match write_storage_version_record().await {
                 Ok(()) => {
-                    let _ = crate::data_interface::storage_version_reconcile::refresh_if_stale().await;
+                    let _ =
+                        crate::data_interface::storage_version_reconcile::refresh_if_stale().await;
                     println!(
                         "存储架构升级完成：{} 个库全部重新解析，已写 storage_version:current（version={}）",
                         progress.requested.len(),
@@ -521,10 +595,8 @@ pub async fn reconcile_progress() -> Option<StorageUpgradeProgress> {
                 }
                 Err(error) => {
                     let dbnum = progress.requested.first().copied().unwrap_or_default();
-                    progress.mark_failed(
-                        dbnum,
-                        format!("写 storage_version:current 失败: {error:#}"),
-                    );
+                    progress
+                        .mark_failed(dbnum, format!("写 storage_version:current 失败: {error:#}"));
                     log::warn!("存储架构升级完成，但版本记录没写进库: {error:#}");
                 }
             }
@@ -551,7 +623,9 @@ pub async fn reconcile_progress() -> Option<StorageUpgradeProgress> {
 
 /// 写 `storage_version:current`。整库一条，三格一起替换。
 pub async fn write_storage_version_record() -> anyhow::Result<()> {
-    use aios_core::model_storage::{StorageVersionRecord, REBUILD_COLUMN, SHAPE_COLUMN, VERSION_COLUMN};
+    use aios_core::model_storage::{
+        REBUILD_COLUMN, SHAPE_COLUMN, StorageVersionRecord, VERSION_COLUMN,
+    };
 
     let record = StorageVersionRecord::current();
     let mut row = serde_json::Map::new();
@@ -623,6 +697,8 @@ mod tests {
                 task_id: "t-100".to_owned(),
             }],
             full_scope: true,
+            shared_wipe: None,
+            scheduling: false,
         }
     }
 
@@ -714,12 +790,71 @@ mod tests {
         assert!(!covers_whole_database(&[8000], &[8000, 8001]));
     }
 
+    #[test]
+    fn geometry_is_purged_only_while_that_dbnum_is_still_being_upgraded() {
+        let running = progress();
+        assert!(purges_geometry_of(Some(&running), 100));
+        assert!(purges_geometry_of(Some(&running), 200));
+        assert!(!purges_geometry_of(Some(&running), 8000));
+        let mut finished = running.clone();
+        finished.finished_at = Some("2026-10-28T01:00:00+08:00".to_owned());
+        assert!(!purges_geometry_of(Some(&finished), 100));
+        assert!(!purges_geometry_of(None, 100));
+    }
+
+    /// 部分名单不清共享解析数据。目录行被别的设计库用着，而且部分升级本来就不写版本记录。
+    #[test]
+    fn a_partial_upgrade_does_not_wipe_shared_parse_rows() {
+        let body = include_str!("storage_upgrade.rs")
+            .split_once("pub async fn start(")
+            .expect("start")
+            .1
+            .split_once("pub async fn reconcile_progress(")
+            .expect("reconcile follows start")
+            .0;
+        let gate = body.find("if full_scope").expect("full_scope 分支");
+        let wipe = body
+            .find("wipe_shared_parse_rows_for_upgrade()")
+            .expect("整库才清共享解析数据");
+        let warn = body
+            .find("不清目录库解析行")
+            .expect("部分范围要说明为什么不清");
+        let enqueue = body.find("enqueue_manual_update_with(").expect("入队");
+        assert!(
+            gate < wipe && wipe < enqueue,
+            "共享清理必须在 full_scope 分支里，并且发生在入队之前: {body}"
+        );
+        assert!(
+            gate < warn && warn < enqueue,
+            "部分范围只打印说明，不清共享数据: {body}"
+        );
+    }
+
+    /// 入队还没写上任务号时，缺任务号不能判失败，否则 `finished_at` 一填上就不再清网格。
+    #[test]
+    fn a_batch_still_being_scheduled_is_not_marked_failed_for_a_missing_task() {
+        let body = include_str!("storage_upgrade.rs")
+            .split_once("pub async fn reconcile_progress(")
+            .expect("reconcile")
+            .1
+            .split_once("没有找到重新解析任务")
+            .expect("missing-task failure")
+            .0;
+        assert!(
+            body.contains("if progress.scheduling"),
+            "缺任务号时要先看是不是还在入队: {body}"
+        );
+    }
+
     /// 升级只走既有逐库重新解析入口，不另写清库 / 解析 / 生成路径；这两个字串少了
     /// 任何一个，升级都会退化成「只重算模型」——版本记录写得再对，旧数据也没清。
     #[test]
     fn the_upgrade_reuses_the_reinitialize_enqueue_path() {
         let source = include_str!("storage_upgrade.rs");
-        assert!(source.contains("enqueue_manual_update_with"), "必须复用既有入队入口");
+        assert!(
+            source.contains("enqueue_manual_update_with"),
+            "必须复用既有入队入口"
+        );
         assert!(
             source.contains("ManualEnqueueOptions { reinitialize: true }"),
             "必须带 reinitialize: true"

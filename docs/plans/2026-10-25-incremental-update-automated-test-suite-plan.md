@@ -16,6 +16,15 @@
 > **P2 第二刀（F03，L2 翻页已绿、逐元素对拍仍缺）**：不另录语料。`ams8000-equi-move-chain` 的 730 步在已有的冷重启之后多判三件：`/tasks?kind=data_batch` 仍能按右端 730 找到这条，`?before=` 用它的 `created_at`（`+` 做百分号编码）翻出更早的一页且不再含它，`/tasks/{id}/changes` 的 `total` 等于本页条数、每条有 `op` / `refno`、至少一条 `root_refno` 是 `24384/24776`。没有把清单逐条钉死到录制宏：夹具里没有那份期望清单。2026-10-26 12:50（北京时间）整档回放绿了，登记表仍是 partial，就差这一截。同一次把 F05 / H05 翻「有」。总账改为有 35 / 部分 9 / 待写 9 / 语料 2。
 > **P2 第三刀（G02 回执房间号，未重跑）**：`ams8000-equi-room-cross` 的 732 / 734 多了 `rooms_changed`，只比房间号：732 是 R224 → R124/R144/R413，734 再换回 R224。库上 `room_relate` 边还没判，登记表仍是 partial。
 > **P3 预算门挂进回放（未重跑）**：`budget_gate` 开在基线那三条链（`ams8000-equi-move-chain`、`ams8000-equi-room-cross`、`db8000-two-delete`）。用例断言过了之后 harness 杀掉服务，跑 `python scripts/increment_budget.py collect <运行目录> --check`。失败注入的两条链不挂。I04 监听器轮询那半仍不在脚本里。登记表仍是 partial。
+> **P2 第四刀（J01 / J02 操作面，未重跑）**：只挂在 `db8000-two-delete` 链尾。`/health` 要 `watch_dbnums` 含 8000、`watch_dbnums_origin` 点名这个键、`initialization.startup.reconcile.catalogue_behind_out_of_scope` 是数组。随后 `POST /update/execute` 只勾选 8000：warnings 含目录核对句和监听限定声明，`unselected` 不含 8000 且非空。非 DESI 不受勾选约束，不判 `enqueued` 为空；`catalogue_reconcile` 不等异步落定。失败 park 的链不打这一枪（人工执行会清账）。登记表仍是 partial。
+> **P2 第五刀（G01 / G02 库上半边进 harness；2026-10-26，编译过、未重跑）**：`Step` 多 `room_edges`（根 → `present` / `absent` 房间号），`Case` 多 `rebuild_edges_equal`（根名列表）；`Service` 多 `store_rows` / `store_rooms_of` / `store_room_edges_under`，直查自己起的那台 surreal。边按**边目标**读（`type::thing('pe', …)<-room_relate`），不按 `out =` 过滤整表扫（#66）。`ams8000-equi-room-cross` 的 732 / 734 各带一条 present / absent（跨房位移后库上「新房在、旧房边没」），链尾打一枪 `POST /api/v1/dbnums/8000/model/rebuild` 再逐边对拍（RI-12，O2）。只钉 present / absent、不钉房间全集：回执里 R144 / R413 这类会随轮次漂，钉死会把用例变成噪声。`cargo check --test increment_replay` 绿（9.7 s，exit 0）。**2026-10-27 01:0x 回放全绿**：732 窗库上边 `{R124,R144,R413}`（R224 已消失）、734 窗回到 `{R224}`；链尾 `model/rebuild` 排 953 根 ModelOnly 任务落 `succeeded` 后逐边相等（根 `24384/24776` 两侧各 1 条），整条 **320 s**、预算门 ok 4 / warn 0 / fail 0。第一条指令一次就红在有价值的地方：**根自己没有 `room_relate` 边**，边写在它的子件上（`inst_relate.anc` 只记直接祖先链，`anc CONTAINS` 只回直接子件），于是把 `store_room_edges_under` 改成逐层下探整棵子树（上限 8 层 / 2000 构件），`store_rooms_of` 改从子树边集合取 `room_num`。登记表 G01 / G02 翻「有」。
+> **P2 第六刀（五条回放链全绿，2026-10-27 01:9x–02:3x）**：`ams8000-equi-room-cross` 320 s、`db8000-two-delete` 133 s、`ams8000-equi-move-chain` 478 s、`ams8000-equi-fail-inject` 173 s、`ams8000-equi-data-fail-park` 145 s，五条全 `ok`，预算门各 3–4 项 OK、0 warn、0 fail。登记表 INC-J01 / J02 翻「有」（合计有 39 / 部分 5 / 待写 9 / 语料 2，即 71 % → 由 55 条里的「有」占 39）。两条用例侧的错是这一次才暴露的，都不是产品缺陷：① J01 原来硬要 `unselected` 非空——`subset_selects` 对非 DESI（SYST / DICT / CATA …）永远放行，而影子工程根里只有 8000 一个 DESI（实测 `scanned=18 / up_to_date=18 / unselected=[]`），改成「形状在 + 不含 8000」，非空那条留给 INC-H03 的 `expect_unselected_non_empty`；② `ams8000-equi-data-fail-park` 的 init 少了 `generate_prime`，冷初始化后投影里没有回执，`/model/records` 读到 0 行（库上 `inst_relate` 有行，正是计划 §5.2 记过的那件事），补上与 move-chain 同款的 `generate_prime` 即绿。**风险**：`window_batch_ms` 在 room-cross 上最大 4823 ms、上限 5000（96 %），room-cross 这次比 10-26 多跑了一次整库重建，nightly 再加环节会先在这一格红。
+> **P2 第七刀（B07：同路径换文件）已撤回（2026-10-27）**：库的身份是 dbnum + 约定文件名（`<三位前缀><库号>[_<四位序号>]`、`<前缀>sys/com/mis/glb`），同路径同名就是同一个库，B07 要防的局面按定义不存在。撤回的那一版拿 `{长度}:{修改时刻}` 当文件身份，与 ADR-089 D2 冲突：E3D 每次会话都改写每个打开库的文件头，mtime 变、会话号不变，生产上会被判成换文件并清库重建；为压住自己跑批次时冒出的假阳（COMM 8190 连判 8 次），又在批次两端刷新身份，结果冻结点复核也判不出来了（10-27 11:17 那次实跑的清库理由是「人工重新解析」，不是「文件被替换」）。产品侧（`file_identity` / `FileReplaced` / `refresh_file_identity` / `adopt_observed_identity`）、夹具里的 `replace_same_sessions` / `expect_file_replaced_reinit` 与用例 `ams8000-file-replaced` 一并撤掉，登记表 INC-B07 退回 todo。同 dbnum 换了文件名（不是只换目录，也不是母库换成它自己的 extract）改判 `name_changed` 并跳过该文件，见 changelog 2026-10-27。
+> **P2 第七刀附记（2026-10-27，harness 的一处竞态已修）**：把 B07 挂上 `known_red` 之后第一次跑全档，fail-inject 的 728 那一步红了两次（连跑两次同一行），报「任务 state=queued，期望 succeeded」。日志里能看清：728 的批次 `succeeded` 之后约 2 s，`[reconcile] 新排：sesno 728..=728` 又给同一个右端排了一条，于是 `/tasks` 的「最新一条」是 `queued`。原因是 harness 只在「预期失败那一窗」用 `latest_terminal_task`，其余窗用 `latest_task`；三水位追平之后对账仍可能为同一右端再排一条（幂等重跑，不推水位），所以**只要期望的是终态，就该挑最近一条已落终态的**。已改成按 `task_state` 判：期望 `succeeded` / `failed` / `partial` 走 `latest_terminal_task`，期望排队或在跑时才看最新一条。改完 fail-inject 单跑绿（148.6 s），全档一条过（**1128.2 s**，`ok 1 passed`，B07 按预期被跳过），四条预算门都是 `warn 0 / fail 0`。产品侧「追平后对账又排一次同右端」本身没判成缺陷——它在日志里、幂等、不动水位；先只记在这里。
+> **P2 第八刀（E02 / E03 目录版本核对，2026-10-27 跑绿）**：两条都挂在「先造前置状态、再看下一拍对账」上——库级落款（`dbnum_watermark:{dbnum}.model_catalogue_sessions`）只有真跑过整库生成才会写，回放链只推一个 DESI 文件造不出来，所以 harness 新增 `Case::seed`（init 追平之后、init 断言之前，对本次运行的那台 surreal 直接发 SurrealQL）与 `Case::watch_dbnums`（缺省仍是 `[dbnum]`）。钉的是一对真数：`ams7000_0001` 在影子工程里最新会话 274，落款钉成 273，窗口只有 274 这一页（1 件 DBMDAT）。`cases/ams8000-catalogue-stamp-only.json`（E02，131 s）：周期拍 `stale_catalogue_dbnums=[7000]`、`catalogue_windows` 一条 273→274、反查 `design_referrers=0` → `catalogue_cascade.stamp_only=[8000]`，空任务跑完把落款盖到 274，再下一拍 stale 与 stamp_only 都空——「盖过就该安静」也判了。`cases/ams8000-catalogue-out-of-scope.json`（E03，139 s）：把域外库 7998（本进程 `watch_dbnums=[8000]`）的落款钉到 273，周期拍 `behind_out_of_scope_libraries=[7998]`，同时 stale 空、`catalogue_cascade` 一个根都没排、日志里没有那句「但在监听限定（…）域外」。两条都在 init 块里判（`steps: []`）——这两条回放链没有第二件事要做，判的就是异步对账那一拍；harness 为此把 `assert_step` 收 `&mut Service`（要等就得调 liveness 检查）。端到端只走了周期入口，启动 / `/update/execute` 两条与它共用 `reconcile_catalogue_versions` 那道串行闸，横幅文案与「只在非周期或本就有 stale 时附一句」由 E01 的 lib 用例钉着。总账：有 42 / 待写 6 / 部分 5 / 语料 2（B07 撤回后为有 41 / 待写 7）。
+> **刚体转动链已录（2026-10-27 13:2x，用例未跑）**：`ams8000-equi-rotate-chain`（735→739，接在跨房链终稿后面；E3D 3.1 TTY、隔离副本、五份真快照）：736 把 EQUI `=24384/24776` 的 `ORI` 从 `Y is N 5 W and Z is D` 改成 `Y is W 5 S and Z is D`（绕自身原点、绕 U 转 +90°，POS 不变），738 改回，737 / 739 是 QUIT 尾会话。用例只走到 737：736 要 `transform`、`geometry_diff.moved == 1`，链尾在转后的状态打一枪整库重建，对拍记录（`rebuild_records_equal`）与房间边（`rebuild_edges_equal`）——刚体路「只动方位」那一半第一次有对拍。转回去的 738 / 739 不走：来回两窗 Δ 的同一种错可能互相抵消。harness 的四元数比较顺手改成取 `p − q` 与 `p + q` 里小的那边：这根的方位是半圈型（`w ≈ 0`），按分量定符号会误报。登记表新增 INC-C08（整根只动方位 → transform，转后与整库重建逐条 / 逐边相等），用例没跑先记「部分」、跑绿再翻「有」；总账 56 条：有 41 / 部分 6 / 补 7 / 语料 2（84 %）。
+>
+> **P2 语料缺口（2026-10-26 查明）**：按登记表点账，P2 的 todo 只剩 5 条（`F05` / `H02` / `H05` 已被 P2 前三刀翻成「有」），其中 4 条要新语料：`E02` / `E03` 要 `ams7997-cata-stamp-chain`（设计库 + 它真读的目录库；目录库那条记账会话由目录程序写，PML 宏录不出来），`G03` 要房间定义元素（PANE / FRMW）改动链，`H03` 要第二个 dbnum 的夹具（harness 现在单库单夹具，`Case` 只有 `dbnum` / `db_file` / `source` 一组）。`G03` 的录制宏已写进 `scripts/e3d/replay/`：`room_pane_probe.mac`（只读探针，先核 `Q TYPE` 确实是 PANE）、`room_pane_apply.mac`、`room_pane_restore.mac`，打在 8000 的 PANE `24381/35844`（FRMW `/1RX-RM05-R512` 的面板，`codex_room_probe.mac` 记过的那一对），而不是本文 §5.2 写的 7997 链——8000 的影子工程根、快照与字节补丁链路都已跑通，省一次整库初始化。`E02` / `E03` 另有一条不碰 E3D 的路：教 `db_session_fixture` 往拷来的目录库文件尾部追加一条只含 DBMDAT 的会话（新能力，属计划里的 `corpus` 档，要先定「落款落后」怎么造）。
 > 口径：本文是**案例集合 + 落地计划**，不是又一份测试总纲——分层与编号沿用 `docs/2026-08-06_model-increment-unit-test-plan.md`（U1–U13 选组、IU-/RI- 不变量），live 事实沿用 `docs/2026-08-12_live-test-ledger.md`，学科矩阵沿用 `docs/plans/2026-09-05-pipe-hvac-ctray-equi-increment-test-matrix.md`。那三份不重写，本文只接上它们**没有接住的那一截**：这两周真机上暴露的缺陷全部发生在「自动化覆盖不到的层」。
 > 代码事实对到 `refactor` `b71617ee3`（2026-10-25）。行号 / 测试名以源码为准。
 > 关联：ADR-079（库级水位）、ADR-080 / 066（单元级发布 / 刚体前移）、ADR-088（整片删老行）、ADR-089（新旧判据与冻结锚）、ADR-011（单队列单消费者）、ADR-010（房间增量 = 全量逐边）；GitHub #61 / #63 / #64 / #65 / #66 / #67 / #68 / #69；`.github/workflows/windows-tests.yml`（`offline-increment-regression` job）。
@@ -90,6 +99,8 @@
 
 编号 `INC-<组><nn>`；「现状」三档：**有**（给出测试名 / 场景 id）、**补**（本计划新写）、**语料**（要先录链或要新能力）。每条的判据按 §2 的 O 编号。
 
+2026-11-03 起登记表多两个可选字段：`change_types` 是这条案例（连同它挂的资产）覆盖的变更类型，编号 `CT-<族><n>`，定义与逐类覆盖见 `docs/specs/incr-gen-audit-aux/increment-change-types.md`；`assets` 是挂在这条案例下、真正去 E3D 跑的执行资产（`suite:` = `scripts/e3d/increment_suite/suite-manifest.json` 的用例，`inplace:` = 原地宏对 P79–P85）。下面各表不加这两列，以登记表为准；套件用例 ID 的前缀是登记表建立前的旧编号，不代表 INC 归属。
+
 ### A · 变化分类与根归结（planner，L0 / L1）
 
 | ID | 案例 | 层 | 判据 | 现状 |
@@ -126,6 +137,7 @@
 | INC-C05 | 整条 PIPE 位移 → 刚体路按设计拒（`HPOS / TPOS` 变）→ regen；几何仍正确 | L3 | O3：`rejected=1 [… AttributesModified: CACHID / HPOS / TPOS]`；O1 | **补**（本周 `pipe_whole_apply/restore.mac`） |
 | INC-C06 | 带 NOZZ 的 EQUI 位移走 transform；目录项（字典项会话 0）按最新锚比 | L3 | O3 | **补**（7997 `=24381/109449`，本周两窗 transform） |
 | INC-C07 | **读目录 ∧ 刚体路**的根（目录项摘要跨登录不漂） | L4 | O3 | **语料**：这套工程没有样本（ADR-089 Q4） |
+| INC-C08 | **整根只动方位 → `kind=transform`**（EQUI 绕自身原点转 90°、POS 不变） | L2 | O3：`kind=transform`、`geometry_diff.moved == 1`；O2：转后 `/model/records` 与同数据整库重建逐条相等（四元数不分符号）、房间边逐边相等 | 部分：`ams8000-equi-rotate-chain` 已录、用例已写，未跑（2026-10-27 新增） |
 
 ### D · 新旧判据与登录（ADR-089，#65）
 
@@ -196,6 +208,20 @@
 | INC-J01 | `/update/execute` 202 回执形状、`unselected`、`warnings` 含目录核对句 | L2 | O3 | 有 L0 形状钉；**补** L2 真回执 |
 | INC-J02 | `/health` 新格：`catalogue_reconcile.behind_out_of_scope_libraries`、`initialization.startup.reconcile.catalogue_behind_out_of_scope`、`watch_dbnums(_origin)` | L0 + L2 | O3 | 有 L0；**补** L2 |
 | INC-J03 | `/dbnums` 三水位相等即 `in_sync`；`/tasks` 字段集不缩（`refno_native_api_contract.rs` 的纪律） | L1 | 形状 | 有 |
+
+### U · 原地宏对（run-owned 对象，E3D 真机）
+
+P79–P85 在 AMS 工程里原地跑：宏对自己建出对象（run-owned）、改、再删掉，跑前备份。E3D 侧前 / 后 / 还原三份 RVM 已齐、restore 腿已过，apply 腿的判定还在等 `DB_UserChanges` 事件观测；gen-model 侧还没对拍，所以都记 **补**。原地宏对的清单和脚本还没入库，登记表只在 `assets` 里写 `inplace:` 名字，不进 `tests`。
+
+| ID | 案例 | 层 | 判据 | 现状 |
+|---|---|---|---|---|
+| INC-U01 | P79：created 祖先去重（同窗新建祖先与其子件，子件被祖先抢占） | L3 | O1 | **补** |
+| INC-U02 | P80：created 祖先下删除（同窗建了又删的子件不出现，只剩祖先新建） | L3 | O1 | **补** |
+| INC-U03 | P81：created 祖先下改属性（净窗口里仍只是一组新建） | L3 | O1 | **补** |
+| INC-U04 | P82：主列表加一个成员（属主成员变化，不升级为重排） | L3 | O1 | **补** |
+| INC-U05 | P83：主列表删一个成员（属主成员变化，不升级为重排） | L3 | O1 | **补** |
+| INC-U06 | P84：限定词清空 | L3 | O1 | **补** |
+| INC-U07 | P85：同窗两次写同一限定词（合并后只剩净值） | L3 | O1 | **补** |
 
 ## 5. 要造的东西
 

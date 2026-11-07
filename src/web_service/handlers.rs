@@ -104,11 +104,7 @@ pub async fn element_ensure(
     let response = service.ensure(refno, req.depth).await.map_err(|error| {
         let message = format!("{error:#}");
         if message.contains("DATA_FACE_INGEST_OWNS_CACHE") {
-            ApiError::coded(
-                StatusCode::CONFLICT,
-                "DATA_FACE_INGEST_OWNS_CACHE",
-                message,
-            )
+            ApiError::coded(StatusCode::CONFLICT, "DATA_FACE_INGEST_OWNS_CACHE", message)
         } else if message.contains("CATALOGUE_NOT_PERSISTED") {
             ApiError::coded(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -293,6 +289,7 @@ pub(crate) fn storage_version_health() -> Value {
                     "started_at": progress.started_at,
                     "finished_at": progress.finished_at,
                     "full_scope": progress.full_scope,
+                    "shared_wipe": progress.shared_wipe,
                 }),
                 None => json!({ "state": "idle" }),
             },
@@ -437,7 +434,10 @@ fn web_response(content_type: &'static str, body: impl Into<Body>) -> Response {
 /// 盘上没有 `web/config.json` 时浏览器拿到的那份。db 段的账号口令只给本机来源：服务出厂监听 `0.0.0.0`，
 /// 原样发出去等于把库账号交给同网段每一台机器。两个键留着、值给空串——plant-ui 的 `BrowserDb`
 /// 两格必填，缺键整份启动配置解析失败。
-fn browser_config(option: &aios_core::options::DbOption, include_credentials: bool) -> serde_json::Value {
+fn browser_config(
+    option: &aios_core::options::DbOption,
+    include_credentials: bool,
+) -> serde_json::Value {
     let (username, password) = if include_credentials {
         (option.v_user.as_str(), option.v_password.as_str())
     } else {
@@ -485,7 +485,10 @@ fn disk_web_asset_path(
     })
 }
 
-pub async fn plant_ui_web(State(state): State<AppState>, request: axum::extract::Request) -> Response {
+pub async fn plant_ui_web(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
     let requested = request.uri().path().trim_start_matches('/');
     let path = if requested.is_empty() {
         "index.html"
@@ -826,7 +829,9 @@ async fn run_rooms_rebuild() {
     let outcome = match resident::rebuild_resident_model().await {
         Ok(outcome) => outcome,
         Err(error) => {
-            eprintln!("[房间重建] 常驻参照模型重建失败（旧边原样保留，生成按 blocked 拒）: {error:#}");
+            eprintln!(
+                "[房间重建] 常驻参照模型重建失败（旧边原样保留，生成按 blocked 拒）: {error:#}"
+            );
             resident::record_startup_init(Err(&error)).await;
             return;
         }
@@ -847,7 +852,9 @@ async fn run_rooms_rebuild() {
             true
         }
         Err(error) => {
-            eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑，但整轮不盖最新记录）: {error:#}");
+            eprintln!(
+                "[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑，但整轮不盖最新记录）: {error:#}"
+            );
             false
         }
     };
@@ -996,14 +1003,21 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         (!model_incremental_types.is_empty()).then(|| model_type_origin.describe());
     let dabacon_tags = crate::data_interface::dabacon_tag_summary::health_snapshot();
     let mut core = crate::data_interface::mdb_route_directory::active(
-        &state.identity.project, &state.identity.mdb,
-    ).map(|directory| directory.health()).unwrap_or_else(|| json!({
-        "status": "initializing", "route_count": 0, "snapshot_epoch": 0,
-        "session_vector": [], "stale_dbnums": [], "failed_dbnums": [],
-        "last_targeted_refresh": null,
-    }));
+        &state.identity.project,
+        &state.identity.mdb,
+    )
+    .map(|directory| directory.health())
+    .unwrap_or_else(|| {
+        json!({
+            "status": "initializing", "route_count": 0, "snapshot_epoch": 0,
+            "session_vector": [], "stale_dbnums": [], "failed_dbnums": [],
+            "last_targeted_refresh": null,
+        })
+    });
     let (mut opened, cached_elements) = crate::data_interface::mdb_read_store::cache_stats(
-        &state.identity.project, &state.identity.mdb);
+        &state.identity.project,
+        &state.identity.mdb,
+    );
     opened.sort_unstable();
     core["open_db_count"] = json!(opened.len());
     core["open_dbnums"] = json!(opened);
@@ -1074,6 +1088,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
             "equip_derived": crate::fast_model::cal_model::equip_model::equip_derived_snapshot(),
             "model_root_backoff": crate::data_interface::model_root_ledger::backoff_snapshot(),
+            "model_catch_up_enqueued_total": crate::data_interface::startup_reconcile::model_catch_up_enqueued_total(),
             "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
             "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
             "runtime_lag": crate::runtime_lag::snapshot(),
@@ -1275,6 +1290,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 模型根失败退避（GitHub #72 / ADR-090 D1；进程内账本，不读库）。`null` = 没有根在退避；否则
         // `backing_off` 是总数、`samples` 点名最快到期的几根。退避中的根仍算「还在赶」、仍拦水位，只是这会儿不重算。
         "model_root_backoff": crate::data_interface::model_root_ledger::backoff_snapshot(),
+        // 稳态模型补偿累计入队数（WP-E / ADR-090 D1）：周期对账拍上「数据追平、模型落后」
+        // 的库补了几条 ModelOnly。0 = 还没补过（追平的库不算）。
+        "model_catch_up_enqueued_total": crate::data_interface::startup_reconcile::model_catch_up_enqueued_total(),
         // 运行期目录版本核对的最近一次回执（H1，2026-09-08；进程内，不读库）。摄入形态下
         // 目录库不进数据批次，目录换了版只有这一条路让模型面知道：sweep 看见目录文件会话
         // 前移 / 周期对账那一拍 / `/update/execute`。`null` = 本进程还没跑过运行期核对
@@ -1497,7 +1515,9 @@ pub async fn tree_roots(
     let worker = service.clone();
     let nodes = tokio::task::spawn_blocking(move || worker.roots())
         .await
-        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree roots 任务异常结束: {error}")))?
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("tree roots 任务异常结束: {error}"))
+        })?
         .map_err(ApiError::from_domain)?;
     let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
@@ -1525,7 +1545,9 @@ pub async fn tree_children(
     let worker = service.clone();
     let nodes = tokio::task::spawn_blocking(move || worker.children(parent))
         .await
-        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree children 任务异常结束: {error}")))?
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("tree children 任务异常结束: {error}"))
+        })?
         .map_err(ApiError::from_domain)?;
     let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
@@ -1669,7 +1691,9 @@ pub async fn tree_ancestors(
         .map_err(ApiError::from_domain)?;
     let refnos = tokio::task::spawn_blocking(move || service.ancestors(start))
         .await
-        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}")))?
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}"))
+        })?
         .map_err(ApiError::from_domain)?;
     Ok(Json(json!({
         "source": "direct",
@@ -1749,12 +1773,10 @@ impl IntoResponse for SpatialApiError {
                     ),
                     "detail": { "state": state.as_str() },
                 });
-                let mut response =
-                    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
-                response.headers_mut().insert(
-                    header::RETRY_AFTER,
-                    header::HeaderValue::from(retry_after),
-                );
+                let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from(retry_after));
                 response
             }
         }
@@ -1790,7 +1812,13 @@ async fn prepare_centerline(
 /// refno 解析失败 400、库里没有 404、不是 BRAN / 拼不出 422（`mbd::api_error`）。
 async fn query_branch(
     branch: RefU64,
-) -> Result<(crate::mbd::branch_query::BranchQueryWithDiameters, Option<u32>), SpatialApiError> {
+) -> Result<
+    (
+        crate::mbd::branch_query::BranchQueryWithDiameters,
+        Option<u32>,
+    ),
+    SpatialApiError,
+> {
     let text = RefnoEnum::from(branch).to_pdms_str();
     let refno = crate::fast_model::e3d_model_service::parse_refno(&text)
         .map_err(|error| ApiError::bad_request(format!("refno `{text}` 无法解析：{error:#}")))?;
@@ -1799,12 +1827,13 @@ async fn query_branch(
         .await?
         .build_set(refno.dbno(), None)
         .map_err(ApiError::from_domain)?;
-    let result = tokio::task::spawn_blocking(move || crate::mbd::branch_query_with_diameters(&set, refno))
-        .await
-        .map_err(|join| {
-            ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
-        })?
-        .map_err(super::mbd::api_error)?;
+    let result =
+        tokio::task::spawn_blocking(move || crate::mbd::branch_query_with_diameters(&set, refno))
+            .await
+            .map_err(|join| {
+                ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
+            })?
+            .map_err(super::mbd::api_error)?;
     Ok((result, dbnum))
 }
 
@@ -1824,7 +1853,9 @@ pub async fn spatial_centerline(
     State(state): State<AppState>,
     Query(request): Query<SpatialCenterlineReq>,
 ) -> Result<Json<crate::fast_model::spatial_centerline::CenterlineResponse>, SpatialApiError> {
-    use crate::fast_model::spatial_centerline::{BranCenterline, centerline_response_with_diameters};
+    use crate::fast_model::spatial_centerline::{
+        BranCenterline, centerline_response_with_diameters,
+    };
 
     resolve_identity(&state, &request.identity)?;
     let raw = request
@@ -1836,11 +1867,14 @@ pub async fn spatial_centerline(
     let branch = RefU64::from_str(raw)
         .ok()
         .filter(RefU64::is_valid)
-        .ok_or_else(|| ApiError::bad_request(format!("refno 格式非法（应为 a/b 或 a_b）: {raw}")))?;
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("refno 格式非法（应为 a/b 或 a_b）: {raw}"))
+        })?;
     let (query, dbnum) = query_branch(branch).await?;
     let centerline = BranCenterline::from_branch(branch, &query.result)
         .map_err(|message| SpatialApiError::from(ApiError::precondition(message)))?;
-    let mut response = centerline_response_with_diameters(&centerline, &query.result, dbnum, &query.diameters);
+    let mut response =
+        centerline_response_with_diameters(&centerline, &query.result, dbnum, &query.diameters);
     response.source_version = Some(query.source_version);
     Ok(Json(response))
 }
@@ -1876,19 +1910,37 @@ fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
 
 /// GET /api/v1/spatial/nearby/branches: loaded BRAN owners, including implicit tubes.
 pub async fn spatial_nearby_branches(
-    State(state): State<AppState>, Query(request): Query<SpatialNearbyReq>,
+    State(state): State<AppState>,
+    Query(request): Query<SpatialNearbyReq>,
 ) -> Result<Json<crate::fast_model::spatial_branches::NearbyBranchesResponse>, SpatialApiError> {
     resolve_identity(&state, &request.identity)?;
-    let params = spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
     // This route has one fixed coverage contract; do not silently ignore filters.
-    if request.query.source_mode.is_some() || request.query.nouns.is_some() || request.query.rooms.is_some()
-        || request.query.dbnums.is_some() || request.query.spec_values.is_some() || request.query.keyword.is_some()
-        || request.query.shape.is_some() || request.query.sort.is_some()
-        || params.include_self || params.include_negative {
-        return Err(ApiError::bad_request("周边管道查询仅接受 BRAN refno、radius、page/per_page，默认覆盖全部已加载库").into());
+    if request.query.source_mode.is_some()
+        || request.query.nouns.is_some()
+        || request.query.rooms.is_some()
+        || request.query.dbnums.is_some()
+        || request.query.spec_values.is_some()
+        || request.query.keyword.is_some()
+        || request.query.shape.is_some()
+        || request.query.sort.is_some()
+        || params.include_self
+        || params.include_negative
+    {
+        return Err(ApiError::bad_request(
+            "周边管道查询仅接受 BRAN refno、radius、page/per_page，默认覆盖全部已加载库",
+        )
+        .into());
     }
-    let service = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
-    Ok(Json(crate::fast_model::spatial_branches::nearby(&params, service).await?))
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(
+        crate::fast_model::spatial_branches::nearby(&params, service).await?,
+    ))
 }
 
 /// GET /api/v1/spatial/rooms — 在册房间清单 + 房间体制此刻的状态（spec §4.13.4；plant3d-web ADR 0067 / 计划 2026-09-20）。
@@ -2006,7 +2058,9 @@ pub async fn spatial_room_tree(
     let room = RefU64::from_str(refno.trim())
         .ok()
         .filter(RefU64::is_valid)
-        .ok_or_else(|| ApiError::bad_request(format!("房间 refno 格式非法（应为 a_b）: {refno}")))?;
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("房间 refno 格式非法（应为 a_b）: {refno}"))
+        })?;
     let params = crate::fast_model::spatial_tree_view::room_tree_params(room, &request.query)
         .map_err(ApiError::bad_request)?;
     let options = tree_options(&request.leaves)?;
@@ -2421,9 +2475,7 @@ fn historical_error(error: crate::fast_model::historical_model::HistoricalModelE
         "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" | "SNAPSHOT_NOT_FOUND" => {
             StatusCode::NOT_FOUND
         }
-        "TIME_BEFORE_OLDEST_SESSION" | "REFNO_OUTSIDE_SNAPSHOT" => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        "TIME_BEFORE_OLDEST_SESSION" | "REFNO_OUTSIDE_SNAPSHOT" => StatusCode::UNPROCESSABLE_ENTITY,
         "GENERATION_LIMIT_EXCEEDED" => StatusCode::PAYLOAD_TOO_LARGE,
         "GENERATION_CANCELLED" => StatusCode::REQUEST_TIMEOUT,
         "SESSION_TIME_UNAVAILABLE" | "SOURCE_NOT_FOUND" | "SOURCE_CHANGED" => {
@@ -3002,7 +3054,12 @@ pub async fn node_versions_resolve(
         }
     };
     // 缺字段与非法值一视同仁，都归 `INVALID_SELECTOR` 并点名 `at`（Requirement 8.4）
-    let Some(at) = req.at.as_deref().map(str::trim).filter(|text| !text.is_empty()) else {
+    let Some(at) = req
+        .at
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    else {
         return Err(ApiError::coded(
             StatusCode::BAD_REQUEST,
             "INVALID_SELECTOR",
@@ -3019,7 +3076,11 @@ pub async fn node_versions_resolve(
         .with_detail(json!({ "params": ["at"] })));
     }
     let dbnum = parse_dbnum_param(req.dbnum.as_deref())?;
-    let refno_text = req.refno.as_deref().map(str::trim).filter(|text| !text.is_empty());
+    let refno_text = req
+        .refno
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
     let Some(refno_text) = refno_text else {
         return Err(ApiError::coded(
             StatusCode::BAD_REQUEST,
@@ -3036,18 +3097,19 @@ pub async fn node_versions_resolve(
         )
     })?;
     let at = at.to_string();
-    let (sesno, session_time) = tokio::task::spawn_blocking(move || {
-        resolve_node_time(dbnum, refno, scope, &at)
-    })
-    .await
-    .map_err(|error| {
-        ApiError::coded(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            format!("时间点解析线程异常退出: {error}"),
-        )
-    })??;
-    Ok(Json(json!({ "sesno": sesno, "session_time": session_time })))
+    let (sesno, session_time) =
+        tokio::task::spawn_blocking(move || resolve_node_time(dbnum, refno, scope, &at))
+            .await
+            .map_err(|error| {
+                ApiError::coded(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    format!("时间点解析线程异常退出: {error}"),
+                )
+            })??;
+    Ok(Json(
+        json!({ "sesno": sesno, "session_time": session_time }),
+    ))
 }
 
 /// 取节点版本表全表（> 5000 行按 `since_sesno` 翻页）再按链序规则解析时间点。
@@ -3085,12 +3147,17 @@ fn resolve_node_time(
 /// 把时间点解析失败搬成 HTTP 错误：状态与错误码取
 /// [`crate::fast_model::realtime_history::resolve_error_status`] /
 /// [`resolve_error_code`]，`detail.params` 点名 `at`。
-fn resolve_error(error: crate::fast_model::time_resolve::ResolveError, message: Option<String>) -> ApiError {
+fn resolve_error(
+    error: crate::fast_model::time_resolve::ResolveError,
+    message: Option<String>,
+) -> ApiError {
     use crate::fast_model::realtime_history as rh;
     let status = StatusCode::from_u16(rh::resolve_error_status(error))
         .unwrap_or(StatusCode::UNPROCESSABLE_ENTITY);
-    let api = ApiError::coded(status, rh::resolve_error_code(error), message.unwrap_or_else(|| {
-        match error {
+    let api = ApiError::coded(
+        status,
+        rh::resolve_error_code(error),
+        message.unwrap_or_else(|| match error {
             crate::fast_model::time_resolve::ResolveError::InvalidFormat => {
                 "at 不符合 YYYY-MM-DD[T| ]HH:mm[:ss[.fff]][Z|±HH:MM]".to_string()
             }
@@ -3100,8 +3167,8 @@ fn resolve_error(error: crate::fast_model::time_resolve::ResolveError, message: 
             crate::fast_model::time_resolve::ResolveError::NoResolvable => {
                 "该节点的版本表里没有任何带 Session_Time 的行".to_string()
             }
-        }
-    }));
+        }),
+    );
     if matches!(
         error,
         crate::fast_model::time_resolve::ResolveError::InvalidFormat
@@ -3122,8 +3189,9 @@ fn node_version_rows(
     let mut all = Vec::new();
     let mut since: Option<u32> = None;
     loop {
-        let report = crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since, Some(PAGE))
-            .map_err(node_versions_error)?;
+        let report =
+            crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since, Some(PAGE))
+                .map_err(node_versions_error)?;
         let last = report.versions.last().map(|row| row.sesno);
         let truncated = report.truncated;
         all.extend(report.versions);
@@ -3168,7 +3236,10 @@ fn parse_dbnum_param(raw: Option<&str>) -> Result<u32, ApiError> {
 
 /// 正整数查询参数（`sesno`）：缺 → `Ok(None)`（调用方决定报什么码）；给了但不是正整数 →
 /// 400 `INVALID_FIELD`。
-fn parse_positive_u32_param(raw: Option<&str>, field: &'static str) -> Result<Option<u32>, ApiError> {
+fn parse_positive_u32_param(
+    raw: Option<&str>,
+    field: &'static str,
+) -> Result<Option<u32>, ApiError> {
     let Some(text) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(None);
     };
@@ -3213,7 +3284,11 @@ pub async fn element_attributes_at(
 ) -> Result<Json<Value>, ApiError> {
     resolve_identity(&state, &req.identity)?;
     let dbnum = parse_dbnum_param(req.dbnum.as_deref())?;
-    let refno_text = req.refno.as_deref().map(str::trim).filter(|text| !text.is_empty());
+    let refno_text = req
+        .refno
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
     let Some(refno_text) = refno_text else {
         return Err(ApiError::coded(
             StatusCode::BAD_REQUEST,
@@ -3451,8 +3526,7 @@ pub async fn model_delete_subtree(
     let direct_tree = state.direct_tree.clone();
     // 「一并删除网格文件」那一格只是一个开关：收键 / 删行 / 删几何的先后都在 `clear_model_scope`
     // 里（spec §4.5.1；`mesh_purge` 模块文档），handler 自己不收键、不删文件。
-    let geometry =
-        crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
+    let geometry = crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
     let clear = async move {
         let tree = direct_tree.get().await?;
         let lookup = tree.clone();
@@ -3573,8 +3647,10 @@ pub async fn model_generate(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.generate",
-        format!("refno={} force={}", req.refno, req.force));
+    let mut diagnostic = crate::process_diagnostics::Operation::begin(
+        "http.model.generate",
+        format!("refno={} force={}", req.refno, req.force),
+    );
     resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
         return Err(ApiError::bad_request(format!(
@@ -3617,11 +3693,15 @@ pub async fn model_generate(
     let worker_refno = req.refno.clone();
     let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
-        let mut worker_log = crate::process_diagnostics::Operation::begin("model.worker.begin",
-            format!("refno={worker_refno} dbnum={memory_only_dbnum:?} force={force}"));
+        let mut worker_log = crate::process_diagnostics::Operation::begin(
+            "model.worker.begin",
+            format!("refno={worker_refno} dbnum={memory_only_dbnum:?} force={force}"),
+        );
         let generate = async move {
-            let mut root_log = crate::process_diagnostics::Operation::begin("model.roots.begin",
-                format!("refno={refno}"));
+            let mut root_log = crate::process_diagnostics::Operation::begin(
+                "model.roots.begin",
+                format!("refno={refno}"),
+            );
             // 范围下的生成根由 e3d-io 骨架给（唯一路：legacy 那条经 SurrealDB `pe` 子树上溯的
             // `ensure_model_scope_generated` 随 db 读路由于 2026-09-08 退役）。
             let tree = direct_tree.get().await?;
@@ -3668,7 +3748,10 @@ pub async fn model_generate(
             diagnostic.finish(format!("generation_failed: {error:#}"));
             ensure_error(error)
         })?;
-    diagnostic.finish(format!("generated refno={} available={}", req.refno, result.model_available));
+    diagnostic.finish(format!(
+        "generated refno={} available={}",
+        req.refno, result.model_available
+    ));
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
@@ -3744,14 +3827,15 @@ pub async fn model_generate(
 fn publication_state_of(generation_root: &str, model_available: bool) -> serde_json::Value {
     use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
     let mut summary = serde_json::json!({ "root_refno": generation_root });
-    let parsed = crate::fast_model::e3d_model_service::parse_refno(
-        generation_root.trim_start_matches('='),
-    )
-    .ok();
+    let parsed =
+        crate::fast_model::e3d_model_service::parse_refno(generation_root.trim_start_matches('='))
+            .ok();
     let store = ModelMemoryStore::global();
     let projection = parsed.and_then(|root| {
         let receipt = store.receipt(ProjectionScope::Current, root)?;
-        let acked = store.publication_ack(ProjectionScope::Current, root).is_some();
+        let acked = store
+            .publication_ack(ProjectionScope::Current, root)
+            .is_some();
         Some((receipt, acked))
     });
     let ledger = parsed.and_then(|root| {
@@ -3768,9 +3852,15 @@ fn publication_state_of(generation_root: &str, model_available: bool) -> serde_j
         _ => fallback,
     };
     if let Some(object) = summary.as_object_mut() {
-        object.insert("publication_status".into(), serde_json::json!(publication_status));
+        object.insert(
+            "publication_status".into(),
+            serde_json::json!(publication_status),
+        );
         if let Some((receipt, _)) = &projection {
-            object.insert("source_sesno".into(), serde_json::json!(receipt.source_sesno));
+            object.insert(
+                "source_sesno".into(),
+                serde_json::json!(receipt.source_sesno),
+            );
             object.insert(
                 "published_via".into(),
                 serde_json::json!(receipt.published_via),
@@ -4038,16 +4128,15 @@ pub async fn storage_version_upgrade(
         ));
     }
     let (requested, _requested_covers_watch_scope) =
-        crate::data_interface::storage_upgrade::resolve_requested(&scope, request.dbnums)
-            .map_err(|out_of_scope| {
+        crate::data_interface::storage_upgrade::resolve_requested(&scope, request.dbnums).map_err(
+            |out_of_scope| {
                 ApiError::bad_request(format!(
                     "dbnums 不在当前 MDB 的设计库范围里: {out_of_scope:?}；全范围是 {scope:?}"
                 ))
-            })?;
-    let full_scope = crate::data_interface::storage_upgrade::covers_whole_database(
-        &requested,
-        &declared,
-    );
+            },
+        )?;
+    let full_scope =
+        crate::data_interface::storage_upgrade::covers_whole_database(&requested, &declared);
     if requested.is_empty() {
         return Err(ApiError::bad_request(
             "dbnums 不能为空；不传 dbnums 表示升级全部设计库",
@@ -4077,6 +4166,7 @@ pub async fn storage_version_upgrade(
             "target_version": progress.target_version,
             "requested": progress.requested,
             "full_scope": progress.full_scope,
+            "shared_wipe": progress.shared_wipe,
             "upgrade": {
                 "state": progress.state(),
                 "started_at": progress.started_at,
@@ -4734,8 +4824,8 @@ fn ensure_model_face_idle(dbnum: u32) -> Result<(), ApiError> {
             receipt.task_id
         )));
     }
-    if let Some(entry) =
-        crate::data_interface::task_registry::TaskRegistry::global().active_dbnum_model_ensure(dbnum)
+    if let Some(entry) = crate::data_interface::task_registry::TaskRegistry::global()
+        .active_dbnum_model_ensure(dbnum)
     {
         return Err(ApiError::conflict(format!(
             "dbnum {dbnum} 有整库即时生成在飞（task_id={}），稍后再清理模型",
@@ -4793,8 +4883,7 @@ pub async fn dbnum_model_delete(
     ensure_model_face_idle(dbnum)?;
     // 「一并删除网格文件」那一格只是一个开关：收键 / 删行 / 删几何的先后都在 `wipe_dbnum_model_face`
     // 里（生成锁之内收、行删完再清；spec §4.5.1D），handler 自己不收键、不删文件。
-    let geometry =
-        crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
+    let geometry = crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
     let result = crate::data_interface::fast_delete::wipe_dbnum_model_face(dbnum, geometry)
         .await
         .map_err(|error| {
@@ -5163,8 +5252,10 @@ pub async fn model_records(
         expanded_roots.push((name.clone(), under));
     }
     let mut memory_overlay_used = false;
-    let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
-        Vec::with_capacity(roots.len());
+    let mut per_root: Vec<(
+        String,
+        Vec<crate::fast_model::model_record_reader::ModelRecord>,
+    )> = Vec::with_capacity(roots.len());
     for (name, under) in &expanded_roots {
         let mut records = Vec::new();
         for (root, below) in under {
@@ -5522,9 +5613,10 @@ mod tests {
         // const + 赋值两行，钉串跟着拆成两段；语义不变：读出来先 trim，空则回退 origin。)
         assert!(index.contains("configuredModelUrl !== \"http://127.0.0.1:8022\""));
         assert!(index.contains("const configuredDataUrl = current.data_api_url?.trim()"));
-        assert!(index.contains("current.data_api_url = configuredDataUrl || window.location.origin"));
+        assert!(
+            index.contains("current.data_api_url = configuredDataUrl || window.location.origin")
+        );
         assert!(index.contains(": window.location.origin"));
-
     }
 
     #[test]
@@ -5598,9 +5690,18 @@ mod tests {
         assert_eq!(local["db"]["password"], "site-secret");
 
         let remote = browser_config(&option, false);
-        assert_eq!(remote["db"]["username"], "", "远程来源拿到的是空串而不是缺键");
-        assert_eq!(remote["db"]["password"], "", "远程来源拿到的是空串而不是缺键");
-        assert_eq!(remote["db"]["host"], local["db"]["host"], "只摘口令，库地址照给");
+        assert_eq!(
+            remote["db"]["username"], "",
+            "远程来源拿到的是空串而不是缺键"
+        );
+        assert_eq!(
+            remote["db"]["password"], "",
+            "远程来源拿到的是空串而不是缺键"
+        );
+        assert_eq!(
+            remote["db"]["host"], local["db"]["host"],
+            "只摘口令，库地址照给"
+        );
         assert_eq!(remote["db"]["database"], local["db"]["database"]);
     }
 
@@ -5610,7 +5711,8 @@ mod tests {
             let mut request = axum::extract::Request::new(axum::body::Body::empty());
             if let Some(peer) = peer {
                 request.extensions_mut().insert(axum::extract::ConnectInfo(
-                    peer.parse::<std::net::SocketAddr>().expect("socket address"),
+                    peer.parse::<std::net::SocketAddr>()
+                        .expect("socket address"),
                 ));
             }
             request
@@ -6264,7 +6366,10 @@ mod tests {
             "刷新必须排在读取之前，否则这一轮带出去的还是上一轮的结论"
         );
         assert!(
-            health.matches("\"storage_version\": storage_version_health(),").count() >= 2,
+            health
+                .matches("\"storage_version\": storage_version_health(),")
+                .count()
+                >= 2,
             "架构版本必须挂在顶层（连接与断开两套响应都要有）：面板按 m.h.storage_version 读，\
              放在 model_cache 里就永远看不见"
         );
@@ -7059,10 +7164,7 @@ mod tests {
                 Variant::Quoted => (Some(format!("\"{key}\"")), true),
                 Variant::Weak => (Some(format!("W/\"{key}\"")), true),
                 Variant::Bare => (Some(key.to_string()), true),
-                Variant::ListWithKey => (
-                    Some(format!("  \"{key}\" ,  \"{flipped}\" ")),
-                    true,
-                ),
+                Variant::ListWithKey => (Some(format!("  \"{key}\" ,  \"{flipped}\" ")), true),
                 Variant::Star => (Some("*".to_string()), true),
                 Variant::OtherKey => (Some(format!("\"{flipped}\"")), false),
                 Variant::Suffixed => (Some(format!("\"{key}x\"")), false),
@@ -7184,7 +7286,8 @@ mod tests {
         use super::super::*;
         use crate::fast_model::realtime_history as rh;
         use crate::fast_model::time_resolve::{
-            ResolveError, VersionInstant, parse_instant_text, resolve_at_rows, resolve_parsed_at_rows,
+            ResolveError, VersionInstant, parse_instant_text, resolve_at_rows,
+            resolve_parsed_at_rows,
         };
 
         /// 一张「仅自身」版本表：sesno 递增，时刻可缺、可重复、可倒退。
@@ -7289,7 +7392,10 @@ mod tests {
             code_of(&parse_positive_u32_param(Some("abc"), "sesno").unwrap_err()),
             (400, "INVALID_FIELD".to_string())
         );
-        assert_eq!(parse_positive_u32_param(Some("12"), "sesno").unwrap(), Some(12));
+        assert_eq!(
+            parse_positive_u32_param(Some("12"), "sesno").unwrap(),
+            Some(12)
+        );
         // 0 不算正整数：sesno 从 1 起
         assert_eq!(
             code_of(&parse_positive_u32_param(Some("0"), "sesno").unwrap_err()),
@@ -7300,13 +7406,15 @@ mod tests {
     /// 反序列化本身不再因为缺字段失败：`Query` 拿到的永远是 `None`，不是 400。
     #[test]
     fn resolve_and_attributes_at_deserialize_without_required_fields() {
-        let resolve: ResolveNodeTimeReq = serde_json::from_str("{}").expect("空查询串也要能反序列化");
+        let resolve: ResolveNodeTimeReq =
+            serde_json::from_str("{}").expect("空查询串也要能反序列化");
         assert!(resolve.dbnum.is_none());
         assert!(resolve.refno.is_none());
         assert!(resolve.at.is_none());
         assert!(resolve.scope.is_none());
 
-        let attributes: AttributesAtReq = serde_json::from_str("{}").expect("空查询串也要能反序列化");
+        let attributes: AttributesAtReq =
+            serde_json::from_str("{}").expect("空查询串也要能反序列化");
         assert!(attributes.dbnum.is_none());
         assert!(attributes.refno.is_none());
         assert!(attributes.sesno.is_none());

@@ -288,3 +288,18 @@ Baked / Canonical 在这条规则下没有区别，不必补本地盒字段。
   `bake_element` 的 `world_bounds` 是世界网格顶点的紧 AABB（`e3d_model_service.rs:1535-1543`），本地盒过矩阵对含旋转的 `Δ` 一律偏松。
   D3 改成「纯平移加 `t`；含旋转读网格顶点」，两种形状都不需要本地盒，不补字段。
 - **Q2** `published_via` 要不要进 `/dbnums` 四格的陈述（「已追平：其中 N 根为前移」）——先只落行，看 live #2 用不用得上。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-B-11 / R-P-16 / R-P-19 / R-C-18（审计按 2026-10-27 工作树）。
+> 本节只追记，D1 与既有追记原文不改；冲突处以本节为准。
+
+- **T-P-3 · D1 的 `transform` 不是并列去向，是 `regen` 的子集加提示。** 生产 DESI 上 `transform ⊆ regen`，另给
+  `transform_units` 提示，`work_items` / `units` 的动作不变（`model_update_plan.rs:144-147`；`window_root_plan.rs:1909-1911,2362-2365`）。
+  窗口去向仍是四个：`regen` / `delete` / `advance` / `lazy`（`window_root_plan.rs:12-27,163-171,238-270`）。
+- **T-P-3 · 「默认仍关」作废。** 刚体开关 `model_transform_cheap_path` 未配置时为开（`options.rs:2310-2342`；
+  R-C-18 `options.rs:2335-2342`）。
+- **T-P-3 · 刚体分桶以 P4（设计引用级联）开为前置。** P4 关时 `rigid_motion_cascade_off`、不分桶；级联扩进来的根
+  一律不走便宜路；刚体开关关时 `classify_transform_roots` 空返回（`window_root_plan.rs:1754-1757,1797-1806`；
+  `rigid_motion.rs:90-91,107-110,143-147`）。
+

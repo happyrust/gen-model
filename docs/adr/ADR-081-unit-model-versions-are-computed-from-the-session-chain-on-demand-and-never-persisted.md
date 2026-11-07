@@ -136,3 +136,12 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
 删除按重生成记——`fold_window_impact` 同一把尺子），并给 `self_impact` / `units_changed` / `units_touched`；`self` 每行 = 它自身
 记录变过的会话。归属不按会话建子树集（容器子树几万个元素 × 几百个窗口建不起），而是每个候选沿 owner 链上溯一趟同时解出所属单元根。
 缓存键含 scope。代码在 `fast_model/node_versions.rs`。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-C-4 与 `review.md` §2.2（审计按 2026-10-27 工作树）。本节只追记，D5 原文与标题不改。
+
+- **T-L-1 · D5「不做 diff 接口」已由追记二修订：现在有 `node/diff-summary`。** 它只做 `A→B` 索引差分、不生成几何、不落库，
+  `needs_confirm` 由 `MODEL_HISTORY_CONFIRM_UNITS`（缺省 20）门（`node_diff_summary.rs:1-11,165-176`）；与「按需算、只进进程内缓存」的
+  D3 纪律一致。
+

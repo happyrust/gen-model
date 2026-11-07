@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(FileAnomaly::Duplicate { .. }) => "duplicate",
                 Some(FileAnomaly::Missing { .. }) => "missing",
                 Some(FileAnomaly::ForeignProject { .. }) => "foreign_project",
+                Some(FileAnomaly::NameChanged { .. }) => "name_changed",
             },
         );
     }

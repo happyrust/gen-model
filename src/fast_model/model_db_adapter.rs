@@ -2982,7 +2982,10 @@ fn collect_bound_record(
             ("out", sur_thing("inst_geo", mesh_id)),
             ("leave", sur_thing("pe", &refno_key(tube.from))),
             ("arrive", sur_thing("pe", &refno_key(tube.to))),
-            ("route_ordinal", SurValue::Number(SurNumber::Int(i64::from(tube.route_ordinal)))),
+            (
+                "route_ordinal",
+                SurValue::Number(SurNumber::Int(i64::from(tube.route_ordinal))),
+            ),
             ("aabb", sur_thing("aabb", id)),
             ("world_trans", sur_thing("trans", id)),
             ("bore_size", SurValue::Number(SurNumber::Int(0))),
@@ -3369,7 +3372,9 @@ mod tests {
             .expect(&format!("变换要顺指针删: {sql}"));
         let relations = sql
             .find("DELETE (SELECT VALUE id FROM tubi_relate WHERE in = pe:⟨24381_103320⟩);")
-            .expect(&format!("关系行按 id 点删，连没登记成边的历史行一起走: {sql}"));
+            .expect(&format!(
+                "关系行按 id 点删，连没登记成边的历史行一起走: {sql}"
+            ));
         assert!(
             pointers < relations && transforms < relations,
             "指针要在关系行之前捞出来删，否则读到的是空集: {sql}"
@@ -3430,9 +3435,7 @@ mod tests {
             .unwrap();
 
         let ids: Vec<String> = db
-            .query(
-                "SELECT VALUE <string>id FROM aabb, trans, tubi_relate;",
-            )
+            .query("SELECT VALUE <string>id FROM aabb, trans, tubi_relate;")
             .await
             .unwrap()
             .check()
@@ -4037,7 +4040,10 @@ mod tests {
         assert!(sql.contains("leave:pe:⟨24383_10⟩"));
         assert!(sql.contains("arrive:pe:⟨24383_20⟩"));
         // 2026-09-22（方案 B T2）：直段身份四元组的序号随行落盘，冷读不再按出现序补号
-        assert!(sql.contains("arrive:pe:⟨24383_20⟩,route_ordinal:0,aabb:"), "{sql}");
+        assert!(
+            sql.contains("arrive:pe:⟨24383_20⟩,route_ordinal:0,aabb:"),
+            "{sql}"
+        );
         assert!(sql.contains("out:inst_geo:⟨e3d_baked_v2_deadbeef⟩"));
         assert!(sql.contains(&format!(
             "aabb:aabb:⟨{TUBE_A}⟩,world_trans:trans:⟨{TUBE_A}⟩"
@@ -4996,10 +5002,14 @@ mod tests {
         );
         let sql = render_spooled_root(&store, root).expect("render");
         let sweep = sql
-            .find(&format!("LET $tube_sweep_trans = [trans:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_trans;"))
+            .find(&format!(
+                "LET $tube_sweep_trans = [trans:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_trans;"
+            ))
             .expect(&format!("管身变换按身份先删: {sql}"));
         assert!(
-            sql.contains(&format!("LET $tube_sweep_aabb = [aabb:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_aabb;")),
+            sql.contains(&format!(
+                "LET $tube_sweep_aabb = [aabb:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_aabb;"
+            )),
             "盒同理: {sql}"
         );
         let insert = sql.find("INSERT IGNORE INTO trans [").expect("插变换");
@@ -8861,6 +8871,7 @@ mod tests {
                     room_generation: Default::default(),
                 }),
                 info: None,
+                model_base_sesno: Some(0),
                 closes_task: true,
             },
         )
@@ -9251,7 +9262,10 @@ mod tests {
     /// 逐根凭证行退役（ADR-079）之后，「这根这一轮成了没成」看进程内的发布 ACK：
     /// 有 ACK 是 `ready`，没有是 `stale`——与退役前 `gen_root.publication_status` 同一口径。
     async fn publication_status_of(store: &ModelMemoryStore, root: RefNo) -> &'static str {
-        if store.publication_ack(ProjectionScope::Current, root).is_some() {
+        if store
+            .publication_ack(ProjectionScope::Current, root)
+            .is_some()
+        {
             "ready"
         } else {
             "stale"

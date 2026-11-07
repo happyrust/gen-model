@@ -1075,3 +1075,19 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
 - 不做任何按 `sesno` 的部分回退 / 部分裁剪（D3 / D5）；不给任务与库之间加队列 / 写者 / 收口（d-285 / d-300 原样）。
 - 不删 D4 点名的 DB 层房间资源、不改 `e3d.room.lookup` 的名字与形状。
 - 不给房间开新的 HTTP 触发口；`RoomOnly` 只在生成路径内部（U4 若拍出全库形态再议）。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-C-16 / R-F-14 / R-B-15、「Implementation Decisions」第 5 条与 `review.md` §2.2
+> （审计按 2026-10-27 工作树）。本节只追记，文头、D7 与 2026-09-11 修订段原文不改；冲突处以本节为准。
+
+- **T-L-1 · 2026-09-11 修订段把 `room_membership=false` 当开关：该开关已于 2026-10-23 退役。** `AIOS_ROOM_MEMBERSHIP`
+  现在只点名、不改行为（`options.rs:1765-1810,1930-1942,2722-2931`）。
+- **T-L-1 · D7「`legacy_adopted` 不退」：该判定已被 ADR-079 退役。** 逐根成败只在进程内账本，库里模型面唯一持久事实
+  是 `dbnum_watermark.model_sesno`（`model_root_ledger.rs:1-16,99-104`；ADR-079 D2 / D3）。
+- **T-L-1 · 文头「作废 ADR-067 全篇」需收窄：常驻房间模型仍在生产（D12 / D13 与 ADR-082 D3 修订）。** 本条依据是
+  审计结论（spec「Implementation Decisions」第 5 条、review §2.2），本次未逐行复核源码。
+- **T-J-8 · GitHub #71 `rooms_after` 拍点（此前无 ADR）。** `rooms_before` 开工前拍（读 `SUL_DB` 边目标）；`rooms_after`
+  在 `await_units_durable` 与房间重算之后补；「后」拍不到时连「前」一起摘（`unit_room_snapshot.rs:1-11`；
+  `batch_worker.rs:1896-1919,4463-4470,4728-4736`）。
+

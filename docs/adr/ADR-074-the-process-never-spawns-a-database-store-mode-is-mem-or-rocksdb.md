@@ -114,3 +114,12 @@ durable 却有真端口。两档之后进程内嵌那档既不持久也没有端
    （`setup_mode_triggers_on_missing_project_path_or_blank_endpoint_address`）——`rocksdb` × 空地址 = 设置模式，`mem` 不看地址。
 5. 服务端源码里不得再出现 `store_process` 模块名与 `SpawnDatastore`；`AIOS_SURREAL_EXE` 只允许出现在起库脚本与
    `src/test/fork_surreal_compat.rs`。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-F-1 / R-F-15（审计按 2026-10-27 工作树）。本节只追记，「后果」原文不改。
+
+- **T-F-2 · 后果里「两种包出厂都是 mem」已作废（已修订 → ADR-083）。** 现行默认 `rocksdb`：裁决
+  `AIOS_STORE_MODE` > `DbOption.toml` > 默认 `rocksdb`，漏设不落到 `mem`（`options.rs:1247-1258,1280-1313,1323-1327`）；
+  发布包启动脚本在未指定时回填 `rocksdb`（`scripts/New-LocalRelease.ps1:591`、`start-local-release.ps1:36`）。
+

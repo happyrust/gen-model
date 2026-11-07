@@ -186,3 +186,27 @@ Retryable 重试一次、再败按 lane 失败。两 lane 同一条。一次 WS 
   「未找到」是这道门，不是 MDB）：6,772 根全 `ready`、零冲突、零超时、水位 184/184、`finished`；`COUNTS` 四项与旧路
   烟测 `READBACK` 逐字相同；峰值 RSS 1,542 MB（只属性面 481 / 关元素缓存 822），拆项见 evidence「AMS 7997」。
 - **未做**：7999 / 1112 未量（同一道门 / 同号副本，见 evidence）。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-A-1 / R-B-15 / R-D-16 与 `review.md` §2.2（审计按 2026-10-27 工作树）。
+> 本节只追记，D5 与背景原文不改。
+
+- **T-L-1 · D5 与背景里的 `UPSERT gen_root` / `enqueue_model_watermark_write_behind` 已退役（已修订 → ADR-079），该名现在只作禁词。**
+  现行：初始化直写 `WriteMode::Initial`、不做整片删（`fast_model/model_initial_persist.rs:6-8,108`）；`TaskEnd.data` 与模型水位
+  同笔落库（D7；`dbnum_initialize.rs:334-342`、`src/data_interface/task_end.rs:78-94,270-271`）；逐根结局只在进程内账本
+  （`model_root_ledger.rs:1-16,99-104`）。
+- **GitHub #74（2026-10-27 修复，2026-10-31 追记）· 初始化里「有失败元素的根」不再是死信，按冷根口径发布幸存件（接 D8）。**
+  D8 第二档的「单根生成失败 = 死信」此前把「整根没算出来」与「根里几件没算出来」混成一档，后者整根丢掉：一只零长 SCTN 名下的 SJOI
+  让同框好杆件一并消失（ams7330 四根 → 整库 lagging），而初始化前库里没有旧行、也没有回执，丢整根只「保住」一个空快照。现行：
+  `project_slice_for_initialization`（`e3d_model_service.rs:2496-2565`）只把生产端硬错（整根没算出来）记 `failures`；有失败元素的根按
+  `incomplete_root_policy(false, false) = Publish`（与 `persist_roots_with` 对冷根的处置同一口径）发幸存件，没算出来的那几件记进
+  `InitialSliceProjection.partial`（`:1366-1371`），`report.failed += root_failed`；`dbnum_initialize::model_half_inner`（`:607-618`）把它写进该根
+  单元的 `message = "published survivors; …"`。**不进失败账、水位照盖**（与增量路的 `partial_roots` 同一口径：模型行已落库，缺的那几件在回执上
+  说得出来）。D8 的两档不加第三档：这是把第二档的范围收窄到「整根没算出来」。配套的诊断：`GET /dbnums/{dbnum}/model/roots`
+  诊断快照多 `durable_ready` / `durable_ready_total`（库级凭证 ∨ 进程账本，`handlers.rs:3363-3400`、`model_dbnum_ensure.rs:144-150`）与
+  `ready_source = process_projection`——「0 ready」是没生成过还是只是冷重启了，看这一格；落后库的逐根 durable 回读见 ADR-071 D8 追记。
+  测试：幸存件发布这半边**没有专门单测**（`project_slice_for_initialization` 要真的 e3d-model 切片；现场证据是 ams7330 的四根），回读半边的钉在
+  `model_read_route.rs`（`a_complete_durable_snapshot_falls_back_per_root_even_while_a_task_is_in_flight`，`4fa7ef4ab`）。补一条「有失败元素的冷根
+  进 `partial` 而非 `failures`」的单测记在计划 WP-I I-3（源码钉类）。
+

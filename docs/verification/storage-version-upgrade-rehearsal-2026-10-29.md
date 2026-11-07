@@ -162,7 +162,59 @@ Error: MODEL_STORAGE_VERSION_MISMATCH stored=none expected=1 source=missing:
 
 **exit 1**，端口未打开。理由：`storage_version:current` 是整库一条记录，7997 等其余 28 个
 元素库仍是旧形状；只升级 8000 不能代表整库。要让这份副本上的 rs-server 转绿，必须把
-MDB 声明的 29 个元素库全部升级完（本演练未执行——那会清空并重建全部库，见 §5）。
+主项目归属的全部设计库升级完——已于 §3.6 执行并通过。
+
+### 3.6 旧库副本全范围升级（20 库，版本记录落盘 + rs-server 转绿）
+
+**范围澄清（第 5 个真 bug，本轮修复）**：MDB `/ALL` 声明的元素库是 29 个，但其中 9 个
+（`6003, 7009, 7011, 7015, 7022, 7027, 7048, 7321, 250705`）归属外部项目，按
+`is_foreign_design_data` 本就不在本库数据域——持久层按裸 dbnum 建键，外部同号库摄取会
+撞号；`enqueue_manual_update` 也永远扫不到它们的候选文件。按 29 做全范围注定 9 个
+missing→failed。修复：`declared_dbnums` 改为 `owned_design_dbnums`（只算主项目归属），
+分母 = **20 个**：`[1112, 7324, 7326, 7327, 7329, 7330, 7331, 7332, 7333, 7334, 7350,
+7352, 7353, 7354, 7356, 7741, 7997, 7998, 7999, 8000]`。启动横幅与升级入口同一分母。
+
+副本 `ams-full3`（源自 `.surreal/ams-8009-fresh` 的丢弃副本），无 `watch_dbnums`，
+`POST /api/v1/storage-version/upgrade` 不带名单：
+
+- 回执：`full_scope=true / requested=20 / scanned=37 / enqueued=19 / merged=1`
+  （7333 并入启动自愈任务——重启时水位 `applied_sesno=0` 触发了自动重排，
+  `db-20261029-134345-000000`）。
+- 13:44 发起 → 14:07 终态（约 23 分钟）：`storage_upgrade:current` =
+  `done=[20 库全列] failed=[] full_scope=true state=done`。
+- **`storage_version:current` 落盘，直接 SQL 验证**（`ams-full3-storage-version.json`）：
+  `{ id: storage_version:current, version: 1, shape: "数据库架构 v1…", rebuild: "…" }`。
+- `/health` 终态（`ams-full3-health-final.json`）：`stored=1 / caught_up=true /
+  upgrade_required=false / upgrade.state=done`。
+- rs-server（`server_release_ip=127.0.0.1:18023`，连 18009）正常启动并监听
+  （`rs-server-full3.log`）：`数据库架构版本：stored=1 expected=1，与本进程一致` →
+  `持久层自检通过` → `server release: 127.0.0.1:18023`。
+- 逐库抽查（事后直查，`ams-full3-watermarks.json` / `-ptset-dist.json` /
+  `-ptset-fn.json`）：20 库水位全部 `applied = model = file_latest`；
+  `pe_ptset` 行分布于 6 个含管件库（7326 / 7327 / 7333 / 7997 / 7999 / 8000，
+  7333 最多 158,818 行），行带 `generator`/`sesno` 新形状；`fn::pe_ptset_of`
+  对重建行返回点集对象、对不存在的 pe 返回 `NONE`，无 THROW。
+
+**失败轮次与根因（环境，非代码）**：本次成功之前同副本连死 4 轮，全部死于宿主机
+commit 耗尽——该机 `63.1GB RAM + 23.3GB pagefile(E:) = ~86.4GB` 硬上限，而基线
+（python×36 ≈13GB + 607 进程 + 现场 aios-database 热缓存 ~20GB）日常就在 ~78GB，
+余量 ~6-8GB。撞顶后任意下一笔分配失败，Rust alloc abort = 进程即死——先后带走
+排练 SurrealDB（7333 写 model lane 时）、排练 aios（alloc 1.3MB 失败）、乃至
+**现场 8009/8022 两个服务**（12:46–12:52 风暴中同归于尽，均非本演练直接操作）。
+现场服务已恢复：surreal 8009 由看护重启（13:34），aios-database 8022 经 release 包
+`Start-AMS.ps1` 拉绿（13:40，PID 18436）。成功轮的关键不是运气，是现场 aios 冷缓存
+窗口——重启后 commit 基线从 ~78GB 掉到 ~54GB，排练栈全程 56-62GB 跑完。
+
+**顺带实锤两条既有文档行为**：
+- 升级中途重启 → 持久化进度里的 task_id 不在注册表 → 落成 `failed`（13:43 重启时
+  亲眼看到 `存储架构升级结束但未全部成功…不在任务注册表`）。
+- 启动自愈：未初始化库（`applied_sesno=0`）在启动时被自动重排——7333 正是以此身份
+  并入第 5 轮并成功。
+
+另：早先"排练 SurrealDB 预留 32.8GB 块缓存"的判断**有误**——RocksDB 块缓存按需提交，
+重启后的现场 surreal Private 仅 ~0.1GB；真正的常驻大户是现场 aios-database 的
+模型/输入缓存（~20GB）。`SURREAL_ROCKSDB_BLOCK_CACHE_SIZE=1GB` 仍建议保留，
+它把容量上限压住了，但死因从来不是单进程预留，而是系统总量贴顶。
 
 ## 4. 演练中发现并修复
 
@@ -185,6 +237,13 @@ MDB 声明的 29 个元素库全部升级完（本演练未执行——那会清
    冒充成新版。改为 `covers_whole_database(requested, declared)`：分母是 **MDB 声明的
    全部设计库**，监听子集永远不等于整库。§3.5 的旧库实测就是这条判据：升级 8000 成功，
    但 `full_scope=false`、版本记录不写、rs-server 继续拒绝。
+5. **MDB 声明名单 ≠ 本库数据域（29 → 20）。**
+   MDB `/ALL` 声明 29 个元素库，其中 9 个归属外部项目、在本持久库没有候选文件（外部
+   同号库本就被 `is_foreign_design_data` 排除），按 29 做全范围必然缺 9 个→failed。
+   `declared_dbnums` 已改为按主项目归属过滤（`owned_design_dbnums`），启动横幅与升级
+   入口一致列 20 个。首轮 29 请求的失败形态本身就是证据：`enqueued=20` 且 9 个外部
+   库记 missing→failed、版本记录不写（`ams-full-health-29-failed.json` /
+   `ams-full-sql-29-failed.json`）。
 
 修复后回归：
 
@@ -193,16 +252,20 @@ MDB 声明的 29 个元素库全部升级完（本演练未执行——那会清
 
 ## 5. 未覆盖
 
-- **未对现场库执行升级**。现场已是 `version=1`，真升级需要清空 29 个设计库，属破坏性操作。
-- **旧库副本只升级了 8000（§3.5），没有升级全部 29 个元素库**。因此该副本上
-  `storage_version:current` 仍为空、rs-server 仍拒绝启动；这是部分范围的正确结果，
-  不是回归。全范围升级仍待授权。
+- **未对现场库执行升级**。现场已是 `version=1`，真升级需要清空全部设计库，属破坏性操作。
+- ~~旧库副本没有升级全部设计库~~ → **§3.6 已完成**：20 个主项目归属设计库全量升级、
+  `storage_version:current` 落盘、rs-server 转绿（MDB 声明 29，其中 9 个外部项目库
+  不在本库数据域，见 §3.6 范围澄清）。
 - 7352 没有管件，第一轮的 `pe_ptset` 有行场景只由合成行验证。第二轮旧库副本的 8000
-  有 2,673 行真实点集（7997 的旧行也在），`fn::pe_ptset_of` 抽样返回对象；现场 29 库
-  重建后的逐库抽样仍未做。
-- 升级中途重启进程的记账行为未演练；`docs/specs/web-service-api.md` §4.5.1D 已写明
-  会落成 `failed`、需要重跑。
+  有 2,673 行真实点集（7997 的旧行也在），`fn::pe_ptset_of` 抽样返回对象；§3.6 全量
+  重建后的逐库水位与点集抽样已补（6 库有行、函数两态正常）。
+- ~~升级中途重启进程的记账行为未演练~~ → §3.6 中实测发生：重启后旧 task_id 落成
+  `failed`，与 `docs/specs/web-service-api.md` §4.5.1D 一致；另观察到启动自愈把
+  未初始化库自动重排。
 - 未做面板视觉检查；只核对了面板读取的 JSON 路径（顶层 `storage_version`）与脚本语法。
+- **宿主机 commit 余量是稳定运行的前提**：本机 `63.1GB RAM + ~23GB pagefile ≈ 86.4GB`
+  上限，基线日常 ~78GB（含现场 aios ~20GB 热缓存）；在此之上跑全量重建是贴顶赌博，
+  连续 4 轮被随机带走（含现场服务）。生产/演练前先确认水位或扩 pagefile。
 
 ## 6. 复现步骤
 
@@ -277,3 +340,19 @@ curl -X POST -H "content-type: application/json" `
 | `05-health-partial.json` | 升级后 `/health`：`caught_up=false`、`upgrade.state=done` |
 | `06-sql-partial.json` | 版本记录为空、进度记录、两库 `pe_ptset` 计数与 `fn::pe_ptset_of` 结果 |
 | `07-rs-server-refused.log` | 部分升级后 rs-server exit 1（`stored=none`） |
+| `ams-full-health-29-failed.json` / `ams-full-sql-29-failed.json` | 按 29 请求的失败形态：9 个外部项目库 missing→failed、版本记录不写 |
+
+`docs/verification/artifacts/storage-version-upgrade-2026-10-29/ams-full3/`（§3.6 全范围成功轮）：
+
+| 文件 | 内容 |
+|---|---|
+| `ams-full3-upgrade-start4.json` | 成功轮回执：`requested=20`、`full_scope=true`、`enqueued=19` + `merged=1`（7333 并入启动自愈任务） |
+| `ams-full3-progress4.log` | `/health` 轮询全程：0→20/20，commit 56-62GB |
+| `ams-full3-upgrade-final.json` | `storage_upgrade:current` 终态：`done=[20 库]`、`failed=[]`、`full_scope=true` |
+| `ams-full3-storage-version.json` | **`storage_version:current` 直查：`version=1`** |
+| `ams-full3-health-final.json` | 终态 `/health`：`stored=1`、`caught_up=true`、`upgrade_required=false`、`state=done` |
+| `rs-server-full3.log` | rs-server 18023 正常启动：`stored=1 expected=1` → `持久层自检通过` |
+| `ams-full3-surreal3.log` | 成功轮 SurrealDB 启动日志（`SURREAL_ROCKSDB_BLOCK_CACHE_SIZE=1GB`） |
+| `ams-full3-watermarks.json` | 20 库 `dbnum_watermark`：全部 `applied = model = file_latest` |
+| `ams-full3-ptset-dist.json` | `pe_ptset` 逐库行数分布（6 个含管件库，7333 达 158,818 行） |
+| `ams-full3-ptset-fn.json` | `fn::pe_ptset_of` 抽样：有行返回对象、无行返回 `NONE` |

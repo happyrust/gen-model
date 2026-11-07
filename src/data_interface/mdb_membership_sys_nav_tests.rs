@@ -50,7 +50,11 @@ fn mdb_lookup_by_navigation_agrees_with_the_named_scan() {
     };
     let sys_db = SysDb::open(sys).expect("open AMS SYS");
     let by_navigation = sys_db.mdbs_named("/ALL").expect("mdbs_named");
-    assert_eq!(by_navigation.len(), 1, "AMS SYS 里 /ALL 恰好一个：{by_navigation:?}");
+    assert_eq!(
+        by_navigation.len(),
+        1,
+        "AMS SYS 里 /ALL 恰好一个：{by_navigation:?}"
+    );
     let by_scan = sys_db.named("/ALL").expect("named");
     assert_eq!(by_navigation, by_scan);
     assert!(

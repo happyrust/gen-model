@@ -177,3 +177,25 @@ LET $slice_keys = array::union($slice_model_keys, $slice_legacy_keys);
 - `model_sesno` 仍兼两份工（护栏 + 回退水位，2026-09-14 计划）。哪天摘它，D1 的判据「`model_sesno = NONE` 且带指针」得换成新的归属列
   重新表述，不能只删那一列。
 - `tubi_relate` 没有老行这一路（D7）。
+
+## 实现状态（2026-10-27 追记）
+
+> 依据：`docs/specs/incr-gen-audit/spec.md` R-D-17 / R-D-23（审计按 2026-10-27 工作树，W2 / W3 本轮未提交改动）。本节只追记。
+
+- **T-J-8 · `pe_ptset` 随发布事务落地、无 backfill（此前无 ADR）。** P 点集行在同一发布事务里随根落地：增量 prelude 先
+  `DELETE (SELECT VALUE id FROM pe_ptset WHERE root = pe:⟨r⟩)` 再 UPSERT；初始化 `render_root` 直接追加；整库 wipe / 回滚随
+  `RANGE_TABLES` 与 `sesno > watermark` 删除；不做异步 backfill，旧库靠重新生成补齐。代码：`fast_model/ptset_rows.rs`、
+  `model_initial_persist.rs`、`fast_delete.rs`、`resource/surreal/gy_common.surql`（`pe_ptset` / `fn::pe_ptset_of` / `fn::bran_comp_len`）；
+  `RANGE_TABLES` 含 `pe_ptset` 见 `data_interface/fast_delete.rs:15-44`。
+- **T-D-6（2026-10-28 修复，2026-10-31 追记）· 初始化撞上带几何指针的老行——「仍开着」第 1 条收掉：验了，是红的；修法是入口先清模型面，D7 不改。**
+  复现（aux `docs/specs/incr-gen-audit-aux/t-d-6-initialize-vs-legacy-pointer-rows.md`）：本库 `pe` 为 0、模型面却留着一行带 `aabb` / `world_trans`
+  指针、没有 `model_sesno` 的 legacy `inst_relate`；`Initial` 直写是 `INSERT IGNORE`，同 id 的旧行赢，新盒落不下去。入口只数 `pe`，看不见它们。
+  现行：`initialize_dbnum_baseline` 在 `baseline_needs_full_parse` 且 `model == ModelHalf::Generate` 时先调 `clear_model_face_before_initial(dbnum)`
+  （`manual_update.rs:3513-3523`；`Skip` 不写模型面、不清）；`dbnum_initialize::clear_model_face_before_initial_on`（`:746-764`）先按 `dbnum` 数
+  `inst_relate` / `tubi_relate`（`model_face_rows_on`，`:715-737`，legacy 行同样带 `dbnum`），有行就走整库模型清理的库那一半
+  `fast_delete::wipe_dbnum_model_face_on`（Ref0 区间 + 房间两边 + 模型水位归零），清完再数一次，`ensure!(left == 0)` 否则拒绝开工并点名圈到的 Ref0
+  ——不把直写压在旧行上。`WriteMode::Initial` 仍不做整片删、不读 `slice_sources_on`（D7 / ADR-077 D4 原样）；「没有旧行」从假设变成由入口保证
+  （`model_initial_persist.rs:7-8` 模块文档改口）。测试：`the_initial_write_replaces_a_legacy_pointer_row_once_the_entry_clears_the_model_face`
+  （`model_initial_persist.rs:528`，内存 SurrealDB：不清则 legacy 行赢、清后同一笔落得进去）、源码钉 `the_baseline_clears_the_model_face_before_an_initial_write`
+  （`manual_update.rs:6156`：全量解析分支 → 只有 `Generate` 才清 → 清 → 直写的顺序）。按需生成先落下的行也在这一清之列：它们随后由初始化整库重写。
+

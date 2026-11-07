@@ -94,6 +94,10 @@ pub struct PhaseBlocker {
     /// ——指向一个不存在的记录比不给更费人时间。
     pub reason_ref: Option<String>,
     pub message: String,
+    /// 只挡 `dbnum` 这一个库（数据批次失败 / park 这类肇事者明确的阻断）；false = 挡整相（扫描期阻断）。
+    /// 不进 `/health`：`blocked_by` 的形状不变。
+    #[serde(skip)]
+    pub dbnum_scoped: bool,
 }
 
 impl PhaseBlocker {
@@ -105,6 +109,7 @@ impl PhaseBlocker {
             task_id: None,
             reason_ref: None,
             message: message.into(),
+            dbnum_scoped: false,
         }
     }
 
@@ -127,6 +132,23 @@ impl PhaseBlocker {
     pub fn with_failure_record(mut self, task_id: impl Into<String>) -> Self {
         self.reason_ref = Some(task_id.into());
         self
+    }
+
+    /// 肇事者明确的阻断（数据批次失败 / park）只挡它自己那个库，同相的兄弟库照常放行。
+    /// 扫描期阻断不走这里：它们认不准是谁的错，仍挡整相。
+    pub fn scoped_to(mut self, dbnum: u32) -> Self {
+        self.dbnum = Some(dbnum);
+        self.dbnum_scoped = true;
+        self
+    }
+
+    pub fn blocks_whole_phase(&self) -> bool {
+        !self.dbnum_scoped
+    }
+
+    /// `dbnum = None`（不指名库的问法）时只看相，只挡某一个库的阻断也算挡。
+    pub fn blocks(&self, phase: DataPhase, dbnum: Option<u32>) -> bool {
+        self.phase == phase && (!self.dbnum_scoped || dbnum.is_none() || self.dbnum == dbnum)
     }
 
     /// 兼容旧消费者的那一行字符串。形状不许变：`/health` 的 `blockers` 与
@@ -449,7 +471,7 @@ impl InitializationCoordinator {
             state
                 .blockers
                 .iter()
-                .any(|blocker| blocker.phase == current)
+                .any(|blocker| blocker.phase == current && blocker.blocks_whole_phase())
         });
         state.status = if current_is_blocked {
             InitializationStatus::Blocked
@@ -471,6 +493,11 @@ impl InitializationCoordinator {
     }
 
     pub fn allows(&self, phase: DataPhase, epoch_id: u64) -> bool {
+        self.allows_dbnum(phase, epoch_id, None)
+    }
+
+    /// 调度按行问：给了 `dbnum`，只挡它自己的阻断（[`PhaseBlocker::scoped_to`]）不再连坐同相兄弟库。
+    pub fn allows_dbnum(&self, phase: DataPhase, epoch_id: u64, dbnum: Option<u32>) -> bool {
         // Legacy/direct test callers that do not participate in an installed
         // manifest remain executable; production discovery always uses a
         // positive epoch.
@@ -482,7 +509,10 @@ impl InitializationCoordinator {
             && state.status == InitializationStatus::Running
             && state.current_phase == Some(phase)
             && !state.model_in_flight
-            && !state.blockers.iter().any(|blocker| blocker.phase == phase)
+            && !state
+                .blockers
+                .iter()
+                .any(|blocker| blocker.blocks(phase, dbnum))
     }
 
     /// Recompute the active barrier from the queue after a row settles.  The
@@ -529,7 +559,7 @@ impl InitializationCoordinator {
             state
                 .blockers
                 .iter()
-                .any(|blocker| blocker.phase == current)
+                .any(|blocker| blocker.phase == current && blocker.blocks_whole_phase())
         }) {
             state.status = InitializationStatus::Blocked;
             state.data_ready = false;
@@ -549,8 +579,12 @@ impl InitializationCoordinator {
             return;
         }
         let phase = blocker.phase;
-        state.status = InitializationStatus::Blocked;
-        state.current_phase = Some(phase);
+        if blocker.blocks_whole_phase() {
+            state.status = InitializationStatus::Blocked;
+            state.current_phase = Some(phase);
+        } else {
+            state.current_phase = state.current_phase.into_iter().chain([phase]).min();
+        }
         state.data_ready = false;
         state.model_ready = false;
         state.phases.entry(phase).or_default().failed += 1;
@@ -627,7 +661,7 @@ impl InitializationCoordinator {
             state
                 .blockers
                 .iter()
-                .any(|blocker| blocker.phase == current)
+                .any(|blocker| blocker.phase == current && blocker.blocks_whole_phase())
         });
         state.status = if current_is_blocked {
             InitializationStatus::Blocked
@@ -1003,6 +1037,7 @@ impl CatalogueBlocker {
             task_id: None,
             reason_ref: None,
             message: self.message,
+            dbnum_scoped: false,
         }
     }
 }
@@ -1795,5 +1830,51 @@ mod tests {
         let blocker = CatalogueBlocker::new("目录清单不可读").into_phase(DataPhase::Meta);
         assert_eq!(blocker.task_id, None);
         assert_eq!(blocker.reason_ref, None);
+    }
+
+    /// T-O-1：一库数据批次失败 / park 只挡它自己，同相兄弟库照常出队；扫描期阻断仍挡整相。
+    #[test]
+    fn a_parked_dbnum_does_not_block_its_siblings_in_the_same_phase() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(
+            epoch,
+            [DataPhase::Design],
+            false,
+            [PhaseBlocker::new(
+                DataPhase::Design,
+                "dbnum=8000 数据批次已失败，已暂停自动重试",
+            )
+            .scoped_to(8000)],
+        );
+        assert_eq!(coordinator.snapshot().status, "running");
+        assert!(coordinator.allows_dbnum(DataPhase::Design, epoch, Some(7997)));
+        assert!(!coordinator.allows_dbnum(DataPhase::Design, epoch, Some(8000)));
+        assert!(
+            !coordinator.allows(DataPhase::Design, epoch),
+            "不指名库的问法仍按整相"
+        );
+        assert!(!coordinator.data_ready(), "park 未解，数据面不算就绪");
+
+        coordinator.mark_failed(
+            epoch,
+            PhaseBlocker::new(DataPhase::Design, "dbnum=7999 数据批次未完整收口").scoped_to(7999),
+        );
+        assert_eq!(coordinator.snapshot().status, "running");
+        assert!(coordinator.allows_dbnum(DataPhase::Design, epoch, Some(7997)));
+        assert!(!coordinator.allows_dbnum(DataPhase::Design, epoch, Some(7999)));
+
+        let scan_time = self::coordinator();
+        let epoch = scan_time.begin_discovery();
+        scan_time.install_manifest(
+            epoch,
+            [DataPhase::Design],
+            false,
+            [PhaseBlocker::new(DataPhase::Design, "dbnum=8000 同号多文件").with_dbnum(8000)],
+        );
+        assert!(
+            !scan_time.allows_dbnum(DataPhase::Design, epoch, Some(7997)),
+            "扫描期阻断仍挡整相"
+        );
     }
 }

@@ -1,9 +1,12 @@
 //! DbnumState — authoritative per-`dbnum` incremental state (see ADR-001).
 //!
 //! One row per `dbnum`, physically the existing `dbnum_watermark:{dbnum}` record,
-//! extended with file identity + scan-observation fields. `applied_sesno` is the
-//! ONLY authoritative watermark (advanced after a data batch fully persists);
-//! `file_latest_sesno` is a scan observation and must never substitute for it.
+//! extended with file identity + scan-observation fields. The row carries **two**
+//! watermarks with different write points (ADR-071 D4, ADR-076 D5): `applied_sesno`
+//! is written by the data window's tail transaction, `model_sesno` by the task-end
+//! commit (only when every root generated and serialized successfully and
+//! `T <= applied_sesno`). Neither may be substituted for the other, and
+//! `file_latest_sesno` is a scan observation that must never substitute for either.
 //!
 //! Read semantics (ADR-001 §兼容迁移):
 //! 1. Prefer an already-established `applied_sesno`.
@@ -548,9 +551,10 @@ fn model_time_of(row: &StateRow) -> Option<String> {
 
 /// A file-identity anomaly for one `dbnum` (see spec §文件异常).
 ///
-/// [`check_file_against_state`] decides `Rollback` / `PathMigrated` from a single
-/// observed file vs the stored state; `Duplicate` / `Missing` are constructed by
-/// the project scanner which aggregates all files per `dbnum`.
+/// [`check_file_against_state`] decides `NameChanged` / `Rollback` / `TypeChanged` /
+/// `PathMigrated` from a single observed file vs the stored state; `Duplicate` /
+/// `Missing` are constructed by the project scanner which aggregates all files per
+/// `dbnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileAnomaly {
@@ -580,9 +584,15 @@ pub enum FileAnomaly {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         applied_sesno_time: Option<String>,
     },
-    /// Same `dbnum` and `db_type`, path changed, watermark did not regress:
-    /// a unique file was moved and the stored path may be auto-updated.
+    /// Same `dbnum` and `db_type`, path changed, watermark did not regress, and the
+    /// file kept its identity: only the directory changed, or a master moved to its own
+    /// extract leaf (`ams7355` → `ams7355_0001`, ADR-028). The stored path may be
+    /// auto-updated.
     PathMigrated { old_path: String, new_path: String },
+    /// 同一个 dbnum，现场文件名却不是登记的那一个（不是只换了目录，也不是母库换成它自己
+    /// 的 extract）。库的身份是 dbnum + 约定文件名，换了名就是另一份文件：跳过它——不入队、
+    /// 不清库、不改登记，连观察值也不写，等人处理。
+    NameChanged { old_path: String, new_path: String },
     /// Same dbnum was observed with a different database type. Never overwrite
     /// the stored identity automatically.
     TypeChanged {
@@ -624,6 +634,10 @@ impl FileAnomaly {
     pub fn block_reason(&self) -> Option<String> {
         match self {
             FileAnomaly::PathMigrated { .. } => None,
+            FileAnomaly::NameChanged { old_path, new_path } => Some(format!(
+                "文件名与登记不符（登记 {old_path} → 现场 {new_path}），已跳过该文件：库的身份是 \
+                 dbnum + 约定文件名，只有换目录、或母库换成它自己的 extract 才按迁移处理"
+            )),
             FileAnomaly::Rollback {
                 file_latest_sesno,
                 applied_sesno,
@@ -658,13 +672,22 @@ impl FileAnomaly {
         matches!(self, FileAnomaly::ForeignProject { .. })
     }
 
+    /// 观察到的根本不是登记的那份文件：归属不符，或文件名换了。这时连观察值都不许写——
+    /// 写进去的会话号、长度属于另一份文件，面板上看到的就是一个不存在的文件状态。
+    pub fn observed_another_file(&self) -> bool {
+        matches!(
+            self,
+            FileAnomaly::ForeignProject { .. } | FileAnomaly::NameChanged { .. }
+        )
+    }
+
     /// 哪些异常转「整库重建」（ADR-021）——**只有回退**。
     ///
     /// 回退的语义是清楚的：登记身份没变、文件本体被还原到更旧的会话，磁盘上
     /// 已经没有被丢弃的那段历史，重建动作（整库清空 + 按首次导入重新解析当前
     /// 文件）有唯一正确答案，因此默认自动执行、不阻断等人。其余阻断类异常动的
     /// 是「这个 dbnum 对应哪个文件」的根基（类型变更 / 同号多文件 / 归属不符 /
-    /// 文件缺失），自动清库等于替人拍板挑文件，照旧阻断；`PathMigrated` 本来
+    /// 文件缺失 / 文件名不符），自动清库等于替人拍板挑文件，照旧阻断；`PathMigrated` 本来
     /// 就不阻断，轮不到这里。
     ///
     /// 清库动作只发生在数据批次 worker 的执行体（扫描路径只分类 + 入队重建
@@ -790,7 +813,10 @@ fn render_legacy_applied_migration(protected: &[u32]) -> String {
 /// Classify one observed file for one `dbnum` against its stored state.
 ///
 /// Returns `Some(anomaly)` when there is something to report/handle, `None` when
-/// the file looks normal. Rollback takes precedence over a path change.
+/// the file looks normal. A file that is not the registered one (see
+/// `keeps_file_identity`) is `NameChanged` before anything else: its session numbers
+/// and type say nothing about the registered file. Otherwise rollback takes precedence
+/// over a path change.
 pub fn check_file_against_state(
     stored_db_type: Option<&str>,
     stored_path: Option<&str>,
@@ -799,6 +825,15 @@ pub fn check_file_against_state(
     observed_path: &str,
     observed_file_latest_sesno: i32,
 ) -> Option<FileAnomaly> {
+    if let Some(stored_path) = stored_path
+        && stored_path != observed_path
+        && !keeps_file_identity(stored_path, observed_path)
+    {
+        return Some(FileAnomaly::NameChanged {
+            old_path: stored_path.to_string(),
+            new_path: observed_path.to_string(),
+        });
+    }
     if observed_file_latest_sesno < applied_sesno {
         return Some(FileAnomaly::Rollback {
             file_latest_sesno: observed_file_latest_sesno,
@@ -823,6 +858,40 @@ pub fn check_file_against_state(
         }
     }
     None
+}
+
+/// 换了路径的文件还是不是登记的那个库。库的身份是 dbnum + 约定文件名：
+///
+/// - 文件名相同（不分大小写），只是目录变了——是；
+/// - 母库换成它自己的 extract（同前缀、同库号，`ams7355` → `ams7355_0001`，ADR-028
+///   选序号最高的叶子当工作文件）——是；
+/// - 其余（换前缀、换库号、`_0001` → `_0002`、extract 退回母库）——不是。
+///
+/// 两种路径分隔符都认：登记路径是 Windows 写法，判据在 Linux 构建上也要跑。
+fn keeps_file_identity(stored_path: &str, observed_path: &str) -> bool {
+    let file_name = |path: &str| {
+        path.rsplit(|c: char| c == '/' || c == '\\')
+            .next()
+            .unwrap_or(path)
+            .to_ascii_lowercase()
+    };
+    let (stored, observed) = (file_name(stored_path), file_name(observed_path));
+    if stored == observed {
+        return true;
+    }
+    use crate::data_interface::extract_family::parse_extract_file_name;
+    match (
+        parse_extract_file_name(&stored),
+        parse_extract_file_name(&observed),
+    ) {
+        (Some(master), Some(leaf)) => {
+            master.extract.is_none()
+                && leaf.extract.is_some()
+                && master.prefix == leaf.prefix
+                && master.dbnum == leaf.dbnum
+        }
+        _ => false,
+    }
 }
 
 /// Escape a string for safe embedding inside a single-quoted SurrealQL literal.
@@ -1638,20 +1707,28 @@ impl DbnumState {
         obs: &FileObservation,
         verdict: &ScanVerdict,
     ) -> anyhow::Result<()> {
-        // 归属不符时**一个字都不写**。阻断路径本来也只写观察值，但那三个字段
-        // （file_size / file_latest_sesno / scanned_at）恰恰就是被写脏的那几个：
-        // 行还挂着 amssys 的身份，file_latest_sesno 却成了 zdjsys 的 52，
+        // 归属不符、或文件名换了（观察到的是另一份文件）时**一个字都不写**。阻断路径本来
+        // 也只写观察值，但那三个字段（file_size / file_latest_sesno / scanned_at）恰恰就是
+        // 被写脏的那几个：行还挂着 amssys 的身份，file_latest_sesno 却成了 zdjsys 的 52，
         // 面板上看到的是一个不存在的文件状态。
-        if verdict
+        if let Some(anomaly) = verdict
             .anomaly
             .as_ref()
-            .is_some_and(FileAnomaly::is_foreign_project)
+            .filter(|anomaly| anomaly.observed_another_file())
         {
-            log::warn!(
-                "dbnum={} 的登记行不归项目 {} 所有，跳过落库（连观察值也不写）",
-                obs.dbnum,
-                obs.project
-            );
+            if anomaly.is_foreign_project() {
+                log::warn!(
+                    "dbnum={} 的登记行不归项目 {} 所有，跳过落库（连观察值也不写）",
+                    obs.dbnum,
+                    obs.project
+                );
+            } else {
+                log::warn!(
+                    "dbnum={} 现场文件 {} 不是登记的那份文件（文件名不符），跳过落库（连观察值也不写）",
+                    obs.dbnum,
+                    obs.file_path
+                );
+            }
             return Ok(());
         }
         let _write_guard = DBNUM_STATE_WRITE_GATE.read().await;
@@ -2272,6 +2349,10 @@ mod tests {
                 old_path: "/old".into(),
                 new_path: "/new".into(),
             },
+            FileAnomaly::NameChanged {
+                old_path: "/p/ams8000_0001".into(),
+                new_path: "/p/zdj8000_0001".into(),
+            },
             FileAnomaly::TypeChanged {
                 stored_db_type: "DESI".into(),
                 observed_db_type: "CATA".into(),
@@ -2293,6 +2374,7 @@ mod tests {
                 FileAnomaly::PathMigrated { .. } => false,
                 // 其余几种都动了「这个 dbnum 对应哪个文件」这件事的根基。
                 FileAnomaly::Rollback { .. }
+                | FileAnomaly::NameChanged { .. }
                 | FileAnomaly::TypeChanged { .. }
                 | FileAnomaly::Duplicate { .. }
                 | FileAnomaly::Missing { .. }
@@ -2333,11 +2415,16 @@ mod tests {
                 stored_project: "AMS".into(),
                 observed_project: "ZDJ".into(),
             },
+            FileAnomaly::NameChanged {
+                old_path: "/p/ams8000_0001".into(),
+                new_path: "/p/ams8000_0002".into(),
+            },
         ];
         for anomaly in &cases {
             let expected = match anomaly {
                 FileAnomaly::Rollback { .. } => true,
                 FileAnomaly::PathMigrated { .. }
+                | FileAnomaly::NameChanged { .. }
                 | FileAnomaly::TypeChanged { .. }
                 | FileAnomaly::Duplicate { .. }
                 | FileAnomaly::Missing { .. }
@@ -2401,6 +2488,54 @@ mod tests {
                 old_path: "/old/path".to_string(),
                 new_path: "/new/path".to_string(),
             })
+        );
+    }
+
+    /// 身份是 dbnum + 约定文件名：只换目录、或母库换成它自己的 extract 才是迁移；文件名
+    /// 换了就是另一份文件，先于回退判 `NameChanged`——拿另一份文件的会话号判回退，会把一份
+    /// 不相干的文件清库重解析。
+    #[test]
+    fn a_renamed_file_is_another_file_not_a_migration() {
+        let check = |stored: &str, observed: &str, sesno: i32| {
+            check_file_against_state(Some("DESI"), Some(stored), 120, "DESI", observed, sesno)
+        };
+        let name_changed = |stored: &str, observed: &str| {
+            Some(FileAnomaly::NameChanged {
+                old_path: stored.to_string(),
+                new_path: observed.to_string(),
+            })
+        };
+
+        // 只换目录（文件名大小写不同也算同名）：迁移。
+        for (stored, observed) in [
+            (r"D:\ams000\AMS8000_0001", r"E:\moved\ams000\ams8000_0001"),
+            ("/p/ams000/ams8000_0001", "/q/ams000/ams8000_0001"),
+            // 母库 → 它自己的 extract（ADR-028）。
+            (r"D:\ams000\ams7355", r"D:\ams000\ams7355_0001"),
+        ] {
+            assert!(
+                matches!(
+                    check(stored, observed, 130),
+                    Some(FileAnomaly::PathMigrated { .. })
+                ),
+                "{stored} → {observed} 应是迁移"
+            );
+        }
+
+        // 换前缀、换序号、extract 退回母库、换库号、换系统库前缀：都是另一份文件。
+        for (stored, observed) in [
+            (r"D:\ams000\ams8000_0001", r"D:\ams000\zdj8000_0001"),
+            (r"D:\ams000\ams8000_0001", r"D:\ams000\ams8000_0002"),
+            (r"D:\ams000\ams7355_0001", r"D:\ams000\ams7355"),
+            (r"D:\ams000\ams8000_0001", r"D:\ams000\ams8001_0001"),
+            (r"D:\ams000\amssys", r"D:\ams000\zdjsys"),
+        ] {
+            assert_eq!(check(stored, observed, 130), name_changed(stored, observed));
+        }
+        // 先于回退：另一份文件的会话号再小，也不许转成整库重建。
+        assert_eq!(
+            check(r"D:\ams000\ams8000_0001", r"D:\ams000\zdj8000_0001", 80),
+            name_changed(r"D:\ams000\ams8000_0001", r"D:\ams000\zdj8000_0001")
         );
     }
 
@@ -2682,6 +2817,10 @@ mod tests {
             },
             FileAnomaly::Missing {
                 path: "/gone".into(),
+            },
+            FileAnomaly::NameChanged {
+                old_path: "/p/ams8000_0001".into(),
+                new_path: "/p/zdj8000_0001".into(),
             },
         ];
         for anomaly in &cases {

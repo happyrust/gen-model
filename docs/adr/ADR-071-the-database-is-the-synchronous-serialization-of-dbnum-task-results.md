@@ -124,6 +124,14 @@ durable ACK（`model_write_behind::await_roots_durable`，阶段 `durable_pendin
 ADR-064 D7 的两档不变：已初始化的库以 rocksdb 查询接口为准，未初始化 / 任务在飞的库走 API 内存投影。判据换成
 `task_registry` 在飞 + 三水位相等。
 
+> **追记 2026-10-27（GitHub #74）：「模型落后」这一档改为按根回读。** D8 把 `model_sesno < applied_sesno` 整库切到内存投影，
+> 理由是「投影是库的超集」。两种形态下这句话不成立：冷重启后投影是空的（启动不再整表读回）；初始化直写不留投影
+> （ADR-077 D5）。ams7330 四根 failed → 整库 lagging → `/model/records` 对已写好的 360 根也回 0 条。现在路由结论仍是
+> `Memory`，但 `/model/records` 对投影里没有任何回执的根改读库里 S 时刻那份（`ModelReadRoute::allows_durable_fallback`，
+> 只对 `ModelLagging` 为真；回执 `source = model-memory+rocksdb-fallback`、`durable_fallback_roots` 点名）。还在赶的根下一窗
+> 落地后有了回执就自然换成投影那份。其它 memory 理由不回读：任务在飞时行可能写到一半（D1 单写者直写），读透 /
+> 基线未落 / 水位缺席或倒挂时库行不可信。
+
 ### D9　退役清单一次到位
 
 退：`model_update_pending.rs` 的 pending 表 CRUD / drain（`drain_non_regen_report` / `drain_post_regen_aabb_report` /

@@ -53,8 +53,9 @@
 |---|---|---|
 | `DB_Attribute::dchc()` | `0x58cf550` | `this+8` 未加载则经 vtbl+20 懒加载，返回 `this+92`；**core.dll 内零调用方**（导出给外面用） |
 | `ATAINT(attr, fieldHash, &out, &err)` | `0x58de220` | `DB_Attribute::findAttribute` + `DB_Attribute::getField(attr, fieldHash)`；属性不存在 → 错误 53 |
-| `DB_Element::hasElementChangedBetween` | `0x593d6d0` | `NOUN_TUBI` 只问 `ATT_POS / ATT_ORI / ATT_ITLE / ATT_SPRE` 四个；其它 noun 走 `sub_5AAD8E0`（dab 记录级「任一属性变」） |
-| `DB_RawChanges::createListBetweenSessions` | `0x59834b0` | `switchToOldSession` → `DB_IndexTableCompare` → `iterate`（`0x5983c30`：按 `modified / inserted / 其余=deleted` 分三个 set）→ `getModifiedTypesAcrossSessions`。**只有索引级，没有任何属性判据** |
+| `DB_Element::hasElementChangedBetween` | `0x593d6d0` | `NOUN_TUBI` 只问 `ATT_POS / ATT_ORI / ATT_ITLE / ATT_SPRE` 四个；其它 noun 走 `sub_5AAD8E0`（dab 记录级「任一属性变」）。2026-11-04 复核的调用方：`attributesChangedBetween`（`0x5928100`）、`rulesChangedBetween`、`DB_Compare::scanNew`、带元素名单的 `createListBetweenSessions`（`0x59833a0`）。`DB_Compare::checkEle` 不调用它 |
+| `DB_RawChanges::createListBetweenSessions` | `0x59834b0` | `(DB*, 四个会话号)`。`switchToOldSession` → `DB_IndexTableCompare` → `iterate`（`0x5983c30`：按 `modified / inserted / 其余=deleted` 分三个 set）→ `getModifiedTypesAcrossSessions`。**只有索引级，没有任何属性判据**。`DB_DB::createGetworkEvents`（`0x58faef0`）调用的是这一重载 |
+| `DB_RawChanges::createListBetweenSessions` | `0x59833a0` | `(dbnum, vector<DB_Element>, 四个会话号)`。对名单里每个元素调用 `hasElementChangedBetween`，为真才分创建 / 删除 / 修改。调用方是 `DBSaveWorkAllowed`、`DBFlushAllowed`、`PostSaveworkFailedAction`、`DB_DB::quitWork`，不是 GETWORK |
 | `DB_DBPlugger::PostLocalChanges` | `0x591b5f0` | 调用方：`DB_DB::quitWork`（`0x590f5bc`）、`DB_MDB::quitWork`（`0x59f872f`）、`DB_Undo::nextMark / prevMark`（`0x59fb5a2` / `0x59fb7af`）、`sub_5A42C80`（`0x5a4329a`，同函数还调 `Pre/PostDBFileChanges`） |
 | `ATT_CACHID` | `0x641d9a4` | core.dll 内唯一 xref 是初始化那一下写（`0x5667afa`，`sub_5667A70`）；**零次读** |
 | `nounlib/LPRMTV` | `0x561ce28` | `ATNLOG(noun, 659518 = PRMF)`；不是 primitive 且 noun ≠ `WORL` 时，owner 是 `TMPL` 且 noun ∉ {`DDSE` `DPSE` `PORS` `LNKS`} 也算 primitive |
@@ -221,10 +222,11 @@ else (cls 1 / 2):                     （不动几何）
 
 ### 4.3 GETWORK 路：任意记录重写 → 顶层件整件重建
 
-`DB_RawChanges::createListBetweenSessions`（`0x59834b0`）只有 `DB_IndexTableCompare`：记录在会话区间里被重写就是「修改」，
-没有 `checkEle`、没有 `hasAttributeChangedBetween`；`sub_1052F2E0` 过 gb 门后 `FNDTOP` 折到顶层件，`EVALAT(top, REDRAW)` 类别恒 4，
+GETWORK 走 `DB_DB::createGetworkEvents`（`0x58faef0`），它调用的是 `createListBetweenSessions` 的 `(DB*, 四个会话号)` 重载（`0x59834b0`）。这一重载只有 `DB_IndexTableCompare`：记录在会话区间里被重写就是「修改」，
+没有 `checkEle`、没有 `hasElementChangedBetween`；`sub_1052F2E0` 过 gb 门后 `FNDTOP` 折到顶层件，`EVALAT(top, REDRAW)` 类别恒 4，
 `UPGRPH` 走 `top == ref` 分支 → `REPELE` 整件重建。**改 `NAME`、改 `DESC`、甚至内容一字未变只是被重写，顶层件都整件重画。**
-唯一属性门在 `hasElementChangedBetween`（TUBI 四属性），但那是 `DB_Compare::checkEle` 用的，`DB_RawChanges` 这条路根本不调它。
+
+`hasElementChangedBetween`（TUBI 四属性）不在这个重载里。它的调用方是 `attributesChangedBetween`（`DB_DB::elementsChangedBetween` 用它）、`rulesChangedBetween`、`DB_Compare::scanNew`，以及带元素名单的另一重载 `0x59833a0`。`0x59833a0` 的调用方是 `DBSaveWorkAllowed`、`DBFlushAllowed`、`PostSaveworkFailedAction`、`DB_DB::quitWork`，不是 GETWORK。`DB_Compare::checkEle` 本身不调用 `hasElementChangedBetween`。
 
 ### 4.4 缓存路：`CACHID` 是 core 自己的「几何版本戳」，但写它的人不在 core.dll / Core3D 里
 
@@ -432,7 +434,7 @@ P0 独立、随时可做；P1 是开 `model_transform_cheap_path` 的前置（G2
 - ★0916 §9 的读法：`DESDRA_SCPlugs` 十二个钩子、`descases/*` 十一个例程、`DB_Element::internalPutAtt` / `postSetAttribute`、`sub_5992C80` 是 Hex-Rays 伪码 + `get_dword` 实读常量；
   **`VDESPT` 的 DCHC 门与 `PLOO.HEIG` 分支、`UPGRPH` 分派骨架、`IDCHNG` 全函数**是逐指令读的。`maplist` 只读了 `MLSADD` 与消费者 `VDEMPR` 两个体，「空间地图包围盒」是从
   `mapboxlib/MPBOX` / `MPBXBR` 的埋点名 + `WSTRAM` 调用推的（`MLSADD` 读的字段 `IMAP` 与快照 `spatial_map` 列的对应是实读常量 + 取值集合对上，`IMAP` 六个取值各自的语义仍是从 noun 成员推的）；`colsel/AUTCO2` 与 `designEvents` 只看了调用序；`sub_1023190B` 的模块码（`Q`→3、`S`→5、`_`→6、ESC→4、其它 1）
-  没有对到模块名。`internalPutAtt` 只读了 ref 版一个重载，「同值早退」「先 `PostSetRefAttribute` 再写再 `postSetAttribute`」这一顺序在其余九个重载上是**推定**。
+  没有对到模块名。`internalPutAtt` 的同值早退：2026-11-04 已读实的是标量 int（`0x59419d0`）、double（`0x5941ed0`）、bool（`0x5942370`）、元素引用（`0x593f220`）、字符串（`0x593f680`）、bool 数组（`0x59415a0`）、元素引用数组（`0x59410c0`），都是旧值相等就返回，不到 `dabPutAtt` / `postSetAttribute`。int 数组（`0x5940190`）和字符串数组（`0x5940e80`）的函数体没有旧值比较。double 数组（`0x5940480`）以及 `putPosAtt` / `putDirAtt`（各 46 字节，转到 `sub_58504E0`）也不比较旧值，插件回调未读。「先 `PostSetRefAttribute` 再写再 `postSetAttribute`」仍只在 ref 版上读过，其余重载的事件顺序未逐个展开。
 
 ## 9. ★0916 会话内交互路补全：从 `putAtt` 到 `VDESPT`，属性专项规则与 QCHGLS 的全部写入者
 
@@ -443,13 +445,13 @@ P0 独立、随时可做；P1 是开 `model_transform_cheap_path` 的前置（G2
 ### 9.1 从 `DB_Element::putAtt` 到 `descases/VDESPT`：一条属性 put 的完整时序
 
 core.dll 侧（`DB_Element::putAtt` 全部重载 `0x59461a0`–`0x5948a20`、`putAttWithinRuleEngine` `0x5949220`–`0x59495f0` 都只是壳，
-真身是按值类型分的十个 `internalPutAtt` `0x593f220`–`0x5942370`；下面按 ref 版 `0x593f220` 读，其余重载**推定同序**）：
+真身是按值类型分的十个 `internalPutAtt` `0x593f220`–`0x5942370`；下面的时序按 ref 版 `0x593f220` 读。同值早退已在 §8 列出的七个重载上读实；int 数组、字符串数组、double 数组没有这条早退。其余步骤的顺序在非 ref 重载上没有逐个展开）：
 
 ```text
 DB_Element::putAtt(attr, [qualifier,] value)
   └ internalPutAtt(attr, qualifier, value, evaluateRules = true)
       0. isDistributedAttribute(attr) → 改道到 XRQELE 成员元素上 putAtt（事件在持有元素上发，不在逻辑元素上）
-      1. getAtt(旧值)；旧值 == 新值 → return true                      ★ 同值 put 什么事件都不发
+      1. getAtt(旧值)；旧值相等 → return true（§8 列出的七个重载；int 数组、字符串数组、double 数组没有）
       2. DB_PreSetAttributePlugger::PreSet*Attribute                     可否决
       3. isUDA → isNounAllowed；updateAllowedWithClaim（claim）
       4. DB_LegalityChecksPlugger vtbl+28  Set*AttributeAllowed          可否决（DESDRA_SCPlugs 也实现了这一族 16 个 Allowed）

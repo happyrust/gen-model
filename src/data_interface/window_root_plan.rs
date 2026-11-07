@@ -6,8 +6,9 @@
 //! `DbSet@S` / `DbSet@T` 上枚举出的 `roots_S` / `roots_T`）与**进程内的生成根账本**
 //! （[`crate::data_interface::model_root_ledger`]：上一窗失败、还欠着的根）。
 //! 一行 `pe` 都不读——从未跑过数据增量、`pe` 零行的库对一个窗口也能选根（N7）。
-//! 一行 `gen_root` 也不读（ADR-079）：`S` 是这个库的模型水位 `model_sesno`，「S 时刻每个根都
-//! 已发布」正是那枚水位承诺的东西，所以 `roots_S` 就是 `DbSet@S` 上枚举出的根集本身。
+//! 一行 `gen_root` 也不读（ADR-079）：`S` 是这扇窗的**模型左端**——数据窗左端与库上
+//! `model_sesno` 取小（ADR-092 D1，`increment_pipeline::model_plan_base_sesno`）；「S 时刻
+//! 每个根都已发布」正是模型水位承诺的东西，所以 `roots_S` 就是 `DbSet@S` 上枚举出的根集本身。
 //!
 //! 候选根 = `roots_S ∪ roots_T`；`touched` = 其中落在闭包里的那些（闭包按祖先封闭，
 //! 「根不在闭包里」＝「它子树里没有任何一件受影响的东西」）。四个去向（D9）：
@@ -70,7 +71,7 @@ mod recorded_matrix_tests;
 /// 候选数占索引键数的比例超过它就不信闭包、全部持久根按过期重排（ADR-056 实施约束 5、审核 P1-1）。
 pub const CREDENTIAL_ADVANCE_CANDIDATE_RATIO: f64 = 0.30;
 
-/// `roots_S` 的元素：窗口左端 `S`（= 这个库的模型水位）上的一个生成根，由 `DbSet@S` 枚举。
+/// `roots_S` 的元素：窗口左端 `S`（= 这个库的模型左端，ADR-092 D1）上的一个生成根，由 `DbSet@S` 枚举。
 ///
 /// 名字里的「已持久化」说的是模型面的承诺：`model_sesno = S` 意味着 S 时刻的每个根都已生成
 /// 并落库（ADR-060 D4 / ADR-079）。库里不再有逐根的行可读（`gen_root` 退役）。
@@ -3955,7 +3956,10 @@ mod tests {
         let out = p4_off.rigid_motion(&roots_s, &settled, &impact);
         assert!(out.transform.is_empty(), "{:?}", out.transform);
         assert_eq!(
-            out.rejected.iter().map(|(root, _)| *root).collect::<Vec<_>>(),
+            out.rejected
+                .iter()
+                .map(|(root, _)| *root)
+                .collect::<Vec<_>>(),
             vec![r(10), r(20)]
         );
         assert!(
@@ -5357,7 +5361,10 @@ mod tests {
             .iter()
             .copied()
         {
-            assert!(!metadata_only_change_seeds_no_root(&diff(&[stamp])), "{stamp}");
+            assert!(
+                !metadata_only_change_seeds_no_root(&diff(&[stamp])),
+                "{stamp}"
+            );
             assert!(
                 !metadata_only_change_seeds_no_root(&diff(&["NAME", stamp])),
                 "{stamp}"

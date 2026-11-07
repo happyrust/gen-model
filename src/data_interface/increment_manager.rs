@@ -513,6 +513,14 @@ mod tests {
             ScanGate::Blocked,
             "身份歧义类异常照旧阻断，绝不自动清库"
         );
+        assert_eq!(
+            gate(Some(FileAnomaly::NameChanged {
+                old_path: "/p/ams8000_0001".into(),
+                new_path: "/p/zdj8000_0001".into(),
+            })),
+            ScanGate::Blocked,
+            "换了文件名就是另一份文件：跳过，不迁移、不清库"
+        );
     }
 
     /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
@@ -2257,7 +2265,9 @@ mod tests {
         let health = body.find("refresh_health").expect("健康复查还在");
         let gate = body.find("has_watch_gaps").expect("健康闸还在");
         // 钉调用形态而不是裸名——函数顶部的 use 导入行也带 `plan_watch_dirs`。
-        let replan = body.find("plan_watch_dirs(&db_option)").expect("重解析还在");
+        let replan = body
+            .find("plan_watch_dirs(&db_option)")
+            .expect("重解析还在");
         assert!(
             health < gate && gate < replan,
             "必须先做免费的健康复查、再过健康闸，有缺口才重解析搜索根"
@@ -2642,6 +2652,7 @@ mod tests {
             let region = &sweep[at..end];
             assert!(
                 region.contains(".with_dbnum(")
+                    || region.contains(".scoped_to(")
                     || (region.contains("SYS 文件解析失败:") && region.contains(".with_project(")),
                 "阶段 blocker 必须带 dbnum；SYS 头损坏、库号未知时必须带 project: {region}"
             );
@@ -2662,6 +2673,65 @@ mod tests {
         );
     }
 
+    /// T-O-2（2026-10-27）：有行在跑时，发现轮不许再整轮早退。`enqueue_discovered` 的 running 闸
+    /// 只保留「不换 epoch、不换 CATA 清单」这两件事，本轮发现的行必须在闸内就入队并记进活动 epoch
+    /// 的账（`coordinator.adopt_rows`），否则一个库在跑，其它库的保存要等到它终态后的下一次重扫。
+    /// 取值范围到 CATA 清单激活为止：那一句紧跟在 `if` 块之后，是闸外第一件事。
+    #[test]
+    fn a_running_row_no_longer_freezes_discovery_for_the_other_databases() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once(concat!("fn ", "enqueue_discovered("))
+            .expect("enqueue_discovered 未找到")
+            .1
+            .split_once(concat!("fn ", "sweep_holds_rows("))
+            .expect("enqueue_discovered 之后应当是 sweep_holds_rows")
+            .0;
+        let gate = body
+            .find("running_queue_row(&active_rows)")
+            .expect("running 闸还在");
+        let manifest = body
+            .find(concat!("install_dependency_", "manifest("))
+            .expect("CATA 依赖清单仍在闸后激活");
+        let begin = body
+            .find(".begin_discovery()")
+            .expect("重扫仍要开自己的 epoch");
+        assert!(
+            gate < manifest && manifest < begin,
+            "顺序必须是 running 闸 → CATA 清单 → 开 epoch: {body}"
+        );
+        let branch = &body[gate..manifest];
+        let enqueue = branch
+            .find("scheduler.enqueue(registry, &found, hold)")
+            .expect("running 时本轮发现的行必须照样入队，不许整轮早退");
+        let adopt = branch
+            .find("coordinator.adopt_rows(active_epoch, adopted)")
+            .expect("并入活动 epoch 的行必须记进协调器的账");
+        assert!(enqueue < adopt, "先入队、后记账: {branch}");
+        assert!(
+            !branch.contains(".begin_discovery()"),
+            "running 时不换 epoch：运行中任务的 job.epoch_id 与当前 epoch 不等时 mark_failed 会被静默忽略: {branch}"
+        );
+        assert!(
+            !branch.contains(".await"),
+            "活动闸内不得有 .await: {branch}"
+        );
+        // 原来的形状是「打一行日志就 return」：闸后的第一个 return 必须排在入队与记账之后。
+        let first_return = branch.find("return;").expect("分支末尾仍以 return 收口");
+        assert!(
+            adopt < first_return,
+            "闸后的第一个 return 必须在入队与记账之后，不能再整轮早退: {branch}"
+        );
+    }
+
+    /// 2026-10-28 park 双入队：扫描循环里的 park 判定与 `enqueue_discovered` 的真正入队之间有一段窗口，另一条
+    /// 发现路排的同右端批次在这段窗口里失败、账本刚写 `streak=1`，本轮算好的 `params` 若照常入队就是同右端
+    /// 第二次尝试（两次失败相隔 545 ms，`DATA_BATCH_PARK_AFTER = 1` 失守）。所以仍持活动闸、running 闸之前
+    /// 再判一次 `batch_failure_parked`，命中的行剔出 `params`、记一条 blocker：两条 drain（running 分支与正常路）
+    /// 都在闸后，闸前这一处同时盖住两条路，而 HEAD 的 running 分支整轮早退、没有 drain，这一处对 HEAD 与工作树
+    /// 都成立；正常路的 blocker 随 `install_manifest` 进本轮清单。helper `park_blocker_before_enqueue` 用 HEAD
+    /// 已有的 `with_dbnum` 带库号（不依赖未提交的 `scoped_to`，blocker 挡整相而非只挡本库，好让本修复能独立落到
+    /// HEAD f7ee75b6）、首次命中落盘。
     #[test]
     fn a_batch_parked_between_the_scan_and_the_enqueue_is_not_enqueued_a_second_time() {
         let source = include_str!("increment_manager.rs");
@@ -2672,9 +2742,7 @@ mod tests {
             .split_once(concat!("fn ", "sweep_holds_rows("))
             .expect("enqueue_discovered 之后应当是 sweep_holds_rows")
             .0;
-        let guard = body
-            .find("epoch_activation_guard();")
-            .expect("活动闸还在");
+        let guard = body.find("epoch_activation_guard();").expect("活动闸还在");
         let recheck = body
             .find("batch_failure_parked(")
             .expect("入队前要复判 park");
@@ -3103,6 +3171,7 @@ pub(crate) fn skip_reason(scope: &UpdateScope, db_type: &str, db_num: u32) -> St
 /// 声明了什么」。范围只由 MDB 定之后这个答案是确定的，那就把它直接写进日志。
 pub(crate) fn out_of_scope_reason(scope: &UpdateScope, db_type: &str, db_num: u32) -> String {
     let declared = scope.declared_desi().count();
+    let extra = scope.extra_dbnums().count();
     if db_type != "DESI" {
         return format!(
             "不在本期执行范围，跳过数据库: 类型={db_type}, 编号={db_num}\
@@ -3111,7 +3180,8 @@ pub(crate) fn out_of_scope_reason(scope: &UpdateScope, db_type: &str, db_num: u3
     }
     format!(
         "不在本期执行范围，跳过数据库: 类型={db_type}, 编号={db_num}\
-         （MDB {} 的 CURD 里没有它；本期声明了 {declared} 个 DESI）",
+         （MDB {} 的 CURD 里没有它，extra_element_dbnums 补充名单里也没有；\
+         本期声明了 {declared} 个 DESI，补充 {extra} 个）",
         scope.mdb()
     )
 }
@@ -3387,7 +3457,8 @@ fn scan_gate_for(verdict: &crate::data_interface::dbnum_state::ScanVerdict) -> S
             FileAnomaly::TypeChanged { .. }
             | FileAnomaly::Duplicate { .. }
             | FileAnomaly::Missing { .. }
-            | FileAnomaly::ForeignProject { .. },
+            | FileAnomaly::ForeignProject { .. }
+            | FileAnomaly::NameChanged { .. },
         ) => ScanGate::Blocked,
     }
 }
@@ -3576,8 +3647,7 @@ impl AiosDBManager {
         let mut selected = HashSet::new();
         let mut cata_dependencies = Vec::new();
         // 选主的项目集合是 MDB 闭包（ADR-078），不再是人手勾的 `included_projects`。
-        let closure_projects =
-            crate::data_interface::project_paths::project_names(&self.db_option);
+        let closure_projects = crate::data_interface::project_paths::project_names(&self.db_option);
         for (db_type, phase) in [("DICT", DataPhase::Meta), ("CATA", DataPhase::Catalogue)] {
             let result = select_catalogue_candidates(
                 by_type.remove(db_type).unwrap_or_default(),
@@ -3750,6 +3820,10 @@ impl AiosDBManager {
             }
             Some(FileAnomaly::PathMigrated { old_path, new_path }) => println!(
                 "F6 文件路径迁移 dbnum={db_num}: {old_path} -> {new_path}（已更新登记路径）"
+            ),
+            Some(FileAnomaly::NameChanged { old_path, new_path }) => println!(
+                "F6 文件名与登记不符，跳过该文件 dbnum={db_num}: 登记 {old_path} -> 现场 {new_path}\
+                 （库的身份是 dbnum + 约定文件名；不入队、不清库、不改登记，也不写观察值）"
             ),
             Some(FileAnomaly::ForeignProject {
                 stored_project,
@@ -4393,7 +4467,7 @@ impl AiosDBManager {
                                 parked.streak
                             ),
                         )
-                        .with_dbnum(db_no)
+                        .scoped_to(db_no)
                         .with_project(project.clone()),
                     );
                     continue;
@@ -4470,10 +4544,12 @@ impl AiosDBManager {
         if !out_of_scope.is_empty() {
             let sample = out_of_scope.iter().take(12).join("、");
             sweep_log::note(format!(
-                "[{origin}] {} 个库不在 MDB {} 的声明名单里，本轮不入队（本期声明 {} 个 DESI）：{sample}{}",
+                "[{origin}] {} 个库不在 MDB {} 的声明名单里，也不在 extra_element_dbnums 补充名单里，\
+                 本轮不入队（本期声明 {} 个 DESI，补充 {} 个）：{sample}{}",
                 out_of_scope.len(),
                 scope.mdb(),
                 scope.declared_desi().count(),
+                scope.extra_dbnums().count(),
                 if out_of_scope.len() > 12 { " …" } else { "" }
             ));
         }
@@ -4901,8 +4977,8 @@ impl AiosDBManager {
         // 剔一次就同时盖住两条路；而 HEAD 的 running 分支是整轮早退、没有 drain，闸前这一处对 HEAD 与工作树
         // 都成立。命中的行剔出 `params`、记一条 blocker：正常路随 `install_manifest` 进本轮清单，running 分支
         // 与其它 blocker 一样留待下一次全清单重扫；控制台与首次落盘由 helper 打出，每库每轮最多消耗一次 `first_notice`。
-        params.retain(|_path, found| {
-            match crate::data_interface::batch_worker::batch_failure_parked(
+        params.retain(
+            |_path, found| match crate::data_interface::batch_worker::batch_failure_parked(
                 found.dbnum,
                 found.file_latest_sesno,
             ) {
@@ -4911,14 +4987,52 @@ impl AiosDBManager {
                     false
                 }
                 None => true,
-            }
-        });
+            },
+        );
         if let Some(running) = running_queue_row(&active_rows) {
+            // T-O-2（2026-10-27）：有行在跑时不换 epoch、不换 CATA 依赖清单——换 epoch 会让运行中任务的
+            // `job.epoch_id` 与当前 epoch 不等，它的 `mark_failed` 从此被静默忽略；换清单会改变它读到的闭包。
+            // 但本轮发现的行不再整批丢弃：直接盖活动 epoch 入队，用 `adopt_rows` 记进当前清单的账
+            // （与「别的发现轮排的行」同一条收养口径），其它库不再因为一个库在跑而等到下一次重扫。
+            // `phase_blockers` / `shadowed` / `manifest_totals` 仍留待任务终态后的下一次全清单重扫。
             let active_epoch = coordinator.snapshot().epoch_id;
             println!(
-                "[{origin}] 保留活动 epoch={active_epoch}：task {} / dbnum={} 仍在运行；本轮 manifest 留待任务终态后的下一次重扫激活",
-                running.task_id, running.dbnum
+                "[{origin}] 保留活动 epoch={active_epoch}：task {} / dbnum={} 仍在运行；本轮 manifest 留待任务终态后的下一次重扫激活，发现的 {} 条行直接并入活动 epoch",
+                running.task_id,
+                running.dbnum,
+                params.len()
             );
+            let mut adopted = Vec::new();
+            for (_path, mut found) in params.drain(..) {
+                found.epoch_id = active_epoch;
+                let outcome = scheduler.enqueue(registry, &found, hold);
+                let verb = match outcome.outcome {
+                    Enqueued::New => "新排",
+                    Enqueued::Merged => "并入会话",
+                    Enqueued::AlreadyCovered => "已覆盖",
+                    Enqueued::BehindRunning => "接在运行批次之后",
+                };
+                // 只有真的多出一行（New / BehindRunning）才记账；Merged / AlreadyCovered 的行早已在账上。
+                if matches!(outcome.outcome, Enqueued::New | Enqueued::BehindRunning) {
+                    adopted.push((found.phase, hold));
+                }
+                let posture = if hold { "，挂起待增量触发" } else { "" };
+                println!(
+                    "[{origin}] dbnum={} {verb}（并入活动 epoch={active_epoch}）：sesno {}..={}（task {}，排在第 {} 位{posture}）",
+                    found.dbnum,
+                    outcome.info.start_sesno,
+                    outcome.info.end_sesno,
+                    outcome.info.task_id,
+                    outcome.info.position
+                );
+            }
+            let counted = coordinator.adopt_rows(active_epoch, adopted);
+            if counted > 0 {
+                sweep_log::note(format!(
+                    "[{origin}] 活动 epoch={active_epoch} 新记账 {counted} 条本轮发现的行（运行中 task {} 不受影响）",
+                    running.task_id
+                ));
+            }
             return;
         }
         // 两份清单各有独立的版本计数器，谁也不是谁的续号；此前后者遮蔽前者，
@@ -5351,6 +5465,9 @@ impl AiosDBManager {
                         log::warn!("{msg}");
                         eprintln!("{msg}");
                     }
+                    // WP-E 稳态模型补偿（ADR-090 D1）：数据追平、模型落后的库补一条 ModelOnly；
+                    // 范围 / 节流 / 入队形状全在 `reconcile_model_catch_up` 里，出错只告警、不挡下一拍。
+                    crate::data_interface::startup_reconcile::reconcile_model_catch_up().await;
                     continue;
                 }
             }

@@ -691,6 +691,10 @@ fn render_delete_phases(
         for table in noun_tables {
             ranges.push(format!("DELETE {};", range_of(table, ref0)));
         }
+        // `ATT_UDA` 不是 `pe.noun`，也不进 `RANGE_TABLES`（那份清单会流进整库模型清理）。
+        // 基线重解析是 `INSERT IGNORE`，不清它的话旧属性行会赢，删掉的元件留下孤儿。
+        // 三种水位处置都清：它是数据面，`RestartInitializationData` 同样要清数据面。
+        ranges.push(format!("DELETE {};", range_of("ATT_UDA", ref0)));
         ranges.push(format!("DELETE {};", range_of("pe", ref0)));
     }
     debug_assert!(model_deletes.next().is_none());
@@ -834,6 +838,271 @@ fn forget_dbnum_model_in_process(dbnum: u32) {
         dbnum,
         crate::data_interface::model_read_route::ModelReadSource::Memory,
     );
+}
+
+/// 升级批次的清库：与 [`wipe_dbnum_for_reinit`] 清同一份解析行和模型行，另外删掉这个库
+/// 引用过的内容寻址几何（`inst_geo`、哈希 `aabb`、`.mesh`）。
+///
+/// 网格键在生成锁和写库锁之内、删行之前从库上的 `inst_relate` 收。`inst_geo` 不按 Ref0
+/// 寻址，行一删就收不出来。升级当时读路由经常是内存，投影里没有这一代的键，所以这里
+/// 固定收库上那一份，不看路由。几何文件排在删行之后。单位几何 1、2、3 不删。
+/// 人工重新解析和回退重建不走这里。
+pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let _generation = match crate::fast_model::e3d_model_service::try_lock_db_generation(dbnum) {
+        Ok(guard) => guard,
+        Err(_) => bail!("dbnum {dbnum} 有生成在飞，升级清库拒绝、一行不删"),
+    };
+    super::pe_batch::require_no_event_on(&SUL_DB).await?;
+    let started = Instant::now();
+    let commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
+        .lock()
+        .await;
+    let state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
+        .write()
+        .await;
+    // 升级清的是库上这一代。读路由这时常常已经是内存（模型水位落后，或重新解析任务在飞），
+    // 进程内投影还没有键。键必须从即将删掉的 `inst_relate` 上收，不能按路由跳过。
+    // 整库模型清理仍看路由：那条路在「只写内存」时不该去删库上另一代的几何。
+    let keys = mesh_purge::dbnum_mesh_ids(dbnum, true).await?;
+    let mut result = wipe_dbnum_rows_on(&SUL_DB, dbnum, WatermarkDisposal::ResetForReinit).await?;
+    forget_dbnum_model_in_process(dbnum);
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
+    drop(state_guard);
+    drop(commit_guard);
+    let geometry = mesh_purge::purge_geometry(&SUL_DB, keys.clone(), true).await?;
+    delete_aabb_mesh_rows(&SUL_DB, &keys).await?;
+    println!(
+        "存储架构升级：dbnum={dbnum} 已清网格几何（{}）",
+        geometry.note()
+    );
+    result.elapsed_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
+/// 整库升级前清掉的共享解析数据。`rows` 是这些目录库清掉之前的 `pe` 行数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedParseWipeReport {
+    pub catalogues: usize,
+    pub rows: usize,
+}
+
+/// 目录库号：依赖状态行 ∪ MDB 里的 CATA 库，去掉 0，升序去重。
+pub(crate) fn union_catalogue_dbnums(
+    from_state: impl IntoIterator<Item = u32>,
+    from_mdb: impl IntoIterator<Item = u32>,
+) -> Vec<u32> {
+    let mut dbnums = from_state
+        .into_iter()
+        .chain(from_mdb)
+        .filter(|dbnum| *dbnum != 0)
+        .collect::<Vec<_>>();
+    dbnums.sort_unstable();
+    dbnums.dedup();
+    dbnums
+}
+
+/// 整库升级开始时清共享解析数据：目录库的 `pe` / noun / `ATT_UDA` / `pe_owner` / `ref_rev`、
+/// `cata_dependency_state`、全部 `parse_error`，然后作废目录 memo。
+///
+/// 不动 `dbnum_watermark` 和交付台账。失败时调用方不得排重新解析批次；再发起一次是幂等的。
+/// 锁序与 [`wipe_dbnum_rows`] 相同。
+pub async fn wipe_shared_parse_rows_for_upgrade() -> anyhow::Result<SharedParseWipeReport> {
+    super::pe_batch::require_no_event_on(&SUL_DB).await?;
+    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
+        .lock()
+        .await;
+    let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
+        .write()
+        .await;
+    let dbnums = catalogue_dbnums_for_upgrade().await?;
+    let report = wipe_shared_parse_rows_on(&SUL_DB, &dbnums).await?;
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
+    Ok(report)
+}
+
+/// [`wipe_shared_parse_rows_for_upgrade`] 的库那一半，给 `mem://` 用例在自己的实例上跑。
+/// 不碰进程内目录 memo，也不读 MDB：目录库号由调用方传入。
+pub(crate) async fn wipe_shared_parse_rows_on(
+    db: &Surreal<Any>,
+    catalogue_dbnums: &[u32],
+) -> anyhow::Result<SharedParseWipeReport> {
+    let dbnums = union_catalogue_dbnums(catalogue_dbnums.iter().copied(), std::iter::empty());
+    let mut planned = Vec::with_capacity(dbnums.len());
+    let mut rows = 0usize;
+    for dbnum in &dbnums {
+        let (pe_rows, ref0s, noun_tables) = collect_dbnum_ref0s_on(db, *dbnum).await?;
+        rows += pe_rows;
+        let (relations, ranges) = render_catalogue_parse_wipe(&ref0s, &noun_tables);
+        planned.push((*dbnum, ref0s, relations, ranges));
+    }
+    for (dbnum, _, relations, ranges) in &planned {
+        execute_phase(db, "delete catalogue owner relations", relations).await?;
+        execute_phase(db, "delete catalogue parse ranges", ranges).await?;
+        execute_phase(
+            db,
+            "delete catalogue dependency state",
+            &[format!("DELETE cata_dependency_state:{dbnum};")],
+        )
+        .await?;
+    }
+    execute_phase(
+        db,
+        "delete parse errors",
+        &["DELETE parse_error;".to_string()],
+    )
+    .await?;
+    for (dbnum, ref0s, _, _) in &planned {
+        assert_parse_face_gone(db, *dbnum, ref0s).await?;
+        crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, *dbnum);
+    }
+    Ok(SharedParseWipeReport {
+        catalogues: dbnums.len(),
+        rows,
+    })
+}
+
+/// 目录库的解析行。不含模型面，也不动水位和交付台账：那些行按目录库号存放，
+/// 设计库自己的清库够不着它们。
+fn render_catalogue_parse_wipe(
+    ref0s: &[String],
+    noun_tables: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut relations = Vec::new();
+    let mut ranges = Vec::new();
+    for ref0 in ref0s {
+        relations.push(format!("DELETE {};", owner_range_of(ref0)));
+        ranges.push(format!("DELETE {};", range_of("ref_rev", ref0)));
+        for table in noun_tables {
+            if table == "ATT_UDA" {
+                continue;
+            }
+            ranges.push(format!("DELETE {};", range_of(table, ref0)));
+        }
+        ranges.push(format!("DELETE {};", range_of("ATT_UDA", ref0)));
+        ranges.push(format!("DELETE {};", range_of("pe", ref0)));
+    }
+    (relations, ranges)
+}
+
+async fn catalogue_dbnums_for_upgrade() -> anyhow::Result<Vec<u32>> {
+    let from_state = dependency_state_dbnums_on(&SUL_DB).await?;
+    let from_mdb = catalogue_dbnums_declared().await?;
+    Ok(union_catalogue_dbnums(from_state, from_mdb))
+}
+
+async fn dependency_state_dbnums_on(db: &Surreal<Any>) -> anyhow::Result<Vec<u32>> {
+    let mut response = db
+        .query("SELECT VALUE dbnum FROM cata_dependency_state;")
+        .await
+        .context("读取 cata_dependency_state 失败")?
+        .check()
+        .context("读取 cata_dependency_state 失败")?;
+    let dbnums: Vec<Option<u32>> = response
+        .take(0)
+        .context("解码 cata_dependency_state 的库号失败")?;
+    Ok(dbnums.into_iter().flatten().collect())
+}
+
+async fn catalogue_dbnums_declared() -> anyhow::Result<Vec<u32>> {
+    let option = aios_core::get_db_option().clone();
+    tokio::task::spawn_blocking(move || {
+        let membership = match crate::data_interface::mdb_membership::get(
+            &option.project_name,
+            &option.mdb_name,
+        ) {
+            Some(membership) => membership,
+            None => std::sync::Arc::new(crate::data_interface::mdb_membership::resolve(
+                &option,
+                &option.project_name,
+                &option.mdb_name,
+            )?),
+        };
+        Ok::<_, anyhow::Error>(
+            membership
+                .of_type(crate::data_interface::mdb_membership::CATA_STYP)
+                .map(|database| database.dbnum)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("读取 MDB 目录库的阻塞任务异常: {error}"))?
+}
+
+async fn assert_parse_face_gone(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    ref0s: &[String],
+) -> anyhow::Result<()> {
+    let mut verify = db
+        .query(render_verify_query(dbnum, ref0s))
+        .await
+        .context("核对目录库清库")?
+        .check()
+        .context("核对目录库清库失败")?;
+    let remaining = verify
+        .take::<Vec<CountRow>>(0)
+        .context("解码目录库 PE 残留")?
+        .first()
+        .map(|row| row.count)
+        .unwrap_or_default();
+    if remaining != 0 {
+        bail!("目录库 {dbnum} 清库未完成：还剩 {remaining} 行 PE");
+    }
+    let mut edges = 0usize;
+    for (offset, ref0) in ref0s.iter().enumerate() {
+        edges += verify
+            .take::<Vec<CountRow>>(offset + 1)
+            .with_context(|| format!("解码目录库 {dbnum} 的 pe_owner 残留 {ref0}"))?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+    }
+    if edges != 0 {
+        bail!("目录库 {dbnum} 清库未完成：Ref0 区间里还剩 {edges} 条 pe_owner");
+    }
+    Ok(())
+}
+
+const MESH_KEY_DELETE_BATCH: usize = 500;
+
+fn render_aabb_mesh_delete(keys: &[String]) -> String {
+    keys.iter()
+        .filter(|key| crate::fast_model::e3d_mesh_store::is_valid_mesh_key(key))
+        .filter(|key| !mesh_purge::is_shared_unit_key(key))
+        .map(|key| format!("DELETE aabb:⟨{key}⟩;"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn delete_aabb_mesh_rows(
+    db: &Surreal<Any>,
+    ids: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let keys = ids
+        .iter()
+        .filter(|key| crate::fast_model::e3d_mesh_store::is_valid_mesh_key(key))
+        .filter(|key| !mesh_purge::is_shared_unit_key(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for chunk in keys.chunks(MESH_KEY_DELETE_BATCH) {
+        let sql = render_aabb_mesh_delete(chunk);
+        if sql.is_empty() {
+            continue;
+        }
+        db.query(sql)
+            .await
+            .context("delete hashed aabb rows")?
+            .check()
+            .context("delete hashed aabb rows")?;
+    }
+    Ok(())
 }
 
 /// 整库生成锁拿不到：有按需 / 整库生成在飞。一行都不删。
@@ -1057,12 +1326,10 @@ fn spool_dbnum_model_tombstones(dbnum: u32) -> anyhow::Result<()> {
             .map(|(_, sesno)| u64::from(*sesno))
             .max()
             .unwrap_or_default();
-        let epoch = crate::data_interface::mdb_memory_store::get(
-            &option.project_name,
-            &option.mdb_name,
-        )
-        .map(|snapshot| snapshot.epoch())
-        .unwrap_or(source_sesno_epoch);
+        let epoch =
+            crate::data_interface::mdb_memory_store::get(&option.project_name, &option.mdb_name)
+                .map(|snapshot| snapshot.epoch())
+                .unwrap_or(source_sesno_epoch);
         spool.persist(
             epoch,
             sessions,
@@ -1098,7 +1365,7 @@ async fn wipe_dbnum_rows(
 
 /// `wipe_dbnum_rows_on` 开头那三句：PE 前缀、noun、`dbnum_info_table` 的 Ref0，取并集。
 /// 整库快删与整库模型清理共用，避免两份圈定。
-async fn collect_dbnum_ref0s_on(
+pub(crate) async fn collect_dbnum_ref0s_on(
     db: &Surreal<Any>,
     dbnum: u32,
 ) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
@@ -1266,6 +1533,45 @@ mod tests {
         }
         assert!(ranges.contains(&"DELETE ref_rev:24381_0..24381_9999999999;".into()));
         assert!(ranges.contains(&"DELETE EQUI:24381_0..24381_9999999999;".into()));
+        assert!(ranges.contains(&"DELETE ATT_UDA:24381_0..24381_9999999999;".into()));
+    }
+
+    /// 升级之后按首次导入重写，写法是 `INSERT IGNORE`。`ATT_UDA` 不在 `pe.noun` 里，
+    /// 也不在 `RANGE_TABLES` 里；三种水位处置都要按 Ref0 区间删掉它，并且排在 `pe` 之前。
+    #[test]
+    fn every_disposal_deletes_att_uda_before_pe() {
+        for disposal in [
+            WatermarkDisposal::DropRow,
+            WatermarkDisposal::ResetForReinit,
+            WatermarkDisposal::RestartInitializationData,
+        ] {
+            let (_, ranges, _) = render_delete_phases(
+                7997,
+                &["24381".into(), "31909".into()],
+                &["EQUI".into()],
+                disposal,
+            );
+            for ref0 in ["24381", "31909"] {
+                let uda = format!("DELETE ATT_UDA:{ref0}_0..{ref0}_{RANGE_END};");
+                let pe = format!("DELETE pe:{ref0}_0..{ref0}_{RANGE_END};");
+                let uda_at = ranges
+                    .iter()
+                    .position(|sql| sql == &uda)
+                    .unwrap_or_else(|| panic!("{disposal:?} 缺少 {uda}: {ranges:?}"));
+                let pe_at = ranges
+                    .iter()
+                    .position(|sql| sql == &pe)
+                    .unwrap_or_else(|| panic!("{disposal:?} 缺少 {pe}: {ranges:?}"));
+                assert!(
+                    uda_at < pe_at,
+                    "{disposal:?} 的 ATT_UDA 必须排在 pe 之前: {ranges:?}"
+                );
+            }
+        }
+        assert!(
+            !RANGE_TABLES.contains(&"ATT_UDA"),
+            "ATT_UDA 是数据面，不能进模型面那份清单"
+        );
     }
 
     /// owner 边走复合 id 区间，整库清理的 SQL 里不该再剩任何图遍历。
@@ -1822,7 +2128,12 @@ mod tests {
                 rendered.range_deletes
             );
         }
-        assert!(rendered.range_deletes.iter().all(|sql| !sql.contains("WHERE")));
+        assert!(
+            rendered
+                .range_deletes
+                .iter()
+                .all(|sql| !sql.contains("WHERE"))
+        );
         assert_eq!(
             rendered.room_predicates,
             vec![
@@ -1882,7 +2193,10 @@ mod tests {
         ]
         .concat()
         .join("\n");
-        assert!(!sql.contains("DELETE pe:") && !sql.contains("DELETE pe;"), "{sql}");
+        assert!(
+            !sql.contains("DELETE pe:") && !sql.contains("DELETE pe;"),
+            "{sql}"
+        );
         assert!(!sql.contains("datacenter"), "{sql}");
         assert!(!sql.contains("dbnum_info_table"), "{sql}");
         assert!(!sql.contains("DELETE dbnum_watermark"), "{sql}");
@@ -1992,8 +2306,13 @@ mod tests {
         assert_eq!(mark.model_sesno, 0, "模型水位归零");
         assert_eq!(mark.state_revision, 3, "state_revision 加一");
         assert_eq!(mark.applied_sesno, 4, "数据水位不动");
-        for (index, label) in [(1, "pe"), (2, "ref_rev"), (3, "BRAN"), (4, "别的库"), (5, "共享盒")]
-        {
+        for (index, label) in [
+            (1, "pe"),
+            (2, "ref_rev"),
+            (3, "BRAN"),
+            (4, "别的库"),
+            (5, "共享盒"),
+        ] {
             let count = response
                 .take::<Vec<CountRow>>(index)
                 .unwrap()
@@ -2002,5 +2321,208 @@ mod tests {
                 .unwrap_or_default();
             assert!(count >= 1, "{label} 不该被整库模型清理删掉，剩下 {count}");
         }
+    }
+
+    #[test]
+    fn catalogue_dbnums_are_the_union_of_state_and_mdb() {
+        assert_eq!(
+            union_catalogue_dbnums([7002, 5052, 0], [7002, 8001]),
+            vec![5052, 7002, 8001]
+        );
+        assert!(union_catalogue_dbnums([0], std::iter::empty()).is_empty());
+    }
+
+    /// 目录库清理解析行，不碰模型面、水位和交付台账。
+    #[test]
+    fn the_catalogue_wipe_only_renders_parse_rows() {
+        let (relations, ranges) =
+            render_catalogue_parse_wipe(&["5052".into()], &["SCOM".into(), "ATT_UDA".into()]);
+        let sql = relations
+            .iter()
+            .chain(&ranges)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sql.contains("DELETE pe_owner:[pe:5052_0, NONE]..=[pe:5052_9999999999, ..];"));
+        assert!(sql.contains("DELETE SCOM:5052_0..5052_9999999999;"));
+        assert_eq!(sql.matches("DELETE ATT_UDA:").count(), 1, "{sql}");
+        assert!(sql.contains("DELETE ref_rev:5052_0..5052_9999999999;"));
+        assert!(
+            sql.ends_with("DELETE pe:5052_0..5052_9999999999;")
+                || sql.contains("DELETE pe:5052_0..5052_9999999999;")
+        );
+        for forbidden in [
+            "inst_relate",
+            "room_relate",
+            "datacenter",
+            "dbnum_watermark",
+            "cata_dependency_state",
+        ] {
+            assert!(
+                !sql.contains(forbidden),
+                "{forbidden} 不该出现在目录解析清理里: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn aabb_mesh_deletes_skip_shared_unit_keys_and_illegal_keys() {
+        let sql = render_aabb_mesh_delete(&[
+            "aa".into(),
+            "1".into(),
+            "2".into(),
+            "3".into(),
+            "../x".into(),
+        ]);
+        assert_eq!(sql, "DELETE aabb:⟨aa⟩;");
+    }
+
+    /// 升级清库先收网格键，再删行，最后删几何。收键若排到删行之后，哈希几何就再也对不上。
+    #[test]
+    fn the_upgrade_wipe_collects_mesh_keys_before_the_rows_and_purges_after() {
+        let body = include_str!("fast_delete.rs")
+            .split_once("pub async fn wipe_dbnum_for_upgrade(")
+            .expect("upgrade wipe")
+            .1
+            .split_once("pub async fn wipe_shared_parse_rows_for_upgrade(")
+            .expect("shared wipe follows")
+            .0;
+        let lock = body.find("try_lock_db_generation(dbnum)").expect("生成锁");
+        let collect = body
+            .find("mesh_purge::dbnum_mesh_ids(dbnum, true)")
+            .expect("收键");
+        let wipe = body.find("wipe_dbnum_rows_on(").expect("删行");
+        let purge = body.find("mesh_purge::purge_geometry(").expect("删几何");
+        let aabb = body.find("delete_aabb_mesh_rows(").expect("删哈希盒");
+        assert!(
+            lock < collect && collect < wipe && wipe < purge && purge < aabb,
+            "顺序必须是 生成锁 → 收键 → 删行 → 删 inst_geo/.mesh → 删哈希 aabb: {body}"
+        );
+        assert!(
+            body.contains("purge_geometry(&SUL_DB, keys.clone(), true)"),
+            "升级清库必须删库上的 inst_geo，不能按读路由跳过: {body}"
+        );
+        assert!(
+            !body.contains("route.is_database()"),
+            "升级当时读路由经常是内存，按它跳过就收不到即将删掉的网格键: {body}"
+        );
+        assert!(
+            body.contains("is_shared_unit_key")
+                || include_str!("fast_delete.rs").contains("is_shared_unit_key"),
+            "单位几何必须跳过"
+        );
+    }
+
+    /// 共享清理在写库锁内做完，再作废目录 memo。memo 若先作废，并发任务会按空记忆把旧行当成没写过。
+    #[test]
+    fn the_shared_wipe_forgets_the_catalogue_memo_after_the_rows() {
+        let body = include_str!("fast_delete.rs")
+            .split_once("pub async fn wipe_shared_parse_rows_for_upgrade(")
+            .expect("shared wipe")
+            .1
+            .split_once("pub(crate) async fn wipe_shared_parse_rows_on(")
+            .expect("library half follows")
+            .0;
+        let rows = body.find("wipe_shared_parse_rows_on(").expect("清行");
+        let forget = body
+            .find("forget_persisted_catalogue_rows(")
+            .expect("作废 memo");
+        assert!(rows < forget, "先清行再作废 memo: {body}");
+        assert!(body.contains("ForgetScope::Everything"), "{body}");
+        assert!(body.contains("require_no_event_on"), "{body}");
+        assert!(body.contains("DATA_COMMIT_SERIAL"), "{body}");
+        assert!(body.contains("DBNUM_STATE_WRITE_GATE"), "{body}");
+    }
+
+    /// 目录库解析行、依赖状态和 parse_error 清掉；设计库、水位、交付台账留下。
+    #[tokio::test]
+    async fn wiping_shared_parse_rows_on_mem_zeroes_catalogue_rows_and_keeps_delivery_ledgers() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("shared_parse").use_db("test").await.unwrap();
+        db.query(
+            "CREATE pe:5052_10 SET dbnum = 5052, noun = 'SCOM';\
+             CREATE pe:5052_11 SET dbnum = 5052, noun = 'SCOM';\
+             RELATE pe:5052_10->pe_owner:[pe:5052_10, 0]->pe:5052_11;\
+             CREATE SCOM:5052_10 SET dbnum = 5052, sesno = 3;\
+             CREATE ATT_UDA:5052_10 SET dbnum = 5052, sesno = 3;\
+             CREATE ref_rev:5052_10 SET dbnum = 5052;\
+             CREATE cata_dependency_state:5052 SET dbnum = 5052, sesno = 9, rows = 2;\
+             CREATE cata_dependency_state:7002 SET dbnum = 7002, sesno = 1, rows = 0;\
+             CREATE parse_error:sample SET kind = 'element', target = '5052/10';\
+             CREATE dbnum_watermark:5052 SET applied_sesno = 9, sesno = 9;\
+             CREATE datacenter_version:keep SET mark = 'stay';\
+             CREATE datacenter_delete:keep SET mark = 'stay';\
+             CREATE pe:24381_1 SET dbnum = 7997, noun = 'EQUI';\
+             CREATE ATT_UDA:24381_1 SET dbnum = 7997;\
+             CREATE EQUI:24381_1 SET dbnum = 7997;\
+             CREATE cata_dependency_state:7003 SET dbnum = 7003, sesno = 2, rows = 1;\
+             CREATE pe:7003_1 SET dbnum = 7003, noun = 'SCOM';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let report = wipe_shared_parse_rows_on(&db, &[7002, 5052, 5052])
+            .await
+            .unwrap();
+        assert_eq!(report.catalogues, 2);
+        assert_eq!(report.rows, 2, "只数被清目录库的 pe 行");
+
+        let mut response = db
+            .query(
+                "SELECT count() AS count FROM pe WHERE dbnum = 5052 GROUP ALL;\
+                 SELECT count() AS count FROM SCOM:5052_0..5052_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM ATT_UDA:5052_0..5052_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM ref_rev:5052_0..5052_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM cata_dependency_state:5052 GROUP ALL;\
+                 SELECT count() AS count FROM cata_dependency_state:7002 GROUP ALL;\
+                 SELECT count() AS count FROM parse_error GROUP ALL;\
+                 SELECT count() AS count FROM dbnum_watermark:5052 GROUP ALL;\
+                 SELECT count() AS count FROM datacenter_version:keep GROUP ALL;\
+                 SELECT count() AS count FROM datacenter_delete:keep GROUP ALL;\
+                 SELECT count() AS count FROM pe WHERE dbnum = 7997 GROUP ALL;\
+                 SELECT count() AS count FROM ATT_UDA:24381_0..24381_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM cata_dependency_state:7003 GROUP ALL;\
+                 SELECT count() AS count FROM pe WHERE dbnum = 7003 GROUP ALL;\
+                 SELECT count() AS count FROM pe_owner:[pe:5052_0, NONE]..=[pe:5052_9999999999, ..] GROUP ALL;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        for index in 0..7 {
+            let count = response
+                .take::<Vec<CountRow>>(index)
+                .unwrap()
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+            assert_eq!(count, 0, "查询 {index} 应该被清掉");
+        }
+        for (index, label) in [
+            (7, "目录库水位"),
+            (8, "datacenter_version"),
+            (9, "datacenter_delete"),
+            (10, "设计库 pe"),
+            (11, "设计库 ATT_UDA"),
+            (12, "未点名的目录状态"),
+            (13, "未点名的目录 pe"),
+        ] {
+            let count = response
+                .take::<Vec<CountRow>>(index)
+                .unwrap()
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+            assert!(count >= 1, "{label} 不该被共享清理删掉，剩下 {count}");
+        }
+        let owners = response
+            .take::<Vec<CountRow>>(14)
+            .unwrap()
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+        assert_eq!(owners, 0, "目录库的 pe_owner 区间必须清空");
     }
 }

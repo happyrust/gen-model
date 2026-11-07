@@ -2195,15 +2195,15 @@ pub(crate) async fn expand_live_reverse_cascade(
     let mut unresolved: Vec<String> = Vec::new();
     let mut roots = BTreeMap::new();
 
-    for referrer in referrers {
-        let dbnum = referrer_dbnums.get(&referrer).copied();
+    for referrer in &referrers {
+        let dbnum = referrer_dbnums.get(referrer).copied();
         if dbnum.is_none() {
             unresolved.push(referrer.to_pdms_str());
         }
         if !referrer_is_design(dbnum, &non_design_dbnums) {
             continue;
         }
-        if let Some(root) = resolve_element_generation_root(referrer, &unit_types, |candidate| {
+        if let Some(root) = resolve_element_generation_root(*referrer, &unit_types, |candidate| {
             graph.get(&candidate).map(|node| GenerationNode {
                 owner: node.owner,
                 noun: node.noun.clone(),
@@ -2221,6 +2221,19 @@ pub(crate) async fn expand_live_reverse_cascade(
             "反向级联：{} 个引用者查不到所属库号（pe.dbnum 缺失），已按设计侧保守保留；样例: {}",
             unresolved.len(),
             skip_samples(&unresolved)
+        );
+        log::warn!("{message}");
+        println!("{message}");
+    }
+    // T-P-5（ADR-063 CATA `ref_rev` 收口）：一个引用者都反查不到时，`ref_rev` 里没有这个目录件的
+    // 入边——要么它真的没人引用，要么这张引用表是空的 / 没建索引 / 没被解析过。后两种会让级联
+    // **静默漏算**（设计实例该重算却没排），而上面那条告警只在「查得到引用者、查不到库号」时
+    // 才响。所以空集必须单独说出来，不能与「确实没人引用」混成同一个静默返回。
+    if referrers.is_empty() {
+        let message = format!(
+            "反向级联：目录件 {} 在 ref_rev 里没有任何入边，本次不展开任何设计根\
+             （若这是空索引 / 未解析的库，级联会漏算，请核对 ref_rev）",
+            seed.to_pdms_str()
         );
         log::warn!("{message}");
         println!("{message}");
@@ -2314,6 +2327,11 @@ pub struct DataBatchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_advance:
         Option<crate::data_interface::window_root_plan::CredentialAdvanceReceipt>,
+    /// 本窗模型规划的左端（`model_plan_base_sesno` 的返回值，ADR-092 D1）：收尾的
+    /// 连续性闸拿它与库上 `model_sesno` 比，越线拒盖。只在窗口路径上有；ModelOnly
+    /// 等无窗批次是 `None`，任务侧回退到入队声明的 `model_start_sesno`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_base_sesno: Option<i32>,
 }
 
 impl DataBatchResult {
@@ -3473,7 +3491,8 @@ impl AiosDBManager {
         model: crate::data_interface::dbnum_initialize::ModelHalf,
     ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
         use crate::data_interface::dbnum_initialize::{
-            InitializationOutcome, InitializationRequest, baseline_counts, initialize,
+            InitializationOutcome, InitializationRequest, ModelHalf, baseline_counts,
+            clear_model_face_before_initial, initialize,
         };
 
         // 基线也要留下文件身份（file_path / db_type / file_name / 观察值）：
@@ -3518,6 +3537,16 @@ impl AiosDBManager {
         // 与增量收口同一把尺子：水位落在 `file_latest_sesno` 上，就存那一条保存的写入时刻。
         let target_time = session_time_rfc3339(project, file_path, file_latest_sesno);
         if baseline_needs_full_parse(count, applied_sesno) {
+            // `Initial` 直写只插不删：模型面还有本库的行就先清，清不干净不开工（T-D-6；只数 `pe` 看不见它们）。
+            // `Skip` 不写模型面，不清。
+            if model == ModelHalf::Generate {
+                let cleared = clear_model_face_before_initial(dbnum).await?;
+                if cleared > 0 {
+                    println!(
+                        "dbnum={dbnum} 初始化前清掉模型面残留 {cleared} 行（Initial 直写只插不删）"
+                    );
+                }
+            }
             // 解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾（applied + model + 写入标记）。
             // 失败先清库再 Err；核对不过 Err 不清库（下一轮按半截基线清）。
             return initialize(
@@ -4001,7 +4030,8 @@ impl AiosDBManager {
         for candidate_project in projects {
             let Some(candidate_dir) = resolve_project_root(&self.db_option, &candidate_project)
             else {
-                let message = format!("无法解析闭包项目目录（不在 MDB 闭包里或未定位）: {candidate_project}");
+                let message =
+                    format!("无法解析闭包项目目录（不在 MDB 闭包里或未定位）: {candidate_project}");
                 warnings.push(message.clone());
                 blockers.push(
                     crate::data_interface::initialization_phase::PhaseBlocker::new(
@@ -5029,6 +5059,7 @@ impl AiosDBManager {
                     modified_elements: 0,
                     deleted_elements: 0,
                     credential_advance: None,
+                    model_base_sesno: None,
                 }),
                 Vec::new(),
             )
@@ -5064,6 +5095,7 @@ impl AiosDBManager {
                         modified_elements: 0,
                         deleted_elements: 0,
                         credential_advance: None,
+                        model_base_sesno: None,
                     }),
                     Vec::new(),
                 );
@@ -5074,6 +5106,20 @@ impl AiosDBManager {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
         let mut applied = verdict.applied_sesno();
+        // 这一窗的模型左端（ADR-058 D4 修订 / ADR-079）：模型水位落后于数据水位时，
+        // 模型规划必须从 `model_sesno` 起算。判据与发现行、启动核对同一处
+        // （`startup_reconcile::startup_model_recovery_plan`），不另立一套。
+        // 下面 `apply_map` 把它交给 `apply_with_precollected`，由 `apply_one` 与数据窗
+        // 左端取 min。见 `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md`。
+        let model_floor = crate::data_interface::startup_reconcile::startup_model_recovery_plan(
+            applied,
+            verdict
+                .prior
+                .as_ref()
+                .map(|state| state.model_sesno)
+                .unwrap_or(0),
+        )
+        .map(|recovery| recovery.model_start_sesno);
         let mut reinitialized = false;
         // 回退默认整库重建（ADR-021）：执行侧以冻结点的**新鲜裁决**为准（入队
         // 与执行之间文件可能被换掉，这里是最后一道复核），仍判回退才允许破坏
@@ -5106,7 +5152,14 @@ impl AiosDBManager {
                 "wipe_reinit",
                 &format!("{reason}，按 ADR-021 整库清空重建"),
             );
-            match crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
+            let purge_geometry =
+                crate::data_interface::storage_upgrade::purges_geometry(dbnum).await;
+            let wiped = if purge_geometry {
+                crate::data_interface::fast_delete::wipe_dbnum_for_upgrade(dbnum).await
+            } else {
+                crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await
+            };
+            match wiped {
                 Ok(report) => {
                     let note = format!(
                         "dbnum={dbnum} {reason}：已整库清空 {} 行 PE（含派生行、统计与队列残留，\
@@ -5129,9 +5182,13 @@ impl AiosDBManager {
                             start_sesno_time: None,
                             end_sesno_time: None,
                             status: BatchStatus::Failed,
-                            message: Some(format!(
-                                "{reason}；整库清空失败（水位未动，下一轮幂等重放）: {error:#}"
-                            )),
+                            message: Some(if purge_geometry {
+                                format!("{reason}；升级清库失败: {error:#}")
+                            } else {
+                                format!(
+                                    "{reason}；整库清空失败（水位未动，下一轮幂等重放）: {error:#}"
+                                )
+                            }),
                             merged_sesnos: Vec::new(),
                             merged_sesno_times: Vec::new(),
                             changed_elements: 0,
@@ -5139,6 +5196,7 @@ impl AiosDBManager {
                             modified_elements: 0,
                             deleted_elements: 0,
                             credential_advance: None,
+                            model_base_sesno: None,
                         }),
                         Vec::new(),
                     );
@@ -5169,6 +5227,7 @@ impl AiosDBManager {
                     modified_elements: 0,
                     deleted_elements: 0,
                     credential_advance: None,
+                    model_base_sesno: None,
                 }),
                 Vec::new(),
             );
@@ -5200,6 +5259,7 @@ impl AiosDBManager {
                             modified_elements: 0,
                             deleted_elements: 0,
                             credential_advance: None,
+                            model_base_sesno: None,
                         }),
                         Vec::new(),
                     );
@@ -5237,7 +5297,11 @@ impl AiosDBManager {
             })
         });
         if initial_load {
-            Self::stage(dbnum, "initial_load", "首次按需初始化（全量基线 + 整库模型，双 lane 直写）");
+            Self::stage(
+                dbnum,
+                "initial_load",
+                "首次按需初始化（全量基线 + 整库模型，双 lane 直写）",
+            );
             // ADR-077：属性面与模型面在 `dbnum_initialize` 里并发直写、收尾一笔盖两枚水位并收写入标记。
             // 模型单元的回执与「任务已收尾」经 `initialization` 交回 batch body，本函数不再回传 UnitTask。
             return match self
@@ -5265,7 +5329,9 @@ impl AiosDBManager {
                         Some(_) => format!(
                             "首次按需初始化完成：解析 {count} 个元素、整库模型 {generated} 根已直写（失败 {failed}），水位与写入标记一笔收口"
                         ),
-                        None => format!("首次按需初始化完成：解析 {count} 个元素、建立增量水位（本库无模型半边）"),
+                        None => format!(
+                            "首次按需初始化完成：解析 {count} 个元素、建立增量水位（本库无模型半边）"
+                        ),
                     };
                     warnings.extend(outcome.warnings.iter().cloned());
                     *initialization = Some(outcome);
@@ -5289,6 +5355,7 @@ impl AiosDBManager {
                             modified_elements: 0,
                             deleted_elements: 0,
                             credential_advance: None,
+                            model_base_sesno: None,
                         }),
                         Vec::new(),
                     )
@@ -5311,6 +5378,7 @@ impl AiosDBManager {
                         modified_elements: 0,
                         deleted_elements: 0,
                         credential_advance: None,
+                        model_base_sesno: None,
                     }),
                     Vec::new(),
                 ),
@@ -5353,6 +5421,7 @@ impl AiosDBManager {
                         modified_elements: 0,
                         deleted_elements: 0,
                         credential_advance: None,
+                        model_base_sesno: None,
                     }),
                     Vec::new(),
                 );
@@ -5404,6 +5473,14 @@ impl AiosDBManager {
             modified_elements: 0,
             deleted_elements: 0,
             credential_advance: None,
+            // 这一窗的模型左端随批次带下去（ADR-092 D1）——与 `apply_one` 内部对
+            // 同一对输入算出的 `base_sesno` 逐位相同；收尾的连续性闸靠它判该不该盖。
+            model_base_sesno: Some(
+                crate::data_interface::increment_pipeline::model_plan_base_sesno(
+                    *plan.range.start(),
+                    model_floor,
+                ) as i32,
+            ),
         };
 
         Self::stage(
@@ -5479,6 +5556,7 @@ impl AiosDBManager {
                 plan.basic_info.clone(),
                 plan.range.clone(),
                 cand.db_type.clone(),
+                model_floor,
             ),
         );
         let mut precollected = IndexMap::new();
@@ -6140,6 +6218,34 @@ mod tests {
                 && reinit < applied
                 && applied < counts,
             "顺序必须是 scan gate 三态 -> 水位/计数/解析: {body}"
+        );
+    }
+
+    /// T-D-6：`Initial` 直写只插不删，整库生成那条路在直写之前先清模型面（只数 `pe` 会把「`pe` 为 0、
+    /// 模型面还留着 legacy 行」当成空库）；`Skip` 不写模型面，不清。
+    #[test]
+    fn the_baseline_clears_the_model_face_before_an_initial_write() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .expect("initialize_dbnum_baseline 必须存在")
+            .1
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview follows baseline")
+            .0;
+        let full_parse = body
+            .find("if baseline_needs_full_parse(count, applied_sesno)")
+            .expect("全量解析分支");
+        let generate = body
+            .find("if model == ModelHalf::Generate")
+            .expect("只有整库生成那条路直写模型面");
+        let clear = body
+            .find("clear_model_face_before_initial(dbnum)")
+            .expect("直写前清模型面");
+        let initialize = body.find("return initialize(").expect("初始化");
+        assert!(
+            full_parse < generate && generate < clear && clear < initialize,
+            "顺序必须是 全量解析分支 -> 整库生成才清 -> 清模型面 -> 直写: {body}"
         );
     }
 
@@ -7154,7 +7260,9 @@ mod tests {
             "薄壳不自己摄入：解析归 dbnum_initialize 的数据半边: {shell}"
         );
         assert!(
-            shell.contains("file_path,") && shell.contains("file_latest_sesno,") && shell.contains("initialize("),
+            shell.contains("file_path,")
+                && shell.contains("file_latest_sesno,")
+                && shell.contains("initialize("),
             "薄壳把点名的文件与本轮复核过的 file_latest_sesno 原样交给编排: {shell}"
         );
         assert!(
@@ -8970,6 +9078,7 @@ mod tests {
             modified_elements: 0,
             deleted_elements: 0,
             credential_advance: None,
+            model_base_sesno: None,
         }
     }
 
@@ -9001,18 +9110,14 @@ mod tests {
         });
         let json = serde_json::to_value(&degraded).unwrap();
         assert_eq!(
-            json["credential_advance"]["degraded"],
-            "candidates_ratio_above_threshold",
+            json["credential_advance"]["degraded"], "candidates_ratio_above_threshold",
             "{json}"
         );
 
         // 缺席形态：整键不出现，而不是 null。
         let absent = batch(7997, BatchStatus::Applied);
         let json = serde_json::to_value(&absent).unwrap();
-        assert!(
-            json.get("credential_advance").is_none(),
-            "整键缺席：{json}"
-        );
+        assert!(json.get("credential_advance").is_none(), "整键缺席：{json}");
     }
 
     /// 凭证前移的账只从成功结果搬：失败早退（`failed_window_result`）恒为 `None`。
