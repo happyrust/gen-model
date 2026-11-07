@@ -1,8 +1,8 @@
 //! plant-mbd M2a / M2b 要的宿主字段（plant3d-web#103）：成员的 `para` / `desp`、`spref_name` / `cate_name` /
 //! `gmref_name`、`aconn` / `lconn` / `p3_conn`、ATTA 的 `prop_bang` / `rpro_dod` / `rpro_dthi` / `atta_adlongth`、
-//! `dmf_targets`、`catalogue_primitives`、`vol`、`ipara`，成员之间的 `navigation`，BRAN 的 `flow_direction` /
-//! `heat_tracing` / `dmf_walls`。字段语义与 PML 出处见 plant-mbd `docs/field-dictionary.md`「M2b 宿主字段」「M2a 极坐标
-//! 摆位的宿主字段」，这里只讲从 E3D 库怎么读。
+//! `dmf_targets`、`catalogue_primitives`（含 `pdia_bare`）、`vol`、`ipara`，成员之间的 `navigation`，BRAN 的
+//! `flow_direction` / `heat_tracing` / `dmf_walls`。字段语义与 PML 出处见 plant-mbd `docs/field-dictionary.md`「M2b 宿主
+//! 字段」「M2a 极坐标摆位的宿主字段」，这里只讲从 E3D 库怎么读。
 //!
 //! - **目录件**：`catalogue_point_set(member).component`，即 PML 的 `catref of`（`SPRE → [SPCO → CATR]* → SCOM`）。
 //!   `para` 先读构件自己的 `PARA`、没有再读目录件的（Core `DESPRE` 同序）；`cate_name` 是目录件属主链上的 CATE，
@@ -14,8 +14,13 @@
 //! - **目录原语**：几何集（ATTA 先 `GSTR` 再 `GMRE`，PML `getattageo` L741-748；其余先 `GMRE` 再 `GSTR`，
 //!   `getPipeMaxdia` L19-25）下的 `LSNO / SRTO / LCYL / SCYL / SSCY / SCTO`，连同各自名下的负体
 //!   `NLCY / NSCY / NSSL / NSSC`。尺寸与轴在「设计构件 + 目录件」的环境里求值，**带保温**：PML 的 `!!evalCata` 走
-//!   `dbref.evaluate`，`IPARAM` 答实例的保温参数，求解器再按 `getPipeMaxdia` 从 `PDIA` 里扣 `ipara[1]`——两边同一口径。
-//!   具名轴按构件的世界旋转转到世界系；`Pn` 轴取那个 P 点的世界方向与位置（`evalCata` 回 `[dir, pos]`）。
+//!   `dbref.evaluate`，`IPARAM` 答实例的保温参数。具名轴按构件的世界旋转转到世界系；`Pn` 轴取那个 P 点的世界方向与
+//!   位置（`evalCata` 回 `[dir, pos]`）。
+//! - **`pdia_bare`**：构件带保温（`ipara` 非空）时，`LCYL / SCYL / SSCY` 的 `PDIA` 另在不带保温的环境里求一次
+//!   （`DbElementParamEnv::without_insulation`，`IPARAM` 一律答 0）。`getPipeMaxdia` 认定这几种圆柱的 `PDIA` 含保温、
+//!   一律扣 `ipara[1]`，AMS 的套接 OLET 却写成不含（24381/145487：`PDIA` = `PARAM 10` = 33，`IPARAM 1` = 340），扣成
+//!   负数就退到直段外径；裸径对两种写法都对（含 `IPARAM` 时去掉保温，不含时原值不变），求解器有它就不扣（plant-mbd
+//!   `D-PIPE-021`）。不带保温时不给，求解器照 PML 公式（`ipara` 为空即不扣）。
 //! - **`ipara`**：保温选件（`ISPE → SELE … → SPCO → CATR`）的 `PARA`，经 `DbElementParamEnv::iparam` 逐格取。公开接口
 //!   越界答 0、分不出「没有这一格」，所以取前 [`IPARA_SLOTS`] 格再截掉末尾的 0；没有保温就是空表（求解器按不扣）。
 //! - **`vol`**：E3D 自己的 SPAMAP（`WITHIN VOLUME` 用的那张表，0.1 mm，存盘快照）里成员的世界包围盒
@@ -217,11 +222,19 @@ pub(super) fn member_fields(
     }
 
     fields.dmf_targets = bad.keep("DMFARR", dmf_targets(member)).unwrap_or_default();
+    fields.ipara = bad
+        .keep("IPARA", insulation_parameters(member, &env))
+        .unwrap_or_default();
     if let Some(component) = &component {
+        let bare_env = (!fields.ipara.is_empty()).then(|| {
+            DbElementParamEnv::new(Some(member.clone()), Some(component.clone()))
+                .without_insulation()
+        });
         let frame = AxisFrame {
             member,
             rotation: site.world.map(|world| DMat3::from_mat4(world)),
             env: &env,
+            bare_env: bare_env.as_ref(),
         };
         fields.catalogue_primitives = bad
             .keep(
@@ -230,9 +243,6 @@ pub(super) fn member_fields(
             )
             .unwrap_or_default();
     }
-    fields.ipara = bad
-        .keep("IPARA", insulation_parameters(member, &env))
-        .unwrap_or_default();
 
     if !bad.0.is_empty() {
         let object_refno = wire_refno(member.refno());
@@ -403,11 +413,13 @@ fn insulation_parameters(
     Ok(values)
 }
 
-/// 原语的轴求值要的：成员（`Pn` 轴问它的 P 点）、它的世界旋转（具名轴）、求值环境。
+/// 原语的轴求值要的：成员（`Pn` 轴问它的 P 点）、它的世界旋转（具名轴）、求值环境；构件带保温时另有不带保温的
+/// 环境（`pdia_bare`，见模块文档）。
 struct AxisFrame<'a> {
     member: &'a DbElement,
     rotation: Option<DMat3>,
     env: &'a DbElementParamEnv,
+    bare_env: Option<&'a DbElementParamEnv>,
 }
 
 /// 几何集下求解器认的原语，各带名下的负体。
@@ -475,13 +487,7 @@ fn evaluate_primitive(
     kind: String,
     frame: &AxisFrame<'_>,
 ) -> CataloguePrimitive {
-    let number = |name: &str| {
-        primitive
-            .get_number(name, frame.env)
-            .ok()
-            .and_then(|number| number.value())
-            .filter(|value| value.is_finite())
-    };
+    let number = |name: &str| evaluated_number(primitive, name, frame.env);
     let axis = |name: &str| catalogue_axis(primitive, name, frame);
     let mut out = CataloguePrimitive {
         level: level(primitive),
@@ -524,8 +530,22 @@ fn evaluate_primitive(
         }
         _ => {}
     }
+    if matches!(kind.as_str(), "LCYL" | "SCYL" | "SSCY") {
+        out.pdia_bare = frame
+            .bare_env
+            .and_then(|env| evaluated_number(primitive, "PDIA", env));
+    }
     out.kind = kind;
     out
+}
+
+/// `name` 在 `env` 里求成的有限数；属性不在模板里、unset、求不出都按没有。
+fn evaluated_number(primitive: &DbElement, name: &str, env: &DbElementParamEnv) -> Option<f64> {
+    primitive
+        .get_number(name, env)
+        .ok()
+        .and_then(|number| number.value())
+        .filter(|value| value.is_finite())
 }
 
 /// `LEVE`：出图级别区间 `[最小, 最大]`，原值。
