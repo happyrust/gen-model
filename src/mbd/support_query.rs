@@ -4,9 +4,10 @@
 //!
 //! # 支架的范围
 //!
-//! [`super::object::support_parts`]（PML `getsuppname`）给出 SUPPO，或支架区里 ZONE 级的 STRU + REST 一对。PML 的
-//! `coll all for $suppname` 在 `:SUPP` 支架上是整个支架；AMS 的支架名就是 STRU 的名字，照抄会漏掉 REST 下的吊挂件，
-//! 这里按原意收：SUPPO 收它的全部后代，否则先 STRU、再 REST 的全部后代（深度优先、文件原序，根本身不收）。
+//! [`super::object::support_parts`]（PML `getsuppname`）给出 SUPPO、UDET 支架 `:SUPP`，或支架区里 ZONE 级的 STRU +
+//! REST 一对。PML 的 `coll all for $suppname` 在 `:SUPP` 支架上是整个支架；AMS 的支架名就是 STRU 的名字，照抄会漏掉
+//! REST 下的吊挂件，这里按原意收：SUPPO / `:SUPP` 收它的全部后代，否则先 STRU、再 REST 的全部后代（深度优先、文件
+//! 原序，根本身不收）。取支架时留下的说明（全库按名配对时有库的 NAME 表读不动）接在判型的 `notes` 后面。
 //!
 //! # 构件（`members`）
 //!
@@ -16,10 +17,18 @@
 //! 原序，世界系；PTSE 里没有 P0 的目录件补上构件原点、局部 +Z 的 P0——E3D 照样答 `p0 pos / dir`，PML 拿它当管夹点）；
 //! 目录件的 `PARA`、带保温规格（`ISPE`）时的 `IPARA[1]`、`name of cate of catref` 与已求值的几何原语（板上 PFIT 的
 //! 实例标架贴板面，同 e3d-model；带保温时圆柱另带不带保温的 `pdia_bare`，见 [`super::support_geometry`]）；SCTN /
-//! GENSEC 的型钢数据、PANE 的板数据；`CUTL`（E3D 现算的伪属性，这里按 `|POSE − POSS|` 给，只对 SCTN）；`DESP`；UDA
+//! GENSEC 的型钢数据、PANE 的板数据；`CUTL`（只对 SCTN，见下节）；`DESP`；UDA
 //! `:itemcode`、`:SUPP-ADLONGTH`（型钢）、`:ZD-XCQG`、`:weldTP`（只给 STRU 下 `DBDEPTH > 7` 的 BOX，WORL 记 0）。
 //! 包围盒（PML `volume`）先查本库 SPAMAP（[`host::spamap_index`]），没有条目的按已取到的几何点（截面两端、板两面、
 //! 原语、P 点）求；材料码表不在宿主，`material_desc` 不给。
+//!
+//! # CUTL（仪表支架的墙装判据）
+//!
+//! EM9 仪表支架拿 STRU 下 SCTN 的 `CUTL` 判墙装（`instSupport.pmlobj:4199-4209`：有一根是 0 就出墙装坐标组；求解器
+//! `support::em9::labels::coordinate_tags`，空着按 0）。E3D 的 `CUTL` 是 Cut length，查询时现算的伪属性：e3d-io 的
+//! E3D 3.1 SCTN 模板里没有它（`UnknownAttribute`），库里读不到。[`resolve_cutl`]：读得到（模板带它、写了值）就用
+//! 真值，0 照样是 0；读不到退回两端距离 `|POSE − POSS|`——正常的型钢不会是 0，于是墙装组只在型钢两端重合时出。
+//! 退回距离只在 EM9 仪表支架的 `issues` 里点一句（别的类型不读 `cutl`，视图照旧）。
 //!
 //! # 管道附件（`pipe_attas`）
 //!
@@ -151,17 +160,24 @@ pub fn query_support(
         Some(parts) => parts,
         None => {
             view.issues.push(format!(
-                "{} {} 既不在 SUPPO 之下、也不是支架区里 ZONE 一级的 STRU / REST，只读它自己的子树",
+                "{} {} 既不在 SUPPO / :SUPP 之下、也不是支架区里 ZONE 一级的 STRU / REST，只读它自己的子树",
                 classified.subject_noun, view.subject_refno
             ));
             SupportParts {
                 name: classified.subject_name.clone(),
                 suppo: None,
+                supp: None,
                 stru: (classified.subject_noun == "STRU").then(|| subject.clone()),
                 rest: (classified.subject_noun != "STRU").then(|| subject.clone()),
+                notes: Vec::new(),
             }
         }
     };
+    for note in &parts.notes {
+        if !view.issues.contains(note) {
+            view.issues.push(note.clone());
+        }
+    }
     view.supp_name = parts.name.clone();
     view.stru_name = stored_name(parts.stru.as_ref())?;
     view.rest_name = stored_name(parts.rest.as_ref())?;
@@ -186,6 +202,11 @@ pub fn query_support(
                 });
             }
         }
+    }
+    if classified.annotation_type == AnnotationType::Em9InstSupp
+        && let Some(note) = cutl_note(reader.cutl_by_distance, reader.cutl_missing)
+    {
+        view.issues.push(note);
     }
     view.bbox = support_bbox(&view.members, &reader.spre_set);
     view.concretes = reader.concretes(&walk, &mut view.issues);
@@ -258,8 +279,8 @@ fn walk_support(
     parts: &SupportParts,
     issues: &mut Vec<String>,
 ) -> Result<Vec<WalkItem>, DbElementError> {
-    let roots: Vec<&DbElement> = match &parts.suppo {
-        Some(suppo) => vec![suppo],
+    let roots: Vec<&DbElement> = match parts.suppo.as_ref().or(parts.supp.as_ref()) {
+        Some(whole) => vec![whole],
         None => parts.stru.iter().chain(parts.rest.iter()).collect(),
     };
     let mut items = Vec::new();
@@ -313,6 +334,9 @@ struct MemberReader<'a> {
     /// `SPRE` 设了（非 Nulref，目标读不读得到不论）的构件 refno：支架包围盒只跳过 `SPRE` unset 的 SCTN（PML
     /// `spref.unset()`），悬空的引用照收。
     spre_set: HashSet<String>,
+    /// STRU 下读不到 `CUTL` 的 SCTN：按两端距离给的、两端也读不到的（[`resolve_cutl`]）。
+    cutl_by_distance: usize,
+    cutl_missing: usize,
 }
 
 impl<'a> MemberReader<'a> {
@@ -321,6 +345,8 @@ impl<'a> MemberReader<'a> {
             set,
             spamaps: HashMap::new(),
             spre_set: HashSet::new(),
+            cutl_by_distance: 0,
+            cutl_missing: 0,
         }
     }
 
@@ -402,7 +428,15 @@ impl<'a> MemberReader<'a> {
                 .and_then(|frame| axes(DMat3::from_mat4(frame)))
                 .or_else(|| world.and_then(|world| axes(DMat3::from_mat4(world))));
             if noun == "SCTN" {
-                member.cutl = data.length;
+                let (cutl, source) = resolve_cutl(stored_cutl(element)?, data.length);
+                member.cutl = cutl;
+                if item.in_stru {
+                    match source {
+                        CutlSource::Attribute => {}
+                        CutlSource::Distance => self.cutl_by_distance += 1,
+                        CutlSource::Missing => self.cutl_missing += 1,
+                    }
+                }
             }
             member.primitives = data.primitives;
             member.para = data.para;
@@ -639,6 +673,63 @@ fn uda_number(element: &DbElement, name: &str) -> Result<Option<f64>, DbElementE
     }
 }
 
+/// SCTN 的 `CUTL` 从哪来（[`resolve_cutl`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutlSource {
+    /// 读到的 `CUTL` 属性。
+    Attribute,
+    /// 两端距离 `|POSE − POSS|`。
+    Distance,
+    /// 两样都没有，`cutl` 空着（求解器按 0 算）。
+    Missing,
+}
+
+/// 见模块文档「CUTL」：读得到的 `CUTL` 优先（0 照样是 0），读不到退回两端距离。
+pub fn resolve_cutl(stored: Option<f64>, distance: Option<f64>) -> (Option<f64>, CutlSource) {
+    if let Some(value) = stored.filter(|value| value.is_finite()) {
+        return (Some(value), CutlSource::Attribute);
+    }
+    match distance.filter(|value| value.is_finite()) {
+        Some(value) => (Some(value), CutlSource::Distance),
+        None => (None, CutlSource::Missing),
+    }
+}
+
+/// SCTN 的 `CUTL` 属性：模板里没有（E3D 3.1 就没有）、没写、现算失败、不是数都按读不到。
+fn stored_cutl(element: &DbElement) -> Result<Option<f64>, DbElementError> {
+    match element.get_double("CUTL") {
+        Ok(value) => Ok(value.filter(|value| value.is_finite())),
+        Err(
+            DbElementError::UnknownAttribute { .. }
+            | DbElementError::PseudoAttribute { .. }
+            | DbElementError::TypeMismatch { .. },
+        ) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// EM9 仪表支架的墙装判据没拿到真 `CUTL` 时的那句话；STRU 下的 SCTN 都读到了给 `None`。
+pub fn cutl_note(by_distance: usize, missing: usize) -> Option<String> {
+    if by_distance + missing == 0 {
+        return None;
+    }
+    let mut note = format!(
+        "STRU 下 {} 根 SCTN 读不到 CUTL（E3D 现算的 Cut length，库里不存）：",
+        by_distance + missing
+    );
+    if by_distance > 0 {
+        note.push_str(&format!("{by_distance} 根按两端距离 |POSE − POSS| 给"));
+    }
+    if missing > 0 {
+        if by_distance > 0 {
+            note.push('，');
+        }
+        note.push_str(&format!("{missing} 根两端也读不到、空着按 0 算"));
+    }
+    note.push_str("；墙装判据（有 CUTL = 0 的 SCTN）用的不是 E3D 的原值");
+    Some(note)
+}
+
 /// `IPARA[1]`：只有设了保温规格（`ISPE`）的构件才有，按带保温的求值环境取。
 fn insulation_parameters(
     member: &DbElement,
@@ -740,9 +831,9 @@ fn support_bbox(members: &[SupportMember], spre_set: &HashSet<String>) -> Option
         })
 }
 
-/// 支架根（SUPPO，否则 STRU、REST）的 UDA `:ZD_BZBM`（`instSupport.gettextindexs` L4838）。
+/// 支架根（SUPPO / `:SUPP`，否则 STRU、REST）的 UDA `:ZD_BZBM`（`instSupport.gettextindexs` L4838）。
 fn function_code(parts: &SupportParts) -> Result<Option<String>, DbElementError> {
-    for root in [&parts.suppo, &parts.stru, &parts.rest]
+    for root in [&parts.suppo, &parts.supp, &parts.stru, &parts.rest]
         .into_iter()
         .flatten()
     {
@@ -1193,6 +1284,24 @@ pub fn name_index(set: &DbSet, dbnum: u32) -> Result<Option<NameIndex>, NameInde
     Ok(loaded)
 }
 
+/// `DbSet` 里全部 DESI 库的 NAME 表（库号升序）。读不动的库留一句「…：库 N {skipped}」跳过。
+fn design_name_indexes(
+    set: &Arc<DbSet>,
+    skipped: &str,
+    issues: &mut Vec<String>,
+) -> Result<Vec<NameIndex>, DbElementError> {
+    let mut out = Vec::new();
+    for dbnum in design_dbs(set) {
+        match name_index(set, dbnum) {
+            Ok(Some(index)) => out.push(index),
+            Ok(None) => {}
+            Err(NameIndexError::Db(error)) => return Err(error),
+            Err(error) => issues.push(format!("{error}：库 {dbnum} {skipped}")),
+        }
+    }
+    Ok(out)
+}
+
 /// `DbSet` 里全部 DESI 库中存名以 `prefix` 开头的元素（库号升序、各库内按名字）。读不动 NAME 表的库留一句话跳过。
 pub fn named_with_prefix(
     set: &Arc<DbSet>,
@@ -1200,21 +1309,32 @@ pub fn named_with_prefix(
     issues: &mut Vec<String>,
 ) -> Result<Vec<RefNo>, DbElementError> {
     let mut out = Vec::new();
-    for dbnum in design_dbs(set) {
-        let index = match name_index(set, dbnum) {
-            Ok(Some(index)) => index,
-            Ok(None) => continue,
-            Err(NameIndexError::Db(error)) => return Err(error),
-            Err(error) => {
-                issues.push(format!("{error}：库 {dbnum} 里的管道附件没参与按名查找"));
-                continue;
-            }
-        };
+    for index in design_name_indexes(set, "里的管道附件没参与按名查找", issues)? {
         let start = index.partition_point(|(name, _)| name.as_str() < prefix);
         out.extend(
             index[start..]
                 .iter()
                 .take_while(|(name, _)| name.starts_with(prefix))
+                .map(|(_, refno)| *refno),
+        );
+    }
+    Ok(out)
+}
+
+/// `DbSet` 里全部 DESI 库中存名恰为 `name` 的元素（库号升序）：PML `name of $!name` 的全库按名，查的是所钉会话的
+/// NAME 表（[`name_index`]，按库文件 + 会话缓存），不做全树扫。读不动 NAME 表的库留一句话跳过。
+pub fn named_exactly(
+    set: &Arc<DbSet>,
+    name: &str,
+    issues: &mut Vec<String>,
+) -> Result<Vec<RefNo>, DbElementError> {
+    let mut out = Vec::new();
+    for index in design_name_indexes(set, "里的元素没参与按名配对", issues)? {
+        let start = index.partition_point(|(key, _)| key.as_str() < name);
+        out.extend(
+            index[start..]
+                .iter()
+                .take_while(|(key, _)| key.as_str() == name)
                 .map(|(_, refno)| *refno),
         );
     }
