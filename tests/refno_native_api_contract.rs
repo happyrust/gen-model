@@ -255,6 +255,8 @@ fn health_dbnums_and_tree_envelopes_are_frozen() {
             "geom_errors",
             "idle_round_panic",
             "batch_failures",
+            "equip_derived",
+            "model_root_backoff",
             "catalogue_reconcile",
             "model_concurrency",
             "geometry_concurrency",

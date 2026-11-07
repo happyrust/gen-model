@@ -5763,14 +5763,13 @@ mod metadata_gate_caliber_tests {
     }
 
     /// 门开着：放行的只有拿到两票（字典 DCHC=0 ∧ 生成器不读）的名字，与 `change_metadata_tier` 逐名相同——
-    /// 老五个与 S6 新档（`DUTY`）都不影响模型。`HREF` 原本也在这一档（手写表登记在级联侧），但 e3d-model
-    /// `route.rs` 起按它认共享 TEE 的穿管分支（`target.get_ref("HREF")`），第二票没了，2026-11-06 起不再
-    /// 放行。戳 `CACHID` 字典按构造收不到，2026-09-17 Q6 起第一票由戳表给，单独跳、跟着老名单跳都放行；
-    /// 读取集合里的 `DIR` 规划器照旧整根重算，预览也得这么说。
+    /// 老五个与 S6 新档（`DUTY`；`SCREF` 同样是字典 0 且生成器不读）都不影响模型。`HREF` 自 2026-11-04
+    /// 起进了读取集合，门开着也要重算。戳 `CACHID` 字典按构造收不到，2026-09-17 Q6 起第一票由戳表给，
+    /// 单独跳、跟着老名单跳都放行；读取集合里的 `DIR` 规划器照旧整根重算，预览也得这么说。
     #[test]
     fn with_the_gate_on_only_the_double_voted_names_are_not_model_affecting() {
         for name in [
-            "NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "CACHID", "SPAMAP",
+            "NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "SCREF", "CACHID", "SPAMAP",
         ] {
             assert!(!affecting(&[name], true), "{name}");
         }

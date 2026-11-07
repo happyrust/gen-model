@@ -69,3 +69,8 @@
 1. 指纹含 `aios-database:<本仓版本>` 的直接后果是**本仓每发一版都整库重排**。若不想要，要把本仓版本从指纹里拿掉、只留 vendor 身份 + 规则标签——这改变「几何算法身份」的定义，需用户拍板；本文按现状记录。
 2. 真机还没带着这条重启过一次（WP-A ⑩ 提交后、WP-F 之前补一次：启动日志应点名全部盖过水位的库、`/health.generator_reconcile` 在 `update/execute` 后非 `null`）。
 3. `reconcile_generator_now` 与启动核对各自读一遍登记表与落款、各自排工，靠 `batch_queue::enqueue` 的同库合并去重（`already_covered`）；没有单测覆盖「两条路同时到」。
+
+## 追记（2026-11-07）
+
+1. **指纹加 `e3d-io:`、`e3d-attlib:` 两段。** e3d-model 用路径依赖吃这两家：读库、求目录 PML 走 e3d-io，属性字典在 e3d-attlib。原先只有 e3d-model 的身份进指纹，单改 e3d-io 的几何修复（如 2026-11-06 的 POD `b6ff292`、操作码 1012 `74bd1ee`）不改指纹，旧行照用，正是本文要堵的洞。`build.rs` 的 vendor 身份泛化成 `vendor_identity(仓名, 环境变量)`，三家同一口径（`E3D_IO_VENDOR_DIR`、`E3D_ATTLIB_VENDOR_DIR` 可改目录）；`/health` 与 `version --json` 多 `e3d_io_build_id`、`e3d_attlib_build_id` 两格；生成器核对日志点名三家身份。换上这版后每个库再整库重排一次。
+2. **「未确认」第 2 条已在本机补上。** 2026-11-07 本机 8022 换成 `fix/model-open-issues-1106`（e3d-model `1e56a42`）：首启日志点名 7997 / 7998 / 8000 `reason=model_generator_changed`，三库落款改为新指纹；再重启 `generator_stale_dbnums` 为空，不排工。线上还没有部署过带这条的构建（11-05 的 publish 构建失败）。

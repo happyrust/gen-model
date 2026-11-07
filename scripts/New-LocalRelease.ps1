@@ -357,6 +357,7 @@ if ($IncludePc) {
     } finally { Pop-Location }
 }
 $webStage = Join-Path $stage 'web'
+$backendPdb = $null
 if ($SkipBuild) {
     Write-Step "复用现成程序产物：$SourcePackage"
     $srcExe = Join-Path $SourcePackage 'aios-database.exe'
@@ -395,10 +396,16 @@ else {
     $previousTargetDir = $env:CARGO_TARGET_DIR
     $previousBuildId = $env:AIOS_BUILD_ID
     $previousBuildEpoch = $env:AIOS_BUILD_EPOCH
+    $previousRustFlags = $env:RUSTFLAGS
+    $previousReleaseDebug = $env:CARGO_PROFILE_RELEASE_DEBUG
     try {
         if ($BackendTargetDir) { $env:CARGO_TARGET_DIR = $BackendTargetDir }
         $env:AIOS_BUILD_ID = $BuildId
         $env:AIOS_BUILD_EPOCH = [string]$buildEpoch
+        # 发布包留 PDB（GitHub #78）：仓库与用户级 cargo 配置都给 MSVC 链接加了 /DEBUG:NONE、debuginfo=0，崩溃偏移解不到
+        # 符号。RUSTFLAGS 一给就整体顶掉配置里的 rustflags，这里只把 -Z threads=8 带回来；行表级调试信息够把偏移解到函数与行号。
+        $env:RUSTFLAGS = '-Z threads=8'
+        $env:CARGO_PROFILE_RELEASE_DEBUG = 'line-tables-only'
         cargo build --release --features http_api --bin aios-database
         if ($LASTEXITCODE) { throw "cargo build 失败（exit $LASTEXITCODE）" }
     }
@@ -409,6 +416,10 @@ else {
         else { $env:AIOS_BUILD_ID = $previousBuildId }
         if ($null -eq $previousBuildEpoch) { Remove-Item Env:AIOS_BUILD_EPOCH -ErrorAction SilentlyContinue }
         else { $env:AIOS_BUILD_EPOCH = $previousBuildEpoch }
+        if ($null -eq $previousRustFlags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
+        else { $env:RUSTFLAGS = $previousRustFlags }
+        if ($null -eq $previousReleaseDebug) { Remove-Item Env:CARGO_PROFILE_RELEASE_DEBUG -ErrorAction SilentlyContinue }
+        else { $env:CARGO_PROFILE_RELEASE_DEBUG = $previousReleaseDebug }
         Pop-Location
     }
     $builtExe = if ($BackendTargetDir) {
@@ -421,6 +432,18 @@ else {
     }
     if (-not (Test-Path -LiteralPath $builtExe)) { throw "构建后找不到 aios-database.exe" }
     Copy-Item -LiteralPath $builtExe -Destination (Join-Path $stage 'aios-database.exe')
+    # PDB 不进包，按构建号归档在 releases\pdb\<build_id>\（GitHub #78），崩溃转储与偏移照它解符号；release.json 记它的 sha256。
+    $builtPdb = Join-Path (Split-Path -Parent $builtExe) 'aios_database.pdb'
+    if (Test-Path -LiteralPath $builtPdb) {
+        $pdbArchive = Join-Path (Join-Path $OutDir 'pdb') $BuildId
+        New-Item -ItemType Directory -Force $pdbArchive | Out-Null
+        Copy-Item -LiteralPath $builtPdb -Destination $pdbArchive -Force
+        $backendPdb = [ordered]@{ path = (Join-Path $pdbArchive 'aios_database.pdb'); sha256 = Get-Sha256Compat $builtPdb }
+        Write-Step "PDB 归档：$pdbArchive"
+    }
+    else {
+        Write-Warn2 "没有找到 $builtPdb：这一包的崩溃偏移解不到符号"
+    }
     if (-not $ReuseWebFromZip) {
         $pub = Join-Path $PlantUiRoot 'web\public'
         Get-ChildItem -LiteralPath $pub -Recurse -File | ForEach-Object {
@@ -566,6 +589,9 @@ param(
     # v_ip 是本机、端口上又没库时，本脚本先用包根 bin\surreal.exe 起一台，服务只连它。
     [ValidateSet('mem', 'rocksdb')][string]$StoreMode,
     [switch]$NoBrowser,
+    # 打开 Windows 崩溃转储（WER LocalDumps，写 HKLM，要管理员）：Rust 与 C++ 的 abort 都走 __fastfail，进程内钩子
+    # 接不住，只有它能留下现场（GitHub #78）。转储落在 logs\dumps，配合 releases\pdb\<build_id> 解符号。
+    [switch]$EnableCrashDumps,
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
@@ -574,6 +600,21 @@ if ($StoreMode) { $env:AIOS_STORE_MODE = $StoreMode }
 $exe = Join-Path $root 'aios-database.exe'
 $logRoot = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logRoot | Out-Null
+if ($EnableCrashDumps) {
+    $dumpDir = Join-Path $logRoot 'dumps'
+    $werKey = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\aios-database.exe'
+    try {
+        New-Item -ItemType Directory -Force $dumpDir | Out-Null
+        New-Item -Path $werKey -Force | Out-Null
+        New-ItemProperty -Path $werKey -Name DumpFolder -PropertyType ExpandString -Value $dumpDir -Force | Out-Null
+        New-ItemProperty -Path $werKey -Name DumpCount -PropertyType DWord -Value 3 -Force | Out-Null
+        New-ItemProperty -Path $werKey -Name DumpType -PropertyType DWord -Value 2 -Force | Out-Null
+        Write-Output "CRASH_DUMPS=$dumpDir"
+    }
+    catch {
+        Write-Warning "写 $werKey 要管理员权限，崩溃转储没开：以管理员身份重跑 Start-AMS.ps1 -EnableCrashDumps，或手动建这个键并设 DumpFolder / DumpCount=3 / DumpType=2"
+    }
+}
 if (-not $Workspace) {
     $bundledWorkspace = Join-Path $root 'workspace'
     $Workspace = if (Test-Path -LiteralPath $bundledWorkspace) { $bundledWorkspace } else { $root }
@@ -666,6 +707,9 @@ if ($existing) {
         }
     }
     $env:DB_OPTION_FILE = $configPath
+    # 与仓内各启动脚本同口径给 128MB 线程栈兜底（GitHub #78）：没显式设栈大小的线程（第三方库自己开的那些）
+    # 默认只有 2MB，而几何与解析链对栈的需求远超这个数。已经设了就不动。
+    if ([string]::IsNullOrEmpty($env:RUST_MIN_STACK)) { $env:RUST_MIN_STACK = '134217728' }
     $offlineRoot = Split-Path -Parent $root
     if (Test-Path -LiteralPath (Join-Path $offlineRoot 'Sync-OfflineConfig.ps1')) { $env:AIOS_OFFLINE_ROOT = $offlineRoot }
     $env:PLANT_UI_WEB_ROOT = Join-Path $root 'web'
@@ -1308,6 +1352,7 @@ try {
         backend_git_dirty  = [bool]$backendBuildInfo.git_dirty
         backend_sha256   = $backendFile[0].sha256
         backend_bytes    = $backendFile[0].bytes
+        backend_pdb      = $backendPdb
         e3d_io_git_commit = $e3dIoGitCommit
         plant_ui_version = $WebVersion
         web_source       = $webSource

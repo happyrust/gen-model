@@ -349,6 +349,25 @@ fn real_branch_lays_out_into_multiple_isolines() {
     assert_eq!(data.branch_refno, "24383_99996");
     assert_eq!(data.input_refno, "24383_99996");
 
+    let version = data
+        .meta
+        .source_version
+        .as_ref()
+        .expect("host stamps meta.source_version");
+    assert_eq!(version.dbnum, BRAN.dbno());
+    let mut dbnums: Vec<u32> = version
+        .databases
+        .iter()
+        .map(|database| database.dbnum)
+        .collect();
+    let total = dbnums.len();
+    dbnums.dedup();
+    assert_eq!(
+        dbnums.len(),
+        total,
+        "databases are unique per dbnum: {dbnums:?}"
+    );
+
     let dims: Vec<(&str, &str)> = data
         .primitives
         .iter()

@@ -603,6 +603,13 @@ async fn model_half_inner(
                 // （收尾时随单元清单一起记），`model_sesno` 不盖就是它在库里的全部说法。
                 report.units.push(failed_unit(dbnum, root, &noun, &reason));
             }
+            // GitHub #74：有失败元素却按冷根口径发布了幸存件的根——提交在上面的事务里、单元已记 `generated`，
+            // 这里只把「哪几件没算出来」写进 message 点名。不进失败账、水位照盖（与增量路的 `partial_roots` 同一口径：
+            // 模型行已落库，缺的那几件在回执上说得出来）。
+            for (root, reason) in projection.partial {
+                log::warn!("dbnum={dbnum} 初始化根 {root} 按冷根口径发布了幸存件：{reason}");
+                note_published_survivors(&mut report.units, root, &reason);
+            }
         }
         Ok::<_, anyhow::Error>(report)
     };
@@ -674,6 +681,19 @@ fn failed_unit(dbnum: u32, root: RefNo, noun: &str, reason: &str) -> ModelUnitRe
     }
 }
 
+/// GitHub #74：把「按冷根口径发布了幸存件」写进这一根已记 `generated` 的单元。没记成 `generated`（这一根
+/// 别处判死了）就不改：失败单元的 message 是失败原因，不能被盖掉。
+fn note_published_survivors(units: &mut [ModelUnitResult], root: RefNo, reason: &str) {
+    let key = format!("{}/{}", root.word0, root.word1);
+    if let Some(unit) = units
+        .iter_mut()
+        .rev()
+        .find(|unit| unit.root_refno == key && matches!(unit.status, UnitGenStatus::Generated))
+    {
+        unit.message = Some(format!("published survivors; {reason}"));
+    }
+}
+
 /// pe 行数与 WORL 根数（`pe_dbnum_noun` 整键索引，见 `common.surql` 注释）。
 pub(crate) async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
     #[derive(serde::Deserialize)]
@@ -717,6 +737,27 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("tests follow")
             .0
+    }
+
+    /// GitHub #74：冷根幸存件只在已记 `generated` 的单元上点名；失败单元的原因不被盖掉。
+    #[test]
+    fn published_survivors_are_named_on_the_generated_unit_only() {
+        use super::*;
+        let partial = RefNo::new(23714, 997);
+        let dead = RefNo::new(23714, 998);
+        let nouns = HashMap::from([(partial, "STRU".to_owned()), (dead, "FRMW".to_owned())]);
+        let mut units = vec![
+            generated_unit(7330, partial, &nouns),
+            failed_unit(7330, dead, "FRMW", "producer failed"),
+        ];
+        note_published_survivors(&mut units, partial, "1 geometry element(s) failed: 23714/1013");
+        note_published_survivors(&mut units, dead, "must not replace the failure");
+        assert_eq!(units[0].status, UnitGenStatus::Generated);
+        assert_eq!(
+            units[0].message.as_deref(),
+            Some("published survivors; 1 geometry element(s) failed: 23714/1013")
+        );
+        assert_eq!(units[1].message.as_deref(), Some("producer failed"));
     }
 
     /// ADR-077 D5：初始化编排不碰投影、不登记 write-behind；D6：不读 `pe` 枚举根。

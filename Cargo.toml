@@ -304,6 +304,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
+    # 崩溃留痕（`process_diagnostics::install_crash_handlers`，GitHub #78）：向量化异常处理与进程内存读数。
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

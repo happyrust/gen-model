@@ -1819,6 +1819,41 @@ mod tests {
         controller.stop_now();
     }
 
+    /// GitHub #88：ACK 全到齐时栅栏立刻返回，最后一声进度就是满格 `(N, N)`。7997 那次面板停在
+    /// 「刷盘 6772/6772」却不收尾，卡的是栅栏之后的设备派生量，不是这里。时间是暂停的：要是栅栏等到了
+    /// 期限，虚拟时钟会直接跳过 600 s。
+    #[tokio::test(start_paused = true)]
+    async fn the_fence_returns_at_once_with_a_full_progress_report_when_every_root_is_acked() {
+        let roots = (130..136).map(|n| RefNo::new(7997, n)).collect::<Vec<_>>();
+        let adapter = Arc::new(ScriptedPersistence::new(vec![DurableBatchResult {
+            acknowledged: roots.iter().map(|root| ack(*root, "all")).collect(),
+            ..Default::default()
+        }]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(roots.iter().map(|root| commit(*root, "all")).collect())
+            .unwrap();
+        let started = Instant::now();
+        let mut reports = Vec::new();
+        let outcome = controller
+            .await_roots_reporting(7997, &roots, budget(5, 600), |acked, total| {
+                reports.push((acked, total))
+            })
+            .await;
+        assert!(outcome.all_acked());
+        assert_eq!(outcome.acked.len(), roots.len());
+        assert_eq!(reports.last(), Some(&(roots.len(), roots.len())));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "ACK 齐了就返回，不等期限：{:?}",
+            started.elapsed()
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1, "一批刷完");
+        controller.stop_now();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_blocked_root_is_reported_at_once_instead_of_waiting_for_the_deadline() {
         let root = RefNo::new(7997, 122);

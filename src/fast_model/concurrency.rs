@@ -330,10 +330,16 @@ where
 /// 消灭掉的形态。
 static CPU_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
+/// 几何 worker 的线程栈（GitHub #78）：e3d-model 求值、manifold 布尔与三角化全在这条线上，rayon 默认只给
+/// 2MB（或 `RUST_MIN_STACK`）——仓内脚本都靠 `RUST_MIN_STACK=128MB` 兜底，发布包没有。与 tokio 运行时同取
+/// 64MB：栈是保留地址空间、按页提交，多留不花实际内存。
+pub(crate) const GEOMETRY_THREAD_STACK: usize = 64 * 1024 * 1024;
+
 fn cpu_pool() -> &'static rayon::ThreadPool {
     CPU_POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(geometry_gate().quota())
+            .stack_size(GEOMETRY_THREAD_STACK)
             .thread_name(|index| format!("geometry-cpu-{index}"))
             .build()
             .expect("private geometry CPU pool")
@@ -389,6 +395,40 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 额度 = 1 时分块宽度 = 全长：单块单任务，就是改动前的串行。
+    /// GitHub #78：几何 worker 跑 e3d-model 求值、布尔与三角化，栈不能是 rayon 默认的 2MB——发布包不设
+    /// `RUST_MIN_STACK`。真建一次池，在 worker 线程上量一下可用栈。
+    #[test]
+    fn the_geometry_pool_runs_on_large_stacks() {
+        assert!(GEOMETRY_THREAD_STACK >= 64 * 1024 * 1024);
+        let source = include_str!("concurrency.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the tests")
+            .0;
+        let pool = source
+            .split_once("fn cpu_pool()")
+            .expect("cpu_pool")
+            .1
+            .split_once("\n}\n")
+            .or_else(|| source.split_once("fn cpu_pool()").unwrap().1.split_once("\n}\r\n"))
+            .expect("cpu_pool end")
+            .0;
+        assert!(
+            pool.contains(".stack_size(GEOMETRY_THREAD_STACK)"),
+            "几何私有池要显式给栈大小: {pool}"
+        );
+        // 2MB 栈上放不下 8MB 的局部数组；64MB 的 worker 放得下。
+        let probe = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .stack_size(GEOMETRY_THREAD_STACK)
+            .build()
+            .unwrap();
+        let sum = probe.install(|| {
+            let block = std::hint::black_box([1u8; 8 * 1024 * 1024]);
+            block.iter().map(|&b| b as u64).sum::<u64>()
+        });
+        assert_eq!(sum, 8 * 1024 * 1024);
+    }
+
     #[test]
     fn quota_one_yields_a_single_chunk() {
         let gate = GeometryGate::with_quota(1);

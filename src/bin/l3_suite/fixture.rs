@@ -3297,6 +3297,7 @@ mod tests {
             exit_status,
             timed_out,
             forced_after_done: false,
+            tail_markers: 0,
             log_path: "driver.log".into(),
             scenario_log_path: "scenario.log".into(),
             driver_log: String::new(),

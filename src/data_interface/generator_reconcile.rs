@@ -226,16 +226,16 @@ pub async fn reconcile_generator_now(origin: &'static str) -> GeneratorReconcile
     receipt.stale.sort_unstable();
     if receipt.stale.is_empty() {
         println!(
-            "[{origin}] 生成器核对：{} 个库的库级生成器落款都与本进程一致（e3d-model {}）",
+            "[{origin}] 生成器核对：{} 个库的库级生成器落款都与本进程一致（{}）",
             receipt.examined,
-            crate::build_info::E3D_MODEL_BUILD_ID
+            crate::build_info::vendor_build_ids()
         );
     } else {
         println!(
-            "[{origin}] 生成器核对：{} 个库的库级生成器落款与本进程不一致 dbnum={:?}（e3d-model {}）；{}：新排 {:?}、并进已排队行 {:?}、没排 {:?}",
+            "[{origin}] 生成器核对：{} 个库的库级生成器落款与本进程不一致 dbnum={:?}（{}）；{}：新排 {:?}、并进已排队行 {:?}、没排 {:?}",
             receipt.stale.len(),
             receipt.stale,
-            crate::build_info::E3D_MODEL_BUILD_ID,
+            crate::build_info::vendor_build_ids(),
             if enabled {
                 "已按整库重排处理"
             } else {

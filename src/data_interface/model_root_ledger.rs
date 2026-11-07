@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{LazyLock, RwLock};
+use std::time::{Duration, Instant};
 
 use aios_core::RefnoEnum;
 
@@ -32,6 +33,23 @@ use aios_core::RefnoEnum;
 /// 现场在动，重新数；与这根无关的失败（[`record_transient_failure`]）把连败清零。数值沿用
 /// 退役前 `model_update_pending::MAX_ATTEMPTS` 的 5。
 pub(crate) const DEAD_ROOT_STREAK: u32 = 5;
+
+/// 失败根的退避（GitHub #72 / ADR-090 D1）：第一次失败后 30 s 内任务不重算它，此后每再失败一次翻倍，
+/// 封顶 10 min——与房间重建的 `RebuildBackoff` 同档。不 park：一个坏根不冻住整库模型面；也不替代判死线，
+/// 只是把判死之前的重试间隔拉长。只在进程内（ADR-079），重启即清零。
+pub(crate) const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(30);
+pub(crate) const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(10 * 60);
+
+/// 连着失败 `failures` 次之后的退避时长（`failures = 0` 不退避）。
+pub(crate) fn retry_backoff(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    let doublings = (failures - 1).min(16);
+    RETRY_BACKOFF_BASE
+        .saturating_mul(1u32 << doublings)
+        .min(RETRY_BACKOFF_CAP)
+}
 
 /// 一根最近一次生成的结局。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +73,10 @@ pub struct RootEntry {
     pub source_end_sesno: i32,
     /// 同一句错误连续失败的次数（`Generated` 时恒 0）：攒到 [`DEAD_ROOT_STREAK`] 转 `Refused`。
     pub failure_streak: u32,
+    /// 连着失败的次数，不分错误、不分是不是这根自己的错（`Generated` / 放弃时恒 0）：定退避档。
+    pub consecutive_failures: u32,
+    /// 退避到这一刻之前，任务不重算这根（`None` = 不退避）。
+    pub retry_at: Option<Instant>,
 }
 
 impl RootEntry {
@@ -62,9 +84,14 @@ impl RootEntry {
         matches!(self.outcome, RootOutcome::Generated)
     }
 
-    /// 还在赶：失败且不是永久放弃。
+    /// 还在赶：失败且不是永久放弃。退避中的根也还在赶——几何不可信、拦水位，只是这会儿不重算。
     pub fn is_chasing(&self) -> bool {
         matches!(self.outcome, RootOutcome::Failed { .. })
+    }
+
+    /// 还在赶、且退避期没过。
+    pub fn backing_off(&self, now: Instant) -> bool {
+        self.is_chasing() && self.retry_at.is_some_and(|retry_at| now < retry_at)
     }
 
     pub fn is_refused(&self) -> bool {
@@ -138,8 +165,17 @@ pub fn record_generated(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesn
             outcome: RootOutcome::Generated,
             source_end_sesno,
             failure_streak: 0,
+            consecutive_failures: 0,
+            retry_at: None,
         },
     );
+}
+
+/// 这一根上一条记录之后又失败一次：连着失败的次数。
+fn next_consecutive_failures(previous: Option<&RootEntry>) -> u32 {
+    previous
+        .filter(|entry| !entry.is_settled())
+        .map_or(1, |entry| entry.consecutive_failures.saturating_add(1))
 }
 
 /// 这一根这一版失败了，错出在它自己的生成上（几何算不出、引用的目录件不在之类）：同一句错误
@@ -173,6 +209,7 @@ pub fn record_failed(
         None => 1,
     };
     let refused = streak >= DEAD_ROOT_STREAK;
+    let consecutive_failures = next_consecutive_failures(roots.get(&root));
     let outcome = if refused {
         RootOutcome::Refused { error }
     } else {
@@ -185,6 +222,8 @@ pub fn record_failed(
             outcome,
             source_end_sesno,
             failure_streak: streak,
+            consecutive_failures: if refused { 0 } else { consecutive_failures },
+            retry_at: (!refused).then(|| Instant::now() + retry_backoff(consecutive_failures)),
         },
     );
     drop(ledger);
@@ -200,7 +239,7 @@ pub fn record_failed(
 /// 这一根这一版没成，但失败不是「它自己坏了」的证据——刷盘预算用尽、房间算不出或计算器
 /// 冻不出、整批生成报错、初始化门 / 依赖库入库这类可重试的情形：记 `Failed`（下一窗重排、拦水位），
 /// 连败清零。已放弃的根撞上它也退回「还在赶」。一阵基础设施故障不许把整批根一起判死——
-/// 判死的根会被后面窗口的水位担保过去。
+/// 判死的根会被后面窗口的水位担保过去。退避照样走（ADR-090 实施约束 2）：判不死，但也不必每一轮都撞。
 pub fn record_transient_failure(
     dbnum: u32,
     root: RefnoEnum,
@@ -208,8 +247,10 @@ pub fn record_transient_failure(
     source_end_sesno: i32,
     error: &str,
 ) {
-    record(
-        dbnum,
+    let mut ledger = write();
+    let roots = ledger.roots.entry(dbnum).or_default();
+    let consecutive_failures = next_consecutive_failures(roots.get(&root));
+    roots.insert(
         root,
         RootEntry {
             noun: noun.trim().to_ascii_uppercase(),
@@ -218,6 +259,8 @@ pub fn record_transient_failure(
             },
             source_end_sesno,
             failure_streak: 0,
+            consecutive_failures,
+            retry_at: Some(Instant::now() + retry_backoff(consecutive_failures)),
         },
     );
 }
@@ -234,6 +277,8 @@ pub fn record_refused(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesno:
             },
             source_end_sesno,
             failure_streak: 0,
+            consecutive_failures: 0,
+            retry_at: None,
         },
     );
 }
@@ -321,6 +366,77 @@ pub fn chasing_entries(dbnum: u32) -> Vec<(RefnoEnum, RootEntry)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 一根这会儿该不该重算的回答：[`deferral`] 给的「还在退避」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deferral {
+    pub remaining: Duration,
+    pub consecutive_failures: u32,
+    pub error: String,
+}
+
+/// 这一根这会儿是不是还在退避（GitHub #72）：还在赶、退避期没过，且这次要算的源不比失败那一版新——
+/// 窗口右端前进（`source_end_sesno` 大于失败时记下的那一版）说明数据又变了，立刻重算，与数据批次
+/// 「右端前进即复活」同一条规矩。失败时没记源版本（`0`）的根只看退避期。
+///
+/// 退避中的根照样留在计划里、照样拦水位：只有任务的单元执行体按这一句跳过生成、单元记失败，
+/// 这一窗就不会被判追平——退避只省重算，不替水位担保什么。
+pub fn deferral(dbnum: u32, root: RefnoEnum, source_end_sesno: i32, now: Instant) -> Option<Deferral> {
+    let ledger = read();
+    let entry = ledger.roots.get(&dbnum)?.get(&root)?;
+    if !entry.backing_off(now) {
+        return None;
+    }
+    if entry.source_end_sesno > 0 && source_end_sesno > entry.source_end_sesno {
+        return None;
+    }
+    Some(Deferral {
+        remaining: entry
+            .retry_at
+            .map_or(Duration::ZERO, |retry_at| retry_at.saturating_duration_since(now)),
+        consecutive_failures: entry.consecutive_failures,
+        error: entry.error().unwrap_or_default().to_owned(),
+    })
+}
+
+/// `/health.model_root_backoff`：`null` = 没有根在退避；否则 `backing_off` 是总数，`samples` 点名
+/// 最快到期的几根（库号、根、还剩几秒、连败几次、上次的错）。
+pub fn backoff_snapshot() -> serde_json::Value {
+    let now = Instant::now();
+    let ledger = read();
+    let mut backing_off = Vec::new();
+    for (dbnum, roots) in &ledger.roots {
+        for (root, entry) in roots {
+            if entry.backing_off(now) {
+                let remaining = entry
+                    .retry_at
+                    .map_or(Duration::ZERO, |retry_at| retry_at.saturating_duration_since(now));
+                backing_off.push((remaining, *dbnum, *root, entry));
+            }
+        }
+    }
+    if backing_off.is_empty() {
+        return serde_json::Value::Null;
+    }
+    backing_off.sort_by_key(|(remaining, ..)| *remaining);
+    let samples = backing_off
+        .iter()
+        .take(8)
+        .map(|(remaining, dbnum, root, entry)| {
+            serde_json::json!({
+                "dbnum": dbnum,
+                "root": root.to_string(),
+                "retry_in_secs": remaining.as_secs(),
+                "consecutive_failures": entry.consecutive_failures,
+                "error": entry.error().map(|error| error.chars().take(200).collect::<String>()),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "backing_off": backing_off.len(),
+        "samples": samples,
+    })
 }
 
 /// 一个库的实时普查。
@@ -529,6 +645,72 @@ mod tests {
         assert_eq!(chasing_roots(dbnum), BTreeSet::from([r(7)]));
         assert!(entry(dbnum, r(8)).unwrap().is_settled());
         assert_eq!(census(dbnum).settled + census(dbnum).chasing, 2);
+        forget_dbnum(dbnum);
+    }
+
+    /// GitHub #72 / ADR-090 D1：退避 30 s 起、翻倍、封顶 10 min，与 `RebuildBackoff` 同档。
+    #[test]
+    fn retry_backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() {
+        assert_eq!(retry_backoff(0), Duration::ZERO);
+        assert_eq!(retry_backoff(1), Duration::from_secs(30));
+        assert_eq!(retry_backoff(2), Duration::from_secs(60));
+        assert_eq!(retry_backoff(3), Duration::from_secs(120));
+        assert_eq!(retry_backoff(5), Duration::from_secs(480));
+        assert_eq!(retry_backoff(6), RETRY_BACKOFF_CAP);
+        assert_eq!(retry_backoff(40), RETRY_BACKOFF_CAP);
+    }
+
+    /// 退避中的根仍在赶、仍进计划（拦水位），只是这会儿不重算；右端前进或到期即放行；
+    /// 不攒连败的失败也退避；生成成功清掉退避；判死的根不退避。
+    #[test]
+    fn a_failed_root_backs_off_until_it_expires_or_newer_source_arrives() {
+        let dbnum = 990_007;
+        forget_dbnum(dbnum);
+        record_failed(dbnum, r(1), "BRAN", 26, "boom");
+        let now = Instant::now();
+        let first = deferral(dbnum, r(1), 26, now).expect("刚失败就退避");
+        assert_eq!(first.consecutive_failures, 1);
+        assert_eq!(first.error, "boom");
+        assert!(
+            first.remaining <= RETRY_BACKOFF_BASE && first.remaining > Duration::from_secs(25),
+            "{:?}",
+            first.remaining
+        );
+        assert!(entry(dbnum, r(1)).unwrap().is_chasing(), "退避中仍在赶、拦水位");
+        assert_eq!(chasing_roots(dbnum), BTreeSet::from([r(1)]), "规划器照样把它并进计划");
+        assert!(
+            deferral(dbnum, r(1), 27, now).is_none(),
+            "右端前进 = 数据又变了，立刻重算"
+        );
+        assert!(
+            deferral(dbnum, r(1), 26, now + RETRY_BACKOFF_BASE + Duration::from_secs(1)).is_none(),
+            "到期就放行"
+        );
+        assert!(!backoff_snapshot().is_null(), "/health 点得出退避中的根");
+
+        record_transient_failure(dbnum, r(1), "BRAN", 26, "write-behind exhausted");
+        let second = deferral(dbnum, r(1), 26, Instant::now()).expect("无关失败也退避");
+        assert_eq!(second.consecutive_failures, 2);
+        assert!(second.remaining > Duration::from_secs(55), "{:?}", second.remaining);
+        assert_eq!(entry(dbnum, r(1)).unwrap().failure_streak, 0, "但不攒连败");
+
+        record_generated(dbnum, r(1), "BRAN", 27);
+        assert!(deferral(dbnum, r(1), 27, Instant::now()).is_none());
+        assert_eq!(entry(dbnum, r(1)).unwrap().consecutive_failures, 0);
+
+        record_failed(dbnum, r(2), "BRAN", 0, "boom");
+        assert!(
+            deferral(dbnum, r(2), 99, Instant::now()).is_some(),
+            "失败时没记源版本：只看退避期"
+        );
+
+        for _ in 0..DEAD_ROOT_STREAK {
+            record_failed(dbnum, r(3), "BRAN", 26, "dead");
+        }
+        let dead = entry(dbnum, r(3)).unwrap();
+        assert!(dead.is_refused());
+        assert_eq!(dead.retry_at, None, "判死的根不在赶，也就不退避");
+        assert!(deferral(dbnum, r(3), 26, Instant::now()).is_none());
         forget_dbnum(dbnum);
     }
 

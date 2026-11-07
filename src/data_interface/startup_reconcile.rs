@@ -608,9 +608,9 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
     }
     if !generator_stale.is_empty() {
         println!(
-            "生成器核对：{} 个库的库级生成器落款与本进程不一致 dbnum={generator_stale:?}（e3d-model {}）；{}",
+            "生成器核对：{} 个库的库级生成器落款与本进程不一致 dbnum={generator_stale:?}（{}）；{}",
             generator_stale.len(),
-            crate::build_info::E3D_MODEL_BUILD_ID,
+            crate::build_info::vendor_build_ids(),
             if generator_rebuild_enabled {
                 "已按整库重排处理（ModelOnly 起点 0，reason=model_generator_changed）"
             } else {

@@ -1,3 +1,68 @@
+## 2026-11-07
+
+### 比对工具内存约减半；publish 的 vendor 口径改为跟各仓主线
+
+- **比对内存**：e3d-model `d139a9d` 把 `rvm_compare` 基准侧面片的连通分量改记成顶点区间，不再按坐标另存一份（解析图元一个分量就是它全部采样点，原先等于基准顶点存了两遍）。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站 `compare.json` 与改前逐字节相同。服务端 rvm-check 在进程内调同一实现：本机 8022 换上本分支二进制后三库按 `model_generator_changed` 重排约 10 分钟，`24381/101405`、`23717/2` 服务端通过、计数不变，比对段服务峰值约 5.5 GB。`23717/2` 的进程内生成段把服务冲到 10.6 GB，是下一处内存热点。
+- **检查编译**：按 linux-binary 的拉法在临时目录检出本分支，五个 vendor 仓与 plant-ui 取 GitHub 现有版本，用 CI 的 features 跑 `cargo check --bin aios-database`。默认 `VENDOR_REF` 在 e3d-model 仓不存在；plant-mbd 远端 `main` 缺本地未推的 6 个提交，编不过（4 处）；换上本地 plant-mbd 后编过、`Cargo.lock` 不变，其余四仓用远端现有版本即可；old-aios-core `main` 落后 `codex/libgm-snout-caliber` 32 个提交，五仓不能统一取 `main`。明细见跟踪清单第六节「待推送的本地提交」。
+- **CI 口径**：linux-binary 默认 `VENDOR_REF=main`、`PLANT_UI_REF=master`；windows-tests 去掉 old-aios-core 的 `codex/libgm-snout-caliber` 钉选。同日推齐各仓主线：plant-mbd `main` 快进到 `3db2d92`（6 个提交，推前测试全过），old-aios-core `main` 快进到 caliber 的 `7c0c54e`，e3d-model `main` 到 `d139a9d`。从 GitHub 取五仓 `main` 与 plant-ui `master` 再做检查编译：通过，`Cargo.lock` 不变。
+- **没动**：`publish`。workflow 改动随本分支进 `refactor`、`publish` 后生效；plant-ui `master` 的内嵌前端比旧 CI 分支新，部署时一起换新。
+
+### 39 个 SITE 的 RVM 对比全部通过（e3d-model#24 关闭）
+
+- **#24**：e3d-model `5182aef` 给隐式管身的共轴门加绝对横偏不超过 1 mm（原先只有相对 1 mrad）。`/Copy-of-1RCS007MN-TUBE/801VP` 的 TUBI 9 两端只偏 0.61 mrad，横偏 1.405 mm，E3D 不画。普查 ams7997/7999/8000 全部 7902 个非零长槽位，过相对门的 6835 个里横偏超过 1 mm 的只有这根和一根双方都不画的头管；E3D 画到 1.000000 mm。
+- **验证**：39 站代码层对拍 only_generated 1 → 0，逐对零变化。本机 8022 对 `tree/roots` 下全部 39 个 SITE 跑 `/api/v1/rvm-check/runs`：全部通过，两侧 199192 对，exact 199180，其余 12 对是弦高 / 参照伪影 / 薄膜三类可接受残差，偏差与只在一侧的件为 0。e3d-model release 库测试 463 通过，四道读取守卫全过。
+- **已知限制**：最大的 SITE `24381/101405` 比对峰值约 7.2 GB，整机提交额度紧张时服务会分配失败退出；额度够时服务端通过。（同日 e3d-model `d139a9d` 压到 3.77 GB，见上一节。）
+### 生成器指纹带上 e3d-io 与 e3d-attlib（#73 补漏）
+
+- **为什么**：e3d-model 经 e3d-io 读库、求目录 PML，属性字典在 e3d-attlib，三家都是路径依赖。指纹原先只含 e3d-model 的构建身份，单改 e3d-io 的几何修复（11-06 的 POD `b6ff292`、操作码 1012 `74bd1ee`）不改指纹，库级落款仍判「一致」，旧行照用。
+- **改**：`build.rs` 的 vendor 身份泛化成 `vendor_identity(仓名, 环境变量)`，e3d-io（`E3D_IO_VENDOR_DIR`）、e3d-attlib（`E3D_ATTLIB_VENDOR_DIR`）同口径注入 `E3D_IO_BUILD_ID` / `E3D_ATTLIB_BUILD_ID`。生成器指纹改为 `e3d-model:…;e3d-io:…;e3d-attlib:…;aios-database:…;<规则标签>`。`/health` 与 `version --json` 多 `e3d_io_build_id`、`e3d_attlib_build_id`；生成器核对日志点名三家身份。ADR-093 追记。
+- **后果**：换上这版后，每个盖过模型水位的库整库重排一次（落款与回执指纹全部对不上）。
+- **验证**：`generator_identity` / `build_info` / `generator_reconcile` / `startup_reconcile` 相关 12 个单测通过。本机 8022（`watch 7997,7998,8000`）换上新二进制：首启日志点名三家身份、三库 `reason=model_generator_changed`；7997 6772 根 7 分 31 秒（`equip_derived` 113.5 s），8000 954 根约 70 s；三库 `dbnum_watermark.model_generator` 改为三段指纹；再重启 `generator_stale_dbnums` 为空、不排工。
+- **没动**：`RULE_TAGS`；plant-mbd、old-aios-core 不进指纹（不参与几何生成）。
+## 2026-11-06
+
+### 对拍残差复核，以及目录公式里的第二个 REAL（验证）
+
+- **39 站**：撤回偏轴门之后的 `gen_ams`（`revert1106`）对真实 `ams000` 重跑 39 站，exact 199180、off 0、kind_differ 0、only_baseline 每站 0、only_generated 合计 1（仍是 #24 那只管子）。约 1240 条只在基准是 #27 之前目录库撞号的旧账。chord 从旧表的 10 条收到 5 条。
+- **#21**：`sjoi_gjtorg_probe` 对三份 MDS 库里走完求交的 perp 关节，局部点乘等于世界点乘。留站位与 E3D 一致，`datum.rs` 那一支没改。
+- **#86**：操作码 1012 是 `exprlib/EXPORE`，打印成 `REAL ( )`，对数字是恒等。已接进 e3d-io `catalogue_pml.rs`，单测 `ptca_py_real_is_the_expore_cast` 通过。同一对目录库再跑普查：读通 117674（+62）、被拒 11890（−62）、分组 25 → 23，`1012 101` 与 `1012 804` 两组消失。其余组没有 PTCA/PTMI/PTAX，不实现。
+
+### 设备派生量单独成阶段，并在预算到点时停手（#88）
+
+- **为什么**：`await_units_durable` 在根全部落盘后就返回，任务却还停在 `durable_pending`。后面的 `refresh_equip_derived` 没有自己的阶段、进度和期限，整库刷新要做五层子树展开和楼板柱子空间反查，db 8000 上这一段占了约 15 秒，看起来像栅栏没返回。
+- **改**：`equip_model.rs` 给这次刷新一个 5 分钟合作式预算；整库或根数达到 2000 时只走已有楼板边、跳过空间反查；节点查询按 1000 分块。`batch_worker.rs` 在栅栏之后把阶段改成 `equip_derived`，进度和心跳跟着走，推迟的数量写进日志和 `/health.equip_derived`。
+- **验证**：`equip_scan_tests` 里预算、整库档、空间反查顺序三条新钉子，以及 `batch_worker` 的阶段钉子、`model_write_behind` 的满 ACK 栅栏钉子。全库 `cargo test --lib`：2844 通过、0 失败、121 忽略（2026-11-06，含读取集合改口后的四条原先失败断言）。
+
+### 冷根部分发布时，回执点名幸存件（#74）
+
+- **为什么**：按根回读和 `ready_source` 已经在 refactor 上。初始化投影里 `partial` 的根仍把成功件说成普通生成，看不出这根是「失败之后留下的幸存件」。
+- **改**：`dbnum_initialize.rs` 在失败循环之后，对 `projection.partial` 里每一根，只改最后一条匹配的 `Generated` 回执，message 写成 `published survivors; {reason}`。
+- **验证**：`published_survivors_are_named_on_the_generated_unit_only`；`handlers` 里按根回读两条钉子仍绿。
+
+### 生成失败的根按次退避，本轮跳过但不把水位往前盖（#72）
+
+- **为什么**：一根失败会让整库一直显示落后，下一轮立刻重试同一根，窗口又盖不下去。ADR-090 D1 要求失败后退避，退避是进程内的，新的 `source_end_sesno` 立刻复活。
+- **改**：`model_root_ledger.rs` 用和重建退避相同的 30 秒起、翻倍、10 分钟封顶。`backing_off` 的根仍算在追赶里（挡水位），但 `batch_worker` 本轮不生成、不增加尝试次数、也不再把退避往后推。更新的源会话号不退避。`AIOS_TEST_MODEL_ROOT_BACKOFF_SECS=0` 关掉退避。`/health.model_root_backoff` 给出还在等的样本。`mark_generation_failed` 带上 `source_end_sesno`。
+- **验证**：退避翻倍与封顶、失败根等到期或新会话才再跑、退避中的根跳过生成且账本不变。这三根钉子都绿。
+
+### 崩溃时留下根、阶段和内存，几何线程用大栈（#78）
+
+- **为什么**：Windows 上的 `0xC0000409` 是栈溢出、内存耗尽或本地 abort 共用的 fastfail，发布构建没有 PDB，panic 钩子也盖不住 abort。几何 rayon 池用默认 2MB 栈。
+- **改**：几何池和主 rayon 池 `stack_size` 64MB。`process_diagnostics.rs` 记下当前根、最近阶段、工作集和提交量；分配失败钩子、栈溢出/访问违例的第一机会记录、`SIGABRT` 都写到 `logs/crash-notes.log`。`New-LocalRelease.ps1` 的发布构建保留行号级 PDB，`Start-AMS.ps1` 在没设 `RUST_MIN_STACK` 时给 128MB，并加 `-EnableCrashDumps` 开关写 WER LocalDumps。
+- **验证**：`the_geometry_pool_runs_on_large_stacks` 实际拉起 64MB 栈的池；诊断模块既有钉子仍绿。没有在生产进程上复现历史崩溃。
+
+### E3D 包装宏在 QUIT 之后再 FINISH 两次，宽限收到 5 秒（#87）
+
+- **为什么**：导出写完 `L3-DONE` 之后会话经常不退，驱动要空等满超时。仓里自称能自己退出的导出宏收尾是 `QUIT` / `FINISH` / `FINISH`，所以包装宏改成同样三条，并留下标记看是哪一条让它退的。
+- **改**：`e3d_query.rs` 的包装宏按这个顺序收尾，每条之后各写一份标记，会话记录里带上 `forced_after_done` 和 `tail_markers`。默认宽限从 60 秒改为 5 秒（`E3D_MCP_DONE_GRACE_SECS` 仍可覆盖）。
+- **验证**：包装宏顺序和标记计数的单测在全库 2844 里。影子工程导出 BRAN `=24381/106125`（RVM 已落盘）之后，这三条放在包装宏里等满 90 秒、再放进用户宏（导出日志 `ALPHA LOG END` 之后）都不返回，`FINISH` 没跑到。宽限仍是实际收尾，不把这三条说成已经能自己退出。
+
+### 二进制工作流的 cargo 缓存不再每次运行换一把钥匙（#79）
+
+- **为什么**：`linux-binary.yml` / `windows-binary.yml` 把 `github.run_id` 写进缓存 key，缓存永远 miss，和构建产物一起挤 10GB 配额。
+- **改**：key 去掉 `run_id`，`restore-keys` 收到前缀，只有 cache miss 才保存。
+- **验证**：两个 workflow 文件用 YAML 解析通过，文件里不再把 `run_id` 放进 key。
+
 ## 2026-10-31
 
 ### T-A-5：`writing` 标记不管原 intent，重启一律折 `Reinitialize`——补一条钉子
