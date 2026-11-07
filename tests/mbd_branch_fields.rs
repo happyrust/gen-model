@@ -5,19 +5,29 @@
 //! `true_od_fallback`、`pipe.dmf_pending`）；再挑 AMS 里的支管口（OLET）、套接三通与法兰、保温、支撑腿样本钉住
 //! 取数口径。AMS 四座设计库的 `DMFA`（PML `dmfarr`）全是 unset，也没有 `FLOWDIRECTION`、`:ZD_GDBR`、
 //! `:ATTA-ADLONGTH`、`BANG`——这几项只能断言没有。开库见 `common/mbd_db.rs`，缺样本整体 SKIP。
+//!
+//! 标签 / 安装角度 / 调整焊要的宿主字段（成员 `ori` / `connection_target` / `crfa_targets` / `atta_support`，BRAN 的
+//! `zone`、连接目标、SITE 名、相邻 BRAN 的首末管）先在六条金样上看形状，再挑 ITUB 区的仪表管、首尾相接的 BRAN、带
+//! `CRFA` 的 PCOM 与 INST 站点上带 `:NPHSASR` 的 ATTA 钉住取数口径；AMS 没有 `:YKSX` / `:ZD_NBBM` / `:ZD_WJBM` /
+//! `:ZD_BZBM`，这几项只能断言没有。
 
 #[path = "common/mbd_db.rs"]
 mod mbd_db;
 
 use std::sync::{Arc, OnceLock};
 
-use aios_database::mbd::{branch_query, layout_pipe};
-use e3d_io::db_element::DbSet;
+use aios_database::mbd::{branch_query, layout_pipe, wire_refno};
+use e3d_io::db_element::{DbElement, DbSet};
 use e3d_io::record::catalogue_eval::{AttribRef, AttributeNumber, ParamEnv};
+use e3d_io::record::descriptor::DescriptorValue;
 use e3d_io::refno::RefNo;
 use e3d_model::catalogue_point_set;
+use e3d_model::route::container_head;
 use glam::DVec3;
-use plant_mbd::{BranchMember, BranchQueryResult, CataloguePrimitive, MbdPrimitive};
+use plant_mbd::{
+    AdjacentTube, BranchMember, BranchQueryResult, CataloguePrimitive, ConnectionTarget,
+    MbdPrimitive, ZoneFlags,
+};
 
 /// plant-mbd `fixtures/golden` 的六条管道金样。
 const GOLDEN: [RefNo; 6] = [
@@ -566,4 +576,355 @@ fn support_legs_lay_out_with_pass_through_ports() {
     for rule in MISSING_HOST_FIELD_RULES {
         assert!(!rules.contains(&rule), "{rule}: {rules:?}");
     }
+}
+
+fn element_of(set: &Arc<DbSet>, wire: &str) -> DbElement {
+    let (word0, word1) = wire.split_once('_').expect("wire refno");
+    set.element(RefNo::new(word0.parse().unwrap(), word1.parse().unwrap()))
+}
+
+fn first_tube(query: &BranchQueryResult) -> &BranchMember {
+    query
+        .members
+        .iter()
+        .find(|member| is_implied(member))
+        .unwrap_or_else(|| panic!("{} has no implied tube", query.branch_refno))
+}
+
+fn last_tube(query: &BranchQueryResult) -> &BranchMember {
+    query
+        .members
+        .iter()
+        .rev()
+        .find(|member| is_implied(member))
+        .unwrap_or_else(|| panic!("{} has no implied tube", query.branch_refno))
+}
+
+/// 相邻 BRAN 的首 / 末管就是那条 BRAN 自己成员表里的那根隐式管身（同一套门、同一个 refno 写法、同样的端点与外径）。
+fn assert_adjacent(
+    adjacent: Option<&AdjacentTube>,
+    branch: &BranchQueryResult,
+    tube: &BranchMember,
+) {
+    let adjacent =
+        adjacent.unwrap_or_else(|| panic!("no adjacent tube from {}", branch.branch_refno));
+    assert_eq!(
+        (
+            adjacent.branch_refno.as_str(),
+            adjacent.refno.as_str(),
+            adjacent.start,
+            adjacent.end,
+            adjacent.outside_diameter
+        ),
+        (
+            branch.branch_refno.as_str(),
+            tube.refno.as_str(),
+            tube.start,
+            tube.end,
+            tube.outside_diameter
+        )
+    );
+}
+
+fn target_of(target: &Option<ConnectionTarget>) -> Option<(&str, &str, ZoneFlags)> {
+    target
+        .as_ref()
+        .map(|target| (target.refno.as_str(), target.noun.as_str(), target.zone))
+}
+
+/// 标签 / 安装角度 / 调整焊的宿主字段在六条金样上的形状：E3D 成员都带正交右手的 ORI，隐式管身一样都没有；连接目标与
+/// 库里的 HREF / TREF / CREF 一一对上，不在 ITUB / INST 区的目标照常有 `connection`；SITE 名都在。
+#[test]
+fn golden_branches_carry_the_tag_host_fields() {
+    let Some(set) = set() else {
+        return;
+    };
+    for refno in GOLDEN {
+        let query = query(&set, refno);
+        let id = &query.branch_refno;
+        let bran = set.element(refno);
+        assert!(
+            query
+                .site_name
+                .as_deref()
+                .is_some_and(|site| site.starts_with('/')),
+            "{id}: site {:?}",
+            query.site_name
+        );
+        assert_eq!(
+            (
+                query.drawing_number.as_deref(),
+                query.document_code.as_deref()
+            ),
+            (None, None),
+            "{id}: AMS has no :ZD_NBBM / :ZD_WJBM"
+        );
+        assert_eq!(query.zone, ZoneFlags::default(), "{id}");
+        for (reference, target) in [
+            ("HREF", &query.head_connection_target),
+            ("TREF", &query.tail_connection_target),
+        ] {
+            let stored = bran
+                .get_element(reference)
+                .expect(reference)
+                .map(|target| wire_refno(target.refno()));
+            assert_eq!(
+                target.as_ref().map(|target| target.refno.clone()),
+                stored,
+                "{id} {reference}"
+            );
+        }
+        for member in &query.members {
+            let name = format!("{id} {} {:?}", member.refno, member.noun);
+            assert!(member.instrument_name.is_none(), "{name}: AMS has no :YKSX");
+            assert!(
+                member.stext.is_none() || member.atta_support.is_none(),
+                "{name}: STEX and the support are exclusive"
+            );
+            if is_implied(member) {
+                assert!(
+                    member.ori.is_none()
+                        && member.connection_target.is_none()
+                        && member.crfa_targets.is_empty()
+                        && member.atta_support.is_none(),
+                    "{name}: an implied tube is not an E3D member"
+                );
+                continue;
+            }
+            let [x, y, z] = member
+                .ori
+                .unwrap_or_else(|| panic!("{name} has no ori"))
+                .map(v);
+            assert!(
+                [x, y, z]
+                    .iter()
+                    .all(|axis| (axis.length() - 1.0).abs() < 1e-6)
+                    && x.dot(y).abs() < 1e-6
+                    && (x.cross(y) - z).length() < 1e-6,
+                "{name}: ori {:?} is not a right-handed unit frame",
+                member.ori
+            );
+            let cref = matches!(member.noun.as_deref(), Some("TEE" | "OLET"))
+                .then(|| {
+                    element_of(&set, &member.refno)
+                        .get_element("CREF")
+                        .expect("CREF")
+                        .map(|target| wire_refno(target.refno()))
+                })
+                .flatten();
+            assert_eq!(
+                member
+                    .connection_target
+                    .as_ref()
+                    .map(|target| target.refno.clone()),
+                cref,
+                "{name}"
+            );
+            if let Some(target) = &member.connection_target {
+                assert!(
+                    !target.zone.is_empty() || member.connection.is_some(),
+                    "{name}: a target outside ITUB / INST zones still gets its connection"
+                );
+            }
+        }
+    }
+}
+
+/// ITUB 区的仪表管（ams7997 `/仪控ISO测试` › `/1RCV-ITUB-XX`）：24381/575 的 Head 连 PCOM 24381/614、Tail 连 BRAN 24381/583，
+/// TEE 24381/580 的 CREF 连 BRAN 24381/573，全在 ITUB 区——宿主的 `connection` 照旧不填，连接目标与区标志照给（PML 据此整条
+/// 不出，`isoTag` L49-57 / L101-105）。575 与 583 首尾相接：一条的末根管就是另一条的 `head_adjacent_tube`，反过来同理。
+/// 两只带 `CRFA` 的 PCOM 前两项是 Nulref，跳过；目标的 `hpos` 与 e3d-model 折到世界系的 Head 点一致。
+#[test]
+fn instrument_tube_zone_targets_adjacent_tubes_and_crfa() {
+    let Some(set) = set() else {
+        return;
+    };
+    let itub = ZoneFlags {
+        itub: true,
+        inst: false,
+    };
+    let b575 = query(&set, RefNo::new(24381, 575));
+    let b583 = query(&set, RefNo::new(24381, 583));
+    assert_eq!((b575.zone, b583.zone), (itub, itub));
+    assert_eq!(b575.site_name.as_deref(), Some("/仪控ISO测试"));
+    assert!(b575.head_connection.is_none() && b575.tail_connection.is_none());
+    assert_eq!(
+        target_of(&b575.head_connection_target),
+        Some(("24381_614", "PCOM", itub))
+    );
+    assert_eq!(
+        target_of(&b575.tail_connection_target),
+        Some(("24381_583", "BRAN", itub))
+    );
+    let tee = member(&b575, "24381_580");
+    assert!(tee.connection.is_none());
+    assert_eq!(
+        target_of(&tee.connection_target),
+        Some(("24381_573", "BRAN", itub))
+    );
+    assert_eq!(
+        target_of(&b583.head_connection_target),
+        Some(("24381_575", "BRAN", itub))
+    );
+
+    assert_adjacent(b583.head_adjacent_tube.as_ref(), &b575, last_tube(&b575));
+    assert_adjacent(b575.tail_adjacent_tube.as_ref(), &b583, first_tube(&b583));
+    assert!(
+        b575.head_adjacent_tube.is_none(),
+        "HREF is a PCOM, not a BRAN"
+    );
+    assert!(b583.tail_adjacent_tube.is_none(), "TREF is a TEE");
+
+    for (bran, pcom, expected) in [
+        (
+            RefNo::new(24381, 598),
+            "24381_614",
+            [
+                ("24381_587", "/1RCV013MN-N273-B2"),
+                ("24381_575", "/1RCV013MN-N273-B4"),
+            ],
+        ),
+        (
+            RefNo::new(24381, 179302),
+            "24381_179312",
+            [
+                ("24381_179319", "/6ZBR101MD-N310-02"),
+                ("24381_179328", "/6ZBR101MD-N310/B3"),
+            ],
+        ),
+    ] {
+        let branch = query(&set, bran);
+        let targets = &member(&branch, pcom).crfa_targets;
+        let got: Vec<(&str, &str)> = targets
+            .iter()
+            .map(|target| (target.refno.as_str(), target.name.as_str()))
+            .collect();
+        assert_eq!(got, expected, "{pcom} CRFA");
+        for target in targets {
+            let head = container_head(&element_of(&set, &target.refno))
+                .expect("HPOS")
+                .expect("a BRAN head");
+            let hpos = v(target.hpos.expect("hpos"));
+            assert!(
+                (hpos - head.pos).length() < 1e-9,
+                "{pcom} -> {}: hpos {hpos} vs head {}",
+                target.refno,
+                head.pos
+            );
+        }
+        assert!(
+            branch
+                .members
+                .iter()
+                .filter(|member| member.refno != pcom)
+                .all(|member| member.crfa_targets.is_empty()),
+            "{pcom}: only the PCOM carries CRFA"
+        );
+    }
+}
+
+/// 不在仪表区的首尾相接：24381/106507 的 HREF 与 24381/106469 的 TREF 互指（ams7997 `/1PTU-INST23`），金样 24381/145018
+/// 的 TREF 是 24381/145012。`connection` 照常给，相邻 BRAN 的首末管与那条 BRAN 自己成员表里的隐式管身逐项相同。
+#[test]
+fn branches_joined_end_to_end_expose_the_neighbours_end_tubes() {
+    let Some(set) = set() else {
+        return;
+    };
+    let head_side = query(&set, RefNo::new(24381, 106507));
+    let tail_side = query(&set, RefNo::new(24381, 106469));
+    assert!(head_side.head_connection.is_some() && tail_side.tail_connection.is_some());
+    assert_adjacent(
+        head_side.head_adjacent_tube.as_ref(),
+        &tail_side,
+        last_tube(&tail_side),
+    );
+    assert_adjacent(
+        tail_side.tail_adjacent_tube.as_ref(),
+        &head_side,
+        first_tube(&head_side),
+    );
+    assert_eq!(
+        first_tube(&head_side).refno,
+        "Head~24381_106508",
+        "the neighbour's first tube starts at its HPOS"
+    );
+
+    let golden = query(&set, RefNo::new(24381, 145018));
+    let next = query(&set, RefNo::new(24381, 145012));
+    assert_adjacent(golden.tail_adjacent_tube.as_ref(), &next, first_tube(&next));
+    assert!(golden.head_adjacent_tube.is_none());
+}
+
+/// SITE 名含 INST 的 ATTA（ams7997 `/1TTU-INST23`）：不给 STEX，给 `:NPHSASR` 第一项的属主（24381/177376 的 ATTA 指到支架
+/// `/1TFA-LX-SUPP`）；AMS 没有 `:ZD_BZBM`，`function_code` 为空。AMS 字典把 `:NphsAsr` 记成单个 REF，7997 里存的却是两项的
+/// 引用数组（PML `$!nphsasr[1]` 的写法）。不在 INST 站点的 ATTA 一个都不给。
+#[test]
+fn instrument_site_attas_name_their_support() {
+    let Some(set) = set() else {
+        return;
+    };
+    let branch = query(&set, RefNo::new(24381, 177376));
+    let support = member(&branch, "24381_177386")
+        .atta_support
+        .as_ref()
+        .expect("the ATTA's support");
+    assert_eq!(
+        (
+            support.refno.as_str(),
+            support.name.as_deref(),
+            support.function_code.as_deref()
+        ),
+        ("24381_177935", Some("/1TFA-LX-SUPP"), None)
+    );
+
+    let mut with_support = 0;
+    for refno in [RefNo::new(24381, 177376), RefNo::new(24381, 177415)] {
+        let branch = query(&set, refno);
+        for atta in branch
+            .members
+            .iter()
+            .filter(|member| member.noun.as_deref() == Some("ATTA"))
+        {
+            assert!(
+                atta.stext.is_none(),
+                "{}: no STEX on an INST site",
+                atta.refno
+            );
+            let first = match element_of(&set, &atta.refno)
+                .attribute(":NPHSASR")
+                .expect(":NPHSASR")
+            {
+                Some(DescriptorValue::RefNoArray(refnos)) => refnos.first().copied(),
+                Some(DescriptorValue::RefNo(refno)) => Some(refno),
+                _ => None,
+            }
+            .filter(RefNo::is_valid);
+            let owner = first.and_then(|first| {
+                set.element(first)
+                    .owner()
+                    .expect("owner")
+                    .map(|owner| wire_refno(owner.refno()))
+            });
+            assert_eq!(
+                atta.atta_support
+                    .as_ref()
+                    .map(|support| support.refno.clone()),
+                owner,
+                "{}",
+                atta.refno
+            );
+            with_support += usize::from(owner.is_some());
+        }
+    }
+    assert!(with_support >= 6, "{with_support} ATTAs with a support");
+
+    let elsewhere = query(&set, RefNo::new(24383, 99996));
+    assert!(
+        elsewhere
+            .members
+            .iter()
+            .all(|member| member.atta_support.is_none()),
+        "{:?} is not an INST site",
+        elsewhere.site_name
+    );
 }

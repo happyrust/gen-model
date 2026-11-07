@@ -30,9 +30,21 @@
 //! - **墙体定位**：PML 的 `dmfarr` 在模板里叫 `DMFA`（引用数组）；目标经找墙候选的同一套组装
 //!   （[`civil_candidate_of`]）进 BRAN 级 `dmf_walls`。
 //!
-//! 读不出就留空：UDA 没定义（AMS 没有 `:ZD_GDBR` / `:ATTA-ADLONGTH`）、目录链断、表达式求不出都算没有。读库出错也不让
-//! 整条 BRAN 失败：一个成员（或 BRAN 自己）读坏的字段汇成一条 Info `adapter.member_field_unreadable`；墙板转不成候选是
-//! `adapter.dmf_wall_unresolved`，转成了但有说明（截面退回 DESP 之类）是 `adapter.dmf_wall_note`。
+//! 标签、安装角度与调整焊要的事实（plant-mbd 字段字典「管道标签 / 安装角度 / 调整焊的宿主字段」）：
+//!
+//! - **`ori`**：成员世界矩阵的三根轴（PML `ori of $!mem wrt /*`），归一。
+//! - **TEE / OLET**：UDA `:YKSX` 原文；`CREF` 的目标（refno、类型、目标自己所在 ZONE 的 ITUB / INST 标志，标志与
+//!   `connection` 的过滤同一口径）。`connection` 的过滤本身不动。
+//! - **PCOM**：`CRFA`（元素引用数组）逐项的存名与 `HPOS`（世界系），跳过 Nulref 与不在所钉会话的目标。
+//! - **SITE 名含 INST 的 ATTA**：UDA `:NPHSASR` 第一项（AMS 字典里它是单个 REF，PML 按数组取 `[1]`，两样都收）的
+//!   属主就是支架，给它的 refno、存名与 `:ZD_BZBM`。
+//! - **BRAN**：SITE 的 NAME（PML `name of`，没有存名给 `=w0/w1`）、自己的 `:ZD_NBBM` / `:ZD_WJBM`（PML `setattvalue`
+//!   只读 BRAN 本身）、`HREF` / `TREF` 的目标，
+//!   以及目标是 BRAN 时它的末 / 首根隐式管身（[`super::adjacent_tube`]）。
+//!
+//! 读不出就留空：UDA 没定义（AMS 没有 `:ZD_GDBR` / `:ATTA-ADLONGTH` / `:YKSX` / `:ZD_*`）、目录链断、表达式求不出都算
+//! 没有。读库出错也不让整条 BRAN 失败：一个成员（或 BRAN 自己）读坏的字段汇成一条 Info `adapter.member_field_unreadable`；
+//! 墙板转不成候选是 `adapter.dmf_wall_unresolved`，转成了但有说明（截面退回 DESP 之类）是 `adapter.dmf_wall_note`。
 
 use std::collections::HashMap;
 
@@ -48,11 +60,12 @@ use e3d_model::route::PPointResolver;
 use e3d_model::{CataloguePoints, catalogue_point_set};
 use glam::{DMat3, DMat4, DVec3};
 use plant_mbd::{
-    BranchMember, CatalogueAxis, CataloguePrimitive, CivilCandidate, IssueCategory, IssueSeverity,
-    MbdV2Issue, MemberNavigation, SourceBox,
+    AdjacentTube, AttaSupport, BranchMember, CatalogueAxis, CataloguePrimitive, CivilCandidate,
+    ConnectionTarget, CrfaTarget, IssueCategory, IssueSeverity, MbdV2Issue, MemberNavigation,
+    SourceBox,
 };
 
-use super::wire_refno;
+use super::{AdjacentEnd, BranchQueryError, adjacent_tube, wire_refno, zone_flags};
 use crate::mbd::civil_faces::civil_candidate_of;
 use crate::mbd::host::{self, SpamapIndex, soft};
 
@@ -86,6 +99,11 @@ pub(super) struct MemberFields {
     catalogue_primitives: Vec<CataloguePrimitive>,
     vol: Option<SourceBox>,
     ipara: Vec<f64>,
+    ori: Option<[[f64; 3]; 3]>,
+    instrument_name: Option<String>,
+    connection_target: Option<ConnectionTarget>,
+    crfa_targets: Vec<CrfaTarget>,
+    atta_support: Option<AttaSupport>,
 }
 
 impl MemberFields {
@@ -106,16 +124,23 @@ impl MemberFields {
         member.catalogue_primitives = self.catalogue_primitives;
         member.vol = self.vol;
         member.ipara = self.ipara;
+        member.ori = self.ori;
+        member.instrument_name = self.instrument_name;
+        member.connection_target = self.connection_target;
+        member.crfa_targets = self.crfa_targets;
+        member.atta_support = self.atta_support;
     }
 }
 
-/// 读一个成员要的上下文：成员、类型、世界矩阵（具名轴转世界系用）与槽位给的到达 / 离开口编号。
+/// 读一个成员要的上下文：成员、类型、世界矩阵（具名轴转世界系用）与槽位给的到达 / 离开口编号；`instrument_atta`
+/// 是 SITE 名含 INST 的 ATTA（位号走所属支架）。
 pub(super) struct MemberSite<'a> {
     pub(super) member: &'a DbElement,
     pub(super) noun: &'a str,
     pub(super) world: Option<DMat4>,
     pub(super) arrive_ppoint: Option<u32>,
     pub(super) leave_ppoint: Option<u32>,
+    pub(super) instrument_atta: bool,
 }
 
 /// 读坏的字段名与原因，最后汇成一条 issue。
@@ -123,7 +148,7 @@ pub(super) struct MemberSite<'a> {
 struct Unreadable(Vec<String>);
 
 impl Unreadable {
-    fn keep<T>(&mut self, field: &str, result: Result<T, DbElementError>) -> Option<T> {
+    fn keep<T, E: std::fmt::Display>(&mut self, field: &str, result: Result<T, E>) -> Option<T> {
         match result {
             Ok(value) => Some(value),
             Err(error) => {
@@ -242,6 +267,22 @@ pub(super) fn member_fields(
                 catalogue_primitives(site.noun, component, &frame),
             )
             .unwrap_or_default();
+    }
+
+    fields.ori = site.world.and_then(world_axes);
+    if matches!(site.noun, "TEE" | "OLET") {
+        fields.instrument_name = bad
+            .keep(":YKSX", host::optional_text(member, ":YKSX"))
+            .flatten();
+        fields.connection_target = bad
+            .keep("CREF target", referenced_target(member, "CREF"))
+            .flatten();
+    }
+    if site.noun == "PCOM" {
+        fields.crfa_targets = bad.keep("CRFA", crfa_targets(member)).unwrap_or_default();
+    }
+    if site.instrument_atta {
+        fields.atta_support = bad.keep(":NPHSASR", atta_support(member)).flatten();
     }
 
     if !bad.0.is_empty() {
@@ -390,6 +431,117 @@ fn dmf_targets(member: &DbElement) -> Result<Vec<RefNo>, DbElementError> {
         }),
         Err(error) => Err(error),
     }
+}
+
+/// PML `name of site of $!el`：属主链上第一个 SITE 的 NAME，没有存名给 `=w0/w1`（管段号前缀按它含不含 `NPIC` / `23`
+/// 分写法，无名的 SITE 也照 PML 参与判断）。
+fn site_name(element: &DbElement) -> Result<Option<String>, DbElementError> {
+    match host::ancestor_of_type(element, "SITE")? {
+        Some(site) => pml_name(&site),
+        None => Ok(None),
+    }
+}
+
+/// 世界矩阵的三根轴（PML `ori of $!mem wrt /*`），归一；有一根退化就不给。
+fn world_axes(world: DMat4) -> Option<[[f64; 3]; 3]> {
+    let rotation = DMat3::from_mat4(world);
+    let axis = |column: DVec3| column.try_normalize().map(|unit| unit.to_array());
+    Some([
+        axis(rotation.x_axis)?,
+        axis(rotation.y_axis)?,
+        axis(rotation.z_axis)?,
+    ])
+}
+
+/// 引用属性指到的连接对象本身（plant-mbd `ConnectionTarget`）；引用不在模板里、为空都按没有。
+fn referenced_target(
+    element: &DbElement,
+    reference: &str,
+) -> Result<Option<ConnectionTarget>, BranchQueryError> {
+    match host::optional_element(element, reference)? {
+        Some(target) => connection_target(&target),
+        None => Ok(None),
+    }
+}
+
+/// 连接对象的 refno、类型与它自己所在 ZONE 的标志；目标不在所钉会话按没有。
+fn connection_target(target: &DbElement) -> Result<Option<ConnectionTarget>, BranchQueryError> {
+    let Some(noun) = soft(host::noun_of(target))? else {
+        return Ok(None);
+    };
+    Ok(Some(ConnectionTarget {
+        refno: wire_refno(target.refno()),
+        noun,
+        zone: zone_flags(target)?,
+    }))
+}
+
+/// PCOM 的 `crfa`（模板里叫 `CRFA`，元素引用数组）：库内序，跳过 Nulref（PML `unset()`）与不在所钉会话的目标。
+fn crfa_targets(member: &DbElement) -> Result<Vec<CrfaTarget>, DbElementError> {
+    let refnos = match member.attribute("CRFA") {
+        Ok(Some(DescriptorValue::RefNoArray(refnos))) => refnos,
+        Ok(Some(DescriptorValue::RefNo(refno))) => vec![refno],
+        Ok(None) | Err(DbElementError::UnknownAttribute { .. }) => return Ok(Vec::new()),
+        Ok(Some(other)) => {
+            return Err(DbElementError::TypeMismatch {
+                refno: member.refno(),
+                name: "CRFA".to_string(),
+                found: format!("{other:?}"),
+                wanted: "RefNoArray",
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let set = member.db_set();
+    let mut out = Vec::new();
+    for refno in refnos.into_iter().filter(RefNo::is_valid) {
+        let target = set.element(refno);
+        let Some(name) = pml_name(&target)? else {
+            continue;
+        };
+        out.push(CrfaTarget {
+            refno: wire_refno(refno),
+            name,
+            hpos: host::world_point(&target, "HPOS")?.map(|pos| pos.to_array()),
+        });
+    }
+    Ok(out)
+}
+
+/// SITE 名含 INST 的 ATTA 所属支架（`isoTag` L155-163）：UDA `:NPHSASR` 第一项的属主，带它的 `:ZD_BZBM`。AMS 字典里
+/// 这个 UDA 是单个 REF，PML 写的是数组 `[1]`，两样都收；第一项是 Nulref、目标或属主不在所钉会话都按没有。
+fn atta_support(member: &DbElement) -> Result<Option<AttaSupport>, DbElementError> {
+    let first = match member.attribute(":NPHSASR") {
+        Ok(Some(DescriptorValue::RefNo(refno))) => refno,
+        Ok(Some(DescriptorValue::RefNoArray(refnos))) => match refnos.first() {
+            Some(&refno) => refno,
+            None => return Ok(None),
+        },
+        Ok(None) | Err(DbElementError::UnknownAttribute { .. }) => return Ok(None),
+        Ok(Some(other)) => {
+            return Err(DbElementError::TypeMismatch {
+                refno: member.refno(),
+                name: ":NPHSASR".to_string(),
+                found: format!("{other:?}"),
+                wanted: "RefNo / RefNoArray",
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    if !first.is_valid() {
+        return Ok(None);
+    }
+    let Some(support) = soft(member.db_set().element(first).owner())?.flatten() else {
+        return Ok(None);
+    };
+    let Some(name) = pml_name(&support)? else {
+        return Ok(None);
+    };
+    Ok(Some(AttaSupport {
+        refno: wire_refno(support.refno()),
+        name: Some(name),
+        function_code: host::optional_text(&support, ":ZD_BZBM")?,
+    }))
 }
 
 /// `ipara of $!mem`，见模块文档。
@@ -669,15 +821,23 @@ pub(super) fn assign_navigation(members: &mut [BranchMember], slot_from: &HashMa
     }
 }
 
-/// BRAN 级的 M2b / M2a 字段。
+/// BRAN 级的 M2b / M2a 字段，与标签 / 调整焊要的 BRAN 级事实。
 #[derive(Debug, Default)]
 pub(super) struct BranchFields {
     pub(super) flow_direction: Option<String>,
     pub(super) heat_tracing: Option<String>,
     pub(super) dmf_walls: Vec<CivilCandidate>,
+    pub(super) site_name: Option<String>,
+    pub(super) drawing_number: Option<String>,
+    pub(super) document_code: Option<String>,
+    pub(super) head_connection_target: Option<ConnectionTarget>,
+    pub(super) tail_connection_target: Option<ConnectionTarget>,
+    pub(super) head_adjacent_tube: Option<AdjacentTube>,
+    pub(super) tail_adjacent_tube: Option<AdjacentTube>,
 }
 
-/// `FLOWDIRECTION`（模板里叫 `FLOW`）、伴热 UDA `:ZD_GDBR`、成员 `DMFARR` 指到的墙板，见模块文档。
+/// `FLOWDIRECTION`（模板里叫 `FLOW`）、伴热 UDA `:ZD_GDBR`、成员 `DMFARR` 指到的墙板；SITE 的 NAME、`:ZD_NBBM` /
+/// `:ZD_WJBM`、`HREF` / `TREF` 的目标与相邻 BRAN 的末 / 首根管，见模块文档。
 pub(super) fn branch_fields(
     container: &DbElement,
     dmf_targets: &[RefNo],
@@ -692,8 +852,36 @@ pub(super) fn branch_fields(
         heat_tracing: bad
             .keep(":ZD_GDBR", host::optional_text(container, ":ZD_GDBR"))
             .flatten(),
-        dmf_walls: Vec::new(),
+        site_name: bad.keep("site of", site_name(container)).flatten(),
+        drawing_number: bad
+            .keep(":ZD_NBBM", host::optional_text(container, ":ZD_NBBM"))
+            .flatten(),
+        document_code: bad
+            .keep(":ZD_WJBM", host::optional_text(container, ":ZD_WJBM"))
+            .flatten(),
+        ..BranchFields::default()
     };
+    if let Some(head) = bad
+        .keep("HREF", host::optional_element(container, "HREF"))
+        .flatten()
+    {
+        fields.head_connection_target = bad.keep("HREF target", connection_target(&head)).flatten();
+        fields.head_adjacent_tube = bad
+            .keep("last tubi of HREF", adjacent_tube(&head, AdjacentEnd::Last))
+            .flatten();
+    }
+    if let Some(tail) = bad
+        .keep("TREF", host::optional_element(container, "TREF"))
+        .flatten()
+    {
+        fields.tail_connection_target = bad.keep("TREF target", connection_target(&tail)).flatten();
+        fields.tail_adjacent_tube = bad
+            .keep(
+                "first tubi of TREF",
+                adjacent_tube(&tail, AdjacentEnd::First),
+            )
+            .flatten();
+    }
     if !bad.0.is_empty() {
         issues.push(info_issue(
             branch_refno,
