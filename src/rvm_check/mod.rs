@@ -30,7 +30,7 @@ mod report;
 pub use config::{ProjectDefaults, ResolvedTools, project_defaults, resolve_tools};
 pub use report::{
     RvmCheckReport, RvmCounts, RvmMismatch, RvmTimingsMs, RvmVerdict, failed_report, judge_compare,
-    verdict_message,
+    judge_report, verdict_message,
 };
 
 const STAGE_RESOLVE: &str = "resolve";
@@ -612,12 +612,20 @@ fn compare_rvms(
         Ok(Err(error)) => return Err(format!("比对没有跑完：{error:#}")),
         Err(panic) => return Err(format!("比对时 panic：{}", panic_text(&*panic))),
     };
-    let value =
-        serde_json::to_value(&report).map_err(|error| format!("比对报告无法序列化：{error}"))?;
-    let bytes = serde_json::to_vec_pretty(&value)
-        .map_err(|error| format!("比对报告无法序列化：{error}"))?;
-    std::fs::write(&out, bytes).map_err(|error| format!("写 compare.json 失败：{error}"))?;
-    Ok(judge_compare(&value))
+    // 流式落盘、直接从结构体判色：早先先 `to_value` 再 `to_vec_pretty` 再从 `Value` 判，
+    // 80k 件的报告在后端进程里同时活着三份（结构体、Value 树、字节串），近 1 GB。
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&out)
+            .map_err(|error| format!("建 compare.json 失败：{error}"))?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, &report)
+            .map_err(|error| format!("比对报告无法序列化：{error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("写 compare.json 失败：{error}"))?;
+    }
+    Ok(judge_report(&report))
 }
 
 fn driver_for(spec: &RunSpec) -> E3dDriver {
@@ -908,6 +916,26 @@ mod tests {
         assert!(counts.both > 0);
         assert_eq!(counts.off, 0);
         assert!(wrote_json);
+    }
+
+    /// 进程内从结构体判色与读落盘 JSON 判色必须一个口径：同一份报告两条路得同一结果，
+    /// 绿的（自比对）与红的（两份不相干的 RVM，全是 only_*）都钉住。
+    #[test]
+    fn judging_the_struct_matches_judging_its_json() {
+        let rvm_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/rvm");
+        let fixture = rvm_dir.join("1RCV0101-B1.rvm");
+        let other = rvm_dir.join("1RS-WF03-W-C-RR001.rvm");
+        for (baseline, generated) in [(&fixture, &fixture), (&fixture, &other)] {
+            let report = e3d_model::rvm_compare::compare_rvm_files(baseline, generated).unwrap();
+            let value = serde_json::to_value(&report).unwrap();
+            let from_struct = judge_report(&report);
+            let from_json = judge_compare(&value);
+            assert_eq!(from_struct.0, from_json.0, "{}", generated.display());
+            assert_eq!(from_struct.1, from_json.1);
+            assert_eq!(from_struct.2, from_json.2);
+            assert_eq!(from_struct.3, from_json.3);
+            assert_eq!(from_struct.4, from_json.4);
+        }
     }
 
     #[test]

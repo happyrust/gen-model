@@ -4,6 +4,7 @@
 //! 差异只在 JSON 里。口径与 `scripts/Compare-SlykRvmStrict.ps1` 相同：
 //! 没有缺件、没有 off、种类也一致是绿；只是种类不一致是黄；其余是红。
 
+use e3d_model::rvm_compare::CompareReport;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -138,78 +139,250 @@ pub fn failed_report(
     }
 }
 
+/// 判色要从一份比对报告里读的全部事实。两种来源摊成同一份：落盘的 `compare.json`
+/// （[`JudgeFacts::from_value`]，宽松读法，缺字段按空算）与进程内刚算完的
+/// [`CompareReport`]（[`JudgeFacts::from_report`]，不必先序列化成 `Value` 再读回来——
+/// 80k 件的报告那棵树要几百 MB）。
+struct JudgeFacts {
+    /// 按 noun 的账合计（`both` … `kind_differ`），`only_*` 还没与清单长度取大。
+    counts: RvmCounts,
+    only_baseline: Vec<String>,
+    only_generated: Vec<String>,
+    unkeyable_baseline: Vec<String>,
+    unkeyable_generated: Vec<String>,
+    centreline: Vec<String>,
+    /// `baseline_members` 在且为 0 才算「E3D 一侧确实读过、而且是空的」。
+    baseline_members_zero: bool,
+    /// 只收有问题的件：`off`、种类不一致、或容器组内逐根账里有 off / only_*。
+    problem_pairs: Vec<PairFacts>,
+}
+
+struct PairFacts {
+    name: String,
+    noun: String,
+    verdict: String,
+    kinds_differ: bool,
+    max_axis_delta_mm: Option<f64>,
+    baseline_kinds: Vec<String>,
+    generated_kinds: Vec<String>,
+    baseline_aabb: Option<[f64; 6]>,
+    generated_aabb: Option<[f64; 6]>,
+    /// 容器组内逐根账里有问题的行：（我们那根的名字、行的判档、差）。
+    container_rows: Vec<(Option<String>, String, Option<f64>)>,
+}
+
+fn is_problem_row(verdict: &str) -> bool {
+    matches!(verdict, "off" | "only_baseline" | "only_generated")
+}
+
+impl JudgeFacts {
+    fn from_value(value: &Value) -> Self {
+        let mut counts = RvmCounts::default();
+        if let Some(by_noun) = value.get("by_noun").and_then(Value::as_object) {
+            for tally in by_noun.values() {
+                counts.both += num(tally, "both");
+                counts.exact += num(tally, "exact");
+                counts.chord += num(tally, "chord");
+                counts.reference_artifact += num(tally, "reference_artifact");
+                counts.film += num(tally, "film");
+                counts.off += num(tally, "off");
+                counts.only_baseline += num(tally, "only_baseline");
+                counts.only_generated += num(tally, "only_generated");
+                counts.kind_match += num(tally, "kind_match");
+                counts.kind_differ += num(tally, "kind_differ");
+            }
+        }
+        if let Some(tubes) = value.get("container_tubes") {
+            counts.container_off = num(tubes, "off");
+            counts.container_only_baseline = num(tubes, "only_baseline");
+            counts.container_only_generated = num(tubes, "only_generated");
+        }
+        let mut problem_pairs = Vec::new();
+        if let Some(pairs) = value.get("pairs").and_then(Value::as_array) {
+            for pair in pairs {
+                let verdict = pair.get("verdict").and_then(Value::as_str).unwrap_or("");
+                let kinds_differ = pair.get("kind_match").and_then(Value::as_bool) == Some(false);
+                let container_rows: Vec<(Option<String>, String, Option<f64>)> = pair
+                    .get("container_tubes")
+                    .and_then(|tubes| tubes.get("rows"))
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| {
+                                let row_verdict =
+                                    row.get("verdict").and_then(Value::as_str).unwrap_or("");
+                                is_problem_row(row_verdict).then(|| {
+                                    (
+                                        row.get("generated")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string),
+                                        row_verdict.to_string(),
+                                        row.get("max_axis_delta_mm").and_then(Value::as_f64),
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if verdict != "off" && !kinds_differ && container_rows.is_empty() {
+                    continue;
+                }
+                problem_pairs.push(PairFacts {
+                    name: pair
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .or_else(|| pair.get("refno").and_then(Value::as_str))
+                        .unwrap_or("?")
+                        .to_string(),
+                    noun: pair
+                        .get("noun")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    verdict: verdict.to_string(),
+                    kinds_differ,
+                    max_axis_delta_mm: pair.get("max_axis_delta_mm").and_then(Value::as_f64),
+                    baseline_kinds: string_array(pair.get("baseline_kinds")),
+                    generated_kinds: string_array(pair.get("generated_kinds")),
+                    baseline_aabb: arr6(pair.get("baseline_aabb")),
+                    generated_aabb: arr6(pair.get("generated_aabb")),
+                    container_rows,
+                });
+            }
+        }
+        Self {
+            counts,
+            only_baseline: string_list(value, "only_baseline"),
+            only_generated: string_list(value, "only_generated"),
+            unkeyable_baseline: string_list(value, "unkeyable_baseline"),
+            unkeyable_generated: string_list(value, "unkeyable_generated"),
+            centreline: string_list(value, "centreline_only_baseline"),
+            baseline_members_zero: value.get("baseline_members").and_then(Value::as_u64) == Some(0),
+            problem_pairs,
+        }
+    }
+
+    fn from_report(report: &CompareReport) -> Self {
+        let mut counts = RvmCounts::default();
+        for tally in report.by_noun.values() {
+            counts.both += tally.both as u64;
+            counts.exact += tally.exact as u64;
+            counts.chord += tally.chord as u64;
+            counts.reference_artifact += tally.reference_artifact as u64;
+            counts.film += tally.film as u64;
+            counts.off += tally.off as u64;
+            counts.only_baseline += tally.only_baseline as u64;
+            counts.only_generated += tally.only_generated as u64;
+            counts.kind_match += tally.kind_match as u64;
+            counts.kind_differ += tally.kind_differ as u64;
+        }
+        counts.container_off = report.container_tubes.off as u64;
+        counts.container_only_baseline = report.container_tubes.only_baseline as u64;
+        counts.container_only_generated = report.container_tubes.only_generated as u64;
+        let problem_pairs = report
+            .pairs
+            .iter()
+            .filter_map(|pair| {
+                let kinds_differ = pair.kind_match == Some(false);
+                let container_rows: Vec<(Option<String>, String, Option<f64>)> = pair
+                    .container_tubes
+                    .as_ref()
+                    .map(|tubes| {
+                        tubes
+                            .rows
+                            .iter()
+                            .filter(|row| is_problem_row(row.verdict))
+                            .map(|row| {
+                                (
+                                    row.generated.clone(),
+                                    row.verdict.to_string(),
+                                    row.max_axis_delta_mm,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if pair.verdict != "off" && !kinds_differ && container_rows.is_empty() {
+                    return None;
+                }
+                Some(PairFacts {
+                    name: pair.key.clone(),
+                    noun: pair.noun.clone(),
+                    verdict: pair.verdict.to_string(),
+                    kinds_differ,
+                    max_axis_delta_mm: Some(pair.max_axis_delta_mm),
+                    baseline_kinds: pair.baseline_kinds.clone(),
+                    generated_kinds: pair.generated_kinds.clone(),
+                    baseline_aabb: Some(pair.baseline_aabb),
+                    generated_aabb: Some(pair.generated_aabb),
+                    container_rows,
+                })
+            })
+            .collect();
+        Self {
+            counts,
+            only_baseline: report.only_baseline.clone(),
+            only_generated: report.only_generated.clone(),
+            unkeyable_baseline: report.unkeyable_baseline.clone(),
+            unkeyable_generated: report.unkeyable_generated.clone(),
+            centreline: report.centreline_only_baseline.clone(),
+            baseline_members_zero: report.baseline_members == Some(0),
+            problem_pairs,
+        }
+    }
+}
+
 /// 从 `rvm_compare` 的 JSON 取值。缺 `by_noun` 或一件都没配上，判红。
 pub fn judge_compare(
     value: &Value,
 ) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
-    let mut counts = RvmCounts::default();
-    if let Some(by_noun) = value.get("by_noun").and_then(Value::as_object) {
-        for tally in by_noun.values() {
-            counts.both += num(tally, "both");
-            counts.exact += num(tally, "exact");
-            counts.chord += num(tally, "chord");
-            counts.reference_artifact += num(tally, "reference_artifact");
-            counts.film += num(tally, "film");
-            counts.off += num(tally, "off");
-            counts.only_baseline += num(tally, "only_baseline");
-            counts.only_generated += num(tally, "only_generated");
-            counts.kind_match += num(tally, "kind_match");
-            counts.kind_differ += num(tally, "kind_differ");
-        }
-    }
-    let only_baseline = string_list(value, "only_baseline");
-    let only_generated = string_list(value, "only_generated");
+    judge(JudgeFacts::from_value(value))
+}
+
+/// 进程内刚算完的报告直接判色，口径与 [`judge_compare`] 读落盘 JSON 完全一致。
+pub fn judge_report(
+    report: &CompareReport,
+) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
+    judge(JudgeFacts::from_report(report))
+}
+
+fn judge(facts: JudgeFacts) -> (RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool) {
+    let JudgeFacts {
+        mut counts,
+        only_baseline,
+        only_generated,
+        unkeyable_baseline,
+        unkeyable_generated,
+        centreline,
+        baseline_members_zero,
+        problem_pairs,
+    } = facts;
     counts.only_baseline = counts.only_baseline.max(only_baseline.len() as u64);
     counts.only_generated = counts.only_generated.max(only_generated.len() as u64);
-
-    if let Some(tubes) = value.get("container_tubes") {
-        counts.container_off = num(tubes, "off");
-        counts.container_only_baseline = num(tubes, "only_baseline");
-        counts.container_only_generated = num(tubes, "only_generated");
-    }
-    let unkeyable_baseline = string_list(value, "unkeyable_baseline");
-    let unkeyable_generated = string_list(value, "unkeyable_generated");
     counts.unkeyable_baseline = unkeyable_baseline.len() as u64;
     counts.unkeyable_generated = unkeyable_generated.len() as u64;
-    let centreline = string_list(value, "centreline_only_baseline");
     counts.centreline_only_baseline = centreline.len() as u64;
 
     let mut mismatches = Vec::new();
-    if let Some(pairs) = value.get("pairs").and_then(Value::as_array) {
-        for pair in pairs {
-            let verdict = pair.get("verdict").and_then(Value::as_str).unwrap_or("");
-            let kind_match = pair.get("kind_match").and_then(Value::as_bool);
-            let kinds_differ = kind_match == Some(false);
-            if verdict == "off" {
-                mismatches.push(pair_mismatch(pair, "off"));
-            } else if kinds_differ {
-                mismatches.push(pair_mismatch(pair, "kind_differ"));
-            }
-            if let Some(rows) = pair
-                .get("container_tubes")
-                .and_then(|tubes| tubes.get("rows"))
-                .and_then(Value::as_array)
-            {
-                for row in rows {
-                    let row_verdict = row.get("verdict").and_then(Value::as_str).unwrap_or("");
-                    if matches!(row_verdict, "off" | "only_baseline" | "only_generated") {
-                        mismatches.push(RvmMismatch {
-                            category: format!("container_{row_verdict}"),
-                            name: row
-                                .get("generated")
-                                .and_then(Value::as_str)
-                                .unwrap_or("(容器管身)")
-                                .to_string(),
-                            noun: "TUBI".to_string(),
-                            max_axis_delta_mm: row.get("max_axis_delta_mm").and_then(Value::as_f64),
-                            baseline_kinds: Vec::new(),
-                            generated_kinds: Vec::new(),
-                            baseline_aabb: None,
-                            generated_aabb: None,
-                        });
-                    }
-                }
-            }
+    for pair in &problem_pairs {
+        if pair.verdict == "off" {
+            mismatches.push(pair_mismatch(pair, "off"));
+        } else if pair.kinds_differ {
+            mismatches.push(pair_mismatch(pair, "kind_differ"));
+        }
+        for (generated, row_verdict, max_axis_delta_mm) in &pair.container_rows {
+            mismatches.push(RvmMismatch {
+                category: format!("container_{row_verdict}"),
+                name: generated
+                    .clone()
+                    .unwrap_or_else(|| "(容器管身)".to_string()),
+                noun: "TUBI".to_string(),
+                max_axis_delta_mm: *max_axis_delta_mm,
+                baseline_kinds: Vec::new(),
+                generated_kinds: Vec::new(),
+                baseline_aabb: None,
+                generated_aabb: None,
+            });
         }
     }
     for name in &only_baseline {
@@ -239,10 +412,8 @@ pub fn judge_compare(
     // E3D 一侧确实读过（`baseline_members` 在且为 0）、生成侧也一件没出，两边同样空：
     // 只画中心线的 SITE（/1AXIS 的 SCTN 没有 SPRE）就是这样，不是对不上。缺这个字段的
     // JSON 说明比对本身没跑完整，仍判红。
-    let both_empty = value.get("baseline_members").and_then(Value::as_u64) == Some(0)
-        && counts.both == 0
-        && counts.kind_differ == 0
-        && structural == 0;
+    let both_empty =
+        baseline_members_zero && counts.both == 0 && counts.kind_differ == 0 && structural == 0;
     let verdict = if both_empty {
         RvmVerdict::Pass
     } else if counts.both == 0 || structural > 0 {
@@ -278,26 +449,16 @@ pub fn verdict_message(verdict: RvmVerdict, counts: &RvmCounts) -> String {
     }
 }
 
-fn pair_mismatch(pair: &Value, category: &str) -> RvmMismatch {
-    let name = pair
-        .get("key")
-        .and_then(Value::as_str)
-        .or_else(|| pair.get("refno").and_then(Value::as_str))
-        .unwrap_or("?")
-        .to_string();
+fn pair_mismatch(pair: &PairFacts, category: &str) -> RvmMismatch {
     RvmMismatch {
         category: category.to_string(),
-        name,
-        noun: pair
-            .get("noun")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        max_axis_delta_mm: pair.get("max_axis_delta_mm").and_then(Value::as_f64),
-        baseline_kinds: string_array(pair.get("baseline_kinds")),
-        generated_kinds: string_array(pair.get("generated_kinds")),
-        baseline_aabb: arr6(pair.get("baseline_aabb")),
-        generated_aabb: arr6(pair.get("generated_aabb")),
+        name: pair.name.clone(),
+        noun: pair.noun.clone(),
+        max_axis_delta_mm: pair.max_axis_delta_mm,
+        baseline_kinds: pair.baseline_kinds.clone(),
+        generated_kinds: pair.generated_kinds.clone(),
+        baseline_aabb: pair.baseline_aabb,
+        generated_aabb: pair.generated_aabb,
     }
 }
 
