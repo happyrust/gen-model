@@ -1505,7 +1505,6 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                         room_generation: Default::default(),
                     }),
                     model_base_sesno: None,
-                    closes_task: true,
                 },
             )
             .await
@@ -2022,7 +2021,7 @@ fn initialization_steps(f: &Fixture) -> Vec<Step> {
 // ───────────────────────────── 源码钉（ADR-072 W2，计划 R1 验收）─────────────────────────────
 
 /// 数据尾事务**不写** `finished`、也不再删旧恢复记录 `increment_update_attempt`；`finished`
-/// 全库只有任务收尾那一笔写得出、而且恰好一句（`closes_task = false` 的中途那一笔一个字都没有）。
+/// 全库只有任务收尾那一笔写得出、而且恰好一句。
 #[test]
 fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once() {
     let render = crate::data_interface::increment_tail::render_finalize_tail(
@@ -2069,7 +2068,7 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
         );
     }
 
-    let mut end = crate::data_interface::task_end::TaskEnd {
+    let end = crate::data_interface::task_end::TaskEnd {
         dbnum: DBNUM,
         target_sesno: END_SESNO,
         data: None,
@@ -2081,7 +2080,6 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
             room_generation: Default::default(),
         }),
         model_base_sesno: None,
-        closes_task: true,
     };
     let closing = crate::data_interface::task_end::render_task_end_tail(&end);
     assert_eq!(
@@ -2094,12 +2092,5 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
             "UPDATE {WRITE_STATE_TABLE}:{DBNUM} SET status = 'finished'"
         )),
         "{closing}"
-    );
-    end.closes_task = false;
-    let midway = crate::data_interface::task_end::render_task_end_tail(&end);
-    assert_eq!(
-        midway.matches("finished").count(),
-        0,
-        "中途那一笔（数据批次之后先落 Ref0 统计）一个 finished 都不许有: {midway}"
     );
 }

@@ -66,6 +66,11 @@ pub(crate) struct TaskDataOutcome {
 }
 
 /// 一个 dbnum 任务收尾时要落的全部控制面事实。
+///
+/// 这一笔恒带 `dbnum_write_state:{dbnum} SET status = 'finished'`（ADR-072 D1 / W2）——全库唯一
+/// 写得出 `finished` 的地方，所以任务中途不许落这一笔，否则会把还在写模型的任务提前宣告写完。
+/// 任务以 `Partial` 收尾（模型失败但没崩）也照落：`finished` 说的是「本任务的写库结束了」，
+/// 欠什么由两水位回答。
 #[derive(Debug, Clone)]
 pub(crate) struct TaskEnd {
     pub dbnum: u32,
@@ -86,15 +91,6 @@ pub(crate) struct TaskEnd {
     /// （`model_watermark_discontinuous`），数据水位照盖。`None` 与 ≤0 等价于
     /// 「从 0 起算」——初始化 / 整库重排 / 纯数据批的旧路径逐位不变。
     pub model_base_sesno: Option<i32>,
-    /// 这一笔是不是本任务的**收尾**那一笔（ADR-072 D1 / W2）。
-    ///
-    /// 为真时事务里多一句 `dbnum_write_state:{dbnum} SET status = 'finished'`——全库唯一
-    /// 写得出 `finished` 的地方。为假的一笔只盖水位、不宣告写完，任何中途提交都必须走这一格，
-    /// 否则会把还在写模型的任务提前宣告写完。
-    ///
-    /// 任务以 `Partial` 收尾（模型失败但没崩）也要为真：`finished` 说的是「本任务
-    /// 的写库结束了」，欠什么由两水位回答。
-    pub closes_task: bool,
 }
 
 impl TaskEnd {
@@ -279,13 +275,9 @@ pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
             format!("{advance}\n{empty}\n")
         })
         .unwrap_or_default();
-    let finished = if end.closes_task {
-        format!("{}\n", super::write_state::render_mark_finished(end.dbnum))
-    } else {
-        String::new()
-    };
+    let finished = super::write_state::render_mark_finished(end.dbnum);
     format!(
-        "BEGIN TRANSACTION;\n{data}{finished}{}\nCOMMIT TRANSACTION;",
+        "BEGIN TRANSACTION;\n{data}{finished}\n{}\nCOMMIT TRANSACTION;",
         render_watermark_update(end)
     )
 }
@@ -411,7 +403,6 @@ mod tests {
                 room_generation: RoomGenerationStamp::Untouched,
             }),
             model_base_sesno: None,
-            closes_task: true,
         }
     }
 
@@ -512,18 +503,6 @@ mod tests {
             marker < watermark,
             "水位必须是事务最后一条（回执按下标取它）：{sql}"
         );
-    }
-
-    /// 中途那一笔（`closes_task = false`）不许宣告写完——模型还没写。
-    #[test]
-    fn a_mid_task_tail_leaves_the_write_marker_alone() {
-        let mut end = end();
-        end.closes_task = false;
-        end.model = None;
-        let sql = render_task_end_tail(&end);
-        assert!(!sql.contains("dbnum_write_state"), "{sql}");
-        assert!(!sql.contains("finished"), "{sql}");
-        assert!(sql.contains("UPDATE dbnum_watermark:8000"), "水位那一句照落：{sql}");
     }
 
     /// 模型失败（没崩、走到了收尾）照样收标记：`finished` 说的是「本任务的写库

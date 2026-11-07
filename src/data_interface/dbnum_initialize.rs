@@ -317,7 +317,6 @@ pub(crate) async fn initialize(
         model: model_outcome.clone(),
         // 初始化从 0 起算整库，连续性闸恒真（ADR-092 D2）。
         model_base_sesno: Some(0),
-        closes_task: true,
     };
     let receipt = crate::data_interface::task_end::commit_task_end_on(&aios_core::SUL_DB, &end)
         .await
@@ -823,7 +822,7 @@ mod tests {
     }
 
     /// ADR-077 D7 / D8：先两 lane 都 `drain`，再裁决清库，再核对，最后才是收尾那一笔；
-    /// 收尾一笔同时带 `data`、`closes_task: true`。
+    /// 收尾一笔同时带 `data`（`finished` 恒在这一笔里）。
     #[test]
     fn drains_precede_the_verdict_and_the_single_closing_transaction() {
         let body = production()
@@ -852,8 +851,7 @@ mod tests {
             "收尾只有一笔"
         );
         assert!(
-            body.contains("data: Some(TaskDataOutcome { confirmed_empty })")
-                && body.contains("closes_task: true"),
+            body.contains("data: Some(TaskDataOutcome { confirmed_empty })"),
             "收尾那一笔同时盖 applied、收写入标记"
         );
         assert!(

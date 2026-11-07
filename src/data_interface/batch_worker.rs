@@ -1772,7 +1772,6 @@ async fn execute_frozen_batch(
                 target_time: end_time,
                 model: model_outcome,
                 model_base_sesno,
-                closes_task: true,
             },
         )
         .await
@@ -1824,7 +1823,6 @@ async fn execute_frozen_batch(
                 target_time: None,
                 model: None,
                 model_base_sesno: None,
-                closes_task: true,
             },
         )
         .await
@@ -5649,7 +5647,6 @@ mod tests {
             target_time: None,
             model: Some(outcome),
             model_base_sesno: None,
-            closes_task: true,
         });
         assert!(
             sql.contains("model_sesno = math::max([model_sesno ?: 0, 26])"),
@@ -5714,12 +5711,10 @@ mod tests {
             closing.contains("commit_task_end_on("),
             "等完才是收尾那一笔: {closing}"
         );
-        for fact in ["closes_task: true", "model: model_outcome"] {
-            assert!(
-                closing.contains(fact),
-                "收尾一笔 = model_sesno + finished，少了 `{fact}`: {closing}"
-            );
-        }
+        assert!(
+            closing.contains("model: model_outcome"),
+            "收尾一笔 = model_sesno + finished，少了 `model: model_outcome`: {closing}"
+        );
         for retired in [
             "enqueue_model_watermark_write_behind",
             "request_settlement",
@@ -5838,10 +5833,14 @@ mod tests {
             fallback.contains("if !write_marker_closed"),
             "兜底只在收尾那一笔没落时才走: {fallback}"
         );
+        let mid_task = before
+            .split_once("registry.set_stage(&job.task_id, \"task_end\")")
+            .expect("task_end stage")
+            .0;
         assert_eq!(
-            body.matches("closes_task: false").count(),
+            mid_task.matches("commit_task_end_on(").count(),
             0,
-            "中途那一笔已并进收尾，不许再有不收标记的写点: {body}"
+            "收尾这一笔恒宣告写完，task_end 阶段之前不许有写点: {mid_task}"
         );
     }
 
@@ -5936,7 +5935,6 @@ mod tests {
             target_time: None,
             model: Some(outcome),
             model_base_sesno: None,
-            closes_task: true,
         });
         assert!(!sql.contains("model_sesno = math::max"), "水位不盖: {sql}");
         assert!(sql.contains("status = 'finished'"), "标记照收: {sql}");
@@ -6890,15 +6888,9 @@ mod tests {
         );
         // 收口只有两处：正常收尾那一笔，和函数末尾的兜底那一笔（W1）。
         assert_eq!(
-            body.matches("closes_task: true").count(),
+            body.matches("commit_task_end_on(").count(),
             2,
-            "收口写点恰好两处（收尾 + 兜底）: {body}"
-        );
-        // 中途那一笔已并进收尾（ADR-076 D5）：不再有不收标记的写点。
-        assert_eq!(
-            body.matches("closes_task: false").count(),
-            0,
-            "一个任务只写一次 task_end: {body}"
+            "收口写点恰好两处（收尾 + 兜底），一个任务只写一次 task_end: {body}"
         );
     }
 

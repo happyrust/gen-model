@@ -8871,7 +8871,6 @@ mod tests {
                     room_generation: Default::default(),
                 }),
                 model_base_sesno: Some(0),
-                closes_task: true,
             },
         )
         .await
