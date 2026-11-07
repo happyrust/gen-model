@@ -2899,7 +2899,10 @@ mod tests {
                 && dispatch.contains("parked,")
                 && dispatch.contains("stale_roots,")
                 && dispatch.contains("None =>")
-                && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
+                && dispatch
+                    .matches("run_room_only_recompute(env, job, ")
+                    .count()
+                    == 2,
             "定向定不了（None）退整库；整库直接整库；点名的根（F3）随范围交给定向那一路: {dispatch}"
         );
         // H1（2026-09-19）：定向那一路拿的是本任务开工冻的那台（`task_rooms`）与准入链的终点代号；没冻出（`None`）

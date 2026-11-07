@@ -20,9 +20,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use aios_core::options::DbOption;
 use chrono::Local;
 use futures::FutureExt;
 use serde::Serialize;
+use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::batch_scheduler::{BatchScheduler, DispatchOutcome, FrozenBatch};
 use crate::data_interface::manual_update::{
@@ -1234,7 +1236,16 @@ async fn run_one_batch(
                     } else {
                         "data_parse"
                     });
-                    execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await
+                    execute_frozen_batch(
+                        TaskEnv::process(),
+                        mgr,
+                        registry,
+                        &job,
+                        cand,
+                        &progress,
+                        &mut warnings,
+                    )
+                    .await
                 }
                 Err(error) => {
                     let replacement = schedule_frozen_source_replacement(
@@ -1452,6 +1463,35 @@ pub(crate) fn parse_explicit_flag(value: Option<&std::ffi::OsStr>) -> ExplicitFl
     }
 }
 
+/// 一次数据任务读写库所用的环境：库句柄、存储形态与数据面形态、模型落库目标、配置。
+///
+/// 任务从入口起只读这一份，不再自己去取全局 `SUL_DB`、`options::store_mode()` / `data_face()` 与全局
+/// `DbOption`。生产走 [`TaskEnv::process`]。落库目标单独带着：生产那一份必须是
+/// [`PersistTarget::process`]，换成 `PersistTarget::new` 会连带关掉落库后的空间树收敛与生成根账本。
+///
+/// [`PersistTarget::process`]: crate::fast_model::model_db_adapter::PersistTarget::process
+#[derive(Clone, Copy)]
+pub(crate) struct TaskEnv<'a> {
+    pub(crate) db: &'a Surreal<Any>,
+    pub(crate) store_mode: crate::options::StoreMode,
+    pub(crate) data_face: crate::options::DataFace,
+    pub(crate) persist: crate::fast_model::model_db_adapter::PersistTarget<'a>,
+    pub(crate) db_option: &'static DbOption,
+}
+
+impl TaskEnv<'static> {
+    /// 本进程配置的那一份：全局 `SUL_DB`、本进程的存储形态与数据面、全局 `DbOption`。
+    pub(crate) fn process() -> Self {
+        Self {
+            db: &aios_core::SUL_DB,
+            store_mode: crate::options::store_mode(),
+            data_face: crate::options::data_face(),
+            persist: crate::fast_model::model_db_adapter::PersistTarget::process(),
+            db_option: aios_core::get_db_option(),
+        }
+    }
+}
+
 /// 本次任务写在写入标记上的 `(intent, S)`（ADR-072 §4.1）。
 ///
 /// S 是**本任务的起点**，也就是崩溃后要退回去的那一版：
@@ -1482,6 +1522,7 @@ fn write_marker_window(
 }
 
 async fn execute_frozen_batch(
+    env: TaskEnv<'_>,
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     job: &FrozenBatch,
@@ -1493,7 +1534,7 @@ async fn execute_frozen_batch(
     // this already-frozen batch in place so the ordinary Reinitialize path
     // performs the wipe at the destructive-action boundary.
     let mut effective_job = job.clone();
-    match crate::data_interface::write_state::load(job.dbnum).await {
+    match crate::data_interface::write_state::load_on(env.db, job.dbnum).await {
         Ok(Some(marker)) if marker.is_writing() => {
             effective_job.intent =
                 crate::data_interface::write_state::recovery_batch_intent(marker.intent);
@@ -1583,7 +1624,8 @@ async fn execute_frozen_batch(
     // 持到函数返回：写入标记、执行体、durable 栅栏、收尾那一笔都要在它里面。
     let _task_in_flight = lock_dbnum_task(job.dbnum).await;
     registry.set_stage(&job.task_id, "write_marker");
-    if let Err(error) = crate::data_interface::write_state::mark_writing(
+    if let Err(error) = crate::data_interface::write_state::mark_writing_on(
+        env.db,
         job.dbnum,
         write_start_sesno,
         file_latest_sesno,
@@ -1609,9 +1651,9 @@ async fn execute_frozen_batch(
     // 「这一版的根全 OK」由任务手里的单元清单回答，不回问库。
     let frozen_source = cand.frozen.clone();
     let mut result = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
-        execute_model_only_body(mgr, registry, job, cand, progress, warnings).await
+        execute_model_only_body(env, mgr, registry, job, cand, progress, warnings).await
     } else {
-        execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await
+        execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await
     };
     let body_ms = body_started.elapsed().as_millis();
 
@@ -1722,6 +1764,7 @@ async fn execute_frozen_batch(
                 registry.set_stage(&job.task_id, "rooms");
                 Some(
                     run_room_recompute(
+                        env,
                         job,
                         &request,
                         task_rooms.as_ref(),
@@ -1793,7 +1836,7 @@ async fn execute_frozen_batch(
             .and_then(|batch| batch.model_base_sesno)
             .or(job.model_start_sesno);
         match crate::data_interface::task_end::commit_task_end_on(
-            &aios_core::SUL_DB,
+            env.db,
             &crate::data_interface::task_end::TaskEnd {
                 dbnum: job.dbnum,
                 target_sesno: file_latest_sesno,
@@ -1844,7 +1887,7 @@ async fn execute_frozen_batch(
     // （`model` 为 None → 水位那一句只前进 `state_revision`）。
     if !write_marker_closed
         && let Err(error) = crate::data_interface::task_end::commit_task_end_on(
-            &aios_core::SUL_DB,
+            env.db,
             &crate::data_interface::task_end::TaskEnd {
                 dbnum: job.dbnum,
                 target_sesno: file_latest_sesno,
@@ -2363,13 +2406,14 @@ async fn library_generation_roots(
 ///
 /// [`recompute_dbnum_room_edges`]: crate::fast_model::model_db_adapter::recompute_dbnum_room_edges
 async fn run_room_only_recompute(
+    env: TaskEnv<'_>,
     job: &FrozenBatch,
     reason: &str,
     result: &mut DataBatchTaskResult,
     target_sesno: i32,
 ) -> RoomRecomputeVerdict {
     use crate::fast_model::model_db_adapter::{
-        PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
+        RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
     };
     let dbnum = job.dbnum;
     let rooms = match frozen_room_calculator() {
@@ -2402,7 +2446,7 @@ async fn run_room_only_recompute(
     };
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     match recompute_dbnum_room_edges(
-        PersistTarget::process(),
+        env.persist,
         store,
         dbnum,
         &rooms,
@@ -2525,6 +2569,7 @@ fn settle_room_recompute_failures(
 /// `task_rooms` 是本任务开工冻的那台计算器（`DataBatchTaskResult::room_calculator`，H1 2026-09-19）：定向那一路
 /// 用它算、盖它的代号——准入链的终点就是它；整库那一路不用它，照旧收尾新冻此刻这一代。
 async fn run_room_recompute(
+    env: TaskEnv<'_>,
     job: &FrozenBatch,
     request: &crate::data_interface::room_recompute::RoomRecomputeRequest,
     task_rooms: Option<&std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
@@ -2534,7 +2579,7 @@ async fn run_room_recompute(
     use crate::data_interface::room_recompute::RoomRecomputeScope;
     let verdict = match &request.scope {
         RoomRecomputeScope::WholeLibrary => {
-            run_room_only_recompute(job, &request.reason, result, target_sesno).await
+            run_room_only_recompute(env, job, &request.reason, result, target_sesno).await
         }
         RoomRecomputeScope::Targeted {
             swaps,
@@ -2545,6 +2590,7 @@ async fn run_room_recompute(
             let targeted = match task_rooms {
                 Some(rooms) => {
                     run_targeted_room_recompute(
+                        env,
                         job,
                         &request.reason,
                         swaps,
@@ -2569,7 +2615,7 @@ async fn run_room_recompute(
                 Some(verdict) => verdict,
                 None => {
                     let reason = format!("{}；定向反查定不了，退整库", request.reason);
-                    run_room_only_recompute(job, &reason, result, target_sesno).await
+                    run_room_only_recompute(env, job, &reason, result, target_sesno).await
                 }
             }
         }
@@ -2631,6 +2677,7 @@ async fn run_room_recompute(
 /// 各段都反查过、没命中就是边没变——与库上那一格说的是同一句话，`model_db_adapter::align_room_acks_along_chain` 把它们的代号
 /// 对齐到链尾。此后本库「ACK ≠ 库上代号」只剩一种含义：盖章之后另一代写的；下一个任务凭它点名、读侧凭它一票否决。
 async fn run_targeted_room_recompute(
+    env: TaskEnv<'_>,
     job: &FrozenBatch,
     reason: &str,
     swaps: &[crate::data_interface::room_recompute::PanelSwap],
@@ -2645,7 +2692,7 @@ async fn run_targeted_room_recompute(
         AffectedRoots, ReverseLookup, affected_roots, fold_parked, park_foreign_hits,
     };
     use crate::fast_model::model_db_adapter::{
-        PersistTarget, RootScope, align_room_acks_along_chain, recompute_dbnum_room_edges,
+        RootScope, align_room_acks_along_chain, recompute_dbnum_room_edges,
         render_panel_delta_statements, render_recalc_panel_topology_statements,
     };
     let dbnum = job.dbnum;
@@ -2670,7 +2717,7 @@ async fn run_targeted_room_recompute(
             return None;
         }
     };
-    let target = PersistTarget::process();
+    let target = env.persist;
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     // 换代段：每一段各反查一次（各自的新盒 + 库上名下的成员），根并起来；别的库的命中按段留着，成功后按段停放。没有换代段
     // （欠账全在停放链上）就没有这一路。
@@ -3182,6 +3229,7 @@ fn task_catalogue_stamps(
 }
 
 async fn execute_model_only_body(
+    env: TaskEnv<'_>,
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     job: &FrozenBatch,
@@ -3289,6 +3337,7 @@ async fn execute_model_only_body(
         worklist.extend(derived_units);
         let worklist = merge_unit_worklist(worklist);
         run_unit_worklist(
+            env,
             mgr,
             registry,
             &job.task_id,
@@ -3746,6 +3795,7 @@ fn failed_window_result(
 }
 
 async fn execute_frozen_batch_body(
+    env: TaskEnv<'_>,
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     job: &FrozenBatch,
@@ -3857,7 +3907,7 @@ async fn execute_frozen_batch_body(
     // 原先排进补偿队列的 SYST 派生作业是空转，随非空间补偿队列一起删掉（ADR-071 D9，d-300）。
     if applied && job.db_type == "SYST" {
         registry.set_stage(&job.task_id, "mdb_reload");
-        let option = aios_core::get_db_option();
+        let option = env.db_option;
         let reloaded = tokio::task::spawn_blocking(move || {
             crate::data_interface::mdb_membership::reload_declaration_and_rebind(
                 option,
@@ -3943,6 +3993,7 @@ async fn execute_frozen_batch_body(
         new_units.extend(derived_units);
         let worklist = merge_unit_worklist(new_units);
         run_unit_worklist(
+            env,
             mgr,
             registry,
             &job.task_id,
@@ -4168,16 +4219,17 @@ async fn run_single_unit(
 ///
 /// [`persist_roots_batched`]: crate::fast_model::model_db_adapter::persist_roots_batched
 async fn persist_republished_roots(
+    env: TaskEnv<'_>,
     dbnum: u32,
     roots: &[String],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
-    use crate::fast_model::model_db_adapter::{PersistTarget, persist_roots_batched};
+    use crate::fast_model::model_db_adapter::persist_roots_batched;
     let refnos = roots
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    if crate::options::store_mode().is_durable() {
+    if env.store_mode.is_durable() {
         // Completed roots already crossed the ModelWriteBehind::publish seam,
         // while replayed roots skipped publish at the idempotence gate; ensure
         // any unacknowledged landed root is tracked by write-behind before the
@@ -4187,7 +4239,7 @@ async fn persist_republished_roots(
         return Ok(std::collections::HashMap::new());
     }
     let batched = persist_roots_batched(
-        PersistTarget::process(),
+        env.persist,
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),
         dbnum,
         &refnos,
@@ -4208,6 +4260,7 @@ async fn persist_republished_roots(
 /// 是否有落库失败)`。执行体本身保守：任一前置不满足就把那根放进回退，所以这里不再判断、
 /// 只按它的分派落结果。
 async fn run_rigid_motion_units(
+    env: TaskEnv<'_>,
     transform_tasks: Vec<crate::data_interface::manual_update::UnitTask>,
     registry: &'static TaskRegistry,
     task_id: &str,
@@ -4260,8 +4313,7 @@ async fn run_rigid_motion_units(
     for ((dbnum, sesno), group) in by_window {
         // 便宜路只支持「投影记录左乘 Δ 后按 regen 同款合块落库」这一种发布模式。读透+durable
         // 直落 / 内存库一律回退整根重算（回退永远正确）。
-        let supported = (!crate::options::data_face().is_read_through()
-            || !crate::options::store_mode().is_durable())
+        let supported = (!env.data_face.is_read_through() || !env.store_mode.is_durable())
             && !crate::data_interface::model_read_route::memory_only_for(dbnum);
         if !supported {
             for mut task in group {
@@ -4331,20 +4383,21 @@ async fn run_rigid_motion_units(
             .filter(|root| completed.contains(root) || replayed.contains(root))
             .collect();
         let mut persist_failures =
-            match persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref()).await {
-            Ok(failures) => failures,
-            Err(error) => {
-                warnings.push(format!(
-                    "dbnum={dbnum} 刚体前移根落库报错，本组 {} 个单元回退整根重算: {error:#}",
-                    landed_roots.len()
-                ));
-                settlement_failed = true;
-                landed_roots
-                    .iter()
-                    .map(|root| (root.clone(), format!("persist error: {error:#}")))
-                    .collect()
-            }
-        };
+            match persist_republished_roots(env, dbnum, &landed_roots, task_rooms.as_deref()).await
+            {
+                Ok(failures) => failures,
+                Err(error) => {
+                    warnings.push(format!(
+                        "dbnum={dbnum} 刚体前移根落库报错，本组 {} 个单元回退整根重算: {error:#}",
+                        landed_roots.len()
+                    ));
+                    settlement_failed = true;
+                    landed_roots
+                        .iter()
+                        .map(|root| (root.clone(), format!("persist error: {error:#}")))
+                        .collect()
+                }
+            };
         for mut task in group {
             // 重放（回执已在 T）的根按完成计：投影一字未动，但落库 / 回执照做。
             let replay = replayed.contains(&task.root_refno);
@@ -4421,6 +4474,7 @@ async fn run_rigid_motion_units(
 /// 分派落结果。同一根的 transform 提示已在这之前被刚体路消费或清掉（实施约束 7：transform 优先、
 /// unit 兜底），所以到这里的单元只剩「单元级还是整根」一个问题。
 async fn run_unit_publish_units(
+    env: TaskEnv<'_>,
     unit_tasks: Vec<crate::data_interface::manual_update::UnitTask>,
     registry: &'static TaskRegistry,
     task_id: &str,
@@ -4477,8 +4531,7 @@ async fn run_unit_publish_units(
     for ((dbnum, base_sesno, sesno), group) in by_window {
         // 与刚体路同一条准入：便宜路只支持「改内存投影后按 regen 同款合块落库」这一种发布模式。
         // 读透+durable 直落 / 内存库一律回退整根重算（回退永远正确）。
-        let supported = (!crate::options::data_face().is_read_through()
-            || !crate::options::store_mode().is_durable())
+        let supported = (!env.data_face.is_read_through() || !env.store_mode.is_durable())
             && !crate::data_interface::model_read_route::memory_only_for(dbnum);
         if !supported {
             for mut task in group {
@@ -4555,20 +4608,21 @@ async fn run_unit_publish_units(
             .filter(|root| completed.contains(root) || replayed.contains(root))
             .collect();
         let mut persist_failures =
-            match persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref()).await {
-            Ok(failures) => failures,
-            Err(error) => {
-                warnings.push(format!(
-                    "dbnum={dbnum} 单元级发布根落库报错，本组 {} 个单元回退整根重算: {error:#}",
-                    landed_roots.len()
-                ));
-                settlement_failed = true;
-                landed_roots
-                    .iter()
-                    .map(|root| (root.clone(), format!("persist error: {error:#}")))
-                    .collect()
-            }
-        };
+            match persist_republished_roots(env, dbnum, &landed_roots, task_rooms.as_deref()).await
+            {
+                Ok(failures) => failures,
+                Err(error) => {
+                    warnings.push(format!(
+                        "dbnum={dbnum} 单元级发布根落库报错，本组 {} 个单元回退整根重算: {error:#}",
+                        landed_roots.len()
+                    ));
+                    settlement_failed = true;
+                    landed_roots
+                        .iter()
+                        .map(|root| (root.clone(), format!("persist error: {error:#}")))
+                        .collect()
+                }
+            };
         for mut task in group {
             let replay = replayed.contains(&task.root_refno);
             if completed.contains(&task.root_refno) || replay {
@@ -4655,6 +4709,7 @@ async fn run_unit_publish_units(
 /// 账本记同一句原因，不白跑几何等到 flush 才判死（此前 flush 冻不出计算器时每根记
 /// `room calculator unavailable for this task`，与这里同一句）。
 async fn run_unit_worklist(
+    env: TaskEnv<'_>,
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     task_id: &str,
@@ -4801,6 +4856,7 @@ async fn run_unit_worklist(
         std::collections::HashMap::new();
     if !transform_tasks.is_empty() {
         let (mut transform_results, requeue, transform_settlement_failed) = run_rigid_motion_units(
+            env,
             transform_tasks,
             registry,
             task_id,
@@ -4825,6 +4881,7 @@ async fn run_unit_worklist(
         std::collections::HashMap::new();
     if !unit_tasks.is_empty() {
         let (mut unit_results, requeue, unit_settlement_failed) = run_unit_publish_units(
+            env,
             unit_tasks,
             registry,
             task_id,
@@ -6746,7 +6803,7 @@ mod tests {
             .expect("executor boundary")
             .0;
         let body_call = executor
-            .find("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await")
+            .find("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await")
             .expect("执行体调用");
         let tail = &executor[body_call..];
         let applied_only = tail
@@ -6890,13 +6947,13 @@ mod tests {
             body.find(needle)
                 .unwrap_or_else(|| panic!("缺 {needle}\n{body}"))
         };
-        let recovery_read = at("write_state::load(job.dbnum).await");
+        let recovery_read = at("write_state::load_on(env.db, job.dbnum).await");
         let recovery_intent = at("write_state::recovery_batch_intent(marker.intent)");
-        let mark = at("write_state::mark_writing(");
+        let mark = at("write_state::mark_writing_on(");
         let body_call =
-            at("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings)");
+            at("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings)");
         let model_only =
-            at("execute_model_only_body(mgr, registry, job, cand, progress, warnings)");
+            at("execute_model_only_body(env, mgr, registry, job, cand, progress, warnings)");
         assert!(
             recovery_read < recovery_intent && recovery_intent < mark,
             "先裁决整库恢复、再落标记: {body}"
@@ -7448,7 +7505,9 @@ mod tests {
             "回退的单元清掉提示再交回整根重算"
         );
         assert!(
-            stage.contains("persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref())"),
+            stage.contains(
+                "persist_republished_roots(env, dbnum, &landed_roots, task_rooms.as_deref())"
+            ),
             "落库与刚体路同一条，且共用本任务那台房间计算器"
         );
         assert!(
@@ -7541,7 +7600,9 @@ mod tests {
         );
         assert_eq!(
             cheap_paths
-                .matches("persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref())")
+                .matches(
+                    "persist_republished_roots(env, dbnum, &landed_roots, task_rooms.as_deref())"
+                )
                 .count(),
             2,
             "刚体前移与单元级发布两处落库都把本任务那一台房间计算器传给 persist_republished_roots: {cheap_paths}"
@@ -7726,7 +7787,7 @@ mod tests {
             .find("desi_finalize_preflight()")
             .expect("DESI 收口预检仍在执行入口");
         let body = executor
-            .find("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await")
+            .find("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await")
             .expect("执行体调用");
         assert!(preflight < body, "预检必须先于执行体: {executor}");
     }
@@ -8101,7 +8162,7 @@ mod tests {
             .find("desi_finalize_preflight(")
             .expect("DESI 批次执行前必须预检收口硬前置");
         let execute_at = body
-            .find("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await")
+            .find("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await")
             .expect("执行体调用必须存在");
         assert!(preflight_at < execute_at, "预检必须先于执行体");
 
@@ -8201,7 +8262,9 @@ mod tests {
         let lock = task
             .find("let _task_in_flight = lock_dbnum_task(job.dbnum).await;")
             .expect("任务在飞锁");
-        let marker = task.find("write_state::mark_writing(").expect("写入标记");
+        let marker = task
+            .find("write_state::mark_writing_on(")
+            .expect("写入标记");
         assert!(lock < marker, "任务在飞锁要在写入标记之前拿");
     }
 }
