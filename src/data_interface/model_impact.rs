@@ -2672,7 +2672,11 @@ mod tests {
         // `RREF` 不在字典里。并集 181 → 183。
         // 2026-11-05：e3d-model 把 RVM 导出搬进库模块 `rvm_export`（原在 `src/bin`，不扫），EXSCAN 管号读路由
         // 成员的 `LOFF`（181）；字典 DCHC=4，上面那一列不变。
-        assert_eq!(generation_read_set().len(), 183, "读取集合条数漂移");
+        // 2026-11-07：e3d-model `a67420a`（桥架件自己的托盘空间 `cable_tray_body`）读 `TRAYW` / `TRAYH` / `OLENG` /
+        // `ALENG` / `LLENG` / `SLENG` / `SSLENG` / `TRAYRW` / `TRAYSW` / `TRAYOW` / `CTTYP` 与属主 CWBRAN 的 `TIERHE`，
+        // `13834a5`（SLADDR 名下 SLRAIL 的现算标架 `ship_ladder`）读 `LPITCH` / `EXDIST` / `HROFF` / `HRSTAR`
+        // （199）；都不是 DCHC=0（ALENG / OLENG / SLENG / SSLENG 不在字典里），上面那一列不变。
+        assert_eq!(generation_read_set().len(), 199, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
