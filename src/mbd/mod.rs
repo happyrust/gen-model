@@ -33,6 +33,7 @@ use plant_mbd::{
     layout_branch,
 };
 
+use branch_query::BranchReadVersion;
 pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
 pub use civil_faces::{CivilFaceError, civil_candidate, locate_candidates};
 pub use civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil, query_civil_with};
@@ -72,8 +73,13 @@ pub fn layout_pipe(
     let request = LayoutRequest::new(input_refno, branch_refno, SOURCE_TO_DESIGN_MM_TO_M);
     let mut data = layout_branch(&source, &request)
         .map_err(|message| BranchQueryError::Solver { refno, message })?;
-    let version = queried.source_version;
-    data.meta.source_version = Some(MbdV2SourceVersion {
+    data.meta.source_version = Some(pipe_source_version(queried.source_version));
+    Ok(data)
+}
+
+/// 管道读取版本 → 契约的 `meta.source_version`（BRAN 所在库与读过的各库）。
+pub(crate) fn pipe_source_version(version: BranchReadVersion) -> MbdV2SourceVersion {
+    MbdV2SourceVersion {
         dbnum: version.dbnum,
         sesno: version.sesno,
         databases: version
@@ -85,6 +91,5 @@ pub fn layout_pipe(
                 db_type: database.db_type,
             })
             .collect(),
-    });
-    Ok(data)
+    }
 }

@@ -37,13 +37,14 @@
 //!
 //! # 出包（[`layout_classified`]）
 //!
-//! 管道两类走现成的 [`layout_pipe`]，再补数据包层的 `annotation_type` / `subject`（`/api/mbd/v2/pipe/{refno}` 是
-//! 管道的别名，输出不变）。EM9 管道现在与 EM4 同一份布局——plant-mbd 的 `LayoutRequest::instrument_pipe` 还是空
-//! 操作，EM9 规则接线时改走 `layout_object`。设备两类读真视图（[`equipment_view`]：
+//! 管道两类读 BRAN 视图（[`super::branch_query_with_diameters`]）进 `layout_object`：EM9 的仪表管规则与表单缺省
+//! （`LayoutRequest::instrument_pipe`、字高比例 3.0 等）由标注类型带进去。`/api/mbd/v2/pipe/{refno}` 别名仍走
+//! [`layout_pipe`]，不判型、按 EM4 出图。设备两类读真视图（[`equipment_view`]：
 //! [`super::equipment_query::query_equipment`] + 判型说明）进 `layout_object`，土建 / 建筑同样（[`civil_view`]：
 //! [`super::civil_query::query_civil_with`]，按标注类型取土建或建筑的数），支架三类同样（[`support_view`]：
 //! [`super::support_query::query_support`]）。只有归属的占位视图（[`stub_source`]）只留给要「只看归属」的调用方。
-//! `meta.source_version` 一律按 `layout_pipe` 的口径注入。
+//! `meta.source_version`：管道取 BRAN 的读取版本（所在库与读过的各库，与 `layout_pipe` 同一口径），其余类型取
+//! 归属对象所在的库。
 
 use std::sync::{Arc, OnceLock};
 
@@ -59,7 +60,10 @@ use super::civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil_with}
 use super::equipment_query::{EquipmentQueryError, query_equipment};
 use super::host::{self, ChainLink, HostError, soft};
 use super::support_query::{SupportQueryError, query_support};
-use super::{BranchQueryError, SOURCE_TO_DESIGN_MM_TO_M, layout_pipe, wire_refno};
+use super::{
+    BranchQueryError, SOURCE_TO_DESIGN_MM_TO_M, branch_query_with_diameters, pipe_source_version,
+    wire_refno,
+};
 use crate::options::{
     MbdTypeRuleConfig, MbdTypeRulesConfig, default_mbd_type_rules, effective_mbd_type_rules,
 };
@@ -715,13 +719,6 @@ pub fn layout_classified(
     classified: &Classified,
     input_refno: &str,
 ) -> Result<MbdV2PipeData, ObjectQueryError> {
-    if classified.kind == SubjectKind::Pipe {
-        let mut data = layout_pipe(set, classified.subject_refno, input_refno)
-            .map_err(ObjectQueryError::Pipe)?;
-        data.annotation_type = Some(classified.annotation_type);
-        data.subject = Some(classified.subject());
-        return Ok(data);
-    }
     let request = ObjectLayoutRequest::new(
         classified.annotation_type,
         input_refno,
@@ -729,6 +726,23 @@ pub fn layout_classified(
         classified.subject_noun.clone(),
         SOURCE_TO_DESIGN_MM_TO_M,
     );
+    if classified.kind == SubjectKind::Pipe {
+        // 管道也走统一入口：EM9 的仪表管规则与表单缺省（字高比例 3.0 等）由标注类型带进去，
+        // `/pipe/{refno}` 别名照旧按 EM4 出图。
+        let queried = branch_query_with_diameters(set, classified.subject_refno)
+            .map_err(ObjectQueryError::Pipe)?;
+        let source = InMemoryMbdSource {
+            branches: vec![queried.result],
+            ..InMemoryMbdSource::default()
+        };
+        let mut data =
+            layout_object(&request, &source).map_err(|message| ObjectQueryError::Solver {
+                refno: classified.subject_refno,
+                message,
+            })?;
+        data.meta.source_version = Some(pipe_source_version(queried.source_version));
+        return Ok(data);
+    }
     let source = match classified.kind {
         SubjectKind::Equipment => InMemoryMbdSource {
             equipments: vec![equipment_view(set, classified)?],
@@ -790,8 +804,8 @@ pub fn support_view(
 }
 
 /// 归属对象的占位视图：只有 refno / noun / NAME，判型的 `notes` 进 `issues`。设备、土建、支架都已走真视图
-/// （[`equipment_view`] / [`civil_view`] / [`support_view`]），这里只留给要「只看归属」的调用方；管道不用（走
-/// [`layout_pipe`]），给空源。
+/// （[`equipment_view`] / [`civil_view`] / [`support_view`]），这里只留给要「只看归属」的调用方；管道不用（读
+/// BRAN 视图），给空源。
 pub fn stub_source(classified: &Classified) -> InMemoryMbdSource {
     let subject_refno = classified.subject_wire_refno();
     let subject_noun = classified.subject_noun.clone();
