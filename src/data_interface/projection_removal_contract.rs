@@ -10,7 +10,7 @@ use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
 use glam::DMat4;
 
-use super::fast_delete::{ModelFaceGenerationBusy, wipe_dbnum_model_face};
+use super::fast_delete::{ModelFaceGenerationBusy, wipe_dbnum_for_upgrade, wipe_dbnum_model_face};
 use super::manual_update::generation_root_lock;
 use super::mesh_purge::ClearGeometry;
 use super::on_demand_model::ModelGenerationInProgress;
@@ -258,6 +258,17 @@ async fn a_model_face_wipe_is_refused_while_the_dbnum_is_generating() {
         Some(dbnum),
         "{error:#}"
     );
+}
+
+/// 升级清库也一样：同库在飞的生成攥着生成锁，在拿锁那一步就回绝，收键、删行、删几何都没走到。
+#[tokio::test]
+async fn an_upgrade_wipe_is_refused_while_the_dbnum_is_generating() {
+    let dbnum = 6916;
+    let _generation = lock_db_generation(dbnum).await;
+    let error = wipe_dbnum_for_upgrade(dbnum)
+        .await
+        .expect_err("a generation holds the dbnum");
+    assert!(error.to_string().contains("有生成在飞"), "{error:#}");
 }
 
 /// 覆盖范围的根正在后台生成（根锁被占），删除入口立刻回「正在生成」、一行不删：删根里的一件、锁它头上的根

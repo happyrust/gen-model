@@ -177,7 +177,7 @@
 | G0 钉现状 | 0-A / 0-B / 0-C 入库；`cargo test --lib` 绿；生产代码零改动 | 通过（2026-11-08，2900 过 / 0 失败 / 128 忽略） |
 | G1 入口就位 | P 路走入口；G0 测试绿 | 通过（2026-11-08，2903 过 / 0 失败 / 128 忽略） |
 | G2 语义统一 | D 路走入口；S1 测试转绿；外层根不再 incomplete | 通过（2026-11-08，2909 过 / 0 失败 / 128 忽略；计数含工作树里其它未提交改动带来的 6 条，见 §8） |
-| G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 未开始 |
+| G3 快删收口 | F 路存储部分走入口；两个顺序不变 | 通过（2026-11-08，2910 过 / 0 失败 / 128 忽略） |
 | G4 可见性 | 收窄完成；无外部调用；无新增告警 | 未开始 |
 | G5 留痕 | ADR + CONTEXT + changelog | 未开始 |
 
@@ -266,3 +266,23 @@
   - 「删内层根之后外层根不再报 incomplete」由 S1 在单测里钉住；未做 L2。
   - 上一轮失败的 `mesh_lod1::tests::prepare_writes_every_canonical_lod1_once_and_reuses_afterwards` 这次也过了。
   - 第一次全量没编译过：工作树里的 `direct_tree.rs` 正改到一半（`ResolvedChildren` 已引用、尚未定义），它存盘之后重跑即上面的结果。
+
+### Phase 3 施工记录（2026-11-08）
+
+- 3-A：整库清理的投影那一半收进入口。
+  - 入口新增 `clear_dbnum(dbnum, spool_tombstones)`：读透形态先把这个库在投影里的每个根渲成 spool 墓碑，落不下就整趟中止、投影不动；再调存储的 `clear_dbnum` 把这个库整个摘掉。它不拿锁：整库清理各入口的锁序和「收键 → 删库行 → 删几何」都留在 `fast_delete`，入口只管投影。
+  - `projected_roots_for_dbnum` / `spool_dbnum_model_tombstones` 原样从 `fast_delete.rs` 搬进入口，改名 `projected_roots_of_dbnum` / `spool_dbnum_tombstones`。墓碑标签 `model-tombstone-dbnum:{dbnum}:{root}`、会话与 epoch 的取法都没变；管身分支改用入口里现成的 `tube_branches`，结果相同。
+  - `forget_dbnum_model_in_process` 改为 `(dbnum, spool_tombstones) -> Result`，投影那一步走入口。调用点：
+    - 整库模型清理、读路由不是权威库：传 `is_read_through()`，替掉原来「读透才落墓碑 → 作废」两步。墓碑失败时账本、空间树、读路由都不动，和原来一样。
+    - 整库模型清理、读路由是权威库；回退重建；升级清库：传 `false`。
+  - 计划只点了整库模型清理和升级清库。回退重建走同一个 `forget_dbnum_model_in_process`，随之改过来；整库快删（`delete_dbnum_fast`）原先直接调存储的 `clear_dbnum`，改调入口的 `clear_dbnum(dbnum, false)`，其余步骤（账本、目录 memo）不变，也没有补上空间树和读路由那两步。生产代码里只剩入口调存储的 `clear_dbnum`。
+  - 两个顺序原样：锁序「按库生成锁 → `DATA_COMMIT_SERIAL` → `DBNUM_STATE_WRITE_GATE`」；「收键 → 删库行 → 删几何」，投影在删库行之后、放写库锁和删几何之前清，与入口「先持久、后投影」同向。
+- 3-B：Q4 文本守卫。
+  - `the_model_face_wipe_collects_geometry_before_the_rows_and_purges_after` 与 `the_upgrade_wipe_collects_mesh_keys_before_the_rows_and_purges_after`：去掉「生成锁在最前」的源码位置断言，改由行为测试钉。整库模型清理是 0-C ②；升级清库新增 `an_upgrade_wipe_is_refused_while_the_dbnum_is_generating`（dbnum 取 6916，别的用例不生成这个库），同库生成锁被占时回「有生成在飞」。
+  - 「收键 → 删库行 → 删几何」仍按源码先后钉：这几步要全局 `SUL_DB` 和盘上的 `.mesh`，单测里没有。两条守卫的注释里写明了。
+  - `cata_dependency.rs` 里整库删除的守卫原先找 `.clear_dbnum(dbnum)`，改找 `projection_removal::clear_dbnum(dbnum,`。
+- 没加入口 `clear_dbnum` 的直接单测：存储的 `clear_dbnum` 除了这个库，还会摘掉所有没有模型目标的回执（说不清归属，整库清理后一律重算），在全局投影上跑会摘掉并行用例的回执。这一层由存储自己的 `clear_dbnum` 用例覆盖（在局部实例上跑）。
+- 顺带：`fast_delete.rs` 里 Ref0 清理（`5117dda11`）留下的一处断言没按 rustfmt 排，单独提交修正（`3dd3fcfd9`）。
+- G3：`cargo +nightly test --lib` 2910 过、0 失败、128 忽略，共 3038 条；本 crate 没有新增告警。
+  - 与 G2 逐条对比：多出的一条是 `an_upgrade_wipe_is_refused_while_the_dbnum_is_generating`。另有一条忽略的 live 用例改了名（`direct_tree` 里 `ams_group_sets_resolve_to_design_elements` → `aps_group_worlds_are_navigable_in_the_resolved_view`），来自工作树里与本计划无关的未提交改动。
+  - 定向跑 `fast_delete` / `projection_removal` / `cata_dependency` / `model_db_adapter`：146 过、0 失败、3 忽略；0-C ② 与新增的升级清库用例都在其中。

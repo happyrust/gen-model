@@ -780,7 +780,7 @@ async fn execute_transactional_phase(
 /// 不作废的话这个进程剩下的任务都当那些行还在，缺行要等到重启才补得回来。
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
-    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    crate::data_interface::projection_removal::clear_dbnum(dbnum, false)?;
     // 生成根账本这一页随库一起没了（ADR-079）：库里没有逐根的行，进程里也不该再记着它们。
     crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
@@ -803,23 +803,25 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
     // 进程内模型面与整库模型清理同一串。目录 memo 是数据面，只有整库重建才作废。
-    forget_dbnum_model_in_process(dbnum);
+    forget_dbnum_model_in_process(dbnum, false)?;
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
     Ok(result)
 }
 
-/// 进程内「这个库的模型」作废：投影、生成根账本、空间树，并把读路由翻到内存。
-/// 整库重建与整库模型清理共用；**不**动目录 memo（那是数据面）。
-fn forget_dbnum_model_in_process(dbnum: u32) {
-    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+/// 进程内「这个库的模型」作废：投影（走删除入口，`spool_tombstones` 时先落读透墓碑，落不下就一样都
+/// 不动）、生成根账本、空间树，并把读路由翻到内存。整库重建与整库模型清理共用；**不**动目录 memo
+/// （那是数据面）。
+fn forget_dbnum_model_in_process(dbnum: u32, spool_tombstones: bool) -> anyhow::Result<()> {
+    crate::data_interface::projection_removal::clear_dbnum(dbnum, spool_tombstones)?;
     crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     crate::data_interface::model_read_route::announce_source_changed(
         dbnum,
         crate::data_interface::model_read_route::ModelReadSource::Memory,
     );
+    Ok(())
 }
 
 /// 升级批次的清库：与 [`wipe_dbnum_for_reinit`] 清同一份解析行和模型行，另外删掉这个库
@@ -850,7 +852,7 @@ pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnu
     // 整库模型清理仍看路由：那条路在「只写内存」时不该去删库上另一代的几何。
     let keys = mesh_purge::dbnum_mesh_ids(dbnum, true).await?;
     let mut result = wipe_dbnum_rows_on(&SUL_DB, dbnum, WatermarkDisposal::ResetForReinit).await?;
-    forget_dbnum_model_in_process(dbnum);
+    forget_dbnum_model_in_process(dbnum, false)?;
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
@@ -1151,10 +1153,7 @@ pub async fn wipe_dbnum_model_face(
         None
     };
     let mut result = if !durable {
-        if crate::options::data_face().is_read_through() {
-            spool_dbnum_model_tombstones(dbnum)?;
-        }
-        forget_dbnum_model_in_process(dbnum);
+        forget_dbnum_model_in_process(dbnum, crate::options::data_face().is_read_through())?;
         ModelFaceWipeResult {
             dbnum,
             ref0s: Vec::new(),
@@ -1164,7 +1163,7 @@ pub async fn wipe_dbnum_model_face(
         }
     } else {
         let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
-        forget_dbnum_model_in_process(dbnum);
+        forget_dbnum_model_in_process(dbnum, false)?;
         result
     };
     // 几何排在库行之后：反过来会先把模型还要用的几何删掉、而产物还在。整库的文件可能几万个，
@@ -1248,78 +1247,6 @@ fn render_model_face_verify(dbnum: u32, ref0s: &[String]) -> String {
          SELECT count() AS count FROM room_panel_relate WHERE in.dbnum = {dbnum} GROUP ALL;"
     ));
     sql
-}
-
-fn projected_roots_for_dbnum(dbnum: u32) -> Vec<e3d_io::refno::RefNo> {
-    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
-    store
-        .roots(scope)
-        .into_iter()
-        .filter(|root| {
-            store.receipt(scope, *root).is_some_and(|receipt| {
-                receipt
-                    .model_target
-                    .as_ref()
-                    .is_some_and(|target| target.design.dbnum == dbnum)
-            }) || store
-                .records_of_root(scope, *root)
-                .iter()
-                .any(|record| record.dbnum == dbnum)
-        })
-        .collect()
-}
-
-fn spool_dbnum_model_tombstones(dbnum: u32) -> anyhow::Result<()> {
-    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
-    let roots = projected_roots_for_dbnum(dbnum);
-    if roots.is_empty() {
-        return Ok(());
-    }
-    let option = aios_core::get_db_option();
-    let spool = crate::data_interface::mirror_spool::MirrorSpool::for_process(
-        &option.surreal_ns,
-        &option.project_name,
-        &option.mdb_name,
-    )?;
-    for root in roots {
-        let records = store
-            .records_of_root(scope, root)
-            .into_iter()
-            .filter(|record| record.dbnum == dbnum)
-            .collect::<Vec<_>>();
-        let tube_branches = records
-            .iter()
-            .filter(|record| record.tube.is_some())
-            .map(|record| record.source_refno)
-            .collect::<Vec<_>>();
-        let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
-            root,
-            &[root],
-            &tube_branches,
-        );
-        let sessions = records
-            .iter()
-            .map(|record| (record.dbnum, record.source_sesno))
-            .collect::<Vec<_>>();
-        let source_sesno_epoch = sessions
-            .iter()
-            .map(|(_, sesno)| u64::from(*sesno))
-            .max()
-            .unwrap_or_default();
-        let epoch =
-            crate::data_interface::mdb_memory_store::get(&option.project_name, &option.mdb_name)
-                .map(|snapshot| snapshot.epoch())
-                .unwrap_or(source_sesno_epoch);
-        spool.persist(
-            epoch,
-            sessions,
-            format!("model-tombstone-dbnum:{dbnum}:{root}"),
-            vec![transaction],
-        )?;
-    }
-    Ok(())
 }
 
 async fn wipe_dbnum_rows(
@@ -2197,9 +2124,10 @@ mod tests {
         );
     }
 
-    /// 整库清理连几何一起清的先后（2026-10-22）：生成锁 → 收键 → 删库行 → 删几何。键在锁内、行前收
-    /// （`inst_geo` 不按 Ref0 寻址，行一删就收不出来），几何在行后删（反过来会先删掉模型还要用的）；
-    /// 库是权威面才收、删库上那一份。
+    /// 整库清理连几何一起清的先后（2026-10-22）：收键 → 删库行 → 删几何。键在行前收（`inst_geo` 不按
+    /// Ref0 寻址，行一删就收不出来），几何在行后删（反过来会先删掉模型还要用的）；库是权威面才收、
+    /// 删库上那一份。生成锁排在最前由行为测试钉（`projection_removal_contract`：同库在飞时一行不删）；
+    /// 这三步要全局 `SUL_DB` 和盘上的 `.mesh`，单测里没有，只能按源码先后钉。
     #[test]
     fn the_model_face_wipe_collects_geometry_before_the_rows_and_purges_after() {
         let body = include_str!("fast_delete.rs")
@@ -2209,7 +2137,6 @@ mod tests {
             .split_once("pub(crate) async fn wipe_dbnum_model_face_on(")
             .expect("library half follows")
             .0;
-        let lock = body.find("try_lock_db_generation(dbnum)").expect("生成锁");
         let collect = body
             .find("mesh_purge::dbnum_mesh_ids(dbnum, durable)")
             .expect("收键");
@@ -2220,8 +2147,8 @@ mod tests {
             .find("mesh_purge::purge_geometry(&SUL_DB, keys, durable)")
             .expect("删几何");
         assert!(
-            lock < collect && collect < wipe && wipe < purge,
-            "顺序必须是 生成锁 → 收键 → 删库行 → 删几何: {body}"
+            collect < wipe && wipe < purge,
+            "顺序必须是 收键 → 删库行 → 删几何: {body}"
         );
         assert!(
             body.contains("let durable = route.is_database();"),
@@ -2364,7 +2291,9 @@ mod tests {
         assert_eq!(sql, "DELETE aabb:⟨aa⟩;");
     }
 
-    /// 升级清库先收网格键，再删行，最后删几何。收键若排到删行之后，哈希几何就再也对不上。
+    /// 升级清库先收网格键，再删行，最后删几何。收键若排到删行之后，哈希几何就再也对不上。生成锁排在
+    /// 最前由行为测试钉（`projection_removal_contract`）；这几步要全局 `SUL_DB` 和盘上的 `.mesh`，只能按源码
+    /// 先后钉。
     #[test]
     fn the_upgrade_wipe_collects_mesh_keys_before_the_rows_and_purges_after() {
         let body = include_str!("fast_delete.rs")
@@ -2374,7 +2303,6 @@ mod tests {
             .split_once("pub async fn wipe_shared_parse_rows_for_upgrade(")
             .expect("shared wipe follows")
             .0;
-        let lock = body.find("try_lock_db_generation(dbnum)").expect("生成锁");
         let collect = body
             .find("mesh_purge::dbnum_mesh_ids(dbnum, true)")
             .expect("收键");
@@ -2382,8 +2310,8 @@ mod tests {
         let purge = body.find("mesh_purge::purge_geometry(").expect("删几何");
         let aabb = body.find("delete_aabb_mesh_rows(").expect("删哈希盒");
         assert!(
-            lock < collect && collect < wipe && wipe < purge && purge < aabb,
-            "顺序必须是 生成锁 → 收键 → 删行 → 删 inst_geo/.mesh → 删哈希 aabb: {body}"
+            collect < wipe && wipe < purge && purge < aabb,
+            "顺序必须是 收键 → 删行 → 删 inst_geo/.mesh → 删哈希 aabb: {body}"
         );
         assert!(
             body.contains("purge_geometry(&SUL_DB, keys.clone(), true)"),

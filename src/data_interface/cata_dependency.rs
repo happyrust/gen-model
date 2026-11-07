@@ -1721,8 +1721,8 @@ mod tests {
             "整库删除之后必须整份忘掉: {delete}"
         );
         assert!(
-            delete.contains(".clear_dbnum(dbnum)"),
-            "整库删除之后投影里那个库也得清: {delete}"
+            delete.contains("projection_removal::clear_dbnum(dbnum,"),
+            "整库删除之后投影里那个库也得清（走删除入口）: {delete}"
         );
     }
 

@@ -1,9 +1,11 @@
-//! 投影删除的入口（`.planning/2026-11-08-projection-store-root-only`）。三条删法都从这里进：「只写内存」与读透
-//! 删请求的子树、墓碑进 spool 或不留；摄入形态按覆盖请求的生成根整根删、墓碑直接写库。
+//! 投影删除的入口（`.planning/2026-11-08-projection-store-root-only`）。按子树删走 [`remove_subtree`]：
+//! 「只写内存」与读透删请求的子树、墓碑进 spool 或不留；摄入形态按覆盖请求的生成根整根删、墓碑
+//! 直接写库。整库清理（`fast_delete`）的投影那一半走 [`clear_dbnum`]。
 //!
-//! 锁序在这里定死：先对覆盖范围的生成根逐个 try-lock（排序去重；被占回「正在后台生成」、一行不删），
-//! 再按库号升序拿生成锁，拿齐之后才结算受影响的根、落墓碑、发删除。根锁必须先拿：同库每一次生成
-//! 全程都攥着库级锁，反过来会排队等完同库在飞的生成，再把别人刚发布的根清掉。
+//! [`remove_subtree`] 的锁序在这里定死：先对覆盖范围的生成根逐个 try-lock（排序去重；被占回「正在后台
+//! 生成」、一行不删），再按库号升序拿生成锁，拿齐之后才结算受影响的根、落墓碑、发删除。根锁必须
+//! 先拿：同库每一次生成全程都攥着库级锁，反过来会排队等完同库在飞的生成，再把别人刚发布的根清掉。
+//! [`clear_dbnum`] 不拿锁：整库清理各入口的锁序与「收键 → 删库行 → 删几何」都在 `fast_delete` 里。
 //!
 //! 墓碑先落、投影后改：墓碑落不下就整趟中止，投影一条没动；落下之后进程死了，重启后库里也没有这片产物。
 //! 反过来先改投影，墓碑失败时投影说删了、库里还在，重启又回来。
@@ -130,6 +132,17 @@ pub(crate) async fn remove_subtree(request: RemovalRequest) -> anyhow::Result<Re
     })
 }
 
+/// 整库清理的投影那一半：`spool_tombstones`（读透形态）时先把这个库在投影里的每个根渲成 spool 墓碑，
+/// 落不下就整趟中止、投影不动；再把这个库从投影里整个摘掉。库行、几何和锁都归调用方。
+pub(crate) fn clear_dbnum(dbnum: u32, spool_tombstones: bool) -> anyhow::Result<()> {
+    let store = ModelMemoryStore::global();
+    if spool_tombstones {
+        spool_dbnum_tombstones(store, dbnum)?;
+    }
+    store.clear_dbnum(dbnum);
+    Ok(())
+}
+
 /// `node` 子树下的那几条：几个子树根各落各的墓碑。
 fn records_under(
     records: &[ProjectedGeometry],
@@ -215,6 +228,72 @@ async fn write_database_tombstone(
             &tube_branches(records_under(records, *node)),
         );
         aios_core::SUL_DB.query(tombstone).await?.check()?;
+    }
+    Ok(())
+}
+
+/// 投影里属于 `dbnum` 的根：回执的模型目标是这个库，或名下有这个库的记录。
+fn projected_roots_of_dbnum(store: &ModelMemoryStore, dbnum: u32) -> Vec<RefNo> {
+    let scope = ProjectionScope::Current;
+    store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| {
+            store.receipt(scope, *root).is_some_and(|receipt| {
+                receipt
+                    .model_target
+                    .as_ref()
+                    .is_some_and(|target| target.design.dbnum == dbnum)
+            }) || store
+                .records_of_root(scope, *root)
+                .iter()
+                .any(|record| record.dbnum == dbnum)
+        })
+        .collect()
+}
+
+/// 读透形态整库清理的墓碑：这个库在投影里的每个根一笔，只带根下属于这个库的记录与它们的会话。
+fn spool_dbnum_tombstones(store: &ModelMemoryStore, dbnum: u32) -> anyhow::Result<()> {
+    let scope = ProjectionScope::Current;
+    let roots = projected_roots_of_dbnum(store, dbnum);
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let option = aios_core::get_db_option();
+    let spool = super::mirror_spool::MirrorSpool::for_process(
+        &option.surreal_ns,
+        &option.project_name,
+        &option.mdb_name,
+    )?;
+    for root in roots {
+        let records = store
+            .records_of_root(scope, root)
+            .into_iter()
+            .filter(|record| record.dbnum == dbnum)
+            .collect::<Vec<_>>();
+        let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+            root,
+            &[root],
+            &tube_branches(records.iter()),
+        );
+        let sessions = records
+            .iter()
+            .map(|record| (record.dbnum, record.source_sesno))
+            .collect::<Vec<_>>();
+        let source_sesno_epoch = sessions
+            .iter()
+            .map(|(_, sesno)| u64::from(*sesno))
+            .max()
+            .unwrap_or_default();
+        let epoch = super::mdb_memory_store::get(&option.project_name, &option.mdb_name)
+            .map(|snapshot| snapshot.epoch())
+            .unwrap_or(source_sesno_epoch);
+        spool.persist(
+            epoch,
+            sessions,
+            format!("model-tombstone-dbnum:{dbnum}:{root}"),
+            vec![transaction],
+        )?;
     }
     Ok(())
 }
