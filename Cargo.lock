@@ -2947,6 +2947,8 @@ dependencies = [
  "earcutr",
  "glam 0.29.3",
  "manifold-csg",
+ "memmap2",
+ "rayon",
  "serde",
  "serde_json",
  "spade",
