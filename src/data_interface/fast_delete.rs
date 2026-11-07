@@ -2075,7 +2075,10 @@ mod tests {
             render_delete_phases(7333, &ref0s, &[], WatermarkDisposal::ResetForReinit);
         assert!(ranges.contains(&"DELETE pe:23717_0..23717_9999999999;".into()));
         assert!(ranges.contains(&"DELETE pe:31909_0..31909_9999999999;".into()));
-        assert!(ranges.iter().all(|sql| !sql.contains("pe:7333_")), "{ranges:?}");
+        assert!(
+            ranges.iter().all(|sql| !sql.contains("pe:7333_")),
+            "{ranges:?}"
+        );
     }
 
     /// 模型面的表清单从 `RANGE_TABLES` 滤出来，不另抄一份。整库清库把 `ref_rev` 插回原位，
