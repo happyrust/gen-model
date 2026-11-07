@@ -107,7 +107,7 @@ def capture(label: str) -> None:
 
         subprocess.run(
             [
-                "D:/work/plant-code/old/target-e3d-model/release/examples/rvm_facets_dump.exe",
+                "D:/work/plant-code/old/vendor/e3d-model/target/release/examples/rvm_facets_dump.exe",
                 "--rvm",
                 str(folder / "model.rvm"),
                 "--contains",

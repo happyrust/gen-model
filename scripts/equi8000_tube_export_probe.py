@@ -11,6 +11,6 @@ for level in [0,6]:
           'export holes on','export autocolour displayexport on','export repr on','export CE','export finish']
 e.tty(folder,commands)
 for file in folder.glob('*.rvm'):
-    subprocess.run(['D:/work/plant-code/old/target-e3d-model/release/examples/rvm_facets_dump.exe',
+    subprocess.run(['D:/work/plant-code/old/vendor/e3d-model/target/release/examples/rvm_facets_dump.exe',
         '--rvm',str(file),'--contains','','--out',str(file.with_suffix('.json'))],check=True,stdout=subprocess.DEVNULL)
 print(folder)

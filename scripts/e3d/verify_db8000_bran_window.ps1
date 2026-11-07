@@ -24,8 +24,7 @@ param(
     [switch]$RootGoneAtTarget
 )
 $ErrorActionPreference = 'Continue'
-$env:CARGO_TARGET_DIR = 'D:\work\plant-code\old\target-e3d-model'
-$REL = 'D:\work\plant-code\old\target-e3d-model\release'
+$REL = 'D:\work\plant-code\old\vendor\e3d-model\target\release'
 $db = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001'
 $common = @('--attlib','E:\reverse\e3d\shadow_e3d31_aps_all\attlib.dat','--db',$db,
     '--template','E:\reverse\e3d\shadow_e3d31_aps_all',

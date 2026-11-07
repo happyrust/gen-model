@@ -36,7 +36,7 @@ text=text[:start]+parser+text[end:]
 pml.write_text(text,encoding='utf-8')
 with (out/'build.log').open('w') as stream:
     subprocess.run(['cargo','rustc','--release','--manifest-path',str(out/'e3d-model/Cargo.toml'),
-                    '--target-dir',str(root.parent/'target-e3d-model'),'--bin','gen_ams','--','-o',str(out/'gen_ams.exe')],
+                    '--bin','gen_ams','--','-o',str(out/'gen_ams.exe')],
                    stdout=stream,stderr=subprocess.STDOUT,check=True)
 target={'refno':'24381/46775'}
 folder=out/'cam'; folder.mkdir(exist_ok=True)

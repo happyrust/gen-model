@@ -31,7 +31,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--service', required=True)
     p.add_argument('--out', required=True)
-    p.add_argument('--tools', default='D:/work/plant-code/old/target-e3d-model/release')
+    p.add_argument('--tools', default='D:/work/plant-code/old/vendor/e3d-model/target/release')
     p.add_argument('--db', default='D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001')
     p.add_argument('--template', default='E:/reverse/e3d/shadow_e3d31_aps_all')
     p.add_argument('--catalogue', action='append', required=True,

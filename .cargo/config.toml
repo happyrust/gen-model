@@ -19,7 +19,6 @@ LIBCLANG_PATH = { value = "D:\\LLVM\\bin", force = false }
 #codegen-backend = "cranelift"
 
 [build]
-target-dir = "../target"
 rustflags = ["-Z", "threads=8"]
 # 本仓库 19 个 bin 目标 × 前端 8 线程，默认 -j（=逻辑核数）会耗尽系统句柄/提交内存，
 # 触发 "could not create 8 threads (os error 1450)" 并留下半成品 rlib（表现为 std/Vec 找不到）。

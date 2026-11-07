@@ -96,7 +96,7 @@ if __name__=='__main__':
             'export holes on','export autocolour displayexport on','export repr on','export CE','export finish'])
         if not (folder/'model.rvm').is_file(): raise RuntimeError('RVM export missing')
         with (folder/'facets.log').open('w') as log:
-            subprocess.run(['D:/work/plant-code/old/target-e3d-model/release/examples/rvm_facets_dump.exe','--rvm',str(folder/'model.rvm'),'--contains','','--out',str(folder/'rvm.json')],stdout=log,stderr=subprocess.STDOUT,check=True)
+            subprocess.run(['D:/work/plant-code/old/vendor/e3d-model/target/release/examples/rvm_facets_dump.exe','--rvm',str(folder/'model.rvm'),'--contains','','--out',str(folder/'rvm.json')],stdout=log,stderr=subprocess.STDOUT,check=True)
         source_after=SOURCE.read_bytes()
         changes=[i for i,(a,b) in enumerate(zip(source_before,source_after)) if a!=b]
         save(folder/'source-byte-differences.json',{'before_size':len(source_before),'after_size':len(source_after),'offsets':changes})

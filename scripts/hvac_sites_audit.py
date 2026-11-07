@@ -11,7 +11,7 @@ import cpv_site_audit
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT/'output/hvac-sites-audit-20260905'
-TARGET = ROOT.parent/'target-e3d-model/release'
+TARGET = ROOT.parent/'vendor/e3d-model/target/release'
 TEMPLATE = 'E:/reverse/e3d/shadow_e3d31_aps_all'
 
 def inventory():

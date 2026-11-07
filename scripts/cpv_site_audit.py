@@ -23,7 +23,7 @@ def generate():
     env=os.environ.copy()
     env.update(E3D_REPRE_LEVEL_HVAC='6',E3D_REPRE_OBST='off')
     template='E:/reverse/e3d/shadow_e3d31_aps_all'
-    args=[str(ROOT.parent/'target-e3d-model/release/gen_ams.exe'),
+    args=[str(ROOT.parent/'vendor/e3d-model/target/release/gen_ams.exe'),
           '--attlib',template+'/attlib.dat','--template',template,
           '--db','D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7997_0001',
           '--catalogue','D:/AVEVA/Projects/E3D3.1/ZDJ/ZDJ000/zdj7600_0001',

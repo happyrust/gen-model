@@ -14,7 +14,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "output/strt-cpv-20260905"
 MODEL = REPO.parent / "vendor/e3d-model"
-TARGET = REPO.parent / "target-e3d-model"
+TARGET = MODEL / "target"
 
 
 def capture():
@@ -110,7 +110,7 @@ def compare(elements_path, report_path):
 def verify():
     OUT.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env.update(CARGO_TARGET_DIR=str(TARGET), E3D_REPRE_LEVEL_HVAC="6", E3D_REPRE_OBST="off")
+    env.update(E3D_REPRE_LEVEL_HVAC="6", E3D_REPRE_OBST="off")
     with (OUT / "verification-build.log").open("w") as log:
         subprocess.run(["cargo", "build", "--release", "--bin", "gen_ams", "--example", "rvm_facets_dump"],
                        cwd=MODEL, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
