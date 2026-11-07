@@ -33,7 +33,8 @@
 //! 标签、安装角度与调整焊要的事实（plant-mbd 字段字典「管道标签 / 安装角度 / 调整焊的宿主字段」）：
 //!
 //! - **`ori`**：成员世界矩阵的三根轴（PML `ori of $!mem wrt /*`），归一。
-//! - **TEE / OLET**：UDA `:YKSX` 原文；`CREF` 的目标（refno、类型、目标自己所在 ZONE 的 ITUB / INST 标志，标志与
+//! - **TEE / OLET / VALV**：UDA `:YKSX` 原文（VALV 的由求解器接在 Tail 连接标签末行，PML `isobran.gettags`
+//!   L2207-2217）。TEE / OLET 另给 `CREF` 的目标（refno、类型、目标自己所在 ZONE 的 ITUB / INST 标志，标志与
 //!   `connection` 的过滤同一口径）。`connection` 的过滤本身不动。
 //! - **PCOM**：`CRFA`（元素引用数组）逐项的存名与 `HPOS`（世界系），跳过 Nulref 与不在所钉会话的目标。
 //! - **SITE 名含 INST 的 ATTA**：UDA `:NPHSASR` 第一项（AMS 字典里它是单个 REF，PML 按数组取 `[1]`，两样都收）的
@@ -270,10 +271,12 @@ pub(super) fn member_fields(
     }
 
     fields.ori = site.world.and_then(world_axes);
-    if matches!(site.noun, "TEE" | "OLET") {
+    if matches!(site.noun, "TEE" | "OLET" | "VALV") {
         fields.instrument_name = bad
             .keep(":YKSX", host::optional_text(member, ":YKSX"))
             .flatten();
+    }
+    if matches!(site.noun, "TEE" | "OLET") {
         fields.connection_target = bad
             .keep("CREF target", referenced_target(member, "CREF"))
             .flatten();
