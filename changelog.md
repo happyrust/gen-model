@@ -1,5 +1,12 @@
 ## 2026-11-07
 
+### 显示用粗网格按 L0 键预生成、按盘分拣、可回填（ADR-096）
+
+- **为什么**：`feat/mesh-lod1` 原先每根生成完后用 4 mm 弦高下限把整根再求一遍，产物写在 `lod1/`。审核两处必须改：规范圆柱共用一个 L0 键（`CylinderV3 { segments }`），粗网格段数却按各实例真实半径算，r = 400–5000 mm 下 41 个键里有 14 个会算出两种段数，`ensure_mesh_file` / `repair_mesh_file` 来回重写同一个文件；重求耗时记在 `bake=` 里，看不出粗网格的代价。另外缓存命中的根不再生成，开关之前生成好的库一个粗网格都没有。
+- **改**：新模块 `fast_model/mesh_lod1.rs`。规范圆柱的副本段数是 L0 键的纯函数 `lod1_segments_for(n0)`（取 0.5 mm 带内的代表半径，再按 4 mm 下限算），启动时在 `batch-worker` 之后后台预生成全部 234 个有副本的键（n0 = 68…1000）。目录件按盘分拣（`plan_lod1`）：`lod1-v1/{id}.mesh` 已有计 reused、零字节 `{id}.none` 计 known_skipped、都没有才用 4 mm 重求，整根没有 pending 就不重求；粗精度下变成图元实例的件计 unmatched、不写。目录名带策略版本 `lod1-v1`，改口径升目录不改 URL。`GET /meshes/{id}?lod=1` 读该目录，缺则 404「没有粗精度副本」，`Cache-Control: public, max-age=604800`、`ETag "{id}-lod1v1"`（L0 仍 immutable），`lod` 其它值 400。`mesh_purge` 删 L0 时一并删 `.mesh` / `.none`，回执多 `lod1_removed`。新增 `POST /api/v1/mesh-lod1/backfill {dbnums}` → 202 任务（kind `mesh_lod1_backfill`，同时只一个，开关关着 412），`E3dModelService::backfill_lod1` 复用初始化的根枚举与缓存输入，只求 L0 身份与副本，不写 L0、不写库；L0 文件不在的件计 unpublished 跳过。生成 worker 日志单列 `lod1=ms`，`BakedSnapshot.lod1` 折进 `E3dPersistReport.lod1_*`。spec §4.11 / §4.11.3。e3d-model `58955ad` 把 `with_min_chord_tol` 注释改为实际范围：只抬原容差低于下限的路径，负体刀 10 mm、SNOU 5 mm、截面弧 10 mm、GENPRI 自带 6 mm 不受影响。
+- **验证**：`cargo test --lib` 2847 通过（mesh_lod1 14 条、handler 2 条、purge 1 条在内；随后补的 `write_lod1` 用例单跑通过），合并 `origin/refactor` 后相关模块 139 条再跑通过。拷贝 `ams-8009` 到 8019、后端 8052 开 `AIOS_MESH_LOD1=1` 实跑：首启预生成 written=234（11.3 s）；回填 7997 共 6772 根 2 分 17 秒，written=1047 reused=597 known_skipped=326 skipped=233 unmatched=0 failed=0；二次启动 reused=234（3.3 s），二次回填 written=0 reused=1644 known_skipped=559；`?lod=1` 同键 1,267,116 → 466,092 字节，`?lod=2` 400，`.none` 键 404；L0 118402 个前后不变；无 `[mesh-lod1]` WARN。plant3d-web `5932034d` 配套：粗网格索引数不少于原网格时拒收，对不认 `?lod=` 的旧后端不再把原网格存两份。
+- **没动**：`AIOS_MESH_LOD1` 默认仍关；`publish`。
+
 ### 比对工具内存约减半；publish 的 vendor 口径改为跟各仓主线
 
 - **比对内存**：e3d-model `d139a9d` 把 `rvm_compare` 基准侧面片的连通分量改记成顶点区间，不再按坐标另存一份（解析图元一个分量就是它全部采样点，原先等于基准顶点存了两遍）。`24381/101405`（34325 对）峰值私有内存 7.24 → 3.77 GB，`23717/2`（79938 对）6.66 → 4.88 GB，耗时不变；39 站 `compare.json` 与改前逐字节相同。服务端 rvm-check 在进程内调同一实现：本机 8022 换上本分支二进制后三库按 `model_generator_changed` 重排约 10 分钟，`24381/101405`、`23717/2` 服务端通过、计数不变，比对段服务峰值约 5.5 GB。`23717/2` 的进程内生成段把服务冲到 10.6 GB，是下一处内存热点。
