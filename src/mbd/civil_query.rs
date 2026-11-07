@@ -6,10 +6,12 @@
 //!
 //! # 墙板（`element`；楼板旁的墙 `walls[].element` 同一套）
 //!
-//! - 面、厚、高走找墙候选那套面构造（[`civil_shape_of`]）：STWALL 两张大面（截面链 + 两端切面，就是画出来的那堵墙），
-//!   FLOOR 上下两面，GWALL 拉伸体的全部面，`height` 取环高 `HEIG`。WALL 不给面，给 SPINE 点（起点、各段弧中点、
-//!   终点）、`cbow`（截面底边中点在起点处）与截面宽 / 高，求解器照 L525-617 建两道弧；SPINE 是直线的 WALL 求解器
-//!   建不起，留一句话。
+//! - 面、厚、高走找墙候选那套面构造（[`civil_shape_of`]）：STWALL 两张大面（截面链 + 两端切面，就是画出来的那堵墙；
+//!   目录设计表有 `HAUT` 时顶边从起端斜到终端，另给 `height_end`），FLOOR 上下两面，GWALL 拉伸体的全部面，`height`
+//!   取环高 `HEIG`。弧形 SPINE 的 WALL 不给面，给 SPINE 点（起点、各段弧中点、终点）、`cbow`（截面底边中点在起点处）
+//!   与截面宽 / 高，求解器照 L525-617 建两道弧；直线 SPINE 的 WALL 给两张大面（两端按 SPINE 的 DRNS / DRNE 斜切），
+//!   求解器照 STWALL 的面路径建（PML 在 L544 报错停画，plant-mbd 裁决 D-CIVIL-022）。多段 SPINE 只交得出最长的那段，
+//!   留一句话。
 //! - 轴向：STWALL 取截面系（x 厚度向、y 高度向、z 沿轴，即 PML `ori of STWALL wrt/*`），其余取元素的世界矩阵。
 //!   STWALL 另给 POSS / POSE（JUSL 线两端，JUSL 为 NA 时就是 `ppli na prop 0 / 1`）；给了面时求解器不用它们。
 //! - 属主 FRMW 的 NAME、PURP、`:JJ_QTHD` / `:JJ_QDDJ` / `:ZD_NBBM` / `:ROOM_NO`（字典里没有的 UDA 读成没有——AMS
@@ -32,10 +34,13 @@
 //! - PFIT / FITT / SBFI / FIXING：目录件按实例求值，取 PML `getCataData` 挑的那几只——GMRE 下（任意深度）的 NLCY，
 //!   没有就 NSBO / NSEX，再没有换 NGMR 照找。NLCY 给 PAXI 上 PBDI → PTDI 的轴线、`diameter` = 最大 PDIA；NSBO 给
 //!   12 条棱（PX / PY / PZ 居中，轴同构件）；NSEX 给每个 SVER 的竖棱（PAAX / PBAX 标架、位置 = 标架 ·（PX, PY, PZ）、
-//!   沿标架 +Z 拉 PHEI——e3d-model `evaluate_sext` 的口径，PML 写的是 −Z）。公式里的 `ATTRIB ODES[n]` / `OPAR[n]`
+//!   沿标架 +Z 拉 PHEI——e3d-model `evaluate_sext` 的口径，即 E3D 的几何：Core3D 的 SEXT 与 NSEX 走同一支 `QSSEXT`，
+//!   AMS 的 `/B_600x300` 埋板正体 SEXT 与墙上凹槽 NSEX 同参数，按 +Z 才重合。PML 从构件原点按构件轴偏 PX / PY / PZ、
+//!   沿 PAAX × PBAX 拉 −PHEI，不照搬，plant-mbd 裁决 D-CIVIL-023）。公式里的 `ATTRIB ODES[n]` / `OPAR[n]`
 //!   在构件挂在 STWALL 上时由宿主答（STWALL 的 DESP / 目录 PARA）：e3d-io 照 E3D 的目录导出对墙上门不答
 //!   （GATPAR 202），而门洞那只 NSBO 的深度正是 `ODES[1]`（墙厚）。构件标架：PFIT 贴在属主板 SJUS 指的那面（e3d-model
-//!   `panel_fitting_world`，E3D 就画在那里；PML 用 `pos of PFIT wrt/*` 会差一个 POS.z），FIXING 取 e3d-model 建目录实例
+//!   `panel_fitting_world`，E3D TTY 在 ams1112 上 199/199 对上；PML 用 `pos of PFIT wrt/*`，差 POS.z 与板面之差，不照搬，
+//!   plant-mbd 裁决 D-CIVIL-024），FIXING 取 e3d-model 建目录实例
 //!   的标架（墙上 FIXING 的宿主标架只在那里），其余 `world_matrix`（已含 STWALL 上 FITT、CMFI 名下 SBFI 的现算标架）。
 //!   没有目录链（SPRE 空、指到 TEXT）的不给棱线，求解器报 `civil.member_shape_missing`（PML 静默丢掉）。
 //! - PANE：两张板面（`vertPoints(pane, true)` 的 points1 / points2）。
@@ -79,8 +84,8 @@ use plant_mbd::{
 use regex::Regex;
 
 use super::civil_faces::{
-    CIVIL_CANDIDATE_NOUNS, CivilFaceError, CivilShape, civil_shape_of, design_dbs, merged_ring,
-    shape_aabb, tidy, uda_number,
+    CIVIL_CANDIDATE_NOUNS, CivilFaceError, CivilShape, civil_shape_of, design_dbs, main_piece,
+    merged_ring, shape_aabb, tidy, uda_number,
 };
 use super::host::{self, Aabb, noun_of, soft};
 use super::wire_refno;
@@ -359,6 +364,7 @@ fn element_view(
         "STWALL" => {
             view.thickness = Some(tidy(shape.thickness));
             view.height = shape.height.map(tidy);
+            view.height_end = shape.height_end.map(tidy);
             view.axis_start = host::world_point(element, "POSS")?.map(|point| point.to_array());
             view.axis_end = host::world_point(element, "POSE")?.map(|point| point.to_array());
         }
@@ -367,10 +373,24 @@ fn element_view(
             view.height = shape.height.map(tidy);
             view.spine = shape.spine.iter().map(|point| point.to_array()).collect();
             view.cbow = shape.cbow.map(|point| point.to_array());
-            if shape.curved.is_none() {
+            if shape.pieces.len() > 1 {
+                let kinds: Vec<&str> = shape
+                    .pieces
+                    .iter()
+                    .map(|piece| {
+                        if piece.curved.is_some() {
+                            "弧"
+                        } else {
+                            "直段"
+                        }
+                    })
+                    .collect();
                 notes.push(format!(
-                    "WALL {} 的 SPINE 不是弧：求解器只按弧形 SPINE 建墙（markCivil L525-617），这块墙出不了标注",
-                    wire_refno(element.refno())
+                    "WALL {} 的 SPINE 有 {} 段（{}）：只把最长的第 {} 段交给求解器建墙，别的段上的构件找不到墙面",
+                    wire_refno(element.refno()),
+                    kinds.len(),
+                    kinds.join(" / "),
+                    main_piece(&shape.pieces) + 1
                 ));
             }
         }
