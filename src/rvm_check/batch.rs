@@ -1,0 +1,1548 @@
+//! `aios-database rvm-check`：给定 E3D 连接信息与库号，自动枚举根、导基准、生成、比对、汇总。
+//!
+//! 页面单根链路（[`super::execute`]）的批量版，一个命令跑完一个库乃至整个 MDB：
+//!
+//! 1. 根 = 该库 WORLD 的直接成员里 noun 为 `SITE` / `APPLDW` 的元素（`--site-only` 只取 SITE）；
+//!    两类根的件集合互不重叠、合起来才是整库（`.kiro/specs/site-split-rvm-compare`）。
+//! 2. 基准：每个库一次 E3D TTY 会话，把该库全部根逐个 `export`（[`super::export_macro::export_batch_body`]）；
+//!    哪个根没落出文件就再单独按 refno / 名称补导一次（页面同一条退路）。`--baseline-dir` 给了
+//!    就不碰 E3D，直接取目录里的 `<tag>_<w0>_<w1>.rvm`。
+//! 3. 生成：缺省每个根起一个本程序的子进程（`--child`），父进程盯着可提交内存余量与耗时，
+//!    越线就杀掉记 `commit-guard` / `timeout`——ams7333 一个根生成要 9 GB，爆在子进程里不连坐整批。
+//!    `--in-process` 改回进程内（省一次库打开，但没有隔离）。
+//! 4. 比对：进程内 [`super::compare_rvms`]（只读映射 + 并行，几百 MB 以内），判色与页面同一口径。
+//!
+//! 导出与生成是流水线：E3D 会话在自己的线程里逐库跑，生成工人（`--jobs`）不等它；一个根生成完、
+//! 它的基准也到了才比对。产物按 `<out>/<tag>/<w0>_<w1>/` 落，每根一份 `run.json`，整批一份
+//! `summary.json`；`--resume` 跳过已比对完的根。密码只进 E3D 登录串，不进任何落盘文件。
+
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use aios_core::RefU64;
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    RunInput, RunSpec, RvmCounts, RvmMismatch, RvmVerdict, compare_rvms, driver_with_grace,
+    evidence_text, export_e3d, export_macro, generate_ours, prepare_connection, redact,
+    resolve_node, tail, verdict_message,
+};
+use crate::data_interface::direct_tree::DirectTreeService;
+
+/// 跑哪几步。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stage {
+    /// 导出 + 生成 + 比对。
+    Full,
+    /// 只导基准。
+    Export,
+    /// 只生成。
+    Generate,
+    /// 只比对（基准与生成物都已在产物目录里）。
+    Compare,
+}
+
+impl Stage {
+    fn exports(self) -> bool {
+        matches!(self, Self::Full | Self::Export)
+    }
+    fn generates(self) -> bool {
+        matches!(self, Self::Full | Self::Generate)
+    }
+    fn compares(self) -> bool {
+        matches!(self, Self::Full | Self::Compare)
+    }
+}
+
+pub struct BatchOptions {
+    pub connection: RunInput,
+    pub dbnums: Vec<u32>,
+    pub all_desi: bool,
+    pub only: Vec<String>,
+    pub site_only: bool,
+    pub out: PathBuf,
+    pub resume: bool,
+    pub force: bool,
+    pub baseline_dir: Option<PathBuf>,
+    pub stage: Stage,
+    pub in_process: bool,
+    pub jobs: usize,
+    pub min_commit_free_gb: f64,
+    pub gen_timeout: Duration,
+    pub e3d_timeout: Duration,
+}
+
+/// `--child`：只为给定的根做生成，产物落在与父进程同一套目录里，别的什么都不写。
+pub struct ChildOptions {
+    pub connection: RunInput,
+    pub dbno: u32,
+    pub refnos: Vec<String>,
+    pub out: PathBuf,
+    pub gen_timeout: Duration,
+}
+
+pub struct BatchOutcome {
+    pub summary_path: PathBuf,
+    pub clean: bool,
+    pub records: Vec<RootRecord>,
+}
+
+/// 根的终态。`pass` / `empty` 是干净的；`exported` / `generated` 只在对应单步模式下出现。
+pub mod status {
+    pub const PASS: &str = "pass";
+    pub const EMPTY: &str = "empty";
+    pub const KIND_DIFFER: &str = "kind_differ";
+    pub const FAIL: &str = "fail";
+    pub const NO_BASELINE: &str = "no-baseline";
+    pub const GEN_FAILED: &str = "gen-failed";
+    pub const COMPARE_FAILED: &str = "compare-failed";
+    pub const COMMIT_GUARD: &str = "commit-guard";
+    pub const TIMEOUT: &str = "timeout";
+    pub const EXPORTED: &str = "exported";
+    pub const GENERATED: &str = "generated";
+
+    pub fn is_clean(status: &str) -> bool {
+        matches!(status, PASS | EMPTY | EXPORTED | GENERATED)
+    }
+
+    /// 续跑时可以跳过的终态：比对已经出过结果。
+    pub fn is_compared(status: &str) -> bool {
+        matches!(status, PASS | EMPTY | KIND_DIFFER | FAIL)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct StageRecord {
+    /// 整数退出码，或 `commit-guard` / `timeout` / `reuse` / `batch` / `refno` / `name` 一类的说明。
+    pub exit: serde_json::Value,
+    pub seconds: f64,
+    #[serde(default)]
+    pub peak_private_mb: Option<u64>,
+    #[serde(default)]
+    pub min_commit_free_gb: Option<f64>,
+    #[serde(default)]
+    pub message: String,
+    pub finished: String,
+}
+
+impl StageRecord {
+    fn new(
+        exit: impl Into<serde_json::Value>,
+        started: Instant,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            exit: exit.into(),
+            seconds: round1(started.elapsed().as_secs_f64()),
+            peak_private_mb: None,
+            min_commit_free_gb: None,
+            message: message.into(),
+            finished: chrono::Local::now().to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RootRecord {
+    pub dbno: u32,
+    pub tag: String,
+    #[serde(rename = "ref")]
+    pub refno: String,
+    pub noun: String,
+    pub name: String,
+    pub dir: String,
+    pub status: String,
+    pub message: String,
+    #[serde(default)]
+    pub resumed: bool,
+    #[serde(default)]
+    pub export: Option<StageRecord>,
+    #[serde(default, rename = "gen")]
+    pub generate: Option<StageRecord>,
+    #[serde(default)]
+    pub compare: Option<StageRecord>,
+    #[serde(default)]
+    pub counts: Option<RvmCounts>,
+    #[serde(default)]
+    pub mismatches: Vec<RvmMismatch>,
+    #[serde(default)]
+    pub mismatches_truncated: bool,
+    #[serde(default)]
+    pub centreline_only_baseline: usize,
+}
+
+/// 枚举出来的一个根。
+#[derive(Clone)]
+struct RootJob {
+    dbno: u32,
+    tag: String,
+    /// `w0/w1`。
+    refno: String,
+    noun: String,
+    name: String,
+    dir: PathBuf,
+}
+
+impl RootJob {
+    fn display_ref(&self) -> String {
+        format!("={}", self.refno)
+    }
+    fn stem(&self) -> String {
+        self.refno.replace('/', "_")
+    }
+}
+
+#[derive(Clone)]
+enum ExportOutcome {
+    Ready(StageRecord),
+    Missing(StageRecord),
+}
+
+impl ExportOutcome {
+    fn record(&self) -> &StageRecord {
+        match self {
+            Self::Ready(record) | Self::Missing(record) => record,
+        }
+    }
+}
+
+/// 导出线程 → 生成工人的交接板：每个根一格，填上就叫醒等它的工人。
+struct ExportBoard {
+    slots: Mutex<Vec<Option<ExportOutcome>>>,
+    ready: Condvar,
+}
+
+impl ExportBoard {
+    fn new(len: usize) -> Self {
+        Self {
+            slots: Mutex::new(vec![None; len]),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn set(&self, index: usize, outcome: ExportOutcome) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots[index] = Some(outcome);
+        self.ready.notify_all();
+    }
+
+    fn wait(&self, index: usize) -> ExportOutcome {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(outcome) = &slots[index] {
+                return outcome.clone();
+            }
+            slots = self
+                .ready
+                .wait(slots)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// 导出线程退出时把没填的格全部填成「缺基准」，工人不会挂死。
+    fn fill_missing(&self, message: &str) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for slot in slots.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(ExportOutcome::Missing(StageRecord::new(
+                    "not-exported",
+                    Instant::now(),
+                    message,
+                )));
+            }
+        }
+        self.ready.notify_all();
+    }
+}
+
+fn round1(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// `=w0/w1` / `w0/w1` / `w0_w1` → `w0/w1`。
+pub fn normalize_ref(raw: &str) -> Option<String> {
+    let refno = RefU64::from_str(raw.trim()).ok()?;
+    (refno.0 != 0).then(|| format!("{}/{}", refno.get_0(), refno.get_1()))
+}
+
+fn tag_of(e3d_project: &str, dbno: u32) -> String {
+    format!("{}{}", e3d_project.to_ascii_lowercase(), dbno)
+}
+
+fn root_dir(out: &Path, tag: &str, refno: &str) -> PathBuf {
+    out.join(tag).join(refno.replace('/', "_"))
+}
+
+fn ensure_db_option_present() -> Result<()> {
+    let cwd = std::env::current_dir().context("取当前目录")?;
+    let name = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
+    let candidates = [cwd.join(format!("{name}.toml")), cwd.join(&name)];
+    ensure!(
+        candidates.iter().any(|path| path.is_file()),
+        "当前目录 {} 下没有 {name}.toml：rvm-check 和服务一样按工作目录读配置（项目目录、MDB、schema），请在部署目录或仓库根下运行",
+        cwd.display()
+    );
+    Ok(())
+}
+
+/// 一个库的根：WORLD 直接成员里的 SITE（与 APPLDW）。
+fn enumerate_roots(
+    tree: &DirectTreeService,
+    dbno: u32,
+    site_only: bool,
+    e3d_project: &str,
+    out: &Path,
+) -> Result<Vec<RootJob>> {
+    let metadata = tree.metadata()?;
+    let database = metadata
+        .databases()
+        .iter()
+        .find(|db| db.dbnum == dbno)
+        .with_context(|| format!("库 {dbno} 不在当前 MDB 里（或没有文件）"))?;
+    ensure!(
+        database.db_type.eq_ignore_ascii_case("DESI"),
+        "库 {dbno} 是 {}，不是 DESI 设计库",
+        database.db_type
+    );
+    let world = metadata
+        .world_of(dbno)
+        .with_context(|| format!("库 {dbno} 读不到 WORLD"))?;
+    let tag = tag_of(e3d_project, dbno);
+    let mut roots = Vec::new();
+    for node in tree.children(world)? {
+        let noun = node.noun.trim().to_ascii_uppercase();
+        let keep = noun == "SITE" || (!site_only && noun == "APPLDW");
+        if !keep {
+            continue;
+        }
+        let refno = node.refno.refno();
+        let refno = format!("{}/{}", refno.get_0(), refno.get_1());
+        roots.push(RootJob {
+            dbno,
+            tag: tag.clone(),
+            dir: root_dir(out, &tag, &refno),
+            refno,
+            noun,
+            name: node.name.trim().to_string(),
+        });
+    }
+    Ok(roots)
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path).with_context(|| format!("建 {}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn read_record(path: &Path) -> Option<RootRecord> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn dir_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// 绝对路径，不带 Windows `canonicalize` 加的 `\\?\` 前缀——那个前缀会原样进 E3D 宏与报告。
+fn absolute_dir(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let text = absolute.display().to_string();
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+        None => PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text)),
+    }
+}
+
+/// 子进程模式：生成给定的根，不写 run.json，不汇总。失败以非零退出码和 stderr 告知父进程。
+pub fn run_child(opts: &ChildOptions) -> Result<()> {
+    ensure_db_option_present()?;
+    let mut spec = prepare_connection(&opts.connection, false).map_err(anyhow::Error::msg)?;
+    spec.tools.timeout = opts.gen_timeout;
+    let tree = DirectTreeService::open(&spec.project_name, &spec.e3d_mdb)?;
+    let tag = tag_of(&spec.e3d_project, opts.dbno);
+    for raw in &opts.refnos {
+        let refno = normalize_ref(raw).with_context(|| format!("refno 无法解析：{raw}"))?;
+        let dir = root_dir(&opts.out, &tag, &refno);
+        let mut spec = spec.clone();
+        spec.refno = refno.clone();
+        let node = resolve_node(&tree, &spec).map_err(anyhow::Error::msg)?;
+        ensure!(
+            node.dbnum == opts.dbno,
+            "={refno} 属于库 {}，不是 {}",
+            node.dbnum,
+            opts.dbno
+        );
+        generate_ours(&spec, &node, &dir).map_err(anyhow::Error::msg)?;
+        println!("generated ={refno} -> {}", dir.join("ours").display());
+    }
+    Ok(())
+}
+
+/// 整批。返回每根记录与 `summary.json` 的路径；`clean` 为真表示每个根都是 `pass` / `empty`。
+pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
+    ensure_db_option_present()?;
+    ensure!(opts.jobs >= 1, "--jobs 至少为 1");
+    ensure!(
+        opts.min_commit_free_gb > 0.0,
+        "--min-commit-free-gb 要大于 0"
+    );
+    let need_e3d = opts.stage.exports() && opts.baseline_dir.is_none();
+    let spec = prepare_connection(&opts.connection, need_e3d).map_err(anyhow::Error::msg)?;
+    if need_e3d {
+        ensure!(
+            spec.tools.launcher_found,
+            "找不到 E3D 启动脚本（试过 {}）；用 DbOption.toml 的 [rvm_check] e3d_launcher 指定",
+            spec.tools.launcher.display()
+        );
+        ensure!(
+            spec.install_dir.join("des.exe").is_file(),
+            "E3D 安装目录里没有 des.exe：{}",
+            spec.install_dir.display()
+        );
+    }
+    if let Some(dir) = &opts.baseline_dir {
+        ensure!(dir.is_dir(), "基准目录不存在：{}", dir.display());
+    }
+
+    let tree = DirectTreeService::open(&spec.project_name, &spec.e3d_mdb)
+        .with_context(|| format!("打开 MDB {} 的模型树", spec.e3d_mdb))?;
+    let mut dbnums: Vec<u32> = if opts.all_desi {
+        tree.metadata()?
+            .databases()
+            .iter()
+            .filter(|db| db.db_type.eq_ignore_ascii_case("DESI"))
+            .map(|db| db.dbnum)
+            .collect()
+    } else {
+        opts.dbnums.clone()
+    };
+    dbnums.dedup();
+    ensure!(
+        !dbnums.is_empty(),
+        "没有要跑的库：给 --dbnum，或用 --all-desi"
+    );
+
+    // 产物目录一律绝对路径：E3D 宏里的 `export file` 与子进程都按它找文件。
+    let out_root = absolute_dir(&opts.out);
+    let mut jobs = Vec::new();
+    for &dbno in &dbnums {
+        jobs.extend(enumerate_roots(
+            &tree,
+            dbno,
+            opts.site_only,
+            &spec.e3d_project,
+            &out_root,
+        )?);
+    }
+    if !opts.only.is_empty() {
+        let mut wanted = Vec::new();
+        for raw in &opts.only {
+            wanted.push(
+                normalize_ref(raw).with_context(|| format!("--only 里的 refno 无法解析：{raw}"))?,
+            );
+        }
+        let missing: Vec<&String> = wanted
+            .iter()
+            .filter(|refno| !jobs.iter().any(|job| &job.refno == *refno))
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "警告：--only 里的 {} 不是所选库 WORLD 下的 SITE / APPLDW，忽略",
+                missing
+                    .iter()
+                    .map(|refno| format!("={refno}"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+        }
+        jobs.retain(|job| wanted.contains(&job.refno));
+    }
+    ensure!(!jobs.is_empty(), "所选库的 WORLD 下没有 SITE / APPLDW 根");
+
+    std::fs::create_dir_all(&out_root).with_context(|| format!("建 {}", out_root.display()))?;
+    if !opts.resume && !opts.force && dir_has_entries(&out_root) {
+        bail!(
+            "产物目录 {} 非空：加 --resume 续跑（跳过已比对的根），或 --force 覆盖",
+            out_root.display()
+        );
+    }
+
+    // 续跑：已比对出结果的根原样收进汇总，不再跑。
+    let mut resumed: Vec<Option<RootRecord>> = vec![None; jobs.len()];
+    if opts.resume {
+        for (index, job) in jobs.iter().enumerate() {
+            if let Some(mut record) = read_record(&job.dir.join("run.json"))
+                && status::is_compared(&record.status)
+                && job.dir.join("compare.json").is_file()
+            {
+                record.resumed = true;
+                resumed[index] = Some(record);
+            }
+        }
+    }
+
+    let baseline_source = match &opts.baseline_dir {
+        Some(dir) => format!("目录 {}", dir.display()),
+        None if opts.stage.exports() => format!(
+            "E3D TTY（{} {} {}，每库一次会话）",
+            spec.e3d_project, spec.e3d_mdb, spec.username
+        ),
+        None => "产物目录里已有的 e3d.rvm".to_string(),
+    };
+    println!(
+        "rvm-check：{} 个库、{} 个根（{} 个续跑跳过），阶段 {:?}，生成 {}（jobs {}），基准 {}，产物 {}",
+        dbnums.len(),
+        jobs.len(),
+        resumed.iter().filter(|record| record.is_some()).count(),
+        opts.stage,
+        if opts.in_process {
+            "进程内"
+        } else {
+            "子进程"
+        },
+        opts.jobs,
+        baseline_source,
+        out_root.display()
+    );
+    for job in &jobs {
+        println!(
+            "  {} {} {} {}",
+            job.tag,
+            job.display_ref(),
+            job.noun,
+            job.name
+        );
+    }
+
+    let board = ExportBoard::new(jobs.len());
+    let results: Mutex<Vec<Option<RootRecord>>> = Mutex::new(resumed.clone());
+    let next = AtomicUsize::new(0);
+    let in_process_gate = Mutex::new(());
+    let pending: Vec<usize> = (0..jobs.len())
+        .filter(|index| resumed[*index].is_none())
+        .collect();
+
+    std::thread::scope(|scope| {
+        // 基准这一路：导出线程，或从目录取，或看产物目录里有没有。
+        if opts.stage.exports() && opts.baseline_dir.is_none() {
+            let board = &board;
+            let jobs = &jobs;
+            let spec = &spec;
+            let out_root = &out_root;
+            let pending = &pending;
+            scope.spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    export_all(jobs, pending, spec, out_root, opts.e3d_timeout, board)
+                }));
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => board.fill_missing(&format!("导出线程中止：{error:#}")),
+                    Err(panic) => board
+                        .fill_missing(&format!("导出线程 panic：{}", super::panic_text(&*panic))),
+                }
+            });
+        } else {
+            for &index in &pending {
+                let job = &jobs[index];
+                let started = Instant::now();
+                let outcome = match &opts.baseline_dir {
+                    Some(dir) => place_baseline_from_dir(dir, job, started),
+                    None => {
+                        let rvm = job.dir.join("e3d.rvm");
+                        if std::fs::metadata(&rvm).is_ok_and(|meta| meta.len() > 32) {
+                            ExportOutcome::Ready(StageRecord::new("reuse", started, ""))
+                        } else {
+                            ExportOutcome::Missing(StageRecord::new(
+                                "missing",
+                                started,
+                                format!("产物目录里没有 {}", rvm.display()),
+                            ))
+                        }
+                    }
+                };
+                board.set(index, outcome);
+            }
+        }
+
+        // 工人：生成（子进程 / 进程内）→ 等基准 → 比对 → run.json。
+        let workers = if opts.stage == Stage::Export {
+            1
+        } else {
+            opts.jobs.min(pending.len().max(1))
+        };
+        for _ in 0..workers {
+            let board = &board;
+            let jobs = &jobs;
+            let spec = &spec;
+            let tree = &tree;
+            let out_root = &out_root;
+            let results = &results;
+            let next = &next;
+            let pending = &pending;
+            let in_process_gate = &in_process_gate;
+            scope.spawn(move || {
+                loop {
+                    let slot = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(&index) = pending.get(slot) else {
+                        break;
+                    };
+                    let job = &jobs[index];
+                    let record = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_root(
+                            job,
+                            index,
+                            opts,
+                            spec,
+                            tree,
+                            out_root,
+                            board,
+                            in_process_gate,
+                        )
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let mut record = RootRecord::new(job);
+                        record.status = status::COMPARE_FAILED.to_string();
+                        record.message = format!("处理根时 panic：{}", super::panic_text(&*panic));
+                        record
+                    });
+                    if let Err(error) = write_json(&job.dir.join("run.json"), &record) {
+                        eprintln!("写 {} 失败：{error:#}", job.dir.join("run.json").display());
+                    }
+                    println!("{}", record.console_line());
+                    results
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())[index] = Some(record);
+                }
+            });
+        }
+    });
+
+    let records: Vec<RootRecord> = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            record.unwrap_or_else(|| {
+                let mut record = RootRecord::new(&jobs[index]);
+                record.status = status::COMPARE_FAILED.to_string();
+                record.message = "没有跑到这个根".to_string();
+                record
+            })
+        })
+        .collect();
+
+    let summary = Summary::build(opts, &spec, &dbnums, &baseline_source, records.clone());
+    let summary_path = out_root.join("summary.json");
+    write_json(&summary_path, &summary)?;
+    let table = summary.table();
+    std::fs::write(out_root.join("summary.txt"), &table)?;
+    println!("\n{table}");
+    println!("summary.json: {}", summary_path.display());
+    Ok(BatchOutcome {
+        summary_path,
+        clean: summary.clean,
+        records,
+    })
+}
+
+impl RootRecord {
+    fn new(job: &RootJob) -> Self {
+        Self {
+            dbno: job.dbno,
+            tag: job.tag.clone(),
+            refno: job.display_ref(),
+            noun: job.noun.clone(),
+            name: job.name.clone(),
+            dir: job.dir.display().to_string(),
+            status: String::new(),
+            message: String::new(),
+            resumed: false,
+            export: None,
+            generate: None,
+            compare: None,
+            counts: None,
+            mismatches: Vec::new(),
+            mismatches_truncated: false,
+            centreline_only_baseline: 0,
+        }
+    }
+
+    fn console_line(&self) -> String {
+        let counts = self.counts.as_ref();
+        let number =
+            |pick: fn(&RvmCounts) -> u64| counts.map_or("-".to_string(), |c| pick(c).to_string());
+        format!(
+            "{:<8} {:<16} {:<6} {:<14} both {:>6} exact {:>6} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4} | gen {:>6}s {:>6} MB | export {:>6}s | compare {:>5}s{}",
+            self.tag,
+            self.refno,
+            self.noun,
+            self.status,
+            number(|c| c.both),
+            number(|c| c.exact),
+            number(|c| c.off + c.container_off),
+            number(|c| c.only_baseline + c.container_only_baseline),
+            number(|c| c.only_generated + c.container_only_generated),
+            number(|c| c.kind_differ),
+            self.generate
+                .as_ref()
+                .map_or("-".to_string(), |g| format!("{:.1}", g.seconds)),
+            self.generate
+                .as_ref()
+                .and_then(|g| g.peak_private_mb)
+                .map_or("-".to_string(), |mb| mb.to_string()),
+            self.export
+                .as_ref()
+                .map_or("-".to_string(), |e| format!("{:.1}", e.seconds)),
+            self.compare
+                .as_ref()
+                .map_or("-".to_string(), |c| format!("{:.1}", c.seconds)),
+            if self.message.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", tail(&self.message, 160).replace('\n', " "))
+            }
+        )
+    }
+}
+
+/// 从基准目录取 `<tag>_<w0>_<w1>.rvm`：能硬链接就硬链接，不然复制。
+fn place_baseline_from_dir(dir: &Path, job: &RootJob, started: Instant) -> ExportOutcome {
+    let source = dir.join(format!("{}_{}.rvm", job.tag, job.stem()));
+    if !source.is_file() {
+        return ExportOutcome::Missing(StageRecord::new(
+            "missing",
+            started,
+            format!("基准目录里没有 {}", source.display()),
+        ));
+    }
+    let target = job.dir.join("e3d.rvm");
+    if let Err(error) = std::fs::create_dir_all(&job.dir) {
+        return ExportOutcome::Missing(StageRecord::new("io-error", started, error.to_string()));
+    }
+    let _ = std::fs::remove_file(&target);
+    let linked =
+        std::fs::hard_link(&source, &target).is_ok() || std::fs::copy(&source, &target).is_ok();
+    if linked {
+        ExportOutcome::Ready(StageRecord::new(
+            "reuse",
+            started,
+            source.display().to_string(),
+        ))
+    } else {
+        ExportOutcome::Missing(StageRecord::new(
+            "io-error",
+            started,
+            format!("复制 {} 失败", source.display()),
+        ))
+    }
+}
+
+/// 导出线程：每个库一次 TTY 会话导全部根；没落出来的根再单独补导。
+fn export_all(
+    jobs: &[RootJob],
+    pending: &[usize],
+    spec: &RunSpec,
+    out_root: &Path,
+    e3d_timeout: Duration,
+    board: &ExportBoard,
+) -> Result<()> {
+    // 按根在队列里首次出现的库序导出：工人按同一顺序生成，先生成的根先等到基准，流水线才不空转。
+    let mut order: Vec<u32> = Vec::new();
+    let mut by_db: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for &index in pending {
+        let dbno = jobs[index].dbno;
+        if !order.contains(&dbno) {
+            order.push(dbno);
+        }
+        by_db.entry(dbno).or_default().push(index);
+    }
+    let mut session_spec = spec.clone();
+    session_spec.tools.timeout = e3d_timeout;
+    for dbno in order {
+        let indices = by_db.remove(&dbno).unwrap_or_default();
+        let tag = jobs[indices[0]].tag.clone();
+        let started = Instant::now();
+        let mut items = Vec::with_capacity(indices.len());
+        for &index in &indices {
+            let job = &jobs[index];
+            std::fs::create_dir_all(&job.dir)?;
+            let rvm = job.dir.join("e3d.rvm");
+            let _ = std::fs::remove_file(&rvm);
+            items.push((job.refno.clone(), rvm));
+        }
+        println!("E3D 导出 {tag}：{} 个根，一次会话 …", indices.len());
+        let body = export_macro::export_batch_body(&items)?;
+        // 导出文件在 L3-DONE 之前就写完了，QUIT 后只等 E3D 收尾 15 秒（环境变量仍可压过）。
+        let done_grace = if std::env::var_os("E3D_MCP_DONE_GRACE_SECS").is_some() {
+            crate::e3d_query::done_grace_from_env()
+        } else {
+            Duration::from_secs(15)
+        };
+        let driver = driver_with_grace(&session_spec, done_grace);
+        let label = format!("rvm-check-export-{tag}");
+        let session = driver.run_source_evidence(out_root, &label, &body);
+        let session_seconds = started.elapsed().as_secs_f64();
+        let (log, note) = match &session {
+            Ok(evidence) => (
+                evidence_text(evidence),
+                format!(
+                    "exit={:?} alive={} done={} timeout={}",
+                    evidence.exit_status,
+                    evidence.alive_seen,
+                    evidence.done_seen,
+                    evidence.timed_out
+                ),
+            ),
+            Err(error) => (String::new(), format!("会话没有启动：{error:#}")),
+        };
+        let export_log = out_root.join(&tag).join("e3d-export.log");
+        if let Some(parent) = export_log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&export_log)
+        {
+            let _ = writeln!(
+                file,
+                "=== {} {tag} {} 个根 {:.1}s {note}\n{}",
+                chrono::Local::now().to_rfc3339(),
+                indices.len(),
+                session_seconds,
+                redact(&log, &spec.password)
+            );
+        }
+        println!("E3D 导出 {tag}：会话 {:.1}s（{note}）", session_seconds);
+        let per_root_seconds = round1(session_seconds / indices.len() as f64);
+        for &index in &indices {
+            let job = &jobs[index];
+            let rvm = job.dir.join("e3d.rvm");
+            let size = std::fs::metadata(&rvm).map(|meta| meta.len()).unwrap_or(0);
+            if export_macro::export_done_for(&log, &job.refno) && size > 32 {
+                let mut record = StageRecord::new("batch", started, "");
+                record.seconds = per_root_seconds;
+                board.set(index, ExportOutcome::Ready(record));
+                continue;
+            }
+            // 单独补导：页面那条 refno → 名称的退路。
+            let retry_started = Instant::now();
+            let mut root_spec = session_spec.clone();
+            root_spec.refno = job.refno.clone();
+            let _ = std::fs::remove_file(&rvm);
+            let outcome = match export_e3d(&root_spec, &job.dir) {
+                Ok(by) => {
+                    let mut record = StageRecord::new(
+                        by.as_str(),
+                        retry_started,
+                        "批量会话里没落出文件，单独补导成功",
+                    );
+                    record.seconds = round1(record.seconds + per_root_seconds);
+                    ExportOutcome::Ready(record)
+                }
+                Err(message) => {
+                    let mut record = StageRecord::new(
+                        "missing",
+                        retry_started,
+                        redact(&message, &spec.password),
+                    );
+                    record.seconds = round1(record.seconds + per_root_seconds);
+                    ExportOutcome::Missing(record)
+                }
+            };
+            println!(
+                "E3D 补导 {} {}：{}",
+                job.tag,
+                job.display_ref(),
+                match &outcome {
+                    ExportOutcome::Ready(record) => format!("成功（{}）", record.exit),
+                    ExportOutcome::Missing(record) =>
+                        format!("失败：{}", tail(&record.message, 200)),
+                }
+            );
+            board.set(index, outcome);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_root(
+    job: &RootJob,
+    index: usize,
+    opts: &BatchOptions,
+    spec: &RunSpec,
+    tree: &DirectTreeService,
+    out_root: &Path,
+    board: &ExportBoard,
+    in_process_gate: &Mutex<()>,
+) -> RootRecord {
+    let mut record = RootRecord::new(job);
+    if let Err(error) = std::fs::create_dir_all(&job.dir) {
+        record.status = status::GEN_FAILED.to_string();
+        record.message = format!("建目录失败：{error}");
+        return record;
+    }
+
+    if opts.stage.generates() {
+        let generated = job.dir.join("ours").join("generated.rvm");
+        let _ = std::fs::remove_file(&generated);
+        let generation = if opts.in_process {
+            let _serial = in_process_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            generate_in_process(job, spec, tree, opts.gen_timeout)
+        } else {
+            generate_in_child(job, spec, out_root, opts)
+        };
+        let failed_status = match generation.exit.as_str() {
+            Some(status::COMMIT_GUARD) => Some(status::COMMIT_GUARD),
+            Some(status::TIMEOUT) => Some(status::TIMEOUT),
+            _ if generation.exit != serde_json::Value::from(0) => Some(status::GEN_FAILED),
+            _ if !generated.is_file() => Some(status::GEN_FAILED),
+            _ => None,
+        };
+        if let Some(failed) = failed_status {
+            record.status = failed.to_string();
+            record.message = if generation.message.is_empty() {
+                "生成没有写出 generated.rvm".to_string()
+            } else {
+                generation.message.clone()
+            };
+        }
+        record.generate = Some(generation);
+    }
+
+    if opts.stage != Stage::Generate {
+        let outcome = board.wait(index);
+        record.export = Some(outcome.record().clone());
+        if let ExportOutcome::Missing(export) = &outcome
+            && record.status.is_empty()
+        {
+            record.status = status::NO_BASELINE.to_string();
+            record.message = export.message.clone();
+        }
+    }
+
+    if !record.status.is_empty() {
+        return record;
+    }
+    match opts.stage {
+        Stage::Export => {
+            record.status = status::EXPORTED.to_string();
+            return record;
+        }
+        Stage::Generate => {
+            record.status = status::GENERATED.to_string();
+            return record;
+        }
+        Stage::Full | Stage::Compare => {}
+    }
+
+    let generated = job.dir.join("ours").join("generated.rvm");
+    if !generated.is_file() {
+        record.status = status::GEN_FAILED.to_string();
+        record.message = format!("产物目录里没有 {}", generated.display());
+        return record;
+    }
+    let started = Instant::now();
+    match compare_rvms(&job.dir) {
+        Ok((verdict, counts, mismatches, centreline, truncated)) => {
+            record.message = verdict_message(verdict, &counts);
+            record.status = match verdict {
+                RvmVerdict::Pass if counts.both == 0 => status::EMPTY,
+                RvmVerdict::Pass => status::PASS,
+                RvmVerdict::KindDiffer => status::KIND_DIFFER,
+                RvmVerdict::Fail => status::FAIL,
+            }
+            .to_string();
+            record.compare = Some(StageRecord::new(0, started, ""));
+            record.counts = Some(counts);
+            record.mismatches = mismatches;
+            record.mismatches_truncated = truncated;
+            record.centreline_only_baseline = centreline.len();
+        }
+        Err(message) => {
+            record.status = status::COMPARE_FAILED.to_string();
+            record.message = redact(&message, &spec.password);
+            record.compare = Some(StageRecord::new(1, started, record.message.clone()));
+        }
+    }
+    record
+}
+
+fn generate_in_process(
+    job: &RootJob,
+    spec: &RunSpec,
+    tree: &DirectTreeService,
+    gen_timeout: Duration,
+) -> StageRecord {
+    let started = Instant::now();
+    let mut spec = spec.clone();
+    spec.refno = job.refno.clone();
+    spec.tools.timeout = gen_timeout;
+    let node = match resolve_node(tree, &spec) {
+        Ok(node) => node,
+        Err(message) => return StageRecord::new(1, started, message),
+    };
+    match generate_ours(&spec, &node, &job.dir) {
+        Ok(()) => StageRecord::new(0, started, ""),
+        Err(message) => StageRecord::new(1, started, message),
+    }
+}
+
+/// 子进程生成：`aios-database rvm-check --child …`，父进程盯内存与耗时。
+fn generate_in_child(
+    job: &RootJob,
+    spec: &RunSpec,
+    out_root: &Path,
+    opts: &BatchOptions,
+) -> StageRecord {
+    let started = Instant::now();
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return StageRecord::new(1, started, format!("取不到自身路径：{error}")),
+    };
+    let stdout = std::fs::File::create(job.dir.join("gen.stdout.log"));
+    let stderr = std::fs::File::create(job.dir.join("gen.stderr.log"));
+    let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
+        return StageRecord::new(1, started, "建 gen.*.log 失败");
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("rvm-check")
+        .arg("--child")
+        .arg("--dbnum")
+        .arg(job.dbno.to_string())
+        .arg("--only")
+        .arg(job.display_ref())
+        .arg("--out")
+        .arg(out_root)
+        .arg("--gen-timeout-secs")
+        .arg(opts.gen_timeout.as_secs().to_string())
+        .arg("--projects-dir")
+        .arg(&spec.projects_dir)
+        .arg("--project-name")
+        .arg(&spec.project_name)
+        .arg("--e3d-project")
+        .arg(&spec.e3d_project)
+        .arg("--mdb")
+        .arg(&spec.e3d_mdb)
+        .env("RUST_BACKTRACE", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return StageRecord::new(1, started, format!("起子进程失败：{error}")),
+    };
+    let mut peak: u64 = 0;
+    let mut min_free: Option<f64> = None;
+    let mut killed: Option<&'static str> = None;
+    let deadline = started + opts.gen_timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(error) => return StageRecord::new(1, started, format!("等子进程失败：{error}")),
+        }
+        if let Some(bytes) = memory::process_peak_private_bytes(&child) {
+            peak = peak.max(bytes);
+        }
+        if let Some(free) = memory::commit_free_gb() {
+            min_free = Some(min_free.map_or(free, |current: f64| current.min(free)));
+            if free < opts.min_commit_free_gb {
+                killed = Some(status::COMMIT_GUARD);
+            }
+        }
+        if killed.is_none() && Instant::now() >= deadline {
+            killed = Some(status::TIMEOUT);
+        }
+        if killed.is_some() {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let exit = child.wait();
+    let stderr_tail = std::fs::read_to_string(job.dir.join("gen.stderr.log"))
+        .map(|text| tail(&text, 600))
+        .unwrap_or_default();
+    let mut record = match killed {
+        Some(status::COMMIT_GUARD) => StageRecord::new(
+            status::COMMIT_GUARD,
+            started,
+            format!(
+                "可提交内存余量低于 {:.1} GB，已杀掉生成子进程",
+                opts.min_commit_free_gb
+            ),
+        ),
+        Some(_) => StageRecord::new(
+            status::TIMEOUT,
+            started,
+            format!("生成超过 {} 秒，已杀掉子进程", opts.gen_timeout.as_secs()),
+        ),
+        None => match exit {
+            Ok(status) if status.success() => StageRecord::new(0, started, ""),
+            Ok(status) => StageRecord::new(
+                status.code().unwrap_or(-1),
+                started,
+                if stderr_tail.trim().is_empty() {
+                    format!("生成子进程退出码 {status}")
+                } else {
+                    stderr_tail
+                },
+            ),
+            Err(error) => StageRecord::new(1, started, format!("等子进程失败：{error}")),
+        },
+    };
+    record.peak_private_mb = (peak > 0).then_some(peak / (1024 * 1024));
+    record.min_commit_free_gb = min_free.map(round2);
+    record
+}
+
+/// 内存护栏要读的两个数：系统可提交内存余量、子进程峰值私有内存。
+mod memory {
+    #[cfg(windows)]
+    pub fn commit_free_gb() -> Option<f64> {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        // 安全性：结构体已按 Win32 要求填好长度，指针在调用期间有效。
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        (ok != 0).then(|| status.ullAvailPageFile as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+
+    #[cfg(windows)]
+    pub fn process_peak_private_bytes(child: &std::process::Child) -> Option<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        counters.cb = size;
+        // 安全性：句柄来自 std 的 Child，进程存活期间有效；结构体长度已填。
+        let ok =
+            unsafe { K32GetProcessMemoryInfo(child.as_raw_handle() as _, &mut counters, size) };
+        (ok != 0).then(|| counters.PeakPagefileUsage as u64)
+    }
+
+    #[cfg(not(windows))]
+    pub fn commit_free_gb() -> Option<f64> {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Some(system.available_memory() as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+
+    #[cfg(not(windows))]
+    pub fn process_peak_private_bytes(child: &std::process::Child) -> Option<u64> {
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        let pid = Pid::from_u32(child.id());
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        system.process(pid).map(|process| process.memory())
+    }
+}
+
+#[derive(Serialize)]
+struct DbSummary {
+    dbno: u32,
+    tag: String,
+    roots: usize,
+    clean_roots: usize,
+    status_counts: BTreeMap<String, usize>,
+    counts: RvmCounts,
+    gen_seconds: f64,
+    gen_peak_private_mb: u64,
+    export_seconds: f64,
+    compare_seconds: f64,
+}
+
+#[derive(Serialize)]
+struct Summary {
+    generated_at: String,
+    stage: Stage,
+    out: String,
+    dbnums: Vec<u32>,
+    site_only: bool,
+    jobs: usize,
+    in_process: bool,
+    baseline: String,
+    e3d_project: String,
+    mdb: String,
+    clean: bool,
+    status_counts: BTreeMap<String, usize>,
+    totals: RvmCounts,
+    gen_seconds: f64,
+    export_seconds: f64,
+    compare_seconds: f64,
+    dbs: Vec<DbSummary>,
+    roots: Vec<RootRecord>,
+}
+
+fn add_counts(into: &mut RvmCounts, from: &RvmCounts) {
+    into.both += from.both;
+    into.exact += from.exact;
+    into.chord += from.chord;
+    into.reference_artifact += from.reference_artifact;
+    into.film += from.film;
+    into.off += from.off;
+    into.only_baseline += from.only_baseline;
+    into.only_generated += from.only_generated;
+    into.kind_match += from.kind_match;
+    into.kind_differ += from.kind_differ;
+    into.container_off += from.container_off;
+    into.container_only_baseline += from.container_only_baseline;
+    into.container_only_generated += from.container_only_generated;
+    into.centreline_only_baseline += from.centreline_only_baseline;
+    into.unkeyable_baseline += from.unkeyable_baseline;
+    into.unkeyable_generated += from.unkeyable_generated;
+}
+
+impl Summary {
+    fn build(
+        opts: &BatchOptions,
+        spec: &RunSpec,
+        dbnums: &[u32],
+        baseline: &str,
+        roots: Vec<RootRecord>,
+    ) -> Self {
+        let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut totals = RvmCounts::default();
+        let mut dbs: BTreeMap<u32, DbSummary> = BTreeMap::new();
+        let (mut gen_seconds, mut export_seconds, mut compare_seconds) = (0.0, 0.0, 0.0);
+        for record in &roots {
+            *status_counts.entry(record.status.clone()).or_default() += 1;
+            let db = dbs.entry(record.dbno).or_insert_with(|| DbSummary {
+                dbno: record.dbno,
+                tag: record.tag.clone(),
+                roots: 0,
+                clean_roots: 0,
+                status_counts: BTreeMap::new(),
+                counts: RvmCounts::default(),
+                gen_seconds: 0.0,
+                gen_peak_private_mb: 0,
+                export_seconds: 0.0,
+                compare_seconds: 0.0,
+            });
+            db.roots += 1;
+            if status::is_clean(&record.status) {
+                db.clean_roots += 1;
+            }
+            *db.status_counts.entry(record.status.clone()).or_default() += 1;
+            if let Some(counts) = &record.counts {
+                add_counts(&mut totals, counts);
+                add_counts(&mut db.counts, counts);
+            }
+            if let Some(generation) = &record.generate {
+                gen_seconds += generation.seconds;
+                db.gen_seconds += generation.seconds;
+                db.gen_peak_private_mb = db
+                    .gen_peak_private_mb
+                    .max(generation.peak_private_mb.unwrap_or(0));
+            }
+            if let Some(export) = &record.export {
+                export_seconds += export.seconds;
+                db.export_seconds += export.seconds;
+            }
+            if let Some(compare) = &record.compare {
+                compare_seconds += compare.seconds;
+                db.compare_seconds += compare.seconds;
+            }
+        }
+        for db in dbs.values_mut() {
+            db.gen_seconds = round1(db.gen_seconds);
+            db.export_seconds = round1(db.export_seconds);
+            db.compare_seconds = round1(db.compare_seconds);
+        }
+        Self {
+            generated_at: chrono::Local::now().to_rfc3339(),
+            stage: opts.stage,
+            out: opts.out.display().to_string(),
+            dbnums: dbnums.to_vec(),
+            site_only: opts.site_only,
+            jobs: opts.jobs,
+            in_process: opts.in_process,
+            baseline: baseline.to_string(),
+            e3d_project: spec.e3d_project.clone(),
+            mdb: spec.e3d_mdb.clone(),
+            clean: roots.iter().all(|record| status::is_clean(&record.status)),
+            status_counts,
+            totals,
+            gen_seconds: round1(gen_seconds),
+            export_seconds: round1(export_seconds),
+            compare_seconds: round1(compare_seconds),
+            dbs: dbs.into_values().collect(),
+            roots,
+        }
+    }
+
+    fn table(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8}\n",
+            "tag", "ref", "noun", "status", "both", "exact", "off", "only_b", "only_g", "kdiff",
+            "gen_s", "gen_MB", "export_s", "cmp_s"
+        ));
+        for record in &self.roots {
+            let counts = record.counts.clone().unwrap_or_default();
+            let has_counts = record.counts.is_some();
+            let cell = |value: u64| {
+                if has_counts {
+                    value.to_string()
+                } else {
+                    "-".to_string()
+                }
+            };
+            out.push_str(&format!(
+                "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8}\n",
+                record.tag,
+                record.refno,
+                record.noun,
+                record.status,
+                cell(counts.both),
+                cell(counts.exact),
+                cell(counts.off + counts.container_off),
+                cell(counts.only_baseline + counts.container_only_baseline),
+                cell(counts.only_generated + counts.container_only_generated),
+                cell(counts.kind_differ),
+                record.generate.as_ref().map_or("-".to_string(), |g| format!("{:.1}", g.seconds)),
+                record
+                    .generate
+                    .as_ref()
+                    .and_then(|g| g.peak_private_mb)
+                    .map_or("-".to_string(), |mb| mb.to_string()),
+                record.export.as_ref().map_or("-".to_string(), |e| format!("{:.1}", e.seconds)),
+                record.compare.as_ref().map_or("-".to_string(), |c| format!("{:.1}", c.seconds)),
+            ));
+        }
+        out.push('\n');
+        for db in &self.dbs {
+            out.push_str(&format!(
+                "{:<8} roots {:>3} clean {:>3}  both {:>7} exact {:>7} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4}  gen {:>7.1}s peak {:>6} MB  export {:>7.1}s  compare {:>6.1}s  {}\n",
+                db.tag,
+                db.roots,
+                db.clean_roots,
+                db.counts.both,
+                db.counts.exact,
+                db.counts.off + db.counts.container_off,
+                db.counts.only_baseline + db.counts.container_only_baseline,
+                db.counts.only_generated + db.counts.container_only_generated,
+                db.counts.kind_differ,
+                db.gen_seconds,
+                db.gen_peak_private_mb,
+                db.export_seconds,
+                db.compare_seconds,
+                db.status_counts
+                    .iter()
+                    .map(|(status, count)| format!("{status} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        out.push_str(&format!(
+            "\n合计 {} 个根：{}；both {} exact {} chord {} reference_artifact {} film {} off {} only_baseline {} only_generated {} unkeyable {}/{} kind_differ {}；生成 {:.1}s 导出 {:.1}s 比对 {:.1}s → {}\n",
+            self.roots.len(),
+            self.status_counts
+                .iter()
+                .map(|(status, count)| format!("{status} {count}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.totals.both,
+            self.totals.exact,
+            self.totals.chord,
+            self.totals.reference_artifact,
+            self.totals.film,
+            self.totals.off + self.totals.container_off,
+            self.totals.only_baseline + self.totals.container_only_baseline,
+            self.totals.only_generated + self.totals.container_only_generated,
+            self.totals.unkeyable_baseline,
+            self.totals.unkeyable_generated,
+            self.totals.kind_differ,
+            self.gen_seconds,
+            self.export_seconds,
+            self.compare_seconds,
+            if self.clean { "CLEAN" } else { "NOT CLEAN" }
+        ));
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refnos_normalize_to_slash_form() {
+        assert_eq!(
+            normalize_ref("=24383/66456").as_deref(),
+            Some("24383/66456")
+        );
+        assert_eq!(normalize_ref("24383/66456").as_deref(), Some("24383/66456"));
+        assert_eq!(normalize_ref("24383_66456").as_deref(), Some("24383/66456"));
+        assert_eq!(
+            normalize_ref("  =24383/66456 ").as_deref(),
+            Some("24383/66456")
+        );
+        assert_eq!(normalize_ref("nonsense"), None);
+    }
+
+    #[test]
+    fn root_dirs_follow_tag_and_stem() {
+        assert_eq!(tag_of("AMS", 7999), "ams7999");
+        assert_eq!(
+            root_dir(Path::new("out"), "ams7999", "24383/66456"),
+            Path::new("out").join("ams7999").join("24383_66456")
+        );
+    }
+
+    #[test]
+    fn export_board_hands_outcomes_to_waiting_workers_and_fills_the_rest() {
+        let board = ExportBoard::new(3);
+        board.set(
+            1,
+            ExportOutcome::Ready(StageRecord::new("batch", Instant::now(), "")),
+        );
+        assert!(matches!(board.wait(1), ExportOutcome::Ready(_)));
+        board.fill_missing("导出线程中止");
+        assert!(
+            matches!(board.wait(0), ExportOutcome::Missing(record) if record.message == "导出线程中止")
+        );
+        assert!(
+            matches!(board.wait(1), ExportOutcome::Ready(_)),
+            "已填的格不被覆盖"
+        );
+    }
+
+    #[test]
+    fn clean_statuses_are_pass_and_empty_only_in_full_mode() {
+        assert!(status::is_clean(status::PASS));
+        assert!(status::is_clean(status::EMPTY));
+        assert!(!status::is_clean(status::KIND_DIFFER));
+        assert!(!status::is_clean(status::FAIL));
+        assert!(!status::is_clean(status::NO_BASELINE));
+        assert!(!status::is_clean(status::COMMIT_GUARD));
+        assert!(status::is_compared(status::FAIL));
+        assert!(!status::is_compared(status::GEN_FAILED));
+    }
+
+    #[test]
+    fn summary_sums_counts_and_decides_clean_per_root_status() {
+        let job = |dbno: u32, refno: &str| RootJob {
+            dbno,
+            tag: tag_of("AMS", dbno),
+            refno: refno.to_string(),
+            noun: "SITE".to_string(),
+            name: String::new(),
+            dir: root_dir(Path::new("out"), &tag_of("AMS", dbno), refno),
+        };
+        let mut pass = RootRecord::new(&job(7999, "1/2"));
+        pass.status = status::PASS.to_string();
+        pass.counts = Some(RvmCounts {
+            both: 10,
+            exact: 10,
+            kind_match: 10,
+            ..RvmCounts::default()
+        });
+        pass.generate = Some(StageRecord {
+            exit: 0.into(),
+            seconds: 2.5,
+            peak_private_mb: Some(900),
+            ..StageRecord::default()
+        });
+        let mut fail = RootRecord::new(&job(7999, "1/3"));
+        fail.status = status::FAIL.to_string();
+        fail.counts = Some(RvmCounts {
+            both: 4,
+            exact: 3,
+            off: 1,
+            kind_match: 4,
+            ..RvmCounts::default()
+        });
+        let opts = BatchOptions {
+            connection: RunInput {
+                install_dir: String::new(),
+                projects_dir: String::new(),
+                project_name: String::new(),
+                e3d_project: String::new(),
+                username: String::new(),
+                password: String::new(),
+                e3d_mdb: String::new(),
+                refno: String::new(),
+            },
+            dbnums: vec![7999],
+            all_desi: false,
+            only: Vec::new(),
+            site_only: false,
+            out: PathBuf::from("out"),
+            resume: false,
+            force: false,
+            baseline_dir: None,
+            stage: Stage::Full,
+            in_process: false,
+            jobs: 1,
+            min_commit_free_gb: 1.5,
+            gen_timeout: Duration::from_secs(1),
+            e3d_timeout: Duration::from_secs(1),
+        };
+        let spec = RunSpec {
+            install_dir: PathBuf::new(),
+            projects_dir: PathBuf::new(),
+            project_name: String::new(),
+            project_dir: PathBuf::new(),
+            project_evar: PathBuf::new(),
+            e3d_project: "AMS".to_string(),
+            username: String::new(),
+            password: String::new(),
+            e3d_mdb: "/ALL".to_string(),
+            refno: String::new(),
+            tools: super::super::resolve_tools(),
+        };
+        let summary = Summary::build(&opts, &spec, &[7999], "test", vec![pass, fail]);
+        assert!(!summary.clean);
+        assert_eq!(summary.totals.both, 14);
+        assert_eq!(summary.totals.off, 1);
+        assert_eq!(summary.status_counts.get("pass"), Some(&1));
+        assert_eq!(summary.status_counts.get("fail"), Some(&1));
+        assert_eq!(summary.dbs.len(), 1);
+        assert_eq!(summary.dbs[0].clean_roots, 1);
+        assert_eq!(summary.dbs[0].gen_peak_private_mb, 900);
+        let table = summary.table();
+        assert!(table.contains("NOT CLEAN"));
+        assert!(table.contains("=1/3"));
+    }
+}

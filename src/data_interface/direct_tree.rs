@@ -15,12 +15,12 @@ use aios_core::{RefU64, RefnoEnum};
 use anyhow::Context;
 
 use super::direct_store::{DirectStore, DirectStoreError};
-use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
 use super::generation_root::{
     GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
     resolve_element_generation_root,
 };
 use super::mdb_membership::MdbMembership;
+use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
 
 /// One element database of the frozen tree view: its identity and the session it is
 /// pinned to, read from the file header through the shared read view. No element count —
@@ -42,21 +42,50 @@ pub struct TreeMetadata {
 }
 impl TreeMetadata {
     fn open(membership: &MdbMembership, store: &MdbReadStore) -> anyhow::Result<Self> {
-        let mut result = Self { databases: Vec::new(), worlds: HashMap::new(), ref0s: HashMap::new(), problems: membership.problems().to_vec() };
+        let mut result = Self {
+            databases: Vec::new(),
+            worlds: HashMap::new(),
+            ref0s: HashMap::new(),
+            problems: membership.problems().to_vec(),
+        };
         for db in membership.element_databases() {
-            if db.path.is_none() { continue; }
+            if db.path.is_none() {
+                continue;
+            }
             let metadata = store.metadata(db.dbnum)?;
-            result.worlds.insert(db.dbnum, RefU64::from_two_nums(metadata.world.word0, metadata.world.word1));
+            result.worlds.insert(
+                db.dbnum,
+                RefU64::from_two_nums(metadata.world.word0, metadata.world.word1),
+            );
             result.ref0s.insert(db.dbnum, metadata.extent_ref0s);
-            result.databases.push(TreeDatabase { dbnum: db.dbnum, db_type: metadata.db_type,
-                file: metadata.source.file, sesno: metadata.source.sesno });
+            result.databases.push(TreeDatabase {
+                dbnum: db.dbnum,
+                db_type: metadata.db_type,
+                file: metadata.source.file,
+                sesno: metadata.source.sesno,
+            });
         }
         Ok(result)
     }
-    pub fn databases(&self) -> &[TreeDatabase] { &self.databases }
-    pub fn ref0s_of(&self, dbnum: u32) -> Vec<u32> { self.ref0s.get(&dbnum).cloned().unwrap_or_default() }
-    pub fn problems(&self) -> &[String] { &self.problems }
-    pub fn session_fingerprint(&self) -> Vec<(u32, std::path::PathBuf, u32)> { self.databases.iter().map(|db| (db.dbnum, db.file.clone(), db.sesno)).collect() }
+    pub fn databases(&self) -> &[TreeDatabase] {
+        &self.databases
+    }
+    pub fn ref0s_of(&self, dbnum: u32) -> Vec<u32> {
+        self.ref0s.get(&dbnum).cloned().unwrap_or_default()
+    }
+    /// 这个库的 WORLD 元素；库不在 MDB 里或没有文件时 `None`。
+    pub fn world_of(&self, dbnum: u32) -> Option<RefU64> {
+        self.worlds.get(&dbnum).copied()
+    }
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+    pub fn session_fingerprint(&self) -> Vec<(u32, std::path::PathBuf, u32)> {
+        self.databases
+            .iter()
+            .map(|db| (db.dbnum, db.file.clone(), db.sesno))
+            .collect()
+    }
     pub fn epoch(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -92,26 +121,39 @@ impl DirectTreeService {
         let reader = MdbReadProvider::shared(project, mdb)?;
         let store = reader.view()?;
         Ok(Self {
-            project: project.to_string(), mdb: format!("/{}", mdb.trim_start_matches('/')),
-            membership: reader.membership.clone(), store, reader,
+            project: project.to_string(),
+            mdb: format!("/{}", mdb.trim_start_matches('/')),
+            membership: reader.membership.clone(),
+            store,
+            reader,
             metadata: std::sync::Mutex::new(None),
             children_memo: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
     pub fn metadata(&self) -> anyhow::Result<Arc<TreeMetadata>> {
-        let mut slot = self.metadata.lock().map_err(|_| anyhow::anyhow!("tree metadata lock poisoned"))?;
-        if let Some(metadata) = slot.as_ref() { return Ok(metadata.clone()); }
+        let mut slot = self
+            .metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tree metadata lock poisoned"))?;
+        if let Some(metadata) = slot.as_ref() {
+            return Ok(metadata.clone());
+        }
         let metadata = Arc::new(TreeMetadata::open(&self.membership, &self.store)?);
         *slot = Some(metadata.clone());
         Ok(metadata)
     }
 
     pub(crate) fn is_current(&self) -> bool {
-        self.reader.view().is_ok_and(|view| Arc::ptr_eq(&self.store, &view))
+        self.reader
+            .view()
+            .is_ok_and(|view| Arc::ptr_eq(&self.store, &view))
     }
 
-    pub(crate) fn source_metadata(&self, dbnum: u32) -> anyhow::Result<e3d_io::db_element::DbMetadata> {
+    pub(crate) fn source_metadata(
+        &self,
+        dbnum: u32,
+    ) -> anyhow::Result<e3d_io::db_element::DbMetadata> {
         Ok(self.store.metadata(dbnum)?)
     }
 
@@ -242,9 +284,11 @@ impl DirectTreeService {
                 ))
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
-        Ok(resolve_element_generation_root(requested, unit_types, |refno| {
-            nodes.get(&refno).cloned()
-        }))
+        Ok(resolve_element_generation_root(
+            requested,
+            unit_types,
+            |refno| nodes.get(&refno).cloned(),
+        ))
     }
 
     /// Self -> OWNER -> ... chain, matching Plant UI's existing contract.
@@ -357,12 +401,20 @@ pub trait TreeStore {
     fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError>;
 }
 impl TreeStore for DirectStore {
-    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> { DirectStore::named_attmap(self, refno) }
-    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> { DirectStore::members(self, refno) }
+    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> {
+        DirectStore::named_attmap(self, refno)
+    }
+    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
+        DirectStore::members(self, refno)
+    }
 }
 impl TreeStore for MdbReadStore {
-    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> { MdbReadStore::named_attmap(self, refno) }
-    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> { MdbReadStore::members(self, refno) }
+    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> {
+        MdbReadStore::named_attmap(self, refno)
+    }
+    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
+        MdbReadStore::members(self, refno)
+    }
 }
 
 pub fn generation_roots_in_subtree_on(
@@ -397,8 +449,16 @@ pub struct DirectTreeProvider {
 
 impl DirectTreeProvider {
     pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
-        self.service.read().await.as_ref().map(|service|
-            (service.store.opened_dbnums(), service.store.cached_elements()))
+        self.service
+            .read()
+            .await
+            .as_ref()
+            .map(|service| {
+                (
+                    service.store.opened_dbnums(),
+                    service.store.cached_elements(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -448,14 +508,25 @@ impl DirectTreeService {
     /// 属主链上的一级：这个元素的 `TYPE` / `NAME` 与 `OWNER`，一次记录读（与 [`Self::name_of`] 同代价）。
     /// 空间查询派生「所属专业」沿它往上爬到 SITE（`fast_model::spatial_discipline`），逐级记忆后每个元素只读一次。
     /// 读不出记录回 `None`；`OWNER` 为 0 / 指向自己按到顶处理（`owner: None`）。
-    pub fn lineage_step(&self, refno: RefU64) -> Option<crate::fast_model::spatial_discipline::LineageStep> {
+    pub fn lineage_step(
+        &self,
+        refno: RefU64,
+    ) -> Option<crate::fast_model::spatial_discipline::LineageStep> {
         let attrs = self.store.named_attmap(refno).ok()?;
         let owner = attrs
             .get_refu64("OWNER")
             .filter(|owner| owner.0 != 0 && *owner != refno);
         Some(crate::fast_model::spatial_discipline::LineageStep {
-            noun: attrs.get_as_string("TYPE").unwrap_or_default().trim().to_string(),
-            name: attrs.get_as_string("NAME").unwrap_or_default().trim().to_string(),
+            noun: attrs
+                .get_as_string("TYPE")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            name: attrs
+                .get_as_string("NAME")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             owner,
         })
     }
@@ -463,7 +534,9 @@ impl DirectTreeService {
     /// 这份服务钉住的会话指纹的哈希：`spatial_discipline` 的共享记忆按它换代（会话前进 = 属主链可能变了）。
     /// 元数据读不出时回 0——记忆键退化成常数，语义是「不换代」，宁可多命中一次记忆也别每次查询都清空。
     pub fn lineage_epoch(&self) -> u64 {
-        self.metadata().map(|metadata| metadata.epoch()).unwrap_or(0)
+        self.metadata()
+            .map(|metadata| metadata.epoch())
+            .unwrap_or(0)
     }
 }
 
@@ -488,11 +561,18 @@ mod lazy_live_tests {
         let service = DirectTreeService::open("AvevaMarineSample", "ALL").unwrap();
         let roots = service.roots().unwrap();
         assert!(!roots.is_empty());
-        let chain = service.ancestors(RefU64::from_two_nums(24384, 23257)).unwrap();
+        let chain = service
+            .ancestors(RefU64::from_two_nums(24384, 23257))
+            .unwrap();
         assert!(chain.len() > 1);
         let stats = e3d_io::read_stats::snapshot();
         assert_eq!(stats.scan_calls, 0, "{stats:?}");
         assert_eq!(stats.scanned_elements, 0);
-        eprintln!("AMS roots={} ancestors={} costs={}", roots.len(), chain.len(), stats.summary());
+        eprintln!(
+            "AMS roots={} ancestors={} costs={}",
+            roots.len(),
+            chain.len(),
+            stats.summary()
+        );
     }
 }

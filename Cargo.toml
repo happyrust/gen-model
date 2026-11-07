@@ -309,6 +309,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Kernel",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # rvm-check 批量对拍的内存护栏：可提交内存余量（GlobalMemoryStatusEx）与子进程峰值私有内存（ProcessStatus 上面已带）。
+    "Win32_System_SystemInformation",
 ] }
 
 [dev-dependencies]

@@ -22,6 +22,7 @@ use crate::e3d_query::{
     E3dDriver, E3dDriverSpec, E3dProcessEvidence, running_e3d_sessions, validate_refno,
 };
 
+pub mod batch;
 mod config;
 #[path = "macro.rs"]
 mod export_macro;
@@ -59,6 +60,7 @@ pub struct RunInput {
     pub refno: String,
 }
 
+#[derive(Clone)]
 pub struct RunSpec {
     pub install_dir: PathBuf,
     pub projects_dir: PathBuf,
@@ -105,6 +107,37 @@ pub fn prepare_run(input: &RunInput) -> Result<RunSpec, String> {
 
 pub fn prepare_preflight(input: &RunInput) -> Result<RunSpec, String> {
     prepare(input, false)
+}
+
+/// 批量对拍（[`batch`]）的连接参数：没有 refno（逐根再填），`need_e3d` 为假时（只生成 /
+/// 只比对、子进程）不要求安装目录与账号密码。
+pub(crate) fn prepare_connection(input: &RunInput, need_e3d: bool) -> Result<RunSpec, String> {
+    if need_e3d {
+        let spec = prepare(input, false)?;
+        if spec.password.is_empty() {
+            return Err("E3D 导出需要密码（--password 或环境变量 RVM_CHECK_PASSWORD）".to_string());
+        }
+        return Ok(spec);
+    }
+    let mut local = RunInput {
+        install_dir: input.install_dir.clone(),
+        projects_dir: input.projects_dir.clone(),
+        project_name: input.project_name.clone(),
+        e3d_project: input.e3d_project.clone(),
+        username: if input.username.trim().is_empty() {
+            "SYSTEM".to_string()
+        } else {
+            input.username.clone()
+        },
+        password: String::new(),
+        e3d_mdb: input.e3d_mdb.clone(),
+        refno: String::new(),
+    };
+    if local.install_dir.trim().is_empty() {
+        // 不碰 E3D 的阶段用不到安装目录；填一个绝对路径只为过校验。
+        local.install_dir = std::env::temp_dir().display().to_string();
+    }
+    prepare(&local, false)
 }
 
 fn prepare(input: &RunInput, require_refno: bool) -> Result<RunSpec, String> {
@@ -306,7 +339,7 @@ pub fn execute(
     tasks.set_stage(task_id, STAGE_E3D);
     tasks.set_units_done(task_id, 3);
     let export_started = Instant::now();
-    match export_e3d(spec, &resolved, &task_dir) {
+    match export_e3d(spec, &task_dir) {
         Ok(by) => report.e3d_export_by = Some(by),
         Err(message) => {
             report.stage = STAGE_E3D.to_string();
@@ -376,7 +409,7 @@ pub fn artifact_path(work_dir: &Path, task_id: &str, name: &str) -> Option<PathB
     path.is_file().then_some(path)
 }
 
-struct ResolvedNode {
+pub(crate) struct ResolvedNode {
     dbnum: u32,
     db_type: String,
     db_file: PathBuf,
@@ -410,7 +443,10 @@ fn world_ordinal(sites: &[RefU64], target: RefU64) -> Option<usize> {
     sites.iter().position(|site| *site == target).map(|at| at + 1)
 }
 
-fn resolve_node(tree: &DirectTreeService, spec: &RunSpec) -> Result<ResolvedNode, String> {
+pub(crate) fn resolve_node(
+    tree: &DirectTreeService,
+    spec: &RunSpec,
+) -> Result<ResolvedNode, String> {
     let refno =
         RefU64::from_str_refno(&spec.refno).map_err(|error| format!("refno 无法解析：{error}"))?;
     let dbnum = tree
@@ -460,7 +496,11 @@ impl GenerationHooks for Deadline {
     }
 }
 
-fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<(), String> {
+pub(crate) fn generate_ours(
+    spec: &RunSpec,
+    node: &ResolvedNode,
+    task_dir: &Path,
+) -> Result<(), String> {
     let template = DirectSchema::template_dir_from_env()
         .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
     let attlib = template.join("attlib.dat");
@@ -516,7 +556,7 @@ fn generate_ours(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result
     Ok(())
 }
 
-fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     panic
         .downcast_ref::<&str>()
         .map(|text| text.to_string())
@@ -524,7 +564,7 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "（非字符串 panic）".to_string())
 }
 
-fn export_e3d(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<String, String> {
+pub(crate) fn export_e3d(spec: &RunSpec, task_dir: &Path) -> Result<String, String> {
     if !spec.tools.launcher_found {
         return Err(format!(
             "找不到 E3D 启动脚本（试过 {}）",
@@ -573,7 +613,7 @@ fn export_e3d(spec: &RunSpec, node: &ResolvedNode, task_dir: &Path) -> Result<St
     ))
 }
 
-fn export_ok(log: &str, rvm: &Path) -> bool {
+pub(crate) fn export_ok(log: &str, rvm: &Path) -> bool {
     export_macro::export_finished(log) && std::fs::metadata(rvm).is_ok_and(|meta| meta.len() > 32)
 }
 
@@ -599,7 +639,7 @@ fn session_note(evidence: &E3dProcessEvidence) -> String {
     )
 }
 
-fn compare_rvms(
+pub(crate) fn compare_rvms(
     task_dir: &Path,
 ) -> Result<(RvmVerdict, RvmCounts, Vec<RvmMismatch>, Vec<String>, bool), String> {
     let baseline = task_dir.join("e3d.rvm");
@@ -628,7 +668,13 @@ fn compare_rvms(
     Ok(judge_report(&report))
 }
 
-fn driver_for(spec: &RunSpec) -> E3dDriver {
+pub(crate) fn driver_for(spec: &RunSpec) -> E3dDriver {
+    driver_with_grace(spec, crate::e3d_query::done_grace_from_env())
+}
+
+/// 同 [`driver_for`]，但 `L3-DONE` 之后等 E3D 自己退出的宽限由调用方给：批量导出一库一次会话，
+/// 导出文件在 `L3-DONE` 落盘前就已写完，不必每次都等满缺省的 60 秒。
+pub(crate) fn driver_with_grace(spec: &RunSpec, done_grace: std::time::Duration) -> E3dDriver {
     E3dDriver::from_spec(E3dDriverSpec {
         launcher: spec.tools.launcher.clone(),
         projects_dir: spec.projects_dir.clone(),
@@ -639,19 +685,19 @@ fn driver_for(spec: &RunSpec) -> E3dDriver {
         mdb: spec.e3d_mdb.clone(),
         install_dir: Some(spec.install_dir.clone()),
         alive_timeout: spec.tools.alive_timeout,
-        done_grace: crate::e3d_query::done_grace_from_env(),
+        done_grace,
         timeout: spec.tools.timeout,
     })
 }
 
-fn evidence_text(evidence: &E3dProcessEvidence) -> String {
+pub(crate) fn evidence_text(evidence: &E3dProcessEvidence) -> String {
     match &evidence.scenario_log {
         Some(scenario) => format!("{}\n{}", evidence.driver_log, scenario),
         None => evidence.driver_log.clone(),
     }
 }
 
-fn append_log(task_dir: &Path, text: &str) {
+pub(crate) fn append_log(task_dir: &Path, text: &str) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -675,7 +721,7 @@ fn existing_files(task_dir: &Path) -> Vec<String> {
     .collect()
 }
 
-fn elapsed_ms(started: Instant) -> u64 {
+pub(crate) fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -686,7 +732,7 @@ pub fn redact(text: &str, secret: &str) -> String {
     text.replace(secret, "******")
 }
 
-fn tail(text: &str, max: usize) -> String {
+pub(crate) fn tail(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
         return text.to_string();
@@ -858,6 +904,32 @@ mod tests {
         bad = input();
         bad.install_dir = "relative\\e3d".to_string();
         assert!(prepare_run(&bad).is_err());
+    }
+
+    /// 批量对拍的连接参数：不碰 E3D 的阶段（子进程生成、只比对）不要安装目录与密码；要导基准
+    /// 时密码缺席必须在起任何进程之前就被拦下。
+    #[test]
+    fn batch_connection_only_demands_credentials_when_e3d_is_needed() {
+        let mut local = input();
+        local.install_dir = String::new();
+        local.password = String::new();
+        let spec = prepare_connection(&local, false).unwrap();
+        assert_eq!(spec.e3d_project, "AMS");
+        assert_eq!(spec.e3d_mdb, "/ALL");
+        assert!(spec.refno.is_empty());
+        assert!(spec.password.is_empty());
+
+        let mut no_password = input();
+        no_password.password = String::new();
+        let error = match prepare_connection(&no_password, true) {
+            Ok(_) => panic!("没有密码不该通过"),
+            Err(error) => error,
+        };
+        assert!(error.contains("密码"), "{error}");
+
+        let spec = prepare_connection(&input(), true).unwrap();
+        assert_eq!(spec.password, "secret-value");
+        assert_eq!(spec.install_dir, PathBuf::from(r"E:\e3d\install"));
     }
 
     #[test]

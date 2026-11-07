@@ -80,6 +80,93 @@ enum Command {
     /// 不拿锁是关键：`run_app` 一上来就 `acquire_process_instance_lock`，若这个
     /// 子命令也走那条路，服务跑着时它根本执行不了——而那正是唯一想用它的时候。
     Trace(TraceArgs),
+    /// 批量 RVM 对拍：给库号与 E3D 连接信息，自动枚举 SITE / APPLDW 根，E3D TTY 导基准、
+    /// 生成、比对、汇总。与服务一样按工作目录读 `DbOption.toml`；不拿实例锁，服务跑着也能用。
+    ///
+    /// 全部根都是 pass / empty 时退出码 0，否则 1；明细在 `<out>/summary.json`。
+    RvmCheck(RvmCheckArgs),
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RvmCheckStage {
+    /// 导出 + 生成 + 比对。
+    Full,
+    /// 只用 E3D 导基准。
+    Export,
+    /// 只生成。
+    Generate,
+    /// 只比对产物目录里已有的基准与生成物。
+    Compare,
+}
+
+#[derive(clap::Args)]
+struct RvmCheckArgs {
+    /// 要跑的 DESI 库号，可重复或逗号分隔（`--dbnum 7999,7326`）。
+    #[arg(long, value_delimiter = ',', value_name = "N")]
+    dbnum: Vec<u32>,
+    /// 跑当前 MDB 里全部 DESI 库。
+    #[arg(long)]
+    all_desi: bool,
+    /// 只跑这些根（`=w0/w1`、`w0/w1` 或 `w0_w1`），可重复或逗号分隔。
+    #[arg(long, value_delimiter = ',', value_name = "REF")]
+    only: Vec<String>,
+    /// 只取 SITE 类型的根（缺省 SITE + APPLDW，两类合起来才是整库）。
+    #[arg(long)]
+    site_only: bool,
+    /// 产物目录（缺省 `output/rvm-check-batch/<时间戳>`）。
+    #[arg(long, value_name = "DIR")]
+    out: Option<PathBuf>,
+    /// 在已有产物目录上续跑：已比对出结果的根跳过。
+    #[arg(long)]
+    resume: bool,
+    /// 允许写进非空的产物目录（每个根都重跑）。
+    #[arg(long)]
+    force: bool,
+    /// 不碰 E3D，从这个目录取基准 `<tag>_<w0>_<w1>.rvm`（如 ams7999_24383_66456.rvm）。
+    #[arg(long, value_name = "DIR")]
+    baseline_dir: Option<PathBuf>,
+    /// 跑哪几步。
+    #[arg(long, value_enum, default_value_t = RvmCheckStage::Full)]
+    stage: RvmCheckStage,
+    /// 生成在本进程里跑。缺省每个根起一个子进程，便于内存护栏与失败隔离。
+    #[arg(long)]
+    in_process: bool,
+    /// 同时生成的根数。
+    #[arg(long, default_value_t = 1)]
+    jobs: usize,
+    /// 可提交内存余量低于此值（GB）时杀掉正在生成的子进程，该根记 commit-guard。
+    #[arg(long, default_value_t = 1.5)]
+    min_commit_free_gb: f64,
+    /// 单个根生成的超时（秒）。
+    #[arg(long, default_value_t = 1200)]
+    gen_timeout_secs: u64,
+    /// 一次 E3D 导出会话的超时（秒）。
+    #[arg(long, default_value_t = 3600)]
+    e3d_timeout_secs: u64,
+    /// E3D 安装目录（`des.exe` 所在，要能跑 `des.exe -tty`）。导基准时必填。
+    #[arg(long, value_name = "DIR")]
+    install_dir: Option<PathBuf>,
+    /// 项目父目录（缺省 DbOption.toml 的 project_path）。
+    #[arg(long, value_name = "DIR")]
+    projects_dir: Option<String>,
+    /// 项目目录名（缺省 DbOption.toml 的 project_name）。
+    #[arg(long, value_name = "NAME")]
+    project_name: Option<String>,
+    /// E3D 项目码（缺省按项目目录里的 `<码>000` 扫出的第一个，如 AMS）。
+    #[arg(long, value_name = "CODE")]
+    e3d_project: Option<String>,
+    /// MDB（缺省 DbOption.toml 的 mdb_name）。
+    #[arg(long, value_name = "NAME")]
+    mdb: Option<String>,
+    /// E3D 用户名。
+    #[arg(long, default_value = "SYSTEM")]
+    username: String,
+    /// E3D 密码；不给时读环境变量 RVM_CHECK_PASSWORD。只进登录串，不落盘。
+    #[arg(long)]
+    password: Option<String>,
+    /// 内部用：子进程模式，只生成 --only 指定的根。
+    #[arg(long, hide = true)]
+    child: bool,
 }
 
 #[derive(clap::Args, Default)]
@@ -140,6 +227,7 @@ fn main() -> anyhow::Result<()> {
     let serve = match cli.command {
         Some(Command::Version(args)) => return print_version(&args),
         Some(Command::Trace(args)) => return fetch_trace(&args),
+        Some(Command::RvmCheck(args)) => return run_rvm_check(args),
         Some(Command::Serve(args)) => args,
         None => ServeArgs::default(),
     };
@@ -169,6 +257,77 @@ fn main() -> anyhow::Result<()> {
         .thread_stack_size(RUNTIME_STACK_SIZE)
         .build()?
         .block_on(run_app(None))
+}
+
+/// 批量对拍。同步跑完整批（E3D、生成子进程、比对都是阻塞调用），不进 tokio、不拿实例锁。
+fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
+    use aios_database::rvm_check::RunInput;
+    use aios_database::rvm_check::batch::{self, BatchOptions, ChildOptions, Stage};
+
+    let stage = match args.stage {
+        RvmCheckStage::Full => Stage::Full,
+        RvmCheckStage::Export => Stage::Export,
+        RvmCheckStage::Generate => Stage::Generate,
+        RvmCheckStage::Compare => Stage::Compare,
+    };
+    let password = args
+        .password
+        .clone()
+        .or_else(|| std::env::var("RVM_CHECK_PASSWORD").ok())
+        .unwrap_or_default();
+    let connection = RunInput {
+        install_dir: args
+            .install_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+        projects_dir: args.projects_dir.clone().unwrap_or_default(),
+        project_name: args.project_name.clone().unwrap_or_default(),
+        e3d_project: args.e3d_project.clone().unwrap_or_default(),
+        username: args.username.clone(),
+        password,
+        e3d_mdb: args.mdb.clone().unwrap_or_default(),
+        refno: String::new(),
+    };
+    let out = args.out.clone().unwrap_or_else(|| {
+        PathBuf::from("output")
+            .join("rvm-check-batch")
+            .join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string())
+    });
+
+    if args.child {
+        anyhow::ensure!(args.dbnum.len() == 1, "--child 只接受一个 --dbnum");
+        anyhow::ensure!(!args.only.is_empty(), "--child 需要 --only");
+        return batch::run_child(&ChildOptions {
+            connection,
+            dbno: args.dbnum[0],
+            refnos: args.only.clone(),
+            out,
+            gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
+        });
+    }
+
+    let outcome = batch::run(&BatchOptions {
+        connection,
+        dbnums: args.dbnum.clone(),
+        all_desi: args.all_desi,
+        only: args.only.clone(),
+        site_only: args.site_only,
+        out,
+        resume: args.resume,
+        force: args.force,
+        baseline_dir: args.baseline_dir.clone(),
+        stage,
+        in_process: args.in_process,
+        jobs: args.jobs,
+        min_commit_free_gb: args.min_commit_free_gb,
+        gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
+        e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
+    })?;
+    if !outcome.clean {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn print_version(args: &VersionArgs) -> anyhow::Result<()> {

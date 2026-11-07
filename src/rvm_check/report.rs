@@ -5,7 +5,7 @@
 //! 没有缺件、没有 off、种类也一致是绿；只是种类不一致是黄；其余是红。
 
 use e3d_model::rvm_compare::CompareReport;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const VERDICT_PASS: &str = "pass";
@@ -30,7 +30,7 @@ impl RvmVerdict {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RvmCounts {
     pub both: u64,
     pub exact: u64,
@@ -50,7 +50,7 @@ pub struct RvmCounts {
     pub unkeyable_generated: u64,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RvmMismatch {
     /// `off` / `kind_differ` / `only_baseline` / `only_generated` /
     /// `unkeyable_baseline` / `unkeyable_generated` / `container_off` /
