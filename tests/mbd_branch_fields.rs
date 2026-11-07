@@ -13,7 +13,9 @@ use std::sync::{Arc, OnceLock};
 
 use aios_database::mbd::{branch_query, layout_pipe};
 use e3d_io::db_element::DbSet;
+use e3d_io::record::catalogue_eval::{AttribRef, AttributeNumber, ParamEnv};
 use e3d_io::refno::RefNo;
+use e3d_model::catalogue_point_set;
 use glam::DVec3;
 use plant_mbd::{BranchMember, BranchQueryResult, CataloguePrimitive, MbdPrimitive};
 
@@ -88,6 +90,69 @@ fn rule_ids(issues: &[plant_mbd::MbdV2Issue]) -> Vec<&str> {
         .collect()
 }
 
+fn is_cylinder(primitive: &CataloguePrimitive) -> bool {
+    matches!(primitive.kind.as_str(), "LCYL" | "SCYL" | "SSCY")
+}
+
+/// 什么参数都答不上的求值环境：`get_number` 对表达式回 `Unresolved`，带回原文（E3D `Q` 的写法）。
+struct NoAnswers;
+
+impl ParamEnv for NoAnswers {
+    fn param(&self, _: i32) -> Option<f64> {
+        None
+    }
+    fn iparam(&self, _: i32) -> Option<f64> {
+        None
+    }
+    fn design_dimension(&self, _: i32) -> Option<f64> {
+        None
+    }
+    fn attribute_number(&self, _: &AttribRef<'_>) -> Option<f64> {
+        None
+    }
+    fn fast_path_missing_parameter_is_zero(&self, _: &str, _: Option<f64>) -> bool {
+        false
+    }
+    fn direction_angle(&self, _: &[i32]) -> Option<f64> {
+        None
+    }
+}
+
+/// 成员目录几何集（ATTA 先 `GSTR` 再 `GMRE`，其余反过来，与宿主同序）下 LCYL / SCYL / SSCY 的类型与 `PDIA` 原文，
+/// 按库内序；直存的数没有原文。
+fn cylinder_pdia_texts(set: &Arc<DbSet>, member: &BranchMember) -> Vec<(String, Option<String>)> {
+    let (word0, word1) = member.refno.split_once('_').expect("wire refno");
+    let element = set.element(RefNo::new(word0.parse().unwrap(), word1.parse().unwrap()));
+    let component = catalogue_point_set(&element)
+        .expect("catref")
+        .component
+        .map(|refno| set.element(refno))
+        .expect("catalogue component");
+    let order = if member.noun.as_deref() == Some("ATTA") {
+        ["GSTR", "GMRE"]
+    } else {
+        ["GMRE", "GSTR"]
+    };
+    let geometry = order
+        .into_iter()
+        .find_map(|name| component.get_element(name).ok().flatten())
+        .expect("geometry set");
+    geometry
+        .members()
+        .expect("geometry members")
+        .filter_map(|primitive| {
+            let kind = primitive.element_type().ok()?;
+            matches!(kind.as_str(), "LCYL" | "SCYL" | "SSCY").then(|| {
+                let text = match primitive.get_number("PDIA", &NoAnswers) {
+                    Ok(AttributeNumber::Unresolved { text, .. }) => text,
+                    _ => None,
+                };
+                (kind, text)
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn golden_branches_carry_the_solver_member_fields() {
     let Some(set) = set() else {
@@ -124,6 +189,18 @@ fn golden_branches_carry_the_solver_member_fields() {
                         && member.cate_name.is_some()
                         && member.gmref_name.is_some(),
                     "{name}: primitives without spref / cate / gmref names"
+                );
+            }
+            // 不带保温的直径只在带保温的构件上给，给就是求得出 `PDIA` 的 LCYL / SCYL / SSCY 全给。
+            for primitive in &member.catalogue_primitives {
+                assert_eq!(
+                    primitive.pdia_bare.is_some(),
+                    is_cylinder(primitive) && !member.ipara.is_empty() && primitive.pdia.is_some(),
+                    "{name} {} pdia {:?} pdia_bare {:?} ipara {:?}",
+                    primitive.kind,
+                    primitive.pdia,
+                    primitive.pdia_bare,
+                    member.ipara
                 );
             }
             // 站点的到达 / 离开口都有连接类型；穿过件的 P 点可以不写 PCON（ZDJ 的 `NPHS` 支腿 ATTA）。
@@ -340,10 +417,10 @@ fn socket_tee_and_flange_get_true_od_cylinders() {
 }
 
 /// 24381/145480（ams7997，保温 170 mm：`IPARAM 1` = 340）：套接 OLET 的圆柱 `PDIA` 是不带保温的 `PARAM 10` = 33，
-/// PML `getPipeMaxdia` 照样扣 `ipara[1]`、得负数回 0、退到直段外径——数据齐了，求解器照 PML 报
-/// `polar.true_od_fallback`。宿主如实给两样，取舍留给求解器。
+/// PML `getPipeMaxdia` 照样扣 `ipara[1]`、得负数回 0、退到直段外径。宿主另给不带保温求值的 `pdia_bare`（这里与
+/// `pdia` 相同），求解器有它就不扣（plant-mbd `D-PIPE-021`），这只 OLET 不再报 `polar.true_od_fallback`。
 #[test]
-fn insulated_socket_olet_keeps_the_pml_true_od_fallback() {
+fn insulated_socket_olet_uses_the_bare_diameter() {
     let Some(set) = set() else {
         return;
     };
@@ -351,23 +428,95 @@ fn insulated_socket_olet_keeps_the_pml_true_od_fallback() {
     let olet = member(&query, "24381_145487");
     assert_eq!(olet.aconn.as_deref(), Some("SWF"));
     assert_eq!(olet.ipara, [340.0]);
-    let diameters: Vec<f64> = visible(olet, "LCYL")
+    let diameters: Vec<(Option<f64>, Option<f64>)> = visible(olet, "LCYL")
         .iter()
-        .filter_map(|c| c.pdia)
+        .map(|c| (c.pdia, c.pdia_bare))
         .collect();
-    assert_eq!(diameters, [33.0]);
+    assert_eq!(diameters, [(Some(33.0), Some(33.0))]);
 
     let data = layout_pipe(&set, RefNo::new(24381, 145480), "24381_145480").expect("layout");
-    let fallback = data
+    let fallback: Vec<&str> = data
         .issues
         .iter()
-        .find(|issue| issue.rule_id.as_deref() == Some("polar.true_od_fallback"))
-        .expect("PDIA − IPARA[1] < 0 falls back as in PML");
+        .filter(|issue| issue.rule_id.as_deref() == Some("polar.true_od_fallback"))
+        .map(|issue| issue.message.as_str())
+        .collect();
     assert!(
-        fallback.message.contains("24381_145487"),
-        "{}",
-        fallback.message
+        !fallback
+            .iter()
+            .any(|message| message.contains("24381_145487")),
+        "{fallback:?}"
     );
+}
+
+/// 带保温的圆柱：`PDIA` 表达式含 `IPARAM` 的，带保温求值减 `ipara[1]` 就是不带保温求值（PML `getPipeMaxdia` 的假定在
+/// 它身上成立）；不含的两样相等。24381/145018（保温 100 mm，`IPARAM 1` = 200）带保温的圆柱只有阀门 24381_145035 的
+/// 23 个 SCYL，`PDIA` 全不含 `IPARAM`（直存的数、`PARAM 8`、`ATTRIB PARA[8] * 1.2` 一类）；含 `IPARAM` 的样本在
+/// 24381/145480（保温 170 mm，`IPARAM 1` = 340）：24381_145495 的 LCYL `SUM PARAM 2 IPARAM 1` = 508、裸径 168，与
+/// 24384/26229（保温 100 mm）阀门 24384_26236 的五个 LCYL（如 320.6、裸径 120.6）。
+#[test]
+fn insulated_cylinders_lose_exactly_ipara_when_evaluated_bare() {
+    let Some(set) = set() else {
+        return;
+    };
+    let mut with_iparam = Vec::new();
+    for refno in [
+        RefNo::new(24381, 145018),
+        RefNo::new(24381, 145480),
+        RefNo::new(24384, 26229),
+    ] {
+        let query = query(&set, refno);
+        for member in query.members.iter().filter(|m| !is_implied(m)) {
+            let cylinders: Vec<&CataloguePrimitive> = member
+                .catalogue_primitives
+                .iter()
+                .filter(|primitive| is_cylinder(primitive))
+                .collect();
+            if member.ipara.is_empty() || cylinders.is_empty() {
+                continue;
+            }
+            let texts = cylinder_pdia_texts(&set, member);
+            assert_eq!(texts.len(), cylinders.len(), "{}", member.refno);
+            for ((kind, text), cylinder) in texts.iter().zip(&cylinders) {
+                let name = format!("{} {kind} PDIA {text:?}", member.refno);
+                assert_eq!(kind, &cylinder.kind, "{name}");
+                let (Some(pdia), Some(bare)) = (cylinder.pdia, cylinder.pdia_bare) else {
+                    panic!(
+                        "{name}: pdia {:?} pdia_bare {:?}",
+                        cylinder.pdia, cylinder.pdia_bare
+                    );
+                };
+                if text.as_deref().is_some_and(|text| text.contains("IPAR")) {
+                    assert!(
+                        (pdia - member.ipara[0] - bare).abs() < 1e-9,
+                        "{name}: {pdia} − {} ≠ {bare}",
+                        member.ipara[0]
+                    );
+                    with_iparam.push(member.refno.clone());
+                } else {
+                    assert_eq!(pdia, bare, "{name}");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        with_iparam,
+        [
+            "24381_145495",
+            "24384_26236",
+            "24384_26236",
+            "24384_26236",
+            "24384_26236",
+            "24384_26236"
+        ],
+        "insulated cylinders whose PDIA reads IPARAM"
+    );
+    let sample = member(&query(&set, RefNo::new(24381, 145480)), "24381_145495")
+        .catalogue_primitives
+        .iter()
+        .find(|primitive| primitive.kind == "LCYL")
+        .map(|primitive| (primitive.pdia, primitive.pdia_bare));
+    assert_eq!(sample, Some((Some(508.0), Some(168.0))));
 }
 
 /// 24384/26229（ams8000）：两只支撑腿 ATTA（MDS 目录的空心腿：SCYL 外径 60.3、名下 NLCY 内径 40.3）是穿过件，端口取
