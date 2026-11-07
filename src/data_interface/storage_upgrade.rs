@@ -171,6 +171,25 @@ pub async fn purges_geometry(dbnum: u32) -> bool {
     purges_geometry_of(last_progress().as_ref(), dbnum)
 }
 
+/// 同 [`purges_geometry`]，读的是 `db` 里的进度记录。生产 `SUL_DB` 照旧经进程内进度；别的连接
+/// （测试 / 暂存库）直读那个库的 `storage_upgrade:current`，不进进程缓存。读失败与
+/// [`ensure_loaded`] 读失败同一结论：看不到进度就当没有升级在跑。
+pub(crate) async fn purges_geometry_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+) -> bool {
+    if std::ptr::eq(db, &*aios_core::SUL_DB) {
+        return purges_geometry(dbnum).await;
+    }
+    match read_progress(db).await {
+        Ok(progress) => purges_geometry_of(progress.as_ref(), dbnum),
+        Err(error) => {
+            log::warn!("读取 {STORAGE_UPGRADE_RECORD} 失败，按没有升级在跑处理: {error:#}");
+            false
+        }
+    }
+}
+
 pub(crate) fn purges_geometry_of(progress: Option<&StorageUpgradeProgress>, dbnum: u32) -> bool {
     progress.is_some_and(|progress| {
         progress.finished_at.is_none() && progress.requested.contains(&dbnum)
@@ -195,7 +214,7 @@ pub async fn ensure_loaded() {
     if LOADED.load(Ordering::SeqCst) || progress_lock().is_some() {
         return;
     }
-    match read_progress().await {
+    match read_progress(&aios_core::SUL_DB).await {
         Ok(progress) => {
             let mut slot = progress_lock_mut();
             if slot.is_none() {
@@ -209,8 +228,10 @@ pub async fn ensure_loaded() {
     }
 }
 
-async fn read_progress() -> anyhow::Result<Option<StorageUpgradeProgress>> {
-    let mut response = aios_core::SUL_DB
+async fn read_progress(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<Option<StorageUpgradeProgress>> {
+    let mut response = db
         .query(format!("SELECT * FROM ONLY {STORAGE_UPGRADE_RECORD};"))
         .await?;
     let row: Option<StorageUpgradeProgress> = response.take(0)?;
@@ -700,6 +721,42 @@ mod tests {
             shared_wipe: None,
             scheduling: false,
         }
+    }
+
+    /// Q5：`purges_geometry_on` 读的是传进来的那个库里的升级进度，不经本进程的进度缓存。没有记录、
+    /// 不在名单里、已收尾都不清几何。
+    #[tokio::test]
+    async fn purges_geometry_on_reads_the_progress_recorded_in_that_library() {
+        async fn record(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+            progress: &StorageUpgradeProgress,
+        ) {
+            db.query(format!("UPSERT {STORAGE_UPGRADE_RECORD} CONTENT $record;"))
+                .bind(("record", serde_json::to_value(progress).unwrap()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("upgrade_on").await.unwrap();
+        assert!(
+            !purges_geometry_on(&db, 100).await,
+            "没有进度记录就没有升级在跑"
+        );
+
+        let mut upgrade = progress();
+        record(&db, &upgrade).await;
+        assert!(purges_geometry_on(&db, 100).await, "升级在跑、名单里有它");
+        assert!(
+            !purges_geometry_on(&db, 300).await,
+            "不在名单里的库不清几何"
+        );
+
+        upgrade.finished_at = Some("2026-10-28T01:00:00+08:00".to_owned());
+        record(&db, &upgrade).await;
+        assert!(!purges_geometry_on(&db, 100).await, "升级已收尾");
     }
 
     #[test]

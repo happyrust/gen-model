@@ -1409,15 +1409,18 @@ impl DbnumState {
             .collect()
     }
 
-    /// Read the raw stored row for one `dbnum`.
-    async fn read_row(dbnum: u32) -> anyhow::Result<Option<StateRow>> {
+    /// Read the raw stored row for one `dbnum` from `db`.
+    async fn read_row(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+    ) -> anyhow::Result<Option<StateRow>> {
         let sql = format!(
             "SELECT dbnum, state_revision, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
              applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
              {MODEL_WATERMARK_COLUMNS}, sesno \
              FROM {WATERMARK_TABLE}:{dbnum};"
         );
-        let mut response = SUL_DB
+        let mut response = db
             .query(sql)
             .await
             .map_err(|e| anyhow::anyhow!("读取 DBNUM 状态失败 dbnum={dbnum}: {e}"))?
@@ -1433,7 +1436,7 @@ impl DbnumState {
     async fn facts_for(dbnum: u32) -> anyhow::Result<Option<StateRow>> {
         loop {
             match mirror::acquire(dbnum) {
-                mirror::Acquire::Disabled => return Self::read_row(dbnum).await,
+                mirror::Acquire::Disabled => return Self::read_row(&SUL_DB, dbnum).await,
                 mirror::Acquire::Hit(facts) => return Ok(facts.row),
                 mirror::Acquire::Wait(mut changed) => {
                     changed
@@ -1441,7 +1444,7 @@ impl DbnumState {
                         .await
                         .map_err(|_| anyhow::anyhow!("水位镜像 singleflight 通知通道关闭"))?;
                 }
-                mirror::Acquire::Load(ticket) => match Self::read_row(dbnum).await {
+                mirror::Acquire::Load(ticket) => match Self::read_row(&SUL_DB, dbnum).await {
                     Ok(row) => {
                         let facts = mirror::Facts { row: row.clone() };
                         if mirror::publish(ticket, facts) {
@@ -1516,14 +1519,30 @@ impl DbnumState {
     /// Read the effective state for one `dbnum` (with one-time migration applied
     /// in-memory). Returns `None` only when the `dbnum` has no record at all.
     pub async fn read(dbnum: u32) -> anyhow::Result<Option<DbnumState>> {
-        let Some(row) = Self::facts_for(dbnum).await? else {
-            return Ok(None);
-        };
+        Ok(Self::facts_for(dbnum)
+            .await?
+            .map(|row| Self::state_of(dbnum, row)))
+    }
 
+    /// 同 [`Self::read`]，读的是 `db`。生产 `SUL_DB` 照旧经水位镜像；别的连接（测试 / 暂存库）
+    /// 直读那个库，不读也不回填本进程的镜像——镜像只描述 `SUL_DB`。
+    pub(crate) async fn read_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+    ) -> anyhow::Result<Option<DbnumState>> {
+        if std::ptr::eq(db, &*SUL_DB) {
+            return Self::read(dbnum).await;
+        }
+        Ok(Self::read_row(db, dbnum)
+            .await?
+            .map(|row| Self::state_of(dbnum, row)))
+    }
+
+    fn state_of(dbnum: u32, row: StateRow) -> DbnumState {
         let applied = resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)));
         let applied_sesno_time = applied_time_of(&row, applied);
         let model_sesno_time = model_time_of(&row);
-        Ok(Some(DbnumState {
+        DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
             state_revision: row.state_revision.unwrap_or_default(),
             owner_project: row.owner_project.unwrap_or_default(),
@@ -1545,7 +1564,7 @@ impl DbnumState {
             model_room_generation: row.model_room_generation,
             model_room_stray_generations: row.model_room_stray_generations.unwrap_or_default(),
             initialized: applied.is_some(),
-        }))
+        }
     }
 
     /// Authoritative applied watermark for one `dbnum` (0 when uninitialized).
@@ -1553,6 +1572,18 @@ impl DbnumState {
     /// Read-only: never writes, so it is safe to call from preview scanning.
     pub async fn applied_sesno(dbnum: u32) -> anyhow::Result<i32> {
         let row = Self::facts_for(dbnum).await?;
+        Ok(resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno))).unwrap_or(0))
+    }
+
+    /// 同 [`Self::applied_sesno`]，读的是 `db`；镜像规则同 [`Self::read_on`]。
+    pub(crate) async fn applied_sesno_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+    ) -> anyhow::Result<i32> {
+        if std::ptr::eq(db, &*SUL_DB) {
+            return Self::applied_sesno(dbnum).await;
+        }
+        let row = Self::read_row(db, dbnum).await?;
         Ok(resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno))).unwrap_or(0))
     }
 
@@ -1566,7 +1597,15 @@ impl DbnumState {
     /// 回退检不出来，`needs_initial_load` 还会判成「首次导入」——一次数据库抖动就能
     /// 让一个跑了很久的库被当成新库重新全量解析。各调用方自己决定是跳过还是失败。
     pub async fn classify_scan(obs: &FileObservation) -> anyhow::Result<ScanVerdict> {
-        let prior = Self::read(obs.dbnum).await?;
+        Self::classify_scan_on(&SUL_DB, obs).await
+    }
+
+    /// 同 [`Self::classify_scan`]，登记状态读自 `db`（镜像规则同 [`Self::read_on`]）。
+    pub(crate) async fn classify_scan_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        obs: &FileObservation,
+    ) -> anyhow::Result<ScanVerdict> {
+        let prior = Self::read_on(db, obs.dbnum).await?;
 
         // 归属校验先于其余判据：登记行归别的项目时，后面那些「回退 / 类型变更」
         // 都是拿两个项目的文件在对比，结论没有意义（实测里 acpsys 就被判成了
@@ -1636,6 +1675,15 @@ impl DbnumState {
         obs: &FileObservation,
         verdict: &ScanVerdict,
     ) -> anyhow::Result<()> {
+        Self::record_observation_on(&SUL_DB, obs, verdict).await
+    }
+
+    /// 同 [`Self::record_observation`]，落进 `db`；本进程的镜像只在 `db` 是 `SUL_DB` 时作废。
+    pub(crate) async fn record_observation_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        obs: &FileObservation,
+        verdict: &ScanVerdict,
+    ) -> anyhow::Result<()> {
         // 归属不符、或文件名换了（观察到的是另一份文件）时**一个字都不写**。阻断路径本来
         // 也只写观察值，但那三个字段（file_size / file_latest_sesno / scanned_at）恰恰就是
         // 被写脏的那几个：行还挂着 amssys 的身份，file_latest_sesno 却成了 zdjsys 的 52，
@@ -1662,9 +1710,9 @@ impl DbnumState {
         }
         let _write_guard = DBNUM_STATE_WRITE_GATE.read().await;
         if verdict.blocked() {
-            Self::record_blocked_observation(obs).await
+            Self::record_blocked_observation(db, obs).await
         } else {
-            Self::record_scan(obs).await
+            Self::record_scan(db, obs).await
         }
     }
 
@@ -1706,7 +1754,7 @@ impl DbnumState {
     /// 是故意的：生产代码里出现它，评审一眼就能看见。
     #[cfg(test)]
     pub(crate) async fn force_scan_identity_for_test(obs: &FileObservation) -> anyhow::Result<()> {
-        Self::record_scan(obs).await
+        Self::record_scan(&SUL_DB, obs).await
     }
 
     /// Persist a scan observation WITHOUT touching the applied watermark.
@@ -1720,7 +1768,10 @@ impl DbnumState {
     ///
     /// 私有：外面只能经 [`Self::record_observation`] 落库，由裁决决定走这条还是
     /// 只写观察值的那条。
-    async fn record_scan(obs: &FileObservation) -> anyhow::Result<()> {
+    async fn record_scan(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        obs: &FileObservation,
+    ) -> anyhow::Result<()> {
         let modified_expr = obs
             .file_modified_at
             .as_deref()
@@ -1743,13 +1794,12 @@ impl DbnumState {
             file_size = obs.file_size,
             file_latest_sesno = obs.file_latest_sesno,
         );
-        SUL_DB
-            .query(sql)
+        db.query(sql)
             .await
             .map_err(|e| anyhow::anyhow!("记录扫描观察失败 dbnum={}: {}", obs.dbnum, e))?
             .check()
             .map_err(|e| anyhow::anyhow!("记录扫描观察语句失败 dbnum={}: {}", obs.dbnum, e))?;
-        Self::invalidate_mirrored(obs.dbnum);
+        Self::invalidate_mirrored_on(db, obs.dbnum);
         Ok(())
     }
 
@@ -1765,7 +1815,10 @@ impl DbnumState {
     /// 与 `record_scan` 一样，永不触碰 `applied_sesno`（ADR-001）。
     ///
     /// 私有：外面只能经 [`Self::record_observation`] 落库。
-    async fn record_blocked_observation(obs: &FileObservation) -> anyhow::Result<()> {
+    async fn record_blocked_observation(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        obs: &FileObservation,
+    ) -> anyhow::Result<()> {
         let sql = format!(
             "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
              file_size = {file_size}, file_latest_sesno = {file_latest_sesno}, \
@@ -1775,13 +1828,12 @@ impl DbnumState {
             file_size = obs.file_size,
             file_latest_sesno = obs.file_latest_sesno,
         );
-        SUL_DB
-            .query(sql)
+        db.query(sql)
             .await
             .map_err(|e| anyhow::anyhow!("记录阻断观察失败 dbnum={}: {}", obs.dbnum, e))?
             .check()
             .map_err(|e| anyhow::anyhow!("记录阻断观察语句失败 dbnum={}: {}", obs.dbnum, e))?;
-        Self::invalidate_mirrored(obs.dbnum);
+        Self::invalidate_mirrored_on(db, obs.dbnum);
         Ok(())
     }
 
@@ -2039,6 +2091,85 @@ mod tests {
             super::mirror::Acquire::Load(_)
         ));
         super::mirror::disable();
+    }
+
+    /// Q5：`read_on` / `applied_sesno_on` 读的是传进来的那个库。本进程镜像里同一格挂着别的值也
+    /// 不读它，读完镜像原样——镜像只描述 `SUL_DB`。
+    #[tokio::test]
+    async fn reads_on_another_connection_use_that_library_and_leave_the_mirror_alone() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("read_on").await.unwrap();
+        db.query(
+            "CREATE dbnum_watermark:7997 SET dbnum=7997, db_type='DESI', file_name='ams7997', \
+             owner_project='AMS', state_revision=3, applied_sesno=26, model_sesno=20;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("read-on"));
+        match super::mirror::acquire(7997) {
+            super::mirror::Acquire::Load(ticket) => {
+                assert!(super::mirror::publish(ticket, mirrored_facts(77)))
+            }
+            _ => panic!("first miss must load"),
+        }
+
+        let state = DbnumState::read_on(&db, 7997)
+            .await
+            .unwrap()
+            .expect("那个库里有这一行");
+        assert_eq!(state.applied_sesno, 26, "读的是库，不是镜像里的 77");
+        assert_eq!(state.model_sesno, 20);
+        assert_eq!(state.owner_project, "AMS");
+        assert!(state.initialized);
+        assert_eq!(DbnumState::applied_sesno_on(&db, 7997).await.unwrap(), 26);
+        assert!(DbnumState::read_on(&db, 8001).await.unwrap().is_none());
+        assert_eq!(DbnumState::applied_sesno_on(&db, 8001).await.unwrap(), 0);
+
+        match super::mirror::acquire(7997) {
+            super::mirror::Acquire::Hit(facts) => assert_eq!(fact_sesno(facts), 77),
+            _ => panic!("别的连接上的读不碰本进程镜像"),
+        }
+        super::mirror::disable();
+    }
+
+    /// Q5：扫描裁决与落库都走传进来的那个库——首次观察把文件身份登记进这个库，应用水位不动
+    /// （ADR-001）。
+    #[tokio::test]
+    async fn a_first_observation_on_another_connection_registers_in_that_library() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("observe_on").await.unwrap();
+        let obs = FileObservation {
+            dbnum: 7998,
+            project: "AMS".into(),
+            db_type: "DESI".into(),
+            file_name: "ams7998".into(),
+            file_path: r"D:\ams\ams000\ams7998".into(),
+            file_size: 4096,
+            file_latest_sesno: 31,
+            file_modified_at: None,
+        };
+
+        let verdict = DbnumState::classify_scan_on(&db, &obs).await.unwrap();
+        assert!(verdict.prior.is_none(), "这个库里从未登记过");
+        assert!(verdict.anomaly.is_none(), "首次观察没有异常");
+        DbnumState::record_observation_on(&db, &obs, &verdict)
+            .await
+            .unwrap();
+
+        let state = DbnumState::read_on(&db, 7998)
+            .await
+            .unwrap()
+            .expect("观察落进了这个库");
+        assert_eq!(state.owner_project, "AMS");
+        assert_eq!(state.db_type, "DESI");
+        assert_eq!(state.file_path, r"D:\ams\ams000\ams7998");
+        assert_eq!(state.file_latest_sesno, 31);
+        assert_eq!(state.applied_sesno, 0, "观察不推进应用水位");
+        assert!(!state.initialized);
     }
 
     /// ADR-073 D2：库上只剩两枚水位，恢复阶段只有数据 → 模型 → 完成三档；房间归属随根生成，
@@ -2510,16 +2641,19 @@ mod tests {
             .expect("establish watermark");
 
         // 扫描到文件被移动且带来更新的会话：身份字段该更新，水位不该动。
-        DbnumState::record_scan(&FileObservation {
-            dbnum,
-            project: "TestProject".to_string(),
-            db_type: "DESI".to_string(),
-            file_name: "zz_t605.dbnum".to_string(),
-            file_path: r"D:\zz_t605\moved\desi_1".to_string(),
-            file_size: 4096,
-            file_latest_sesno: 60,
-            file_modified_at: None,
-        })
+        DbnumState::record_scan(
+            &SUL_DB,
+            &FileObservation {
+                dbnum,
+                project: "TestProject".to_string(),
+                db_type: "DESI".to_string(),
+                file_name: "zz_t605.dbnum".to_string(),
+                file_path: r"D:\zz_t605\moved\desi_1".to_string(),
+                file_size: 4096,
+                file_latest_sesno: 60,
+                file_modified_at: None,
+            },
+        )
         .await
         .expect("record moved-file scan");
 
@@ -2529,16 +2663,19 @@ mod tests {
             .expect("state exists");
 
         // 再扫到一个更旧的文件（回退观察）：观察值照实写，水位仍不得倒退。
-        DbnumState::record_scan(&FileObservation {
-            dbnum,
-            project: "TestProject".to_string(),
-            db_type: "DESI".to_string(),
-            file_name: "zz_t605.dbnum".to_string(),
-            file_path: r"D:\zz_t605\moved\desi_1".to_string(),
-            file_size: 2048,
-            file_latest_sesno: 10,
-            file_modified_at: None,
-        })
+        DbnumState::record_scan(
+            &SUL_DB,
+            &FileObservation {
+                dbnum,
+                project: "TestProject".to_string(),
+                db_type: "DESI".to_string(),
+                file_name: "zz_t605.dbnum".to_string(),
+                file_path: r"D:\zz_t605\moved\desi_1".to_string(),
+                file_size: 2048,
+                file_latest_sesno: 10,
+                file_modified_at: None,
+            },
+        )
         .await
         .expect("record rolled-back scan");
 
@@ -2610,16 +2747,19 @@ mod tests {
         DbnumState::advance_applied(dbnum, 50, None)
             .await
             .expect("establish watermark");
-        DbnumState::record_scan(&FileObservation {
-            dbnum,
-            project: "TestProject".to_string(),
-            db_type: "DESI".to_string(),
-            file_name: "zz_us2_0001".to_string(),
-            file_path: r"D:\zz_us2\ams000\zz_us2_0001".to_string(),
-            file_size: 4096,
-            file_latest_sesno: 60,
-            file_modified_at: None,
-        })
+        DbnumState::record_scan(
+            &SUL_DB,
+            &FileObservation {
+                dbnum,
+                project: "TestProject".to_string(),
+                db_type: "DESI".to_string(),
+                file_name: "zz_us2_0001".to_string(),
+                file_path: r"D:\zz_us2\ams000\zz_us2_0001".to_string(),
+                file_size: 4096,
+                file_latest_sesno: 60,
+                file_modified_at: None,
+            },
+        )
         .await
         .expect("record the registered identity");
 
@@ -2639,16 +2779,19 @@ mod tests {
         );
 
         // 阻断路径的落库。
-        DbnumState::record_blocked_observation(&FileObservation {
-            dbnum,
-            project: "TestProject".to_string(),
-            db_type: "CATA".to_string(),
-            file_name: "zz_us2_0001".to_string(),
-            file_path: observed_path.clone(),
-            file_size: 8192,
-            file_latest_sesno: 70,
-            file_modified_at: None,
-        })
+        DbnumState::record_blocked_observation(
+            &SUL_DB,
+            &FileObservation {
+                dbnum,
+                project: "TestProject".to_string(),
+                db_type: "CATA".to_string(),
+                file_name: "zz_us2_0001".to_string(),
+                file_path: observed_path.clone(),
+                file_size: 8192,
+                file_latest_sesno: 70,
+                file_modified_at: None,
+            },
+        )
         .await
         .expect("record blocked observation");
 

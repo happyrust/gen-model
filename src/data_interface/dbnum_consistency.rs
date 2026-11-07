@@ -211,6 +211,7 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
 pub fn task_verdict(
     row: &DbnumState,
     units: &[crate::data_interface::manual_update::ModelUnitResult],
+    data_face: DataFace,
 ) -> ConsistencyVerdict {
     use crate::data_interface::manual_update::UnitGenStatus;
     let generated = units
@@ -219,7 +220,7 @@ pub fn task_verdict(
         .count() as u32;
     let chasing = units.len() as u32 - generated;
     let census = RootCensus::new(generated, chasing, 0);
-    verdict(row, &census, crate::options::data_face())
+    verdict(row, &census, data_face)
 }
 
 impl ConsistencyVerdict {

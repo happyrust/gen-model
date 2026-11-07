@@ -1910,10 +1910,13 @@ async fn execute_frozen_batch(
     // 本任务的单元清单——任务不回问库自己刚写的东西（ADR-071 D1；`verdict_for` 的整表普查
     // 随 ADR-072 出了任务）。它只是观测：读失败不改变批次成败。
     if job.db_type.eq_ignore_ascii_case("DESI") {
-        match crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await {
+        match crate::data_interface::dbnum_state::DbnumState::read_on(env.db, job.dbnum).await {
             Ok(Some(state)) => {
-                let verdict =
-                    crate::data_interface::dbnum_consistency::task_verdict(&state, &result.units);
+                let verdict = crate::data_interface::dbnum_consistency::task_verdict(
+                    &state,
+                    &result.units,
+                    env.data_face,
+                );
                 result.model_verdict = Some(verdict.as_str().to_owned());
                 result.model_caught_up_at = verdict.caught_up_at().map(str::to_owned);
             }
