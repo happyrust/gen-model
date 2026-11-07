@@ -1782,6 +1782,7 @@ pub async fn tree_ancestors(
 }
 
 /// `/tree/ancestors` 的 `secondary_parents`：主链上每一级被哪些分组经 GPITEM 收录。
+/// `group_name` 是分组的 `NAME`（无名回 null），每条多一次记录读——这张表通常只有几条。
 ///
 /// 反查表建不出来时只记一条警告并省掉这格：「定位到树」走的是主链，不能被分组层级里的坏数据
 /// 拖垮；省掉而不是回空表，免得前端把「不知道」当成「不在任何分组里」。
@@ -1803,6 +1804,7 @@ fn tree_secondary_parents(
                 "member": member,
                 "group": RefnoEnum::from(parent.group),
                 "group_noun": parent.group_noun,
+                "group_name": service.name_of(parent.group),
                 "via": RefnoEnum::from(parent.via),
             }));
         }
