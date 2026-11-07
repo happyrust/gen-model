@@ -547,6 +547,84 @@ pub(crate) fn abandon_roots(dbnum: u32, roots: &[RefNo]) {
     ModelWriteBehind::global().abandon(dbnum, roots)
 }
 
+/// 整库清理的写后台那一关：调用方已经攥着这个库的生成锁。
+///
+/// 同一把状态锁里先看这个库有没有正在写的根（`Persisting`、投影里回执还在——读得出行，写下去就是
+/// 清理之后的补写）：有就回绝，一根不摘。没有就把这个库的条目整个摘掉，顺带摘掉各库的过期条目（回执
+/// 没了或换了一份：worker 取出来只会判过期丢弃，条目却还留在队列里，下一轮又被取出来）。摘掉的根对
+/// 等待方等同确认，与 [`abandon_roots`] 同口径；已经在等的叫醒。
+pub(crate) fn quiesce_dbnum_for_wipe(dbnum: u32) -> Result<QuiescedQueue, WriteBehindInFlight> {
+    ModelWriteBehind::global().quiesce_dbnum(dbnum)
+}
+
+/// [`quiesce_dbnum_for_wipe`] 摘掉了多少：这个库的条目、顺带摘掉的过期条目。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QuiescedQueue {
+    pub(crate) purged: usize,
+    pub(crate) stale: usize,
+}
+
+/// [`quiesce_dbnum_for_wipe`] 的回绝：写后台正在写这个库的 `roots` 根。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WriteBehindInFlight {
+    pub(crate) dbnum: u32,
+    pub(crate) roots: usize,
+}
+
+impl std::fmt::Display for WriteBehindInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dbnum {} 有写后台批次在飞（{} 根正在写）",
+            self.dbnum, self.roots
+        )
+    }
+}
+
+impl ModelWriteBehind {
+    fn quiesce_dbnum(&self, dbnum: u32) -> Result<QuiescedQueue, WriteBehindInFlight> {
+        let current = |root: RefNo| {
+            self.store
+                .receipt(ProjectionScope::Current, root)
+                .as_ref()
+                .map(RootIdentity::from)
+        };
+        let mut state = self.state();
+        let in_flight = state
+            .pending
+            .iter()
+            .filter(|((entry_dbnum, _), entry)| {
+                *entry_dbnum == dbnum
+                    && entry.status == PendingStatus::Persisting
+                    && current(entry.root).is_some()
+            })
+            .count();
+        if in_flight > 0 {
+            return Err(WriteBehindInFlight {
+                dbnum,
+                roots: in_flight,
+            });
+        }
+        let mut queued = QuiescedQueue::default();
+        state.pending.retain(|(entry_dbnum, _), entry| {
+            if *entry_dbnum == dbnum {
+                queued.purged += 1;
+                false
+            } else if current(entry.root).as_ref() != Some(&entry.identity) {
+                queued.stale += 1;
+                false
+            } else {
+                true
+            }
+        });
+        drop(state);
+        if queued != QuiescedQueue::default() {
+            self.durable.notify_waiters();
+        }
+        Ok(queued)
+    }
+}
+
 impl ModelWriteBehind {
     async fn await_roots(
         &self,
@@ -2187,5 +2265,236 @@ mod tests {
         );
         assert!(!outcome.all_acked());
         controller.stop_now();
+    }
+
+    /// 记下每一次落盘调用写的是哪个库、哪几根；结果按脚本逐次给。
+    struct RecordingPersistence {
+        outcomes: Mutex<VecDeque<DurableBatchResult>>,
+        calls: Mutex<Vec<(u32, Vec<RefNo>)>>,
+    }
+
+    impl RecordingPersistence {
+        fn new(outcomes: Vec<DurableBatchResult>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls_on(&self, dbnum: u32) -> usize {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(called, _)| *called == dbnum)
+                .count()
+        }
+    }
+
+    impl PersistencePort for RecordingPersistence {
+        fn persist<'a>(
+            &'a self,
+            _store: &'static ModelMemoryStore,
+            dbnum: u32,
+            roots: Vec<RefNo>,
+        ) -> PortFuture<'a, DurableBatchResult> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((dbnum, roots));
+                self.outcomes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap_or_default()
+            })
+        }
+    }
+
+    /// 写后台正有一批在写这个库：整库清理在写后台这一关回 busy，条目一根不摘；这批写完确认之后再清
+    /// 就放行。别的库不受这一批牵连。
+    #[tokio::test(start_paused = true)]
+    async fn a_wipe_is_refused_while_a_batch_of_the_dbnum_is_being_written() {
+        let root = RefNo::new(7985, 1);
+        let adapter = Arc::new(BlockingFirstPersistence {
+            outcomes: Mutex::new(vec![acked(root, "in-flight")].into()),
+            calls: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(root, "in-flight")])
+            .unwrap();
+        wait_until(|| adapter.calls.load(Ordering::SeqCst) == 1).await;
+
+        assert_eq!(
+            controller.quiesce_dbnum(7985),
+            Err(WriteBehindInFlight {
+                dbnum: 7985,
+                roots: 1
+            })
+        );
+        assert_eq!(
+            snapshot_for(controller).in_flight_roots,
+            1,
+            "回 busy 时一根不摘"
+        );
+        assert_eq!(controller.quiesce_dbnum(7984), Ok(QuiescedQueue::default()));
+
+        adapter.release.notify_one();
+        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
+        assert!(!store.root_needs_persist(root));
+        assert_eq!(controller.quiesce_dbnum(7985), Ok(QuiescedQueue::default()));
+        controller.stop_now();
+    }
+
+    /// 整库清理摘掉的排队根，清理之后 worker 再也不碰：重试时间过了也不写。别的库的重试照常，说明
+    /// worker 一直活着、没写只是因为根已经不在队列里。
+    #[tokio::test(start_paused = true)]
+    async fn roots_purged_by_a_wipe_are_never_written_afterwards() {
+        let wiped = RefNo::new(7983, 1);
+        let other = RefNo::new(7982, 1);
+        let adapter = Arc::new(RecordingPersistence::new(vec![
+            failed(wiped, PersistFailureKind::Retryable, "database busy"),
+            failed(other, PersistFailureKind::Retryable, "database busy"),
+            acked(other, "other"),
+        ]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(wiped, "wiped")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).retrying_roots == 1).await;
+        controller
+            .publish_commits(vec![commit(other, "other")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).retrying_roots == 2).await;
+
+        assert_eq!(
+            controller.quiesce_dbnum(7983),
+            Ok(QuiescedQueue {
+                purged: 1,
+                stale: 0
+            })
+        );
+        tokio::time::sleep(Duration::from_secs(120)).await;
+
+        assert_eq!(snapshot_for(controller).pending_unique_roots, 0);
+        assert_eq!(adapter.calls_on(7983), 1, "清理之后不补写");
+        assert_eq!(adapter.calls_on(7982), 2, "别的库照常重试");
+        assert!(!store.root_needs_persist(other));
+        controller.stop_now();
+    }
+
+    /// 摘队列顺带摘过期条目：回执已经退役（按需删除删掉的根）或换了一份的条目，worker 取出来只会判过期
+    /// 丢弃，留在队列里就被一轮轮取出来。回执没了的根写不出行，停在 `Persisting` 也不算在飞，不让它的
+    /// 库回 busy。
+    #[test]
+    fn the_wipe_also_purges_stale_entries_of_every_dbnum() {
+        let wiped = RefNo::new(7981, 1);
+        let zombie = RefNo::new(7981, 2);
+        let retired = RefNo::new(7980, 1);
+        let replaced = RefNo::new(7980, 2);
+        let live = RefNo::new(7980, 3);
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(
+            store,
+            Arc::new(ScriptedPersistence::new(Vec::new())),
+        )));
+        store.try_commit_current(vec![
+            commit(wiped, "wiped"),
+            commit(replaced, "new"),
+            commit(live, "live"),
+        ]);
+        let now = Instant::now();
+        {
+            let mut state = controller.state();
+            for (root, manifest) in [
+                (wiped, "wiped"),
+                (zombie, "zombie"),
+                (retired, "retired"),
+                (replaced, "old"),
+                (live, "live"),
+            ] {
+                let identity = RootIdentity::from(&receipt(manifest));
+                upsert_pending(&mut state, root.dbno(), root, identity, now, None);
+            }
+            for entry in state.pending.values_mut() {
+                if entry.root == zombie || entry.root == retired {
+                    entry.status = PendingStatus::Persisting;
+                }
+            }
+        }
+
+        assert_eq!(
+            controller.quiesce_dbnum(7981),
+            Ok(QuiescedQueue {
+                purged: 2,
+                stale: 2
+            })
+        );
+        let left = controller
+            .state()
+            .pending
+            .values()
+            .map(|entry| entry.root)
+            .collect::<Vec<_>>();
+        assert_eq!(left, vec![live]);
+    }
+
+    /// 两种整库清理都真的过写后台这一关：全局写后台里这个库有一根正在写（回执还在），模型面清理与
+    /// 升级清库都回 busy，条目原样留着。库号没有别的用例碰；条目的重试时间放到一小时后，别的用例拉起的
+    /// 全局 worker 取不到它。
+    #[tokio::test]
+    async fn both_whole_dbnum_wipes_are_refused_while_the_write_behind_writes_the_dbnum() {
+        let dbnum = 6912;
+        let root = RefNo::new(dbnum, 1);
+        let key = (dbnum, packed_refno(root));
+        let controller = ModelWriteBehind::global();
+        controller
+            .store
+            .try_commit_current(vec![commit(root, "in-flight")]);
+        {
+            let mut state = controller.state();
+            let identity = RootIdentity::from(&receipt("in-flight"));
+            let later = Instant::now() + Duration::from_secs(3600);
+            upsert_pending(&mut state, dbnum, root, identity, later, None);
+            state.pending.get_mut(&key).expect("registered").status = PendingStatus::Persisting;
+        }
+
+        let model_face = crate::data_interface::fast_delete::wipe_dbnum_model_face(
+            dbnum,
+            crate::data_interface::mesh_purge::ClearGeometry::Keep,
+        )
+        .await
+        .expect_err("the write-behind is writing the dbnum");
+        assert_eq!(
+            model_face
+                .downcast_ref::<crate::data_interface::fast_delete::ModelFaceGenerationBusy>()
+                .map(|busy| (busy.dbnum, busy.holder)),
+            Some((dbnum, "写后台批次")),
+            "{model_face:#}"
+        );
+        let upgrade = crate::data_interface::fast_delete::wipe_dbnum_for_upgrade(dbnum)
+            .await
+            .expect_err("the write-behind is writing the dbnum");
+        assert!(
+            upgrade.to_string().contains("有写后台批次在飞"),
+            "{upgrade:#}"
+        );
+        assert!(
+            controller.state().pending.contains_key(&key),
+            "回 busy 时条目原样留着"
+        );
+
+        controller.state().pending.remove(&key);
+        controller
+            .store
+            .retire_deleted_root(ProjectionScope::Current, root);
     }
 }

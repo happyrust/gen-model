@@ -839,6 +839,17 @@ pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnu
         Ok(guard) => guard,
         Err(_) => bail!("dbnum {dbnum} 有生成在飞，升级清库拒绝、一行不删"),
     };
+    // 任务在飞锁不试：升级清库只在任务自己的重建阶段里跑，那把锁就在调用方手里。
+    let queued = match crate::fast_model::model_write_behind::quiesce_dbnum_for_wipe(dbnum) {
+        Ok(queued) => queued,
+        Err(busy) => bail!("{busy}，升级清库拒绝、一行不删"),
+    };
+    if queued.purged + queued.stale > 0 {
+        println!(
+            "[upgrade-wipe] dbnum={dbnum} 摘掉写后台排队 {} 根（顺带摘掉过期条目 {} 根）",
+            queued.purged, queued.stale
+        );
+    }
     super::pe_batch::require_no_event_on(&SUL_DB).await?;
     let started = Instant::now();
     let commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
@@ -1089,18 +1100,21 @@ async fn delete_aabb_mesh_rows(
     Ok(())
 }
 
-/// 整库生成锁拿不到：有按需 / 整库生成在飞。一行都不删。
+/// 整库模型清理拿不到这个库：有按需 / 整库生成在飞（生成锁）、有任务在飞（写入标记到收尾之间），
+/// 或写后台正在写这个库的一批根。一行都不删。
 #[derive(Debug)]
 pub struct ModelFaceGenerationBusy {
     pub dbnum: u32,
+    /// 占着这个库的是谁：「生成」「任务」「写后台批次」。
+    pub holder: &'static str,
 }
 
 impl std::fmt::Display for ModelFaceGenerationBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "dbnum {} 有生成在飞，整库模型清理拒绝、一行不删",
-            self.dbnum
+            "dbnum {} 有{}在飞，整库模型清理拒绝、一行不删",
+            self.dbnum, self.holder
         )
     }
 }
@@ -1134,8 +1148,19 @@ pub async fn wipe_dbnum_model_face(
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
+    let busy = |holder| ModelFaceGenerationBusy { dbnum, holder };
     let _generation = crate::fast_model::e3d_model_service::try_lock_db_generation(dbnum)
-        .map_err(|_| ModelFaceGenerationBusy { dbnum })?;
+        .map_err(|_| busy("生成"))?;
+    let _task = crate::data_interface::batch_worker::try_lock_dbnum_task(dbnum)
+        .map_err(|_| busy("任务"))?;
+    let queued = crate::fast_model::model_write_behind::quiesce_dbnum_for_wipe(dbnum)
+        .map_err(|_| busy("写后台批次"))?;
+    if queued.purged + queued.stale > 0 {
+        println!(
+            "[model-face-wipe] dbnum={dbnum} 摘掉写后台排队 {} 根（顺带摘掉过期条目 {} 根）",
+            queued.purged, queued.stale
+        );
+    }
     let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
         .await;

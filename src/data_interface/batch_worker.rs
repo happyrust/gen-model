@@ -246,6 +246,33 @@ fn stage_label(stage: &str) -> &str {
 /// 收敛必须改在这把锁下一次一个。
 pub(crate) static DATA_COMMIT_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// 按库的「任务在飞」锁：`execute_frozen_batch` 从写入标记到收尾一直攥着它。
+///
+/// 生成锁只在单次发布调用里持有，任务两次发布之间（等 durable、算房间、收尾那一笔）是空的；整库模型
+/// 清理（`fast_delete::wipe_dbnum_model_face`）再试这一把，拿不到就回 busy，不切进任务中间。按需删除
+/// 不碰它，仍只按单次发布调用排队；升级清库只在任务自己的重建阶段里跑（锁在调用方手里），也不碰它。
+static DBNUM_TASK_LOCKS: std::sync::OnceLock<dashmap::DashMap<u32, Arc<tokio::sync::Mutex<()>>>> =
+    std::sync::OnceLock::new();
+
+fn dbnum_task_lock(dbnum: u32) -> Arc<tokio::sync::Mutex<()>> {
+    DBNUM_TASK_LOCKS
+        .get_or_init(dashmap::DashMap::new)
+        .entry(dbnum)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+pub(crate) async fn lock_dbnum_task(dbnum: u32) -> tokio::sync::OwnedMutexGuard<()> {
+    dbnum_task_lock(dbnum).lock_owned().await
+}
+
+/// 拿不到就立刻返回，不等。整库模型清理用它：有任务在飞就 409，一行不删。
+pub(crate) fn try_lock_dbnum_task(
+    dbnum: u32,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError> {
+    dbnum_task_lock(dbnum).try_lock_owned()
+}
+
 /// 配置的会话预算（`AIOS_INCREMENT_WINDOW_MAX_SESSIONS`，缺省 / 0 = 整段一次应用）。
 ///
 /// 旧名 `AIOS_STAGING_WINDOW_MAX_SESSIONS` 随 kv-mem 暂存退役（ADR-056）改名；部署里
@@ -1553,6 +1580,8 @@ async fn execute_frozen_batch(
     // 一律改成 Reinitialize，并由普通整库重建路径在破坏性边界清库。这里覆盖成本次标记，
     // 随后的任何写入仍受 W1 保护。
     let (write_intent, write_start_sesno) = write_marker_window(job);
+    // 持到函数返回：写入标记、执行体、durable 栅栏、收尾那一笔都要在它里面。
+    let _task_in_flight = lock_dbnum_task(job.dbnum).await;
     registry.set_stage(&job.task_id, "write_marker");
     if let Err(error) = crate::data_interface::write_state::mark_writing(
         job.dbnum,
@@ -8159,5 +8188,20 @@ mod tests {
             "累计数是给人看的账，不能被复活抹掉"
         );
         assert_eq!(ledger.last_at.as_deref(), Some("t"));
+    }
+
+    /// 任务在飞锁的接线：`execute_frozen_batch` 在写入标记之前拿锁、持到函数返回。清理撞上它回 busy 的
+    /// 行为由 `projection_removal_contract` 钉着；整条任务这里跑不起来，只钉「任务确实拿了这把锁、在写库之前」。
+    #[test]
+    fn the_task_takes_its_in_flight_lock_before_the_write_marker() {
+        let source = include_str!("batch_worker.rs");
+        let (_, task) = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch");
+        let lock = task
+            .find("let _task_in_flight = lock_dbnum_task(job.dbnum).await;")
+            .expect("任务在飞锁");
+        let marker = task.find("write_state::mark_writing(").expect("写入标记");
+        assert!(lock < marker, "任务在飞锁要在写入标记之前拿");
     }
 }

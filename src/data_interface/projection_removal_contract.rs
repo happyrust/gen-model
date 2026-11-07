@@ -10,13 +10,14 @@ use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
 use glam::DMat4;
 
+use super::batch_worker::lock_dbnum_task;
 use super::fast_delete::{ModelFaceGenerationBusy, wipe_dbnum_for_upgrade, wipe_dbnum_model_face};
 use super::manual_update::generation_root_lock;
 use super::mesh_purge::ClearGeometry;
 use super::on_demand_model::ModelGenerationInProgress;
 use super::projection_removal::{RemovalReport, RemovalRequest, TombstoneSink, remove_subtree};
 use crate::fast_model::e3d_mesh_store::geometry_record_id;
-use crate::fast_model::e3d_model_service::lock_db_generation;
+use crate::fast_model::e3d_model_service::{lock_db_generation, try_lock_db_generation};
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionCommit, ProjectionScope,
     RootReceipt, packed_refno,
@@ -269,6 +270,65 @@ async fn an_upgrade_wipe_is_refused_while_the_dbnum_is_generating() {
         .await
         .expect_err("a generation holds the dbnum");
     assert!(error.to_string().contains("有生成在飞"), "{error:#}");
+}
+
+/// 任务从写入标记到收尾攥着任务在飞锁，两次发布之间生成锁是空的：整库模型清理照样回 busy、收键删行
+/// 都没走到；回绝之后生成锁也放开了，不卡后面的生成。dbnum 取一个没有别的用例会碰的库。
+#[tokio::test]
+async fn a_model_face_wipe_is_refused_while_a_task_holds_the_dbnum() {
+    let dbnum = 6915;
+    let _task = lock_dbnum_task(dbnum).await;
+    let error = wipe_dbnum_model_face(dbnum, ClearGeometry::Keep)
+        .await
+        .expect_err("a task holds the dbnum");
+    assert_eq!(
+        error
+            .downcast_ref::<ModelFaceGenerationBusy>()
+            .map(|busy| (busy.dbnum, busy.holder)),
+        Some((dbnum, "任务")),
+        "{error:#}"
+    );
+    assert!(
+        try_lock_db_generation(dbnum).is_ok(),
+        "回绝之后生成锁要放开"
+    );
+}
+
+/// 按需删除只按单次发布调用排队（生成锁），不等整个任务：任务在飞锁被占着时照常删完；生成锁被占着
+/// 时照旧等它放开再删。整库清理多了任务锁，按需删除的等待不能跟着变长。
+#[tokio::test]
+async fn an_on_demand_removal_waits_for_the_generation_lock_but_not_for_a_task() {
+    let root = RefNo::new(6914, 300);
+    let sources = [RefNo::new(6914, 301)];
+    let store = ModelMemoryStore::global();
+    let scope = ProjectionScope::Current;
+    let _cleanup = RetireOnDrop(vec![root]);
+    let _task = lock_dbnum_task(root.dbno()).await;
+
+    commit_root(store, root, &sources);
+    tokio::time::timeout(Duration::from_secs(5), remove_subtree(whole_roots(&[root])))
+        .await
+        .expect("a task in flight does not hold the removal up")
+        .expect("removal");
+    assert!(store.receipt(scope, root).is_none());
+
+    commit_root(store, root, &sources);
+    let generation = lock_db_generation(root.dbno()).await;
+    let removal = remove_subtree(whole_roots(&[root]));
+    tokio::pin!(removal);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut removal)
+            .await
+            .is_err(),
+        "a publish call holding the generation lock still holds the removal up"
+    );
+    assert!(store.receipt(scope, root).is_some());
+    drop(generation);
+    tokio::time::timeout(Duration::from_secs(5), removal)
+        .await
+        .expect("the removal goes ahead once the generation lock is free")
+        .expect("removal");
+    assert!(store.receipt(scope, root).is_none());
 }
 
 /// 覆盖范围的根正在后台生成（根锁被占），删除入口立刻回「正在生成」、一行不删：删根里的一件、锁它头上的根
