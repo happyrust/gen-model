@@ -188,6 +188,10 @@ struct RvmCheckArgs {
     /// false = 结果只入库（rvm_check_run / rvm_check_mismatch），盘上留 judgement.json。
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     emit_compare: bool,
+    /// 生成子进程的 rayon 线程数：0 = 逻辑核数（不设上限）。
+    /// 批量层原样传给每个子进程，由子进程建全局池时使用。
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    threads: usize,
     /// 内部用：子进程模式，只生成 --only 指定的根。
     #[arg(long, hide = true)]
     child: bool,
@@ -243,14 +247,24 @@ struct TraceArgs {
 fn main() -> anyhow::Result<()> {
     aios_database::process_diagnostics::install_panic_hook();
     aios_database::process_diagnostics::install_crash_handlers();
-    // 全局 rayon 池（`room_model` / `db_model` 的 `par_iter`）与几何私有池同样给 64MB 栈（GitHub #78）：
-    // 默认 2MB，而发布包不像仓内脚本那样设 `RUST_MIN_STACK`。必须在第一次 `par_iter` 之前建。
-    let _ = rayon::ThreadPoolBuilder::new()
-        .stack_size(RUNTIME_STACK_SIZE)
-        .build_global();
     use clap::Parser;
 
     let cli = Cli::parse();
+    // 全局 rayon 池（`room_model` / `db_model` 的 `par_iter`）与几何私有池同样给 64MB 栈（GitHub #78）：
+    // 默认 2MB，而发布包不像仓内脚本那样设 `RUST_MIN_STACK`。必须在第一次 `par_iter` 之前建。
+    //
+    // 建池挪到 `Cli::parse()` 之后：`--threads` 要能决定池大小，而全局池只能建一次
+    // （`build_global` 重复调用返回 Err，下面照旧用 `let _ =` 吞掉）。只有 `rvm-check`
+    // 有这个旋钮，其它子命令按 0 走默认线程数。
+    let threads = match &cli.command {
+        Some(Command::RvmCheck(args)) => args.threads,
+        _ => 0,
+    };
+    let mut pool = rayon::ThreadPoolBuilder::new().stack_size(RUNTIME_STACK_SIZE);
+    if threads > 0 {
+        pool = pool.num_threads(threads);
+    }
+    let _ = pool.build_global();
     let serve = match cli.command {
         Some(Command::Version(args)) => return print_version(&args),
         Some(Command::Trace(args)) => return fetch_trace(&args),
@@ -336,6 +350,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             compare_window_mb: args.compare_window_mb,
             element_cache: args.element_cache,
             emit_compare: args.emit_compare,
+            threads: args.threads,
         });
     }
 
@@ -360,6 +375,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         compare_window_mb: args.compare_window_mb,
         element_cache: args.element_cache,
         emit_compare: args.emit_compare,
+        threads: args.threads,
         store: !args.no_store,
     })?;
     if !outcome.clean {

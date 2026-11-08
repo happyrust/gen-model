@@ -96,6 +96,8 @@ pub struct BatchOptions {
     /// fused 模式是否落 `compare.json` 全量报告（大件上百 MB）。
     /// false = 结果只入库，盘上留 judgement.json 做进程间运输。
     pub emit_compare: bool,
+    /// 生成子进程的 rayon 线程数，0 = 不设上限。
+    pub threads: usize,
 }
 
 /// `--child`：只为给定的根做生成，产物落在与父进程同一套目录里，别的什么都不写。
@@ -114,6 +116,8 @@ pub struct ChildOptions {
     pub element_cache: usize,
     /// 是否落 `compare.json` 全量报告（false = 结果只入库）。
     pub emit_compare: bool,
+    /// 生成子进程的 rayon 线程数，0 = 不设上限。
+    pub threads: usize,
 }
 
 pub struct BatchOutcome {
@@ -1347,12 +1351,18 @@ fn generate_in_child(
         .arg("--element-cache")
         .arg(opts.element_cache.to_string())
         .arg("--emit-compare")
-        .arg(opts.emit_compare.to_string());
+        .arg(opts.emit_compare.to_string())
+        .arg("--threads")
+        .arg(opts.threads.to_string());
     command
         .env("RUST_BACKTRACE", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::from(stderr));
+    // 双保险：子进程里若有池在 `build_global` 之前就读环境，也能按同一线程数起来。
+    if opts.threads > 0 {
+        command.env("RAYON_NUM_THREADS", opts.threads.to_string());
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return StageRecord::new(1, started, format!("起子进程失败：{error}")),
@@ -1816,6 +1826,7 @@ mod tests {
             compare_window_mb: 0,
             element_cache: 0,
             emit_compare: false,
+            threads: 0,
         };
         let spec = RunSpec {
             install_dir: PathBuf::new(),
