@@ -249,25 +249,31 @@ fn noun_of(store: &dyn TreeStore, refno: RefU64) -> anyhow::Result<String> {
         .to_ascii_uppercase())
 }
 
+/// 内存里的树（[`TreeStore`] 的测试替身）：每个元素只有 TYPE、成员和（GPITEM 才有的）GPREF。
+/// 本模块的单测与 `web_service::handlers` 的分组契约快照共用。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use aios_core::{NamedAttrMap, NamedAttrValue};
+pub(crate) mod fake_store {
+    use std::collections::{HashMap, HashSet};
 
-    /// 内存里的树：每个元素只有 TYPE、成员和（GPITEM 才有的）GPREF。
+    use aios_core::{NamedAttrMap, NamedAttrValue, RefU64};
+
+    use super::GROUP_ITEM_NOUN;
+    use crate::data_interface::direct_store::DirectStoreError;
+    use crate::data_interface::direct_tree::TreeStore;
+
     #[derive(Default)]
-    struct FakeStore {
+    pub(crate) struct FakeStore {
         elements: HashMap<RefU64, (&'static str, Vec<RefU64>, Option<RefU64>)>,
         /// 这些高位字的库不在 MDB，指过去回 `DbNotInMdb`；其余缺失回 `NoSuchElement`。
-        foreign: HashSet<u32>,
+        pub(crate) foreign: HashSet<u32>,
     }
 
     impl FakeStore {
-        fn add(&mut self, refno: RefU64, noun: &'static str, members: &[RefU64]) {
+        pub(crate) fn add(&mut self, refno: RefU64, noun: &'static str, members: &[RefU64]) {
             self.elements.insert(refno, (noun, members.to_vec(), None));
         }
 
-        fn item(&mut self, refno: RefU64, gpref: Option<RefU64>) {
+        pub(crate) fn item(&mut self, refno: RefU64, gpref: Option<RefU64>) {
             self.elements
                 .insert(refno, (GROUP_ITEM_NOUN, Vec::new(), gpref));
         }
@@ -315,6 +321,12 @@ mod tests {
                 .ok_or_else(|| self.missing(refno))
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake_store::FakeStore;
+    use super::*;
 
     fn r(high: u32, low: u32) -> RefU64 {
         RefU64::from_two_nums(high, low)

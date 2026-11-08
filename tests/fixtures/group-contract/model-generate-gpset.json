@@ -1,0 +1,50 @@
+{
+  "requested_refno": "2/11",
+  "generation_root": "2/11",
+  "generation_root_noun": "GPSET",
+  "status": "Generated",
+  "model_available": true,
+  "model_instance_count": 14,
+  "generated_instance_count": 14,
+  "generation_root_count": 2,
+  "generation_roots": [
+    "1/4",
+    "3/5"
+  ],
+  "cached_root_count": 1,
+  "generated_root_count": 1,
+  "failed_root_count": 0,
+  "failed_roots": [],
+  "dbnum": null,
+  "model_source": null,
+  "model_source_reason": null,
+  "durable": false,
+  "scope_kind": "group",
+  "scope_refnos": [
+    "1/4",
+    "3/5",
+    "1/6"
+  ],
+  "unresolved_count": 3,
+  "routes": [
+    {
+      "dbnum": 7001,
+      "model_source": "database",
+      "model_source_reason": null,
+      "durable": true,
+      "generation_roots": [
+        "1/4"
+      ]
+    },
+    {
+      "dbnum": 7003,
+      "model_source": "memory",
+      "model_source_reason": "model_lagging",
+      "durable": false,
+      "generation_roots": [
+        "3/5"
+      ]
+    }
+  ],
+  "publication_status": "ready"
+}

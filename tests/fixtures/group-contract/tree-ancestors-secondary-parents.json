@@ -1,0 +1,26 @@
+{
+  "source": "direct",
+  "refnos": [
+    "1_6",
+    "1_4",
+    "1_3",
+    "1_2",
+    "1_1"
+  ],
+  "secondary_parents": [
+    {
+      "member": "1_6",
+      "group": "2_11",
+      "group_noun": "GPSET",
+      "group_name": "/GROUP-PUMPS",
+      "via": "2_14"
+    },
+    {
+      "member": "1_4",
+      "group": "2_11",
+      "group_noun": "GPSET",
+      "group_name": "/GROUP-PUMPS",
+      "via": "2_12"
+    }
+  ]
+}

@@ -1505,15 +1505,7 @@ fn tree_nodes_with_dbnum(
 ) -> Result<Vec<Value>, ApiError> {
     nodes
         .into_iter()
-        .map(|node| {
-            let dbnum = service.dbnum_of(node.refno.refno());
-            let mut value =
-                serde_json::to_value(&node).map_err(|error| ApiError::from_domain(error.into()))?;
-            if let Some(object) = value.as_object_mut() {
-                object.insert("dbnum".into(), json!(dbnum));
-            }
-            Ok(value)
-        })
+        .map(|node| tree_node_value(&node, service.dbnum_of(node.refno.refno())))
         .collect()
 }
 
@@ -1596,10 +1588,21 @@ async fn tree_children_resolved(
             ApiError::from_domain(anyhow::anyhow!("tree children 任务异常结束: {error}"))
         })?
         .map_err(ApiError::from_domain)?;
-    let mut nodes = tree_nodes_with_dbnum(
-        &service,
-        layer.nodes.iter().map(|row| row.node.clone()).collect(),
-    )?;
+    resolved_children_body(parent, &layer, |refno| service.dbnum_of(refno)).map(Json)
+}
+
+/// [`tree_children_resolved`] 的回执本体。与取数分开，分组契约的响应快照（`tests/fixtures/group-contract/`）
+/// 才能直接喂内存里的一层。
+fn resolved_children_body(
+    parent: RefU64,
+    layer: &crate::data_interface::direct_tree::ResolvedChildren,
+    dbnum_of: impl Fn(RefU64) -> Option<u32>,
+) -> Result<Value, ApiError> {
+    let mut nodes = layer
+        .nodes
+        .iter()
+        .map(|row| tree_node_value(&row.node, dbnum_of(row.node.refno.refno())))
+        .collect::<Result<Vec<_>, _>>()?;
     for (value, row) in nodes.iter_mut().zip(&layer.nodes) {
         if let (Some(via), Some(object)) = (row.via, value.as_object_mut()) {
             object.insert("via".into(), json!(RefnoEnum::from(via)));
@@ -1626,7 +1629,20 @@ async fn tree_children_resolved(
             })
             .collect();
     }
-    Ok(Json(body))
+    Ok(body)
+}
+
+/// 树行的线上形状：`EleTreeNode` 原样序列化，再补只有服务端答得出的库号（见 [`tree_nodes_with_dbnum`]）。
+fn tree_node_value(
+    node: &aios_core::pdms_types::EleTreeNode,
+    dbnum: Option<u32>,
+) -> Result<Value, ApiError> {
+    let mut value =
+        serde_json::to_value(node).map_err(|error| ApiError::from_domain(error.into()))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("dbnum".into(), json!(dbnum));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1763,7 +1779,11 @@ pub async fn tree_ancestors(
         .map_err(ApiError::from_domain)?;
     let (refnos, secondary_parents) = tokio::task::spawn_blocking(move || {
         let refnos = service.ancestors(start)?;
-        let secondary_parents = tree_secondary_parents(&service, &refnos);
+        let secondary_parents = tree_secondary_parents(
+            &refnos,
+            |refno| service.secondary_parents(refno),
+            |group| service.name_of(group),
+        );
         Ok::<_, anyhow::Error>((refnos, secondary_parents))
     })
     .await
@@ -1771,6 +1791,11 @@ pub async fn tree_ancestors(
         ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}"))
     })?
     .map_err(ApiError::from_domain)?;
+    Ok(Json(tree_ancestors_body(refnos, secondary_parents)))
+}
+
+/// [`tree_ancestors`] 的回执本体；`secondary_parents` 为 `None` 时省掉这一格（见 [`tree_secondary_parents`]）。
+fn tree_ancestors_body(refnos: Vec<RefnoEnum>, secondary_parents: Option<Vec<Value>>) -> Value {
     let mut body = json!({
         "source": "direct",
         "refnos": refnos,
@@ -1778,7 +1803,7 @@ pub async fn tree_ancestors(
     if let Some(secondary_parents) = secondary_parents {
         body["secondary_parents"] = Value::Array(secondary_parents);
     }
-    Ok(Json(body))
+    body
 }
 
 /// `/tree/ancestors` 的 `secondary_parents`：主链上每一级被哪些分组经 GPITEM 收录。
@@ -1786,13 +1811,21 @@ pub async fn tree_ancestors(
 ///
 /// 反查表建不出来时只记一条警告并省掉这格：「定位到树」走的是主链，不能被分组层级里的坏数据
 /// 拖垮；省掉而不是回空表，免得前端把「不知道」当成「不在任何分组里」。
-fn tree_secondary_parents(
-    service: &crate::data_interface::direct_tree::DirectTreeService,
+///
+/// 反查与取名由调用方给：线上是 `DirectTreeService::secondary_parents` / `name_of`，分组契约的响应快照
+/// 喂内存里的 `GroupIndex`。
+fn tree_secondary_parents<P, N>(
     chain: &[RefnoEnum],
-) -> Option<Vec<Value>> {
+    parents_of: P,
+    name_of: N,
+) -> Option<Vec<Value>>
+where
+    P: Fn(RefU64) -> anyhow::Result<Vec<crate::data_interface::group_membership::SecondaryParent>>,
+    N: Fn(RefU64) -> Option<String>,
+{
     let mut out = Vec::new();
     for member in chain {
-        let parents = match service.secondary_parents(member.refno()) {
+        let parents = match parents_of(member.refno()) {
             Ok(parents) => parents,
             Err(error) => {
                 log::warn!("tree ancestors: 分组反查表不可用，省略 secondary_parents: {error:#}");
@@ -1804,7 +1837,7 @@ fn tree_secondary_parents(
                 "member": member,
                 "group": RefnoEnum::from(parent.group),
                 "group_noun": parent.group_noun,
-                "group_name": service.name_of(parent.group),
+                "group_name": name_of(parent.group),
                 "via": RefnoEnum::from(parent.via),
             }));
         }
@@ -4054,11 +4087,8 @@ async fn generate_group_scope(
     state: &AppState,
     refno: RefnoEnum,
 ) -> Result<serde_json::Value, ApiError> {
-    use crate::data_interface::direct_tree::GroupGenerationScope;
     use crate::data_interface::generation_root::GenerationRoot;
-    use crate::data_interface::on_demand_model::{
-        OnDemandModelResult, OnDemandModelStatus, ScopeRootFailure, root_failure_is_retryable,
-    };
+    use crate::data_interface::on_demand_model::{ScopeRootFailure, root_failure_is_retryable};
 
     let requested = refno.to_pdms_str();
     let tree = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
@@ -4090,11 +4120,6 @@ async fn generate_group_scope(
             ApiError::from_domain(anyhow::anyhow!("group generation-scope task failed: {error}"))
         })?
         .map_err(ApiError::from_domain)?;
-    let GroupGenerationScope {
-        members,
-        roots,
-        unresolved,
-    } = scope;
     let mut failed_roots: Vec<ScopeRootFailure> = unrouted
         .into_iter()
         .map(|generation_root| ScopeRootFailure {
@@ -4192,16 +4217,7 @@ async fn generate_group_scope(
                 first_error.get_or_insert(error);
             }
         }
-        routes.push(json!({
-            "dbnum": route.dbnum,
-            "model_source": route.source.as_str(),
-            "model_source_reason": route.reason.map(|reason| reason.as_str()),
-            "durable": route.is_database(),
-            "generation_roots": batch_roots
-                .iter()
-                .map(|root| root.root.to_pdms_str())
-                .collect::<Vec<_>>(),
-        }));
+        routes.push(group_route_entry(route, batch_roots));
     }
     if !succeeded && !failed_roots.is_empty() {
         return Err(match first_error {
@@ -4212,35 +4228,103 @@ async fn generate_group_scope(
         });
     }
 
-    let model_available = model_instance_count > 0;
+    let mut payload = group_generate_receipt(
+        &requested,
+        noun,
+        &scope,
+        GroupGenerateTally {
+            model_instance_count,
+            generated_instance_count,
+            cached_root_count,
+            generated_root_count,
+            failed_roots,
+        },
+        &routed,
+        routes,
+    )?;
+    if crate::options::data_face().is_read_through() {
+        payload["snapshot_epoch"] = json!(
+            crate::data_interface::mdb_memory_store::get(
+                &state.identity.project,
+                &state.identity.mdb,
+            )
+            .map(|snapshot| snapshot.epoch())
+            .unwrap_or_default()
+        );
+    }
+    Ok(payload)
+}
+
+/// 分组 generate 逐批累计出来的数，[`group_generate_receipt`] 的输入。
+struct GroupGenerateTally {
+    model_instance_count: usize,
+    generated_instance_count: usize,
+    cached_root_count: usize,
+    generated_root_count: usize,
+    failed_roots: Vec<crate::data_interface::on_demand_model::ScopeRootFailure>,
+}
+
+/// 分组 generate 回执 `routes` 里的一批：这批生成根所属的库、它的读写路由与来源。
+fn group_route_entry(
+    route: &crate::data_interface::model_read_route::ModelReadRoute,
+    batch_roots: &[crate::data_interface::generation_root::GenerationRoot],
+) -> Value {
+    json!({
+        "dbnum": route.dbnum,
+        "model_source": route.source.as_str(),
+        "model_source_reason": route.reason.map(|reason| reason.as_str()),
+        "durable": route.is_database(),
+        "generation_roots": batch_roots
+            .iter()
+            .map(|root| root.root.to_pdms_str())
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// 分组 generate 的回执（契约见分组计划 §2.3）。路由、生成与计数都在 [`generate_group_scope`] 里做完，
+/// 这里只拼回执，分组契约的响应快照直接喂它。
+fn group_generate_receipt(
+    requested: &str,
+    noun: String,
+    scope: &crate::data_interface::direct_tree::GroupGenerationScope,
+    tally: GroupGenerateTally,
+    routed: &[(
+        crate::data_interface::model_read_route::ModelReadRoute,
+        Vec<crate::data_interface::generation_root::GenerationRoot>,
+    )],
+    routes: Vec<Value>,
+) -> Result<serde_json::Value, ApiError> {
+    use crate::data_interface::on_demand_model::{OnDemandModelResult, OnDemandModelStatus};
+
+    let model_available = tally.model_instance_count > 0;
     let status = if !model_available {
         OnDemandModelStatus::NoRenderableGeometry
-    } else if generated_root_count > 0 {
+    } else if tally.generated_root_count > 0 {
         OnDemandModelStatus::Generated
     } else {
         OnDemandModelStatus::AlreadyAvailable
     };
     let result = OnDemandModelResult {
-        requested_refno: requested.clone(),
-        generation_root: requested.clone(),
+        requested_refno: requested.to_string(),
+        generation_root: requested.to_string(),
         generation_root_noun: noun,
         status,
         model_available,
-        model_instance_count,
-        generated_instance_count,
-        generation_root_count: roots.len(),
-        generation_roots: roots.iter().map(|root| root.root.to_pdms_str()).collect(),
-        cached_root_count,
-        generated_root_count,
-        failed_root_count: failed_roots.len(),
-        failed_roots,
+        model_instance_count: tally.model_instance_count,
+        generated_instance_count: tally.generated_instance_count,
+        generation_root_count: scope.roots.len(),
+        generation_roots: scope.roots.iter().map(|root| root.root.to_pdms_str()).collect(),
+        cached_root_count: tally.cached_root_count,
+        generated_root_count: tally.generated_root_count,
+        failed_root_count: tally.failed_roots.len(),
+        failed_roots: tally.failed_roots,
     };
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     let object = payload.as_object_mut().ok_or_else(|| {
         ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
     })?;
     // 跨库时没有单一的库 / 路由，这几格记 null，逐库的看 `routes`。
-    let single = match routed.as_slice() {
+    let single = match routed {
         [(route, _)] => Some(*route),
         _ => None,
     };
@@ -4262,30 +4346,18 @@ async fn generate_group_scope(
     object.insert("scope_kind".into(), json!("group"));
     object.insert(
         "scope_refnos".into(),
-        json!(members
+        json!(scope
+            .members
             .iter()
             .map(|member| RefnoEnum::from(*member).to_pdms_str())
             .collect::<Vec<_>>()),
     );
-    object.insert("unresolved_count".into(), json!(unresolved.len()));
+    object.insert("unresolved_count".into(), json!(scope.unresolved.len()));
     object.insert("routes".into(), json!(routes));
     object.insert(
         "publication_status".into(),
         json!(if model_available { "ready" } else { "empty" }),
     );
-    if crate::options::data_face().is_read_through() {
-        object.insert(
-            "snapshot_epoch".into(),
-            json!(
-                crate::data_interface::mdb_memory_store::get(
-                    &state.identity.project,
-                    &state.identity.mdb,
-                )
-                .map(|snapshot| snapshot.epoch())
-                .unwrap_or_default()
-            ),
-        );
-    }
     Ok(payload)
 }
 
@@ -5852,17 +5924,83 @@ async fn model_records_of_group(
         by_member.extend(batch.per_root);
         durable_fallback_roots.extend(batch.durable_fallback_roots);
         incomplete_roots.extend(batch.incomplete_roots);
-        routes.push(json!({
-            "dbnum": dbnum,
-            "source": batch.source,
-            "model_source": route.source.as_str(),
-            "model_source_reason": route.reason.map(|reason| reason.as_str()),
-            "durable": route.is_database(),
-        }));
+        routes.push(group_records_route(dbnum, batch.source, &route));
         sources.push(batch.source);
         routed.push(route);
     }
 
+    let snapshot =
+        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
+    let session_vector = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.session_fingerprint())
+        .unwrap_or_default();
+    Ok(group_records_body(
+        requested,
+        &scope,
+        GroupRecordsFetch {
+            by_member,
+            routes,
+            routed,
+            sources,
+            durable_fallback_roots,
+            incomplete_roots,
+        },
+        snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
+        session_vector
+            .iter()
+            .map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno}))
+            .collect(),
+        cursor,
+        limit,
+    ))
+}
+
+/// 分组 records 逐库取到的东西，[`group_records_body`] 的输入。
+struct GroupRecordsFetch {
+    by_member:
+        std::collections::HashMap<String, Vec<crate::fast_model::model_record_reader::ModelRecord>>,
+    routes: Vec<Value>,
+    routed: Vec<crate::data_interface::model_read_route::ModelReadRoute>,
+    sources: Vec<&'static str>,
+    durable_fallback_roots: Vec<String>,
+    incomplete_roots: Vec<String>,
+}
+
+/// 分组 records 回执 `routes` 里的一库：这库的取数来源（`source`）与读写路由。
+fn group_records_route(
+    dbnum: u32,
+    source: &str,
+    route: &crate::data_interface::model_read_route::ModelReadRoute,
+) -> Value {
+    json!({
+        "dbnum": dbnum,
+        "source": source,
+        "model_source": route.source.as_str(),
+        "model_source_reason": route.reason.map(|reason| reason.as_str()),
+        "durable": route.is_database(),
+    })
+}
+
+/// 分组 records 的回执（契约见分组计划 §2.4）：逐库取到的记录按成员先后合并、去重、分页。取数在
+/// [`model_records_of_group`] 里做完，分组契约的响应快照直接喂它。
+fn group_records_body(
+    requested: &str,
+    scope: &crate::data_interface::group_membership::GroupScope,
+    fetched: GroupRecordsFetch,
+    snapshot_epoch: u64,
+    session_vector: Vec<Value>,
+    cursor: usize,
+    limit: usize,
+) -> Value {
+    let GroupRecordsFetch {
+        mut by_member,
+        routes,
+        routed,
+        sources,
+        durable_fallback_roots,
+        incomplete_roots,
+    } = fetched;
     let scope_refnos = scope
         .members
         .iter()
@@ -5896,13 +6034,7 @@ async fn model_records_of_group(
         [route] => Some(*route),
         _ => None,
     };
-    let snapshot =
-        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
-    let session_vector = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.session_fingerprint())
-        .unwrap_or_default();
-    Ok(json!({
+    json!({
         "source": source,
         "dbnum": single.as_ref().map(|route| route.dbnum),
         "model_source": single.as_ref().map(|route| route.source.as_str()),
@@ -5913,8 +6045,8 @@ async fn model_records_of_group(
         "complete": incomplete_roots.is_empty(),
         "incomplete_roots": incomplete_roots,
         "durable_fallback_roots": durable_fallback_roots,
-        "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
-        "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+        "snapshot_epoch": snapshot_epoch,
+        "session_vector": session_vector,
         "items": page.items,
         "total": page.total,
         "truncated": page.next_cursor.is_some(),
@@ -5924,7 +6056,7 @@ async fn model_records_of_group(
         "scope_refnos": scope_refnos,
         "unresolved_count": scope.unresolved.len(),
         "routes": routes,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -7201,6 +7333,320 @@ mod tests {
             .expect("a single group root expands its members");
         let dbnum = records.find("dbnum_for_roots(").expect("dbnum routing");
         assert!(expand < dbnum, "分组不按它自己的库取数: {records}");
+    }
+
+    /// 分组契约（分组计划 §2）的响应快照：四个接口的回执拼装喂同一份内存夹具，逐字对
+    /// `tests/fixtures/group-contract/` 下的基准——§6「契约三仓各写各的，字段漂移」的对策。基准里的
+    /// 字段名就是契约：plant-ui 与 plant3d-web 各有一条测试把它们读的字段名硬编码成清单、注释指回
+    /// 这里，所以回执字段一变，基准和两个前端的清单要一起改。
+    /// 默认只比对、不重写；设环境变量 `UPDATE_GROUP_CONTRACT=1` 跑一次才重写基准。
+    fn assert_group_contract(name: &str, body: &Value) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/group-contract")
+            .join(name);
+        let actual = format!("{}\n", serde_json::to_string_pretty(body).unwrap());
+        if std::env::var_os("UPDATE_GROUP_CONTRACT").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "{}: {error}（UPDATE_GROUP_CONTRACT=1 生成基准）",
+                path.display()
+            )
+        });
+        assert_eq!(
+            expected.replace("\r\n", "\n"),
+            actual,
+            "{name} 与基准不一致：回执形状变了，基准和两个前端的字段名清单要一起改"
+        );
+    }
+
+    /// 分组契约快照的内存夹具（refno 记作 `高位/低位`）：
+    /// - 设计库 1：WORL 1/1 ─ SITE 1/2 ─ ZONE 1/3 ─ BRAN 1/4 ─ VALV 1/6；设计库 3：WORL 3/1 ─ SITE 3/2 ─ EQUI 3/5。
+    /// - 分组库 2：WORL 2/1 ─ GPWL 2/10 ─ GPSET 2/11 与 GPSET 2/20。GPSET 2/11 的 GPITEM 依次指向 BRAN 1/4、
+    ///   跨库的 EQUI 3/5、BRAN 名下的 VALV 1/6，外加三个坏槽：GPREF 为空、指向不在 MDB 的库 9、指向库 1 里
+    ///   不存在的 1/99。GPSET 2/20 只有一个指向不存在元素的 GPITEM（空组）。
+    fn group_contract_store() -> crate::data_interface::group_membership::fake_store::FakeStore {
+        let r = RefU64::from_two_nums;
+        let mut store = crate::data_interface::group_membership::fake_store::FakeStore::default();
+        store.add(r(1, 1), "WORL", &[r(1, 2)]);
+        store.add(r(1, 2), "SITE", &[r(1, 3)]);
+        store.add(r(1, 3), "ZONE", &[r(1, 4)]);
+        store.add(r(1, 4), "BRAN", &[r(1, 6)]);
+        store.add(r(1, 6), "VALV", &[]);
+        store.add(r(3, 1), "WORL", &[r(3, 2)]);
+        store.add(r(3, 2), "SITE", &[r(3, 5)]);
+        store.add(r(3, 5), "EQUI", &[]);
+        store.add(r(2, 1), "WORL", &[r(2, 10)]);
+        store.add(r(2, 10), "GPWL", &[r(2, 11), r(2, 20)]);
+        store.add(
+            r(2, 11),
+            "GPSET",
+            &[r(2, 12), r(2, 13), r(2, 14), r(2, 15), r(2, 16), r(2, 17)],
+        );
+        store.item(r(2, 12), Some(r(1, 4)));
+        store.item(r(2, 13), Some(r(3, 5)));
+        store.item(r(2, 14), Some(r(1, 6)));
+        store.item(r(2, 15), None);
+        store.item(r(2, 16), Some(r(9, 1)));
+        store.item(r(2, 17), Some(r(1, 99)));
+        store.add(r(2, 20), "GPSET", &[r(2, 21)]);
+        store.item(r(2, 21), Some(r(1, 98)));
+        store.foreign.insert(9);
+        store
+    }
+
+    /// 夹具里元素所属的库号：refno 的高位只是 ref0，不是库号（`CONTEXT.md`「Ref0 库归属」）。
+    fn group_contract_dbnum(refno: RefU64) -> Option<u32> {
+        match refno.0 >> 32 {
+            1 => Some(7001),
+            2 => Some(7002),
+            3 => Some(7003),
+            _ => None,
+        }
+    }
+
+    /// 夹具里设计元素的树行，照 `DirectTreeService::node` 的口径：owner 是元素自己主链上的属主，
+    /// `order` 是它在分组里的位次。
+    fn group_contract_row(refno: RefU64, order: usize) -> aios_core::pdms_types::EleTreeNode {
+        let r = RefU64::from_two_nums;
+        let (noun, name, owner, children_count) = if refno == r(1, 4) {
+            ("BRAN", "/PIPE-100/B1", r(1, 3), 1)
+        } else if refno == r(1, 6) {
+            ("VALV", "/PIPE-100/B1/V1", r(1, 4), 0)
+        } else if refno == r(3, 5) {
+            ("EQUI", "/P-201", r(3, 2), 0)
+        } else {
+            panic!("夹具里没有 {refno}")
+        };
+        aios_core::pdms_types::EleTreeNode {
+            refno: RefnoEnum::from(refno),
+            noun: noun.into(),
+            name: name.into(),
+            owner: RefnoEnum::from(owner),
+            order: u16::try_from(order).unwrap(),
+            children_count,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolved_children_of_a_gpset_match_the_group_contract() {
+        use crate::data_interface::direct_tree::{ResolvedChild, ResolvedChildren};
+        use crate::data_interface::group_membership::resolved_members_on;
+
+        let gpset = RefU64::from_two_nums(2, 11);
+        let resolved = resolved_members_on(&group_contract_store(), gpset).unwrap();
+        let layer = ResolvedChildren {
+            nodes: resolved
+                .members
+                .iter()
+                .enumerate()
+                .map(|(order, member)| ResolvedChild {
+                    node: group_contract_row(member.element(), order),
+                    via: member.via(),
+                })
+                .collect(),
+            unresolved: resolved.unresolved,
+        };
+        let body = resolved_children_body(gpset, &layer, group_contract_dbnum).unwrap();
+        let reasons: Vec<&str> = body["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|slot| slot["reason"].as_str())
+            .collect();
+        assert_eq!(
+            reasons,
+            ["gpref_missing", "db_not_in_mdb", "target_missing"],
+            "{body}"
+        );
+        // 端到端坏槽路径的起点：GPREF 指向库 1 里不存在的 1/99，槽里要带着这个目标。
+        assert_eq!(
+            body["unresolved"][2],
+            json!({"via": "2_17", "target": "1_99", "reason": "target_missing"}),
+            "{body}"
+        );
+        assert_group_contract("tree-children-resolved-gpset.json", &body);
+    }
+
+    #[test]
+    fn secondary_parents_on_the_ancestor_chain_match_the_group_contract() {
+        use crate::data_interface::group_membership::GroupIndex;
+
+        let r = RefU64::from_two_nums;
+        let store = group_contract_store();
+        let index = GroupIndex::build(&store, &[r(1, 1), r(2, 1), r(3, 1)]).unwrap();
+        let chain: Vec<RefnoEnum> = [r(1, 6), r(1, 4), r(1, 3), r(1, 2), r(1, 1)]
+            .into_iter()
+            .map(RefnoEnum::from)
+            .collect();
+        let secondary_parents = tree_secondary_parents(
+            &chain,
+            |refno| Ok(index.parents_of(refno).to_vec()),
+            |group| (group == r(2, 11)).then(|| "/GROUP-PUMPS".to_string()),
+        );
+        let body = tree_ancestors_body(chain, secondary_parents);
+        assert_eq!(
+            body["secondary_parents"].as_array().map(Vec::len),
+            Some(2),
+            "{body}"
+        );
+        assert_group_contract("tree-ancestors-secondary-parents.json", &body);
+    }
+
+    #[test]
+    fn group_generate_receipts_match_the_group_contract() {
+        use crate::data_interface::direct_tree::GroupGenerationScope;
+        use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
+        use crate::data_interface::group_membership::expand_group_on;
+        use crate::data_interface::model_read_route::{
+            MemoryReason, ModelReadRoute, ModelReadSource,
+        };
+
+        let r = RefU64::from_two_nums;
+        let store = group_contract_store();
+        let root = |refno: RefU64| {
+            let row = group_contract_row(refno, 0);
+            GenerationRoot {
+                root: row.refno,
+                noun: row.noun,
+                name: row.name,
+                kind: GenerationRootKind::DeliveryUnit,
+            }
+        };
+
+        // VALV 1/6 的生成根就是它所在的 BRAN 1/4：按生成根去重后剩两个，分属两个库、两种路由。
+        let expanded = expand_group_on(&store, r(2, 11)).unwrap();
+        let scope = GroupGenerationScope {
+            members: expanded.members,
+            roots: vec![root(r(1, 4)), root(r(3, 5))],
+            unresolved: expanded.unresolved,
+        };
+        let routed = vec![
+            (
+                ModelReadRoute {
+                    dbnum: 7001,
+                    source: ModelReadSource::Database,
+                    reason: None,
+                },
+                vec![scope.roots[0].clone()],
+            ),
+            (
+                ModelReadRoute {
+                    dbnum: 7003,
+                    source: ModelReadSource::Memory,
+                    reason: Some(MemoryReason::ModelLagging),
+                },
+                vec![scope.roots[1].clone()],
+            ),
+        ];
+        let routes = routed
+            .iter()
+            .map(|(route, roots)| group_route_entry(route, roots))
+            .collect();
+        let tally = GroupGenerateTally {
+            model_instance_count: 14,
+            generated_instance_count: 14,
+            cached_root_count: 1,
+            generated_root_count: 1,
+            failed_roots: Vec::new(),
+        };
+        let requested = RefnoEnum::from(r(2, 11)).to_pdms_str();
+        let body =
+            group_generate_receipt(&requested, "GPSET".into(), &scope, tally, &routed, routes)
+                .unwrap();
+        assert_eq!(body["generation_root_count"], 2, "{body}");
+        assert_group_contract("model-generate-gpset.json", &body);
+
+        // 空组：唯一的 GPITEM 指向不存在的元素。生成根回显式的空表，客户端不得回退为分组自己。
+        let expanded = expand_group_on(&store, r(2, 20)).unwrap();
+        let scope = GroupGenerationScope {
+            members: expanded.members,
+            roots: Vec::new(),
+            unresolved: expanded.unresolved,
+        };
+        let tally = GroupGenerateTally {
+            model_instance_count: 0,
+            generated_instance_count: 0,
+            cached_root_count: 0,
+            generated_root_count: 0,
+            failed_roots: Vec::new(),
+        };
+        let requested = RefnoEnum::from(r(2, 20)).to_pdms_str();
+        let body =
+            group_generate_receipt(&requested, "GPSET".into(), &scope, tally, &[], Vec::new())
+                .unwrap();
+        assert_eq!(body["generation_roots"], json!([]), "{body}");
+        assert_eq!(body["unresolved_count"], 1, "{body}");
+        assert_group_contract("model-generate-gpset-empty.json", &body);
+    }
+
+    #[test]
+    fn group_records_match_the_group_contract() {
+        use crate::data_interface::group_membership::expand_group_on;
+        use crate::data_interface::model_read_route::{
+            MemoryReason, ModelReadRoute, ModelReadSource,
+        };
+        use crate::fast_model::model_record_reader::ModelRecord;
+
+        let r = RefU64::from_two_nums;
+        let scope = expand_group_on(&group_contract_store(), r(2, 11)).unwrap();
+        let record = |refno: RefU64, owner: RefU64, generic: &str| ModelRecord {
+            inst: aios_core::GeomInstQuery {
+                refno: RefnoEnum::from(refno),
+                old_refno: None,
+                owner: RefnoEnum::from(owner),
+                world_aabb: parry3d::bounding_volume::Aabb::new(
+                    parry3d::math::Point::origin(),
+                    parry3d::math::Point::new(100.0, 100.0, 100.0),
+                ),
+                world_trans: Default::default(),
+                insts: vec![aios_core::ModelHashInst {
+                    geo_hash: format!("{}-{}", generic.to_lowercase(), refno.0 as u32),
+                    ..Default::default()
+                }],
+                has_neg: false,
+                generic: generic.into(),
+                pts: None,
+                date: None,
+            },
+            tube: None,
+        };
+        let name = |refno: RefU64| RefnoEnum::from(refno).to_pdms_str();
+        // BRAN 1/4 名下取到 VALV 1/6，成员 VALV 1/6 自己又取到同一条：按成员先后只留第一次。
+        let by_member = std::collections::HashMap::from([
+            (name(r(1, 4)), vec![record(r(1, 6), r(1, 4), "VALV")]),
+            (name(r(3, 5)), vec![record(r(3, 5), r(3, 2), "EQUI")]),
+            (name(r(1, 6)), vec![record(r(1, 6), r(1, 4), "VALV")]),
+        ]);
+        let database = ModelReadRoute {
+            dbnum: 7001,
+            source: ModelReadSource::Database,
+            reason: None,
+        };
+        let memory = ModelReadRoute {
+            dbnum: 7003,
+            source: ModelReadSource::Memory,
+            reason: Some(MemoryReason::ModelLagging),
+        };
+        let fetched = GroupRecordsFetch {
+            by_member,
+            routes: vec![
+                group_records_route(7001, "model-database", &database),
+                group_records_route(7003, "model-memory", &memory),
+            ],
+            routed: vec![database, memory],
+            sources: vec!["model-database", "model-memory"],
+            durable_fallback_roots: Vec::new(),
+            incomplete_roots: Vec::new(),
+        };
+        let body = group_records_body(&name(r(2, 11)), &scope, fetched, 0, Vec::new(), 0, 500);
+        assert_eq!(body["total"], 2, "{body}");
+        assert_eq!(body["source"], "mixed", "{body}");
+        assert_group_contract("model-records-gpset.json", &body);
     }
 
     /// **只有 `mem` 报占位地址。**

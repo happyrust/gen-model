@@ -1,0 +1,169 @@
+{
+  "source": "mixed",
+  "dbnum": null,
+  "model_source": null,
+  "model_source_reason": null,
+  "durable": false,
+  "complete": true,
+  "incomplete_roots": [],
+  "durable_fallback_roots": [],
+  "snapshot_epoch": 0,
+  "session_vector": [],
+  "items": [
+    {
+      "refno": "1_6",
+      "old_refno": null,
+      "owner": "1_4",
+      "world_aabb": {
+        "mins": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "maxs": [
+          100.0,
+          100.0,
+          100.0
+        ]
+      },
+      "world_trans": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "insts": [
+        {
+          "geo_hash": "valv-6",
+          "transform": {
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "is_tubi": false,
+          "is_invalid_tubi": false
+        }
+      ],
+      "has_neg": false,
+      "generic": "VALV",
+      "pts": null,
+      "date": null
+    },
+    {
+      "refno": "3_5",
+      "old_refno": null,
+      "owner": "3_2",
+      "world_aabb": {
+        "mins": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "maxs": [
+          100.0,
+          100.0,
+          100.0
+        ]
+      },
+      "world_trans": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "insts": [
+        {
+          "geo_hash": "equi-5",
+          "transform": {
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "is_tubi": false,
+          "is_invalid_tubi": false
+        }
+      ],
+      "has_neg": false,
+      "generic": "EQUI",
+      "pts": null,
+      "date": null
+    }
+  ],
+  "total": 2,
+  "truncated": false,
+  "next_cursor": null,
+  "generation_root": "2/11",
+  "expanded_from_group": true,
+  "scope_refnos": [
+    "1/4",
+    "3/5",
+    "1/6"
+  ],
+  "unresolved_count": 3,
+  "routes": [
+    {
+      "dbnum": 7001,
+      "source": "model-database",
+      "model_source": "database",
+      "model_source_reason": null,
+      "durable": true
+    },
+    {
+      "dbnum": 7003,
+      "source": "model-memory",
+      "model_source": "memory",
+      "model_source_reason": "model_lagging",
+      "durable": false
+    }
+  ]
+}
