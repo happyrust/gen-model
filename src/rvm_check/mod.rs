@@ -583,6 +583,9 @@ pub(crate) struct FusedCompare {
     /// 并发核对窗口（字节）：待判成员攒满即并发判一批；0 = vendor 默认 256MB。
     /// 内存/性能旋钮——大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
     pub window_bytes: usize,
+    /// 是否还落 `compare.json` 全量报告（大件上百 MB）。false = 结果只入库
+    /// （判定 + 不截断的差异行），盘上只留 judgement.json 做进程间运输。
+    pub emit_compare: bool,
 }
 
 /// `element_cache_limit`：池级元素缓存上限（条），0 = vendor 默认 200_000——内存/性能旋钮。
@@ -650,20 +653,23 @@ pub(crate) fn generate_ours(
     {
         return Err("生成没有写出 generated.rvm".to_string());
     }
-    // 流式对拍：与 `compare_rvms` 同一套落盘（compare.json）+ 判定结果另存小文件，
-    // 父进程不必为判色再解析几百 MB 的报告树。
+    // 流式对拍：判定结果（紧凑 judgement.json）是子进程→父进程的运输件；全量
+    // compare.json 只在 emit_compare 开时落盘——结果的权威归宿是库
+    // （`rvm_check_run` / `rvm_check_mismatch`），大件 JSON 默认不产。
     if let Some(report) = &outcome.compare {
-        let compare_out = task_dir.join("compare.json");
-        {
-            use std::io::Write;
-            let file = std::fs::File::create(&compare_out)
-                .map_err(|error| format!("建 compare.json 失败：{error}"))?;
-            let mut writer = std::io::BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, report)
-                .map_err(|error| format!("比对报告无法序列化：{error}"))?;
-            writer
-                .flush()
-                .map_err(|error| format!("写 compare.json 失败：{error}"))?;
+        if fused.is_some_and(|fused| fused.emit_compare) {
+            let compare_out = task_dir.join("compare.json");
+            {
+                use std::io::Write;
+                let file = std::fs::File::create(&compare_out)
+                    .map_err(|error| format!("建 compare.json 失败：{error}"))?;
+                let mut writer = std::io::BufWriter::new(file);
+                serde_json::to_writer_pretty(&mut writer, report)
+                    .map_err(|error| format!("比对报告无法序列化：{error}"))?;
+                writer
+                    .flush()
+                    .map_err(|error| format!("写 compare.json 失败：{error}"))?;
+            }
         }
         let judgement = judge_report_full(report);
         let judgement_out = task_dir.join("judgement.json");

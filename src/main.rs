@@ -184,6 +184,10 @@ struct RvmCheckArgs {
     /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
     #[arg(long, default_value_t = 0, value_name = "N")]
     element_cache: usize,
+    /// fused 模式是否落 `compare.json` 全量报告（大件上百 MB）。
+    /// false = 结果只入库（rvm_check_run / rvm_check_mismatch），盘上留 judgement.json。
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    emit_compare: bool,
     /// 内部用：子进程模式，只生成 --only 指定的根。
     #[arg(long, hide = true)]
     child: bool,
@@ -331,6 +335,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             emit_rvm: args.emit_rvm,
             compare_window_mb: args.compare_window_mb,
             element_cache: args.element_cache,
+            emit_compare: args.emit_compare,
         });
     }
 
@@ -354,6 +359,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         emit_rvm: args.emit_rvm,
         compare_window_mb: args.compare_window_mb,
         element_cache: args.element_cache,
+        emit_compare: args.emit_compare,
         store: !args.no_store,
     })?;
     if !outcome.clean {

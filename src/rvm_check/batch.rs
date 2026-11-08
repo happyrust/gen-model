@@ -93,6 +93,9 @@ pub struct BatchOptions {
     /// 池级元素缓存上限（条）：0 = vendor 默认 200_000。
     /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
     pub element_cache: usize,
+    /// fused 模式是否落 `compare.json` 全量报告（大件上百 MB）。
+    /// false = 结果只入库，盘上留 judgement.json 做进程间运输。
+    pub emit_compare: bool,
 }
 
 /// `--child`：只为给定的根做生成，产物落在与父进程同一套目录里，别的什么都不写。
@@ -109,6 +112,8 @@ pub struct ChildOptions {
     /// 与父进程同一口径的内存/性能旋钮（0 = vendor 默认）。
     pub compare_window_mb: usize,
     pub element_cache: usize,
+    /// 是否落 `compare.json` 全量报告（false = 结果只入库）。
+    pub emit_compare: bool,
 }
 
 pub struct BatchOutcome {
@@ -460,6 +465,7 @@ pub fn run_child(opts: &ChildOptions) -> Result<()> {
             baseline: baseline.clone(),
             emit_rvm: opts.emit_rvm,
             window_bytes: opts.compare_window_mb * 1024 * 1024,
+            emit_compare: opts.emit_compare,
         });
         generate_ours(&spec, &node, &dir, fused.as_ref(), opts.element_cache)
             .map_err(anyhow::Error::msg)?;
@@ -577,7 +583,8 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         for (index, job) in jobs.iter().enumerate() {
             if let Some(mut record) = read_record(&job.dir.join("run.json"))
                 && status::is_compared(&record.status)
-                && job.dir.join("compare.json").is_file()
+                && (job.dir.join("judgement.json").is_file()
+                    || job.dir.join("compare.json").is_file())
             {
                 record.resumed = true;
                 resumed[index] = Some(record);
@@ -1137,6 +1144,7 @@ fn process_root(
                 baseline,
                 emit_rvm: opts.emit_rvm,
                 window_bytes: opts.compare_window_mb * 1024 * 1024,
+                emit_compare: opts.emit_compare,
             });
         let generation = if opts.in_process {
             let _serial = in_process_gate
@@ -1153,14 +1161,15 @@ fn process_root(
         } else {
             generate_in_child(job, spec, out_root, opts, fused.as_ref())
         };
-        // 不写 generated.rvm 时，生成成功的物证是子进程落下的 compare.json。
+        // 不写 generated.rvm 时，生成成功的物证是子进程落下的 judgement.json
+        // （compare.json 默认不落——结果入库，大件 JSON 只是可选下钻证据）。
         let produced = fused.as_ref().map_or_else(
             || generated.is_file(),
             |fused| {
                 if fused.emit_rvm {
                     generated.is_file()
                 } else {
-                    job.dir.join("compare.json").is_file()
+                    job.dir.join("judgement.json").is_file()
                 }
             },
         );
@@ -1336,7 +1345,9 @@ fn generate_in_child(
         .arg("--compare-window-mb")
         .arg(opts.compare_window_mb.to_string())
         .arg("--element-cache")
-        .arg(opts.element_cache.to_string());
+        .arg(opts.element_cache.to_string())
+        .arg("--emit-compare")
+        .arg(opts.emit_compare.to_string());
     command
         .env("RUST_BACKTRACE", "1")
         .stdin(std::process::Stdio::null())
@@ -1804,6 +1815,7 @@ mod tests {
             store: false,
             compare_window_mb: 0,
             element_cache: 0,
+            emit_compare: false,
         };
         let spec = RunSpec {
             install_dir: PathBuf::new(),
