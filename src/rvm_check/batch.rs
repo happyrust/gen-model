@@ -204,6 +204,53 @@ impl StageRecord {
     }
 }
 
+/// 每根跑完的内存分项。只填 gen-model 侧能测到的项：生成段峰值、比对段峰值、
+/// 生成期间可提交内存余量、产物文件字节。
+///
+/// 待比窗口峰值、负载字节、元素缓存条数/清空次数、目录网格缓存条数都还没测——那些要等 vendor
+/// 先在流式对拍与池级缓存上暴露计数，这里故意不留一堆恒为 `None` 的空字段。
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct MemoryBreakdown {
+    /// 生成子进程整段累计峰值（`PeakPagefileUsage`），与 `gen.peak_private_mb` 同一口径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen_peak_private_mb: Option<u64>,
+    /// 比对段峰值（按时刻采样的当前提交量取 max）。读文件比对、或阶段标记没落盘时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_peak_private_mb: Option<u64>,
+    /// 生成期间可提交内存余量的最小值（GB）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_commit_free_gb: Option<f64>,
+    /// 产物文件字节合计：`ours/generated.rvm`、`compare.json`、`judgement.json`、
+    /// `ours/report.json`、`ours/elements.json`。一个都没落就是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_bytes: Option<u64>,
+}
+
+impl MemoryBreakdown {
+    /// 从已经落定的三段记录里拼内存分项。拿不到的项留 `None`，绝不拿父进程自己的内存冒充。
+    fn collect(record: &RootRecord) -> Self {
+        let dir = Path::new(&record.dir);
+        let mut product_bytes: Option<u64> = None;
+        for path in [
+            dir.join("ours").join("generated.rvm"),
+            dir.join("compare.json"),
+            dir.join("judgement.json"),
+            dir.join("ours").join("report.json"),
+            dir.join("ours").join("elements.json"),
+        ] {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                *product_bytes.get_or_insert(0) += meta.len();
+            }
+        }
+        Self {
+            gen_peak_private_mb: record.generate.as_ref().and_then(|g| g.peak_private_mb),
+            compare_peak_private_mb: record.compare.as_ref().and_then(|c| c.peak_private_mb),
+            min_commit_free_gb: record.generate.as_ref().and_then(|g| g.min_commit_free_gb),
+            product_bytes,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RootRecord {
     pub dbno: u32,
@@ -231,6 +278,10 @@ pub struct RootRecord {
     pub mismatches_truncated: bool,
     #[serde(default)]
     pub centreline_only_baseline: usize,
+    /// 每根跑完的内存分项。现在只填 gen-model 侧能测到的项；
+    /// 待比窗口峰值、负载字节、元素缓存条数/清空次数、目录网格缓存条数要等 vendor 先暴露。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryBreakdown>,
     /// 不截断的差异清单，只给入库用（[`super::store`]）；不进 `run.json`。
     #[serde(skip)]
     pub mismatches_all: Vec<RvmMismatch>,
@@ -702,7 +753,7 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                         break;
                     };
                     let job = &jobs[index];
-                    let record = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut record = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         process_root(
                             job,
                             index,
@@ -720,6 +771,8 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                         record.message = format!("处理根时 panic：{}", super::panic_text(&*panic));
                         record
                     });
+                    // 内存分项统一在这里拼：产物都已落盘，字节数才是这一轮的真实值。
+                    record.memory = Some(MemoryBreakdown::collect(&record));
                     if let Err(error) = write_json(&job.dir.join("run.json"), &record) {
                         eprintln!("写 {} 失败：{error:#}", job.dir.join("run.json").display());
                     }
@@ -814,6 +867,7 @@ impl RootRecord {
             mismatches: Vec::new(),
             mismatches_truncated: false,
             centreline_only_baseline: 0,
+            memory: None,
             mismatches_all: Vec::new(),
             centreline_names: Vec::new(),
         }
@@ -920,7 +974,7 @@ impl RootRecord {
         let number =
             |pick: fn(&RvmCounts) -> u64| counts.map_or("-".to_string(), |c| pick(c).to_string());
         format!(
-            "{:<8} {:<16} {:<6} {:<14} both {:>6} exact {:>6} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4} | gen {:>6}s {:>6} MB | export {:>6}s | compare {:>5}s{}",
+            "{:<8} {:<16} {:<6} {:<14} both {:>6} exact {:>6} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4} | gen {:>6}s {:>6} MB | cmp {:>6} MB | export {:>6}s | compare {:>5}s{}",
             self.tag,
             self.refno,
             self.noun,
@@ -937,6 +991,10 @@ impl RootRecord {
             self.generate
                 .as_ref()
                 .and_then(|g| g.peak_private_mb)
+                .map_or("-".to_string(), |mb| mb.to_string()),
+            self.compare
+                .as_ref()
+                .and_then(|c| c.peak_private_mb)
                 .map_or("-".to_string(), |mb| mb.to_string()),
             self.export
                 .as_ref()
@@ -1126,6 +1184,8 @@ fn process_root(
     in_process_gate: &Mutex<()>,
 ) -> RootRecord {
     let mut record = RootRecord::new(job);
+    // 比对段峰值（MB）：只有融合对拍且阶段标记落盘时才有值，后面写 compare 段记录时用。
+    let mut compare_peak_mb: Option<u64> = None;
     if let Err(error) = std::fs::create_dir_all(&job.dir) {
         record.status = status::GEN_FAILED.to_string();
         record.message = format!("建目录失败：{error}");
@@ -1138,6 +1198,9 @@ fn process_root(
         // 融合对拍的产物一并清掉：不然上一轮的 compare/judgement 会被当成这一轮的结果。
         let _ = std::fs::remove_file(job.dir.join("compare.json"));
         let _ = std::fs::remove_file(job.dir.join("judgement.json"));
+        // 阶段标记也要清：上一轮留下的 compare_start 会让这一轮的采样一开始就归到比对段。
+        let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_START));
+        let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_END));
         // `--baseline-dir` 模式下基准在 worker 启动前已同步放好（`place_baseline_from_dir`）；
         // 在盘上就喂给子进程做生成即比对。没放好（缺失）就不融合，走原路。
         let fused = opts
@@ -1150,21 +1213,26 @@ fn process_root(
                 window_bytes: opts.compare_window_mb * 1024 * 1024,
                 emit_compare: opts.emit_compare,
             });
-        let generation = if opts.in_process {
+        let (generation, measured) = if opts.in_process {
             let _serial = in_process_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            generate_in_process(
-                job,
-                spec,
-                tree,
-                opts.gen_timeout,
-                fused.as_ref(),
-                opts.element_cache,
+            // 进程内跑没有独立子进程可采样，比对段峰值只能留空。
+            (
+                generate_in_process(
+                    job,
+                    spec,
+                    tree,
+                    opts.gen_timeout,
+                    fused.as_ref(),
+                    opts.element_cache,
+                ),
+                None,
             )
         } else {
             generate_in_child(job, spec, out_root, opts, fused.as_ref())
         };
+        compare_peak_mb = measured;
         // 不写 generated.rvm 时，生成成功的物证是子进程落下的 judgement.json
         // （compare.json 默认不落——结果入库，大件 JSON 只是可选下钻证据）。
         let produced = fused.as_ref().map_or_else(
@@ -1252,7 +1320,7 @@ fn process_root(
                 RvmVerdict::Fail => status::FAIL,
             }
             .to_string();
-            record.compare = Some(StageRecord::new(
+            let mut compare = StageRecord::new(
                 if judgement_path.is_file() {
                     serde_json::Value::from("fused")
                 } else {
@@ -1260,7 +1328,19 @@ fn process_root(
                 },
                 started,
                 "",
-            ));
+            );
+            compare.peak_private_mb = compare_peak_mb;
+            if compare_peak_mb.is_none() {
+                // 两种拿不到的情形分开写清，免得把「没测」看成「测出来是 0」。
+                compare.message = if judgement_path.is_file() {
+                    "比对跑在生成子进程内，但没有阶段标记文件（ours/phase.compare_start/.end），\
+                     切不出比对段峰值"
+                        .to_string()
+                } else {
+                    "读文件比对在父进程内跑，未单独采样；不拿父进程内存冒充".to_string()
+                };
+            }
+            record.compare = Some(compare);
             let (page_mismatches, truncated) = judgement.page_mismatches();
             record.counts = Some(judgement.counts);
             record.mismatches = page_mismatches;
@@ -1272,7 +1352,9 @@ fn process_root(
         Err(message) => {
             record.status = status::COMPARE_FAILED.to_string();
             record.message = redact(&message, &spec.password);
-            record.compare = Some(StageRecord::new(1, started, record.message.clone()));
+            let mut compare = StageRecord::new(1, started, record.message.clone());
+            compare.peak_private_mb = compare_peak_mb;
+            record.compare = Some(compare);
         }
     }
     record
@@ -1300,23 +1382,77 @@ fn generate_in_process(
     }
 }
 
+/// 比对段在产物目录里的阶段标记文件：子进程在 vendor 比对前后各写一个，
+/// 父进程据此把「当前提交量」采样归到 gen 段还是 compare 段。
+const PHASE_COMPARE_START: &str = "ours/phase.compare_start";
+const PHASE_COMPARE_END: &str = "ours/phase.compare_end";
+
+/// 生成段 / 收尾段的采样间隔。生成段是几分钟量级，密采样拿不到更多信息，只会白烧 CPU。
+const GEN_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 比对段的采样间隔。比对段实测只有 0.0–0.1 秒
+/// （`output/rvm-check-batch/mem-breakdown/summary.txt` 的 `cmp_s` 列，ams1112 `=9304/2`），
+/// 沿用 500ms 一轮的话大概率一个样本都落不进比对段，`compare_peak` 恒为 0、
+/// 比对段峰值永远是 `None`——功能等于没做。20ms 一轮至少能在 0.1 秒的窗口里采到 4~5 个样本。
+const COMPARE_SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
+
+/// 阶段标记状态机。标记文件不存在时永远停在 [`Phase::Gen`]——这是可接受的降级：
+/// 融合对拍（生成完接着比对，同一子进程）切不出比对段峰值，compare 峰值留 `None`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    /// `compare_start` 还没出现：采样归生成段。
+    Gen,
+    /// `compare_start` 已出现、`compare_end` 未出现：采样归比对段。
+    Compare,
+    /// 两个标记都出现：比对已收尾，后续采样不再计入比对段（仍计入生成段累计峰值）。
+    Done,
+}
+
+impl Phase {
+    /// 按产物目录里标记文件的存在情况推进状态，只前进不回退。
+    fn advance(self, dir: &Path) -> Self {
+        match self {
+            Self::Gen if dir.join(PHASE_COMPARE_START).exists() => Self::Compare,
+            Self::Compare if dir.join(PHASE_COMPARE_END).exists() => Self::Done,
+            other => other,
+        }
+    }
+
+    /// 本阶段的采样间隔：只有比对段需要密采样，见 [`COMPARE_SAMPLE_INTERVAL`] 的说明。
+    fn sample_interval(self) -> Duration {
+        match self {
+            Self::Compare => COMPARE_SAMPLE_INTERVAL,
+            Self::Gen | Self::Done => GEN_SAMPLE_INTERVAL,
+        }
+    }
+}
+
 /// 子进程生成：`aios-database rvm-check --child …`，父进程盯内存与耗时。
+///
+/// 返回 `(生成段记录, 比对段峰值 MB)`。第二项只有融合对拍且阶段标记落盘时才有值：
+/// 比对跑在同一子进程里，`PeakPagefileUsage` 是整段累计峰值，切不出比对段，
+/// 所以改成每轮读**当前**提交量、按阶段标记归段、段内取 max。
 fn generate_in_child(
     job: &RootJob,
     spec: &RunSpec,
     out_root: &Path,
     opts: &BatchOptions,
     fused: Option<&FusedCompare>,
-) -> StageRecord {
+) -> (StageRecord, Option<u64>) {
     let started = Instant::now();
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(error) => return StageRecord::new(1, started, format!("取不到自身路径：{error}")),
+        Err(error) => {
+            return (
+                StageRecord::new(1, started, format!("取不到自身路径：{error}")),
+                None,
+            );
+        }
     };
     let stdout = std::fs::File::create(job.dir.join("gen.stdout.log"));
     let stderr = std::fs::File::create(job.dir.join("gen.stderr.log"));
     let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
-        return StageRecord::new(1, started, "建 gen.*.log 失败");
+        return (StageRecord::new(1, started, "建 gen.*.log 失败"), None);
     };
     let mut command = std::process::Command::new(exe);
     command
@@ -1365,21 +1501,45 @@ fn generate_in_child(
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return StageRecord::new(1, started, format!("起子进程失败：{error}")),
+        Err(error) => {
+            return (
+                StageRecord::new(1, started, format!("起子进程失败：{error}")),
+                None,
+            );
+        }
     };
     let mut peak: u64 = 0;
+    let mut compare_peak: u64 = 0;
     let mut min_free: Option<f64> = None;
     let mut killed: Option<&'static str> = None;
+    let mut phase = Phase::Gen;
     let deadline = started + opts.gen_timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {}
-            Err(error) => return StageRecord::new(1, started, format!("等子进程失败：{error}")),
+            Err(error) => {
+                return (
+                    StageRecord::new(1, started, format!("等子进程失败：{error}")),
+                    None,
+                );
+            }
         }
+        // 整段累计峰值：现有语义不动（`gen.peak_private_mb` 到处都是）。
+        // `PeakPagefileUsage` 是内核维护的累计峰值，读它只取值、不改值，所以比对段密采样
+        // 只是把同一个数读得更勤，不会让峰值变大或失真——因此这里不降频，每轮都读。
         if let Some(bytes) = memory::process_peak_private_bytes(&child) {
             peak = peak.max(bytes);
         }
+        // 当前提交量：按阶段标记归段，比对段取 max。标记文件没落盘时永远停在 Gen，
+        // compare_peak 保持 0，比对段峰值留 None。
+        phase = phase.advance(&job.dir);
+        if let Some(bytes) = memory::process_private_bytes(&child) {
+            if phase == Phase::Compare {
+                compare_peak = compare_peak.max(bytes);
+            }
+        }
+        // 提交量余量取整段 min：比对段密采样只是把采样点变密，min 只会更准，不会变松。
         if let Some(free) = memory::commit_free_gb() {
             min_free = Some(min_free.map_or(free, |current: f64| current.min(free)));
             if free < opts.min_commit_free_gb {
@@ -1393,7 +1553,9 @@ fn generate_in_child(
             let _ = child.kill();
             break;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        // 间隔按阶段自适应：比对段几十毫秒量级必须密采样，生成段与收尾段 500ms 足够。
+        // 顺带的效果是超时判定在比对段也更密，TIMEOUT 只会更及时，不会更松。
+        std::thread::sleep(phase.sample_interval());
     }
     let exit = child.wait();
     let stderr_tail = std::fs::read_to_string(job.dir.join("gen.stderr.log"))
@@ -1429,10 +1591,12 @@ fn generate_in_child(
     };
     record.peak_private_mb = (peak > 0).then_some(peak / (1024 * 1024));
     record.min_commit_free_gb = min_free.map(round2);
-    record
+    // 比对段峰值：标记文件没落盘时 compare_peak 恒 0，这里给 None 而不是编一个数。
+    let compare_peak_mb = (compare_peak > 0).then_some(compare_peak / (1024 * 1024));
+    (record, compare_peak_mb)
 }
 
-/// 内存护栏要读的两个数：系统可提交内存余量、子进程峰值私有内存。
+/// 内存护栏要读的三个数：系统可提交内存余量、子进程峰值私有内存、子进程当前提交量。
 mod memory {
     #[cfg(windows)]
     pub fn commit_free_gb() -> Option<f64> {
@@ -1459,6 +1623,23 @@ mod memory {
         (ok != 0).then(|| counters.PeakPagefileUsage as u64)
     }
 
+    /// 子进程**当前**提交量（字节）：`PagefileUsage`，不是 `PeakPagefileUsage`。
+    /// 峰值切不出「比对段」这种同一进程内的阶段，只能按时刻采样当前值再归段取 max。
+    #[cfg(windows)]
+    pub fn process_private_bytes(child: &std::process::Child) -> Option<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        counters.cb = size;
+        // 安全性：句柄来自 std 的 Child，进程存活期间有效；结构体长度已填。
+        let ok =
+            unsafe { K32GetProcessMemoryInfo(child.as_raw_handle() as _, &mut counters, size) };
+        (ok != 0).then(|| counters.PagefileUsage as u64)
+    }
+
     #[cfg(not(windows))]
     pub fn commit_free_gb() -> Option<f64> {
         let mut system = sysinfo::System::new();
@@ -1474,6 +1655,14 @@ mod memory {
         system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         system.process(pid).map(|process| process.memory())
     }
+
+    /// 非 Windows：`sysinfo` 只给当前驻留，没有「当前提交量」这一项，
+    /// 也没有跨平台的历史峰值可读——与现有峰值回退同口径，直接返回 None，
+    /// 让比对段峰值在非 Windows 上保持 `None`（不拿驻留冒充提交量）。
+    #[cfg(not(windows))]
+    pub fn process_private_bytes(_child: &std::process::Child) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -1486,6 +1675,8 @@ struct DbSummary {
     counts: RvmCounts,
     gen_seconds: f64,
     gen_peak_private_mb: u64,
+    /// 本库各根比对段峰值的最大者（MB）。没有一个根测到时为 0——`summary.txt` 打印成 `-`。
+    compare_peak_private_mb: u64,
     export_seconds: f64,
     compare_seconds: f64,
 }
@@ -1557,6 +1748,7 @@ impl Summary {
                 counts: RvmCounts::default(),
                 gen_seconds: 0.0,
                 gen_peak_private_mb: 0,
+                compare_peak_private_mb: 0,
                 export_seconds: 0.0,
                 compare_seconds: 0.0,
             });
@@ -1583,6 +1775,9 @@ impl Summary {
             if let Some(compare) = &record.compare {
                 compare_seconds += compare.seconds;
                 db.compare_seconds += compare.seconds;
+                db.compare_peak_private_mb = db
+                    .compare_peak_private_mb
+                    .max(compare.peak_private_mb.unwrap_or(0));
             }
         }
         for db in dbs.values_mut() {
@@ -1616,9 +1811,9 @@ impl Summary {
     fn table(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8}\n",
+            "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8} {:>8}\n",
             "tag", "ref", "noun", "status", "both", "exact", "off", "only_b", "only_g", "kdiff",
-            "gen_s", "gen_MB", "export_s", "cmp_s"
+            "gen_s", "gen_MB", "cmp_MB", "export_s", "cmp_s"
         ));
         for record in &self.roots {
             let counts = record.counts.clone().unwrap_or_default();
@@ -1631,7 +1826,7 @@ impl Summary {
                 }
             };
             out.push_str(&format!(
-                "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8}\n",
+                "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8} {:>8}\n",
                 record.tag,
                 record.refno,
                 record.noun,
@@ -1648,14 +1843,25 @@ impl Summary {
                     .as_ref()
                     .and_then(|g| g.peak_private_mb)
                     .map_or("-".to_string(), |mb| mb.to_string()),
+                record
+                    .compare
+                    .as_ref()
+                    .and_then(|c| c.peak_private_mb)
+                    .map_or("-".to_string(), |mb| mb.to_string()),
                 record.export.as_ref().map_or("-".to_string(), |e| format!("{:.1}", e.seconds)),
                 record.compare.as_ref().map_or("-".to_string(), |c| format!("{:.1}", c.seconds)),
             ));
         }
         out.push('\n');
         for db in &self.dbs {
+            // 一个根都没测到比对段峰值时打 `-`：0 会被读成「测出来是 0」。
+            let compare_peak = if db.compare_peak_private_mb > 0 {
+                format!("{} MB", db.compare_peak_private_mb)
+            } else {
+                "-".to_string()
+            };
             out.push_str(&format!(
-                "{:<8} roots {:>3} clean {:>3}  both {:>7} exact {:>7} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4}  gen {:>7.1}s peak {:>6} MB  export {:>7.1}s  compare {:>6.1}s  {}\n",
+                "{:<8} roots {:>3} clean {:>3}  both {:>7} exact {:>7} off {:>5} only_b {:>5} only_g {:>5} kind_differ {:>4}  gen {:>7.1}s peak {:>6} MB  cmp peak {:>8}  export {:>7.1}s  compare {:>6.1}s  {}\n",
                 db.tag,
                 db.roots,
                 db.clean_roots,
@@ -1667,6 +1873,7 @@ impl Summary {
                 db.counts.kind_differ,
                 db.gen_seconds,
                 db.gen_peak_private_mb,
+                compare_peak,
                 db.export_seconds,
                 db.compare_seconds,
                 db.status_counts
@@ -1895,5 +2102,25 @@ mod tests {
             "rvm-check-batch/20261107-full"
         );
         assert_eq!(batch_id_for(Path::new("single")), "single");
+    }
+
+    /// 阶段状态机：标记文件缺席时永远停在 Gen（compare 峰值留 None），出现后只前进不回退。
+    #[test]
+    fn phase_markers_advance_one_way_and_never_without_files() {
+        let dir = std::env::temp_dir().join(format!("rvm-phase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ours")).unwrap();
+        assert_eq!(Phase::Gen.advance(&dir), Phase::Gen, "没有标记就停在 Gen");
+        std::fs::write(dir.join(PHASE_COMPARE_START), b"").unwrap();
+        assert_eq!(Phase::Gen.advance(&dir), Phase::Compare);
+        assert_eq!(
+            Phase::Compare.advance(&dir),
+            Phase::Compare,
+            "只到 start 不进 Done"
+        );
+        std::fs::write(dir.join(PHASE_COMPARE_END), b"").unwrap();
+        assert_eq!(Phase::Compare.advance(&dir), Phase::Done);
+        assert_eq!(Phase::Done.advance(&dir), Phase::Done, "不回退");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
