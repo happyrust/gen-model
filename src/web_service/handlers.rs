@@ -1575,8 +1575,10 @@ pub async fn tree_children(
 /// `/tree/children?resolved=1`：分组父节点的行换成解析成员（契约见
 /// `docs/plans/2026-11-08-gpwl-gpset-group-nodes-dev-plan.md` §2.1）。
 ///
-/// 二级成员行加 `via`（经由的 GPITEM）、`secondary: true`、`rule: false`，主链子节点不加；
-/// `unresolved` 只在有坏槽时出现。新增的 refno 字段与 `nodes[].refno` 同一 serde 形状。
+/// 三种行各有三键口径（`validation-contract.md` VAL-CONTRACT-001/002/003）：主链子节点三键都不出现；
+/// GPITEM 解析成员 `via` = 那个 GPITEM、`secondary: true`、`rule: false`；规则成员 `via: null`、
+/// `secondary: true`、`rule: true`。`unresolved` 只在有坏槽时出现。新增的 refno 字段与
+/// `nodes[].refno` 同一 serde 形状。
 async fn tree_children_resolved(
     service: std::sync::Arc<crate::data_interface::direct_tree::DirectTreeService>,
     parent: RefU64,
@@ -1604,11 +1606,28 @@ fn resolved_children_body(
         .map(|row| tree_node_value(&row.node, dbnum_of(row.node.refno.refno())))
         .collect::<Result<Vec<_>, _>>()?;
     for (value, row) in nodes.iter_mut().zip(&layer.nodes) {
-        if let (Some(via), Some(object)) = (row.via, value.as_object_mut()) {
-            object.insert("via".into(), json!(RefnoEnum::from(via)));
-            object.insert("secondary".into(), json!(true));
-            object.insert("rule".into(), json!(false));
+        // 三键（`via` / `secondary` / `rule`）按行类型独立决定，不能共用一个守卫：
+        // `via == None` 有两种行——主链子节点与规则成员。旧写法
+        // `if let (Some(via), Some(object)) = (row.via, ...)` 把两者一起吞掉，于是规则成员
+        // 三键全不输出、`rule: true` 永远发不出去（`validation-contract.md` VAL-CONTRACT-003）。
+        if !row.rule && row.via.is_none() {
+            // 主链子节点：三个键都不出现（是缺失，不是 `null`）。VAL-CONTRACT-001。
+            continue;
         }
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        // 规则成员没有经由的 GPITEM，但 `via` 这个键**必须出现**且值为 `null`
+        // （AGENTS.md 实现约束 11）。GPITEM 解析成员照旧写那个 GPITEM 的 refno。
+        object.insert(
+            "via".into(),
+            match row.via {
+                Some(via) => json!(RefnoEnum::from(via)),
+                None => Value::Null,
+            },
+        );
+        object.insert("secondary".into(), json!(true));
+        object.insert("rule".into(), json!(row.rule));
     }
     let mut body = json!({
         "source": "direct",
@@ -7412,7 +7431,9 @@ mod tests {
     /// `order` 是它在分组里的位次。
     fn group_contract_row(refno: RefU64, order: usize) -> aios_core::pdms_types::EleTreeNode {
         let r = RefU64::from_two_nums;
-        let (noun, name, owner, children_count) = if refno == r(1, 4) {
+        let (noun, name, owner, children_count) = if refno == r(1, 3) {
+            ("ZONE", "/PIPE-100", r(1, 2), 1)
+        } else if refno == r(1, 4) {
             ("BRAN", "/PIPE-100/B1", r(1, 3), 1)
         } else if refno == r(1, 6) {
             ("VALV", "/PIPE-100/B1/V1", r(1, 4), 0)
@@ -7447,6 +7468,7 @@ mod tests {
                 .map(|(order, member)| ResolvedChild {
                     node: group_contract_row(member.element(), order),
                     via: member.via(),
+                    rule: member.is_rule(),
                 })
                 .collect(),
             unresolved: resolved.unresolved,
@@ -7470,6 +7492,186 @@ mod tests {
             "{body}"
         );
         assert_group_contract("tree-children-resolved-gpset.json", &body);
+    }
+
+    /// VAL-CONTRACT-001 / 002 / 003：同一份回执里三种行的三键形状。
+    ///
+    /// 三种行必须分开判定：主链子节点**三个键都不出现**（缺失，不是 `null`）；GPITEM 解析成员
+    /// `via` 是那个 GPITEM；规则成员 `via` 必须是 `null` 且 `rule: true`。旧实现把三键挂在
+    /// `if let (Some(via), Some(object))` 上，规则成员（`via == None`）三键全丢，`rule: true`
+    /// 永远发不出去——这是本用例钉住的缺陷。
+    #[test]
+    fn the_three_member_keys_are_decided_per_row_kind() {
+        use crate::data_interface::direct_tree::{ResolvedChild, ResolvedChildren};
+
+        let r = RefU64::from_two_nums;
+        let layer = ResolvedChildren {
+            nodes: vec![
+                // 主链子节点：分组里没写这个成员，就是存储层级本身，三个键都不该出现。
+                ResolvedChild {
+                    node: group_contract_row(r(1, 3), 0),
+                    via: None,
+                    rule: false,
+                },
+                // GPITEM 解析成员：`via` 是那个 GPITEM 的 refno，`rule: false`。
+                ResolvedChild {
+                    node: group_contract_row(r(1, 4), 1),
+                    via: Some(r(2, 12)),
+                    rule: false,
+                },
+                // 规则成员：没有 GPITEM，但 `via` 这个键必须在且值为 `null`。
+                ResolvedChild {
+                    node: group_contract_row(r(1, 6), 2),
+                    via: None,
+                    rule: true,
+                },
+            ],
+            unresolved: Vec::new(),
+        };
+        let body = resolved_children_body(r(1, 2), &layer, group_contract_dbnum).unwrap();
+        let nodes = body["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3, "{body}");
+
+        let main = nodes[0].as_object().unwrap();
+        for key in ["via", "secondary", "rule"] {
+            assert!(
+                !main.contains_key(key),
+                "主链子节点不该出现 {key} 键（是缺失，不是 null）：{}",
+                nodes[0]
+            );
+        }
+
+        assert_eq!(nodes[1]["via"], json!("2_12"), "{}", nodes[1]);
+        assert_eq!(nodes[1]["secondary"], json!(true), "{}", nodes[1]);
+        assert_eq!(nodes[1]["rule"], json!(false), "{}", nodes[1]);
+
+        assert!(
+            nodes[2]
+                .as_object()
+                .unwrap()
+                .contains_key("via"),
+            "规则成员的 via 键必须出现（值为 null，不是省略）：{}",
+            nodes[2]
+        );
+        assert_eq!(nodes[2]["via"], Value::Null, "{}", nodes[2]);
+        assert_eq!(nodes[2]["secondary"], json!(true), "{}", nodes[2]);
+        assert_eq!(nodes[2]["rule"], json!(true), "{}", nodes[2]);
+    }
+
+    /// VAL-CONTRACT-003 的端到端形态：夹具里一条真正的 `SCOSEL` 规则（不是手搓的 `ResolvedChild`）
+    /// 从成员解析一路走到响应体，规则行必须是 `via: null` + `secondary: true` + `rule: true`。
+    ///
+    /// 覆盖范围要说清：这条从 `resolved_members_with_rules`（真 decode + 真 evaluate）起，
+    /// 经 `ResolvedMember::is_rule()` → `ResolvedChild` → 响应层，钉的是「规则标记与 `via: null`
+    /// 在响应里都在」。`DirectTreeService::read_resolved_children` 里那行搬运由真库测试
+    /// `the_three_consumers_see_rule_members_when_the_switch_is_on` 的 `all(row.rule)` 断言覆盖
+    /// （它需要真库，`#[ignore]`）。
+    #[test]
+    fn a_rule_member_reaches_the_response_with_all_three_keys() {
+        use crate::data_interface::direct_tree::{ResolvedChild, ResolvedChildren};
+        use crate::data_interface::group_membership::{
+            fake_store::FakeStore, resolved_members_with_rules,
+        };
+        use crate::data_interface::scosel::{
+            Scosel, ScoselExpr, ScoselQualifier, ScoselRule, encode,
+        };
+        use crate::data_interface::scosel_eval::{ScoselScope, desc_attribute_hash};
+
+        /// 夹具求值域：`DESC` 文本表 + noun 表。
+        #[derive(Default)]
+        struct FixtureScope {
+            texts: std::collections::HashMap<(u32, String), std::collections::HashSet<RefU64>>,
+            nouns: std::collections::HashMap<u32, std::collections::HashSet<RefU64>>,
+        }
+        impl ScoselScope for FixtureScope {
+            fn refnos_with_attr_text(
+                &self,
+                attr_hash: u32,
+                text: &str,
+            ) -> std::collections::HashSet<RefU64> {
+                self.texts
+                    .get(&(attr_hash, text.to_string()))
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            fn refnos_of_noun(&self, noun_hash: u32) -> std::collections::HashSet<RefU64> {
+                self.nouns.get(&noun_hash).cloned().unwrap_or_default()
+            }
+        }
+
+        const ZONE_HASH: u32 = 640_493;
+        let r = RefU64::from_two_nums;
+
+        // 分组库 2 的 GPSET 2/11：存储成员为 0（真库 APS 的 29 个 GPSET 全是这个形状），
+        // 成员全靠规则算出来。
+        let mut store = FakeStore::default();
+        store.add(r(2, 1), "WORL", &[r(2, 10)]);
+        store.add(r(2, 10), "GPWL", &[r(2, 11)]);
+        store.add(r(2, 11), "GPSET", &[]);
+        store.add(r(1, 1), "WORL", &[r(1, 2)]);
+        store.add(r(1, 2), "SITE", &[r(1, 3)]);
+        store.add(r(1, 3), "ZONE", &[]);
+
+        // `ALL ZONE WITH ( ATTRIB DESC OF ZONE EQ 'AREA01PIPE' )`，用 `encode` 生成字节而不是手写
+        // 数组：手写一份就等于在测试里放第二份布局真相（`scosel.rs` 的 encode 有 27 条真实样本
+        // 逐字往返作为它的证据）。
+        let rule = Scosel {
+            classes: Vec::new(),
+            rules: vec![ScoselRule {
+                attr: ZONE_HASH as i32,
+                filter: ScoselExpr::StrEq(
+                    Box::new(ScoselExpr::Attr {
+                        hash: desc_attribute_hash() as i32,
+                        tail: [1, 120, 0],
+                        qualifiers: vec![ScoselQualifier::Typed {
+                            words: vec![2, ZONE_HASH as i32, 6, 1701],
+                        }],
+                    }),
+                    Box::new(ScoselExpr::Text("AREA01PIPE".into())),
+                ),
+            }],
+        };
+        store.scosel(r(2, 11), &encode(&rule));
+
+        let mut scope = FixtureScope::default();
+        scope.texts.insert(
+            (desc_attribute_hash(), "AREA01PIPE".to_string()),
+            [r(1, 3)].into_iter().collect(),
+        );
+        scope.nouns.insert(ZONE_HASH, [r(1, 3)].into_iter().collect());
+
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(resolved.members.len(), 1, "{:?}", resolved.members);
+        assert!(
+            resolved.members[0].is_rule(),
+            "夹具只挂了规则，成员必须来自规则求值"
+        );
+        assert!(resolved.unresolved.is_empty(), "{:?}", resolved.unresolved);
+
+        let layer = ResolvedChildren {
+            nodes: resolved
+                .members
+                .iter()
+                .enumerate()
+                .map(|(order, member)| ResolvedChild {
+                    node: group_contract_row(member.element(), order),
+                    via: member.via(),
+                    rule: member.is_rule(),
+                })
+                .collect(),
+            unresolved: resolved.unresolved,
+        };
+        let body = resolved_children_body(r(2, 11), &layer, group_contract_dbnum).unwrap();
+        let row = &body["nodes"][0];
+        assert_eq!(row["refno"], json!("1_3"), "{body}");
+        assert!(
+            row.as_object().unwrap().contains_key("via"),
+            "规则成员的 via 键必须出现：{body}"
+        );
+        assert_eq!(row["via"], Value::Null, "{body}");
+        assert_eq!(row["secondary"], json!(true), "{body}");
+        assert_eq!(row["rule"], json!(true), "{body}");
     }
 
     #[test]

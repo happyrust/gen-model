@@ -687,11 +687,19 @@ impl DirectTreeService {
     }
 }
 
-/// 解析视图里的一行：树行本身，加上它经由哪个 GPITEM 解出（`None` = 成员链上的元素本身）。
+/// 解析视图里的一行：树行本身，加上它经由哪个 GPITEM 解出（`None` = 成员链上的元素本身），
+/// 以及这一行是不是 `SCOSEL` 规则算出来的成员。
+///
+/// 为什么需要 `rule`：`via == None` 有两种完全不同的行——主链子节点（分组里没写成员，就是
+/// 存储层级本身）与规则成员（分组里也没写这个成员，是规则把它算进来的）。只看 `via` 分不开，
+/// 而响应契约要求前者**三个键都不出现**、后者必须是 `via: null` + `secondary: true` +
+/// `rule: true`（`validation-contract.md` VAL-CONTRACT-001/003）。
 #[derive(Debug, Clone)]
 pub struct ResolvedChild {
     pub node: EleTreeNode,
     pub via: Option<RefU64>,
+    /// 由 `ResolvedMember::Rule` 解出的成员。主链子节点与 GPITEM 解析成员都是 `false`。
+    pub rule: bool,
 }
 
 /// [`DirectTreeService::resolved_children`] 的一层：解析出的行，与解析不出的 GPITEM 槽。
@@ -739,7 +747,12 @@ impl DirectTreeService {
             let nodes = self
                 .children(parent)?
                 .into_iter()
-                .map(|node| ResolvedChild { node, via: None })
+                // 非分组父节点的行就是主链子节点本身：没有经由的 GPITEM，也不是规则算出来的。
+                .map(|node| ResolvedChild {
+                    node,
+                    via: None,
+                    rule: false,
+                })
                 .collect();
             return Ok(ResolvedChildren {
                 nodes,
@@ -775,6 +788,9 @@ impl DirectTreeService {
             nodes.push(ResolvedChild {
                 node,
                 via: member.via(),
+                // 规则成员的行要在响应里发 `rule: true`；其余两种都是 `false`。
+                // 判定走 `ResolvedMember::is_rule()`，不在这里再 match 一次变体。
+                rule: member.is_rule(),
             });
         }
         Ok(ResolvedChildren { nodes, unresolved })
@@ -1131,6 +1147,10 @@ mod lazy_live_tests {
         assert!(
             layer.nodes.iter().all(|row| row.via.is_none()),
             "规则成员没有经由的 GPITEM，via 必须是 None"
+        );
+        assert!(
+            layer.nodes.iter().all(|row| row.rule),
+            "这些行全是 SCOSEL 规则算出来的，`rule` 必须是 true——否则响应层发不出 `rule: true`"
         );
 
         let group_scope = service
