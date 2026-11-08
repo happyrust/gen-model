@@ -1,7 +1,5 @@
 use crate::fast_model::utils::save_transforms_to_surreal;
-use aios_core::{
-    RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir,
-};
+use aios_core::{RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, query_neareast_along_axis};
 use bevy_transform::components::Transform;
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
@@ -241,16 +239,24 @@ pub async fn update_cal_equip_for_roots_with(
 
     let mut scan = collect_live_targets(roots).await?;
     let link_floors = crate::fast_model::spatial_state::current_state().is_ready();
-    outcome.floors_skipped = !link_floors
-        && !(scan.live.is_empty() && scan.valves.is_empty() && scan.floors.is_empty());
+    outcome.floors_skipped =
+        !link_floors && !(scan.live.is_empty() && scan.valves.is_empty() && scan.floors.is_empty());
     println!(
         "[设备派生量] 开始 根={} 设备={} 阀门={} 楼板={} 口径={}{}",
         roots.len(),
         scan.live.len(),
         scan.valves.len(),
         scan.floors.len(),
-        if scope.library_scale { "整库" } else { "逐根" },
-        if link_floors { "" } else { "（空间树未就绪，只写 cal_equi）" }
+        if scope.library_scale {
+            "整库"
+        } else {
+            "逐根"
+        },
+        if link_floors {
+            ""
+        } else {
+            "（空间树未就绪，只写 cal_equi）"
+        }
     );
     let mut progress = Progress {
         done: 0,
@@ -280,7 +286,14 @@ pub async fn update_cal_equip_for_roots_with(
     if !link_floors {
         return Ok(outcome);
     }
-    drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress).await;
+    drain_floor_targets(
+        &mut scan,
+        scope,
+        &mut outcome,
+        &mut progress,
+        &mut on_progress,
+    )
+    .await;
 
     // 牵连名单拿不全只记一笔失败，不拖住其余的重算。
     if budget_exhausted(scope.deadline, Instant::now()) {
@@ -297,7 +310,14 @@ pub async fn update_cal_equip_for_roots_with(
             outcome.failed += 1;
         }
     }
-    drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress).await;
+    drain_floor_targets(
+        &mut scan,
+        scope,
+        &mut outcome,
+        &mut progress,
+        &mut on_progress,
+    )
+    .await;
 
     if scope.library_scale {
         outcome.floor_space_skipped = !scan.floors.is_empty();
@@ -323,8 +343,14 @@ pub async fn update_cal_equip_for_roots_with(
                 true
             }
         };
-        drain_floor_targets(&mut scan, scope, &mut outcome, &mut progress, &mut on_progress)
-            .await;
+        drain_floor_targets(
+            &mut scan,
+            scope,
+            &mut outcome,
+            &mut progress,
+            &mut on_progress,
+        )
+        .await;
         if !complete {
             outcome.deferred += floors.len() - index;
             break;
@@ -494,10 +520,11 @@ async fn column_dependents(
     entries: &[(RefnoEnum, String)],
     deadline: Option<Instant>,
 ) -> anyhow::Result<(Vec<Node>, bool)> {
-    let to_node = |id: Option<surrealdb::sql::Thing>, noun: Option<String>, deleted: Option<bool>| {
-        let refno = crate::data_interface::helper::pe_thing_to_refno(id?).ok()?;
-        Some((refno, noun, deleted.unwrap_or(false)))
-    };
+    let to_node =
+        |id: Option<surrealdb::sql::Thing>, noun: Option<String>, deleted: Option<bool>| {
+            let refno = crate::data_interface::helper::pe_thing_to_refno(id?).ok()?;
+            Some((refno, noun, deleted.unwrap_or(false)))
+        };
     let mut nodes = Vec::new();
     for batch in entries.chunks(COLUMN_LOOKUP_BATCH) {
         if budget_exhausted(deadline, Instant::now()) {
@@ -605,7 +632,10 @@ fn child_aabbs_raw_expr(e: &str) -> String {
 
 /// [`child_aabbs_raw_expr`] 去掉 `NONE`：`parry3d::Aabb` 的反序列化遇到一个 `NONE` 整个数组就失败。
 fn child_aabbs_expr(e: &str) -> String {
-    format!("array::filter({}, |$v| $v != NONE)", child_aabbs_raw_expr(e))
+    format!(
+        "array::filter({}, |$v| $v != NONE)",
+        child_aabbs_raw_expr(e)
+    )
 }
 
 fn pe_keys(refnos: &[RefnoEnum]) -> String {
@@ -715,7 +745,10 @@ async fn clear_floor_miss(target: &str) {
 async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
     let e = equip.to_pe_key();
     let mut response = SUL_DB
-        .query(format!("SELECT VALUE {} FROM ONLY {e};", child_aabbs_expr(&e)))
+        .query(format!(
+            "SELECT VALUE {} FROM ONLY {e};",
+            child_aabbs_expr(&e)
+        ))
         .await?
         .check()?;
     // 读不出来是数据异常，不是「脚下没有楼板」：上抛，旧边原样留着。
@@ -748,8 +781,13 @@ async fn relink_floor(equip: RefnoEnum) -> anyhow::Result<bool> {
 }
 
 /// 重算单个阀门的楼板边（调用方保证树已就绪）。返回重算后是否挂着楼板边。
+///
+/// 射线口径与启动全量 [`aios_core::spatial::pipe::cal_valve_nearest_floor`] 同源：
+/// 都走 `valve_nearest_floor`（阀体底面 4 角 + 中心）。以前这里用
+/// `query_neareast_along_axis`（阀门原点单点），全量用原点、增量也用原点，但全量改成
+/// 底面多点后两边就不一致了——同一台阀门会随触发方式算出不同的 `dist`。
 async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
-    let nearest = query_neareast_along_axis(valve, Vec3::NEG_Z, "FLOOR").await?;
+    let nearest = aios_core::spatial::pipe::valve_nearest_floor(valve).await?;
     let v = valve.to_pe_key();
     let sql = match nearest {
         Some((floor, dist)) => {
@@ -769,36 +807,58 @@ async fn refresh_one_valve(valve: RefnoEnum) -> anyhow::Result<bool> {
     Ok(nearest.is_some())
 }
 
-/// 每个子件盒底面的四个角，按 0.1mm 去重。环形 / 管状布置的设备合并盒四角常常落在空处，
-/// 只能逐子件打（真库 24381_57646：合并盒四角全空，逐子件 236 个点全部命中）。
-fn bottom_corners(aabbs: &[Aabb]) -> Vec<Vec3> {
+/// 每个子件盒底面的四个角 + 底面中心，按 0.1mm 去重。环形 / 管状布置的设备合并盒四角常常
+/// 落在空处，只能逐子件打（真库 24381_57646：合并盒四角全空，逐子件 236 个点全部命中）。
+///
+/// 底面中心是 2026-11-08 补的：四角只覆盖轮廓，设备中部正下方有更高的局部基础 / 凸台时，
+/// 四角全部落到远处楼板、中心那个点却离凸台最近，只打四角会把距离算大。
+fn bottom_points(aabbs: &[Aabb]) -> Vec<Vec3> {
     let mut seen = std::collections::HashSet::new();
     let mut points = Vec::new();
+    let mut push = |pt: Vec3, points: &mut Vec<Vec3>| {
+        let key = (
+            (pt.x * 10.0).round() as i64,
+            (pt.y * 10.0).round() as i64,
+            (pt.z * 10.0).round() as i64,
+        );
+        if seen.insert(key) {
+            points.push(pt);
+        }
+    };
     for aabb in aabbs {
         for corner in &aabb.vertices()[..4] {
-            let pt: Vec3 = (*corner).into();
-            let key = (
-                (pt.x * 10.0).round() as i64,
-                (pt.y * 10.0).round() as i64,
-                (pt.z * 10.0).round() as i64,
-            );
-            if seen.insert(key) {
-                points.push(pt);
-            }
+            push(Vec3::from(*corner), &mut points);
         }
+        let center = aabb.center();
+        push(Vec3::new(center.x, center.y, aabb.mins.z), &mut points);
     }
     points
 }
 
-/// 逐子件底角向 -Z 打射线，取最近的那块楼板。
+/// 逐子件那一级最多提交多少个探测点。
 ///
-/// 两级：先打**合并盒**的四个角（4 条射线，绝大多数设备这一级就命中）；一条都不中时再退到
-/// **逐子件**底角。合并盒是外接矩形，环形 / 管状布置的设备四角落在空处，一条都打不中——真库
-/// 2026-11-02 实测 24381_57646 / 57737 / 57828 三台四角全落空，逐子件却有 200+ 个点命中。
-/// 只做逐子件会把全量重算从 21 秒推到 320 秒（真库实测），所以合并盒那级不能省。
+/// 合并盒四角已经覆盖了轮廓，逐子件这一级只为抓「设备中部正下方更高的局部基础 / 凸台」
+/// 和「穿孔立管把合并盒拉低导致的跳层」。这两类都只会出现在**最低的**若干子件下方，
+/// 所以按 z 升序取前 N 个点就够；不设上限时一台 200+ 子件的设备要打 1000+ 条射线。
+const BOTTOM_POINT_LIMIT: usize = 64;
+
+/// 逐子件底角 + 底面中心向 -Z 打射线，取最近的那块楼板。
 ///
-/// 两级都取**最小距离**而不是第一个命中：子件分散在多层时，第一个命中取决于遍历顺序，
-/// 不是「最近」。
+/// 两级：
+///
+/// 1. **合并盒四角**（4 个点）。绝大多数设备这一级就是最终答案。
+/// 2. **逐子件底角 + 底面中心**，按 z 升序取前 [`BOTTOM_POINT_LIMIT`] 个，并把第一级
+///    的结果当作初始上界传进批量查询（只有严格更近的才回报）。
+///
+/// 第二级不能省，也不能在第一级命中后直接返回：
+///
+/// - **跳层**：合并盒是外接矩形，穿孔立管会把 `merged.mins.z` 拉到本层楼板以下，四角
+///   直接打到下一层。
+/// - **局部凸台漏检**：设备中部正下方有更高的局部基础时，四角全落在远处楼板上，只有
+///   中部那些点看得见凸台。
+///
+/// 以前是「四角命中即短路」，真库 2026-11-08 因此在这两类设备上连错楼板 / 连出偏大的
+/// 距离。现在两级都跑，但第二级带上界剪枝 + 点数上限，全量重算耗时与短路版本同级。
 async fn nearest_floor_below(aabbs: &[Aabb]) -> Option<(RefnoEnum, f32)> {
     if aabbs.is_empty() {
         return None;
@@ -811,26 +871,59 @@ async fn nearest_floor_below(aabbs: &[Aabb]) -> Option<(RefnoEnum, f32)> {
         .iter()
         .map(|corner| Vec3::from(*corner))
         .collect::<Vec<_>>();
-    if let Some(hit) = nearest_floor_among(&merged_corners).await {
-        return Some(hit);
+    let coarse = nearest_floor_among(&merged_corners, None).await;
+    // 贴面（0 距离）已经是最优，逐子件不可能更近。
+    if let Some((_, dist)) = coarse {
+        if dist <= f32::EPSILON {
+            return coarse;
+        }
     }
-    nearest_floor_among(&bottom_corners(aabbs)).await
+    let mut detailed = bottom_points(aabbs);
+    // 按 z 升序：更低的点更可能更近，先打它们。
+    detailed.sort_by(|a, b| a.z.total_cmp(&b.z));
+    detailed.truncate(BOTTOM_POINT_LIMIT);
+    let fine = nearest_floor_among(&detailed, coarse).await;
+    match (coarse, fine) {
+        (Some(a), Some(b)) => Some(if better(b, a) { b } else { a }),
+        (Some(a), None) => Some(a),
+        (None, fine) => fine,
+    }
+}
+
+/// `candidate` 是否优于 `current`：更近，或同距但 refno 更小（保证同一台设备重跑结果稳定）。
+fn better(candidate: (RefnoEnum, f32), current: (RefnoEnum, f32)) -> bool {
+    candidate.1 < current.1 || (candidate.1 == current.1 && candidate.0 < current.0)
 }
 
 /// 这一批点上向 -Z 打射线，返回最近的一块楼板（0 距离直接返回）。
-async fn nearest_floor_among(points: &[Vec3]) -> Option<(RefnoEnum, f32)> {
+///
+/// 一次交给 `AccelerationTree::query_nearest_below_bounded`：它只做一次 R-tree 包络
+/// 粗筛，再逐点精筛。以前这里是逐点调 `query_neareast_by_pos_dir`，每个点各读一次
+/// `GLOBAL_AABB_TREE`、各扫一次 R-tree——设备底面动辄几十到两百多个点时，粗筛成了主要开销。
+///
+/// `bound` 是调用方已有的最优解：传进去后批量查询只用它做剪枝与「是否改进」的判据，
+/// 返回 `Some` 即代表这一点严格更近。
+async fn nearest_floor_among(
+    points: &[Vec3],
+    bound: Option<(RefnoEnum, f32)>,
+) -> Option<(RefnoEnum, f32)> {
+    if points.is_empty() {
+        return None;
+    }
+    let filter = HashSet::from(["FLOOR".to_string()]);
+    let hits = {
+        let tree = aios_core::room::room::GLOBAL_AABB_TREE.read().await;
+        tree.query_nearest_below_bounded(points, &filter, bound)
+            .await
+            .ok()?
+    };
     let mut best: Option<(RefnoEnum, f32)> = None;
-    for pt in points {
-        let Ok(Some((floor, dist))) = query_neareast_by_pos_dir(*pt, Vec3::NEG_Z, "FLOOR").await
-        else {
-            continue;
-        };
-        // 贴面（0 距离）已经是最优，不用再打。
-        if dist <= f32::EPSILON {
-            return Some((floor, dist));
+    for hit in hits.into_iter().flatten() {
+        if hit.1 <= f32::EPSILON {
+            return Some(hit);
         }
-        if best.is_none_or(|(_, d)| dist < d) {
-            best = Some((floor, dist));
+        if best.is_none_or(|current| better(hit, current)) {
+            best = Some(hit);
         }
     }
     best
@@ -885,10 +978,7 @@ fn unlinked_live_equips_sql() -> &'static str {
 }
 
 async fn enumerate_unlinked_live_equips() -> anyhow::Result<Vec<RefnoEnum>> {
-    let mut response = SUL_DB
-        .query(unlinked_live_equips_sql())
-        .await?
-        .check()?;
+    let mut response = SUL_DB.query(unlinked_live_equips_sql()).await?.check()?;
     Ok(response.take(0)?)
 }
 
@@ -1305,7 +1395,9 @@ mod equip_scan_tests {
         let src = include_str!("equip_model.rs");
         // 两条入口（update_cal_equip 与 update_cal_equip_for_roots）都得调。
         assert!(
-            src.matches("clear_soft_deleted_equip_rows().await?;").count() >= 2,
+            src.matches("clear_soft_deleted_equip_rows().await?;")
+                .count()
+                >= 2,
             "全量与增量都要调 clear_soft_deleted_equip_rows"
         );
         // 软删清理必须有自己的函数体，不能在两处各写一份 SQL。
@@ -1419,11 +1511,16 @@ mod equip_scan_tests {
         assert_eq!(scan.floor_equips, vec![r(5)]);
         assert_eq!(scan.valves, vec![r(6)]);
 
-        let again = scan.absorb_floor_dependents(vec![node(5, "EQUI", false), node(6, "VALV", false)]);
+        let again =
+            scan.absorb_floor_dependents(vec![node(5, "EQUI", false), node(6, "VALV", false)]);
         assert_eq!(again, 0, "现有边反查与空间反查拉到同一个，只收一次");
     }
 
-    fn link(own: (u32, &str), parent: Option<(u32, &str, bool)>, grand: Option<(u32, &str, bool)>) -> ColumnLink {
+    fn link(
+        own: (u32, &str),
+        parent: Option<(u32, &str, bool)>,
+        grand: Option<(u32, &str, bool)>,
+    ) -> ColumnLink {
         ColumnLink {
             node: node(own.0, own.1, false),
             parent: parent.map(|(n, noun, d)| node(n, noun, d)),
@@ -1433,10 +1530,20 @@ mod equip_scan_tests {
 
     #[test]
     fn column_entries_resolve_to_their_equip_or_valve() {
-        assert_eq!(floor_dependent_of(link((1, "VALV"), Some((2, "BRAN", false)), None)), Some(node(1, "VALV", false)));
-        assert_eq!(floor_dependent_of(link((1, "BOX"), Some((2, "EQUI", false)), None)), Some(node(2, "EQUI", false)));
         assert_eq!(
-            floor_dependent_of(link((1, "BOX"), Some((2, "SUBE", false)), Some((3, "EQUI", false)))),
+            floor_dependent_of(link((1, "VALV"), Some((2, "BRAN", false)), None)),
+            Some(node(1, "VALV", false))
+        );
+        assert_eq!(
+            floor_dependent_of(link((1, "BOX"), Some((2, "EQUI", false)), None)),
+            Some(node(2, "EQUI", false))
+        );
+        assert_eq!(
+            floor_dependent_of(link(
+                (1, "BOX"),
+                Some((2, "SUBE", false)),
+                Some((3, "EQUI", false))
+            )),
             Some(node(3, "EQUI", false)),
             "SUBE 下的零件归到祖父那台设备"
         );
@@ -1445,7 +1552,14 @@ mod equip_scan_tests {
             Some(node(2, "EQUI", true)),
             "软删标记原样带出，由 absorb_floor_dependents 丢掉"
         );
-        assert_eq!(floor_dependent_of(link((1, "PANE"), Some((2, "STRU", false)), Some((3, "ZONE", false)))), None);
+        assert_eq!(
+            floor_dependent_of(link(
+                (1, "PANE"),
+                Some((2, "STRU", false)),
+                Some((3, "ZONE", false))
+            )),
+            None
+        );
     }
 
     #[test]
@@ -1455,18 +1569,30 @@ mod equip_scan_tests {
             parry3d::math::Point::new(10.0, 20.0, 150.0),
         );
         let column = floor_column(&floor).expect("有效楼板盒");
-        assert_eq!(column.mins, floor.mins, "z 从楼板底面起：贴在楼板里的阀门也算");
+        assert_eq!(
+            column.mins, floor.mins,
+            "z 从楼板底面起：贴在楼板里的阀门也算"
+        );
         assert_eq!((column.maxs.x, column.maxs.y), (10.0, 20.0));
         assert_eq!(column.maxs.z, f32::MAX);
-        assert!(floor_column(&Aabb::new_invalid()).is_none(), "楼板不在树上就没有柱子");
+        assert!(
+            floor_column(&Aabb::new_invalid()).is_none(),
+            "楼板不在树上就没有柱子"
+        );
     }
 
     /// 孙件那一跳必须经过 `pe`：连写两次 `<-pe_owner` 恒为空，曾让 477 台设备取不到盒。
     #[test]
     fn child_aabbs_walk_through_pe_to_reach_grandchildren() {
         let expr = child_aabbs_expr("pe:24381_1");
-        assert!(expr.contains("pe:24381_1<-pe_owner<-pe<-pe_owner"), "{expr}");
-        assert!(expr.starts_with("array::filter("), "最外层要滤掉 NONE: {expr}");
+        assert!(
+            expr.contains("pe:24381_1<-pe_owner<-pe<-pe_owner"),
+            "{expr}"
+        );
+        assert!(
+            expr.starts_with("array::filter("),
+            "最外层要滤掉 NONE: {expr}"
+        );
 
         let source = include_str!("equip_model.rs");
         let doubled = ["<-pe_owner", "<-pe_owner"].concat();
@@ -1476,9 +1602,12 @@ mod equip_scan_tests {
         );
     }
 
-    /// 合并盒四角打不中时要退到逐子件：环形 / 管状布置的设备四角落在空处。
+    /// 每个子件底面出 4 角 + 底面中心；重复的不再计。
+    ///
+    /// 底面中心是 2026-11-08 补的：四角只覆盖轮廓，设备中部正下方更高的局部基础 / 凸台
+    /// 只有中心点看得见（真库 24381_46777 这类支腿设备）。
     #[test]
-    fn bottom_corners_cover_every_child_and_dedupe() {
+    fn bottom_points_cover_every_child_with_corners_and_center() {
         let far = Aabb::new(
             parry3d::math::Point::new(0.0, 0.0, 0.0),
             parry3d::math::Point::new(10.0, 10.0, 10.0),
@@ -1487,24 +1616,85 @@ mod equip_scan_tests {
             parry3d::math::Point::new(100.0, 100.0, 0.0),
             parry3d::math::Point::new(110.0, 110.0, 10.0),
         );
-        let points = bottom_corners(&[far, near, far]);
-        assert_eq!(points.len(), 8, "两个不同子件各四个底角，重复的不再计: {points:?}");
+        let points = bottom_points(&[far, near, far]);
+        assert_eq!(
+            points.len(),
+            10,
+            "两个不同子件各 4 角 + 1 中心，重复的不再计: {points:?}"
+        );
         assert!(
             points.iter().all(|p| (p.z - 0.0).abs() < 1e-6),
-            "只取底面（z 最小）的四个角: {points:?}"
+            "只取底面（z 最小）: {points:?}"
         );
         assert!(
             points.iter().any(|p| (p.x - 100.0).abs() < 1e-6)
                 && points.iter().any(|p| (p.x - 110.0).abs() < 1e-6),
             "每个子件自己的角都要在，不能用合并盒的四角代替: {points:?}"
         );
-        assert!(bottom_corners(&[]).is_empty());
+        // 中心点：两个子件的底面中心各一个，坐标是各自盒的 xy 中点。
+        assert!(
+            points
+                .iter()
+                .any(|p| (p.x - 5.0).abs() < 1e-6 && (p.y - 5.0).abs() < 1e-6),
+            "第一个子件的底面中心必须探到: {points:?}"
+        );
+        assert!(
+            points
+                .iter()
+                .any(|p| (p.x - 105.0).abs() < 1e-6 && (p.y - 105.0).abs() < 1e-6),
+            "第二个子件的底面中心必须探到: {points:?}"
+        );
+        assert!(bottom_points(&[]).is_empty());
+    }
+
+    /// 合并盒那一级命中后不能直接短路：穿孔立管会把合并盒拉到本层楼板以下，四角直接跳层；
+    /// 而设备中部更高的局部凸台只有逐子件点看得见。
+    #[test]
+    fn nearest_floor_below_does_not_short_circuit_on_the_merged_box() {
+        let src = include_str!("equip_model.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let body = src
+            .split_once("async fn nearest_floor_below(")
+            .expect("设备底面探测入口")
+            .1
+            .split_once("\n/// 这一批点上向 -Z 打射线")
+            .expect("入口结尾")
+            .0;
+        assert!(
+            !body.contains("return Some(hit);"),
+            "合并盒命中后不能直接返回，否则穿孔立管跳层、局部凸台漏检"
+        );
+        assert!(
+            body.contains("BOTTOM_POINT_LIMIT"),
+            "逐子件那一级要有探测点上限，否则一台 200+ 子件的设备要打上千条射线"
+        );
+        assert!(
+            body.contains("nearest_floor_among(&detailed, coarse)"),
+            "合并盒的结果必须作为上界传进逐子件那一级，让批量查询直接剪枝"
+        );
+        assert!(body.contains("better(b, a)"), "两级结果必须比出更近的那个");
+    }
+
+    /// 同距时按 refno 定序，保证同一台设备重跑连到同一块楼板。
+    #[test]
+    fn equal_distances_resolve_to_the_smaller_refno() {
+        let a = (RefnoEnum::from("24381/100"), 50.0);
+        let b = (RefnoEnum::from("24381/200"), 50.0);
+        assert!(better(a, b), "同距选 refno 小的");
+        assert!(!better(b, a));
+        let closer = (RefnoEnum::from("24381/300"), 10.0);
+        assert!(better(closer, a), "更近的赢");
     }
 
     #[test]
     fn floor_dependents_sql_names_the_floor_table_and_soft_deleted_floors() {
         let sql = floor_dependents_sql(&[r(2), r(3)]);
-        assert!(sql.contains("out IN [FLOOR:24381_2,FLOOR:24381_3]"), "{sql}");
+        assert!(
+            sql.contains("out IN [FLOOR:24381_2,FLOOR:24381_3]"),
+            "{sql}"
+        );
         assert!(
             !sql.contains("deleted = true"),
             "软删楼板那一句单独问一次，不随每批楼板重复: {sql}"
@@ -1529,8 +1719,14 @@ mod equip_scan_tests {
     #[test]
     fn whole_library_or_many_roots_refresh_at_library_scale() {
         assert!(library_scale_refresh(true, 1));
-        assert!(library_scale_refresh(false, EQUIP_DERIVED_LIBRARY_SCALE_ROOTS));
-        assert!(!library_scale_refresh(false, EQUIP_DERIVED_LIBRARY_SCALE_ROOTS - 1));
+        assert!(library_scale_refresh(
+            false,
+            EQUIP_DERIVED_LIBRARY_SCALE_ROOTS
+        ));
+        assert!(!library_scale_refresh(
+            false,
+            EQUIP_DERIVED_LIBRARY_SCALE_ROOTS - 1
+        ));
         assert!(!library_scale_refresh(false, 0));
     }
 
@@ -1549,11 +1745,15 @@ mod equip_scan_tests {
             .expect("入口结尾")
             .0;
         let live = body.find("refresh_one_equip(").expect("根下设备");
-        let existing = body.find("floor_dependents(&scan.floors)").expect("现有边反查");
+        let existing = body
+            .find("floor_dependents(&scan.floors)")
+            .expect("现有边反查");
         let library = body
             .find("outcome.floor_space_skipped =")
             .expect("整库口径");
-        let spatial = body.find("column_dependents(&entries, scope.deadline)").expect("空间反查");
+        let spatial = body
+            .find("column_dependents(&entries, scope.deadline)")
+            .expect("空间反查");
         assert!(
             live < existing && existing < library && library < spatial,
             "顺序必须是 根下设备 → 现有边反查 → 整库口径收手 → 柱子空间反查"
@@ -1717,8 +1917,15 @@ mod incremental_live_tests {
             root.to_pe_key(),
             dependents.len()
         );
-        assert_eq!(first.via_floors, dependents.len(), "挂在这些楼板上的都要拉进来");
-        assert_eq!(first.refreshed, 0, "根下没有设备，牵连的只重连、不写 cal_equi");
+        assert_eq!(
+            first.via_floors,
+            dependents.len(),
+            "挂在这些楼板上的都要拉进来"
+        );
+        assert_eq!(
+            first.refreshed, 0,
+            "根下没有设备，牵连的只重连、不写 cal_equi"
+        );
         assert_eq!(first.failed, 0);
         assert!(!first.floors_skipped);
         let edges = floor_edges(&dependents).await?;
@@ -1774,9 +1981,16 @@ mod incremental_live_tests {
             equip.to_pe_key(),
             started.elapsed().as_millis()
         );
-        assert!(outcome.via_floor_space >= 1, "删了边的设备只能靠空间反查拉进来");
+        assert!(
+            outcome.via_floor_space >= 1,
+            "删了边的设备只能靠空间反查拉进来"
+        );
         assert_eq!(outcome.failed, 0);
-        assert_eq!(floor_edges(&[equip]).await?, before, "补回的边应与删之前相同");
+        assert_eq!(
+            floor_edges(&[equip]).await?,
+            before,
+            "补回的边应与删之前相同"
+        );
 
         update_cal_equip_for_roots(&[root]).await?;
         assert_eq!(floor_edges(&[equip]).await?, before, "重跑不能堆边");
@@ -1812,7 +2026,9 @@ mod incremental_live_tests {
 
         let cal_key = equip.to_table_key("cal_equi");
         SUL_DB
-            .query(format!("UPSERT {cal_key} SET world_trans = trans:⟨stale_sentinel⟩;"))
+            .query(format!(
+                "UPSERT {cal_key} SET world_trans = trans:⟨stale_sentinel⟩;"
+            ))
             .await?
             .check()?;
 
