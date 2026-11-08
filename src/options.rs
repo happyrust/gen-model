@@ -4237,14 +4237,6 @@ mod tests {
             let _off = DesignReferenceCascadeOverride::set(false);
             assert!(!model_design_reference_cascade());
         }
-        {
-            let _on = GroupScoselOverride::set(true);
-            assert!(group_scosel());
-        }
-        {
-            let _off = GroupScoselOverride::set(false);
-            assert!(!group_scosel());
-        }
     }
 
     /// VAL-WIRE-003 / VAL-WIRE-004：`group_scosel` 默认关，环境变量双向压过配置，拼错退回配置值。
@@ -4270,6 +4262,81 @@ mod tests {
         // 同一进程里别的测试可能已设环境变量，所以只在没有任何 AIOS_GROUP_SCOSEL 时断言。
         if std::env::var(GROUP_SCOSEL_ENV).is_err() {
             assert!(!group_scosel(), "没设环境变量、配置写 false 时必须默认关");
+        }
+    }
+
+    /// 进程内覆盖守卫必须**两个方向都真的压得住取值函数**，且离开作用域即回到「按配置来」。
+    ///
+    /// 为什么单独一条而不是塞进 `the_p2_switch_test_overrides_win_and_reset`：那条测的是
+    /// P2 灰度开关家族，`group_scosel` 是 M2 分组 G3 的开关，混在一起会让「谁的守卫漏了归零」
+    /// 定位不到人。这里同时钉住 `GROUP_SCOSEL_OVERRIDE` 落回 `0`——只断言「守卫内取值正确」
+    /// 的话，守卫 Drop 忘了清零也照样过，随后同进程里别的测试就会读到一个假的开/关。
+    ///
+    /// 不用 `std::env::set_var`：lib 测试是多线程进程，2024 edition 起它已是 unsafe，且会与
+    /// 并发读环境变量的用例互相踩（`parse_bool_flag` 那组测试同样刻意不改进程环境）。
+    #[test]
+    fn the_group_scosel_override_pins_both_branches_and_releases() {
+        {
+            let _on = GroupScoselOverride::set(true);
+            assert!(group_scosel(), "守卫设开时取值函数必须回 true");
+        }
+        assert_eq!(
+            GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "守卫落下后必须回到「按配置来」，否则后续用例会读到一个假的开关值"
+        );
+        {
+            let _off = GroupScoselOverride::set(false);
+            assert!(!group_scosel(), "守卫设关时取值函数必须回 false");
+        }
+        assert_eq!(
+            GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "第二个守卫落下后同样必须归零"
+        );
+    }
+
+    /// VAL-WIRE-003 的配置文件那一半：仓库根 `DbOption.toml` 必须**生效地**写着 `group_scosel = false`。
+    ///
+    /// 只断言 getter 默认 false 不够——那由 `effective_default_off_switch(None, None)` 决定，
+    /// 与配置文件写没写、写的是什么无关。契约要的是「默认关」这件事落在配置文件里，
+    /// 否则运维打开这份文件时会以为这个开关不存在。逐行扫而不是 `toml::from_str`：
+    /// 本文件有大量注释段与历史遗留写法，同目录其它 `DbOption*.toml` 也未必都是合法 TOML，
+    /// 已有 `no_db_option_fixture_still_carries_a_store_mode_key` 就是逐行扫的先例。
+    ///
+    /// 出厂模板（`scripts/templates/DbOption.factory.toml`）允许不写这个键（缺键 = 代码默认 false，
+    /// 与模板起的现场不分叉）；但只要写了就必须是 false，不许与代码默认分叉（2026-09-15 的教训）。
+    #[test]
+    fn the_group_scosel_key_is_written_off_in_the_repository_configuration() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |relative: &str| {
+            std::fs::read_to_string(repo.join(relative))
+                .unwrap_or_else(|error| panic!("{relative} 必须可读：{error}"))
+        };
+        // 取生效行的值：跳过注释行，只认 `group_scosel` 后紧跟 `=` 的那一行。
+        let live_value = |text: &str| {
+            text.lines()
+                .map(str::trim_start)
+                .filter(|line| !line.starts_with('#'))
+                .find_map(|line| {
+                    let rest = line.strip_prefix("group_scosel")?;
+                    let rest = rest.trim_start().strip_prefix('=')?;
+                    Some(rest.trim().to_owned())
+                })
+        };
+
+        let root = read("DbOption.toml");
+        assert_eq!(
+            live_value(&root).as_deref(),
+            Some("false"),
+            "仓库根 DbOption.toml 必须生效地写着 group_scosel = false（默认关）"
+        );
+
+        if let Some(value) = live_value(&read("scripts/templates/DbOption.factory.toml")) {
+            assert_eq!(
+                value, "false",
+                "出厂模板若写了 group_scosel，就必须与代码默认（关）一致"
+            );
         }
     }
 
