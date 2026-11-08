@@ -212,6 +212,8 @@ pub(crate) mod room_recompute;
 /// 反向传播（ADR-073 D13 反查）：面板变了 → 拿新盒查全局树 / 管身（谁进来）+ 库上名下的成员边（谁离开）→ 折成本库受影响的根，整库重算降为兜底。
 pub(crate) mod room_reverse;
 pub mod scosel;
+/// SCOSEL 规则的纯函数求值器（M1）：只回答「这条规则命中了哪些元素」，不碰 store、不碰文件。
+pub mod scosel_eval;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给
 /// `generation_root` / `model_update_plan` 当契约的，见模块头。
