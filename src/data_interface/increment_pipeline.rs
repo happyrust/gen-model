@@ -15,6 +15,7 @@ use aios_core::{RefnoEnum, SUL_DB, clear_all_caches_batch};
 use anyhow::Context as _;
 use indexmap::IndexMap;
 
+use crate::data_interface::batch_worker::TaskEnv;
 use crate::data_interface::db_file_header::DbFileHeader;
 use crate::data_interface::e3d_collector::RetiredTypeRow;
 use crate::data_interface::ele_ops::{
@@ -628,8 +629,15 @@ pub enum FinalizePreflight {
 /// （`fn::find_ancestor_type` 曾同为硬前置，P3 退役 `zone_refno` 后离开收口链，
 /// 探针随之收窄。）
 pub async fn desi_finalize_preflight() -> FinalizePreflight {
+    desi_finalize_preflight_on(&SUL_DB).await
+}
+
+/// [`desi_finalize_preflight`] 的显式句柄版：探的是调用方给的那个库。
+pub(crate) async fn desi_finalize_preflight_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> FinalizePreflight {
     const PROBE: &str = "RETURN fn::anc_u64(type::thing('pe','__finalize_preflight__'));";
-    match aios_core::SUL_DB.query(PROBE).await {
+    match db.query(PROBE).await {
         Err(error) => FinalizePreflight::Unverified(format!("探针查询未送达持久层（{error}）")),
         Ok(response) => match response.check() {
             Ok(_) => FinalizePreflight::Ready,
@@ -1028,6 +1036,21 @@ impl IncrementPipeline {
             PathBuf,
             (DbFileHeader, RangeInclusive<i32>, String, Option<i32>),
         >,
+        precollected: IndexMap<PathBuf, (RangeInclusive<i32>, CollectedWindow)>,
+    ) -> IncrResult {
+        self.apply_with_precollected_in(TaskEnv::process(), increment_ranges_map, precollected)
+            .await
+    }
+
+    /// [`Self::apply_with_precollected`] 在给定任务环境里的版本：落库、收口、工程名与
+    /// 读透判断都取自 `env`。
+    pub(crate) async fn apply_with_precollected_in(
+        &self,
+        env: TaskEnv<'_>,
+        increment_ranges_map: IndexMap<
+            PathBuf,
+            (DbFileHeader, RangeInclusive<i32>, String, Option<i32>),
+        >,
         mut precollected: IndexMap<PathBuf, (RangeInclusive<i32>, CollectedWindow)>,
     ) -> IncrResult {
         let mut result = IncrResult::default();
@@ -1049,6 +1072,7 @@ impl IncrementPipeline {
 
             let (outcome, warnings) = self
                 .apply_one(
+                    env,
                     &path,
                     &basic_info,
                     sesno_range,
@@ -1074,6 +1098,7 @@ impl IncrementPipeline {
 
     async fn apply_one(
         &self,
+        env: TaskEnv<'_>,
         path: &PathBuf,
         basic_info: &DbFileHeader,
         requested_range: RangeInclusive<i32>,
@@ -1184,7 +1209,7 @@ impl IncrementPipeline {
             if seeds.is_empty() {
                 None
             } else {
-                let project = aios_core::get_db_option().project_name.clone();
+                let project = env.db_option.project_name.clone();
                 let rows = StageTimings::measure(
                     &mut timings.cata_dependency,
                     crate::data_interface::cata_dependency::resolve_dependency_rows(
@@ -1232,7 +1257,7 @@ impl IncrementPipeline {
         //
         // 跳过之后**不许**有人把「索引没维护」读成「没有引用者」：`fetch_ref_rev_edges`
         // 在同一形态下直接报错，调用方走既有的 `cascade_deferred` 退化路（见 ADR-063 D3）。
-        let reverse_index_statements = if crate::options::data_face().is_read_through() {
+        let reverse_index_statements = if env.data_face.is_read_through() {
             Vec::new()
         } else {
             crate::data_interface::manual_update::build_reverse_index_statements(&range_eles)
@@ -1256,7 +1281,7 @@ impl IncrementPipeline {
         // 灌了 fn::find_ancestor_types。
         let mut window_statements = StageTimings::measure(
             &mut timings.datacenter,
-            Self::datacenter_statements(&range_eles, db_type, dbnum, &session_time_of),
+            Self::datacenter_statements(env.db, &range_eles, db_type, dbnum, &session_time_of),
         )
         .await?;
         // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
@@ -1265,7 +1290,7 @@ impl IncrementPipeline {
         // refno 复用（窗口内换了 noun）的旧 noun 表行不再单独排进尾事务：它随元素块的删除块
         // 一起清（`element_batch::items_from_changes` 的 `old_noun`，plan 2026-09-06 §3 D2）。
 
-        let project = aios_core::get_db_option().project_name.clone();
+        let project = env.db_option.project_name.clone();
         let from_sesno = u32::try_from(start_sesno.saturating_sub(1))?;
         let target_sesno = u32::try_from(end_sesno)?;
         // 本窗的结构行（pe / ATT_ / CATA 依赖 / `ref_rev` / 随窗语句）先在内存里装成一份窗口产物，
@@ -1288,7 +1313,7 @@ impl IncrementPipeline {
         let landing = StageTimings::measure(
             &mut timings.persist,
             crate::data_interface::window_landing::land_increment_window(
-                &aios_core::SUL_DB,
+                env.db,
                 u64::from(target_sesno),
                 &artifact,
             ),
@@ -1332,6 +1357,7 @@ impl IncrementPipeline {
         StageTimings::measure(
             &mut timings.finalize,
             crate::data_interface::increment_tail::finalize_attempt(
+                env.db,
                 dbnum,
                 end_sesno,
                 end_sesno_time.as_deref(),
@@ -1978,9 +2004,10 @@ impl IncrementPipeline {
         Ok(statements)
     }
 
-    /// 窗口前持久态的 pe 点查（noun + owner + name），显式 `SUL_DB` 不经读路由——
+    /// 窗口前持久态的 pe 点查（noun + owner + name），显式句柄（生产即 `SUL_DB`）不经读路由——
     /// 与锁域解析同一纪律；软删行仍在场，Deleted 分支读到的正是删除前的归属与位号。
     async fn load_pe_chain_view_from_persistent(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         refnos: Vec<RefU64>,
     ) -> anyhow::Result<HashMap<RefU64, PeChainView>> {
         #[derive(serde::Deserialize)]
@@ -2000,7 +2027,7 @@ impl IncrementPipeline {
                 .map(|refno| refno.to_pe_key())
                 .collect::<Vec<_>>()
                 .join(",");
-            let mut response = SUL_DB
+            let mut response = db
                 .query(format!(
                     "SELECT id, noun, owner, name FROM [{keys}] WHERE record::exists(id);"
                 ))
@@ -2023,12 +2050,6 @@ impl IncrementPipeline {
 
     /// 最新 issue #1 的插入门：只记录已经发布到中台的交付单元。`datacenter_version` 与事件表
     /// 使用同一个 refno 值作 ID，因此对窗口内变更 refno 做一轮分块显式点查即可。
-    async fn load_published_datacenter_refnos(
-        refnos: Vec<RefU64>,
-    ) -> anyhow::Result<HashSet<RefU64>> {
-        Self::load_published_datacenter_refnos_on(&SUL_DB, refnos).await
-    }
-
     async fn load_published_datacenter_refnos_on(
         db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         refnos: Vec<RefU64>,
@@ -2073,6 +2094,7 @@ impl IncrementPipeline {
     /// unmoved so the window replays and the idempotent updates converge
     /// (`increment_tail::FinalizeRender` has the full argument).
     async fn datacenter_statements<S>(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
         dbnum: u32,
@@ -2094,14 +2116,15 @@ impl IncrementPipeline {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let published_refnos = Self::load_published_datacenter_refnos(changed_refnos).await?;
+        let published_refnos =
+            Self::load_published_datacenter_refnos_on(db, changed_refnos).await?;
         Self::resolve_datacenter_statements_with(
             data,
             &delivery_unit_types,
             dbnum,
             session_time,
             &published_refnos,
-            Self::load_pe_chain_view_from_persistent,
+            |refnos| Self::load_pe_chain_view_from_persistent(db, refnos),
         )
         .await
     }
@@ -2115,7 +2138,8 @@ impl IncrementPipeline {
         db_type: &str,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
-        let statements = Self::datacenter_statements(data, db_type, dbnum, |_| None).await?;
+        let statements =
+            Self::datacenter_statements(&SUL_DB, data, db_type, dbnum, |_| None).await?;
         Ok(count_datacenter_delete_statements(&statements))
     }
 
@@ -2244,8 +2268,9 @@ mod cache_tests {
         let cata = at("cata_dependency::resolve_dependency_rows(");
         let invalidate = at("Self::invalidate_caches(&cache_refnos)");
         let reverse_index = at("build_reverse_index_statements(&range_eles)");
-        let datacenter =
-            at("Self::datacenter_statements(&range_eles, db_type, dbnum, &session_time_of)");
+        let datacenter = at(
+            "Self::datacenter_statements(env.db, &range_eles, db_type, dbnum, &session_time_of)",
+        );
         let artifact = at("IncrementWindowArtifact::from_window(");
         let landed = at("land_increment_window(");
         let recheck = at("reopen_verified()");
@@ -2451,7 +2476,7 @@ mod cache_tests {
     fn reverse_index_rides_the_window_artifact_without_a_compensation_queue() {
         let body = apply_one_body();
         let guarded = body
-            .find("if crate::options::data_face().is_read_through() {")
+            .find("if env.data_face.is_read_through() {")
             .expect("反向索引渲染必须先问形态（ADR-063 D2）");
         let rendered = body
             .find("build_reverse_index_statements(&range_eles)")
@@ -3778,6 +3803,83 @@ mod datacenter_tests {
                 .expect("load published"),
             HashSet::from([refu(3), refu(21)])
         );
+    }
+
+    /// 窗口前态点查读的是调用方给的那个库：行在就回 noun / owner / name（空名记 `None`），
+    /// 库里没有的 refno 不出现在结果里。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pre_window_chain_view_reads_the_library_it_is_given() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("datacenter_delete_gate")
+            .use_db("chain_view")
+            .await
+            .expect("use db");
+        db.query(format!(
+            "UPSERT {bran} SET noun = 'BRAN', owner = {zone}, name = '/B1';\
+             UPSERT {zone} SET noun = 'ZONE', name = '';",
+            bran = refu(3).to_pe_key(),
+            zone = refu(6).to_pe_key(),
+        ))
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seed pe rows");
+
+        let views = IncrementPipeline::load_pe_chain_view_from_persistent(
+            &db,
+            vec![refu(3), refu(6), refu(21)],
+        )
+        .await
+        .expect("load chain view");
+        assert_eq!(
+            views,
+            HashMap::from([
+                (
+                    refu(3),
+                    PeChainView {
+                        noun: Some("BRAN".to_string()),
+                        owner: Some(refu(6)),
+                        name: Some("/B1".to_string()),
+                    },
+                ),
+                (
+                    refu(6),
+                    PeChainView {
+                        noun: Some("ZONE".to_string()),
+                        owner: None,
+                        name: None,
+                    },
+                ),
+            ])
+        );
+    }
+
+    /// 收口预检探的是调用方给的那个库：没灌 `fn::anc_u64` 判缺失，灌上之后放行。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_preflight_probes_the_library_it_is_given() {
+        let verdict = |preflight: FinalizePreflight| match preflight {
+            FinalizePreflight::Ready => "ready".to_string(),
+            FinalizePreflight::Missing(reason) => format!("missing: {reason}"),
+            FinalizePreflight::Unverified(reason) => format!("unverified: {reason}"),
+        };
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("finalize_preflight")
+            .use_db("probe")
+            .await
+            .expect("use db");
+        let before = verdict(desi_finalize_preflight_on(&db).await);
+        assert!(before.starts_with("missing: "), "{before}");
+
+        db.query("DEFINE FUNCTION fn::anc_u64($refno: any) { RETURN []; };")
+            .await
+            .expect("define transport")
+            .check()
+            .expect("define fn::anc_u64");
+        assert_eq!(verdict(desi_finalize_preflight_on(&db).await), "ready");
     }
 
     /// 下属管件改名、`NAME` 从无到有、位号没变（只是 `NAME` 出现在别的改动里）：都不记。

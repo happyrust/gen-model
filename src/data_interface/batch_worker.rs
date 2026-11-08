@@ -1572,9 +1572,9 @@ async fn execute_frozen_batch(
         && job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
     {
         use crate::data_interface::increment_pipeline::{
-            FinalizePreflight, desi_finalize_preflight,
+            FinalizePreflight, desi_finalize_preflight_on,
         };
-        match desi_finalize_preflight().await {
+        match desi_finalize_preflight_on(env.db).await {
             FinalizePreflight::Ready => {}
             FinalizePreflight::Missing(reason) => {
                 let message = format!(
@@ -7787,7 +7787,7 @@ mod tests {
             "冻结点路由追踪只剩 direct 一个值: {executor}"
         );
         let preflight = executor
-            .find("desi_finalize_preflight()")
+            .find("desi_finalize_preflight_on(env.db)")
             .expect("DESI 收口预检仍在执行入口");
         let body = executor
             .find("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await")
@@ -8162,7 +8162,7 @@ mod tests {
             .0;
 
         let preflight_at = body
-            .find("desi_finalize_preflight(")
+            .find("desi_finalize_preflight_on(")
             .expect("DESI 批次执行前必须预检收口硬前置");
         let execute_at = body
             .find("execute_frozen_batch_body(env, mgr, registry, job, cand, progress, warnings).await")

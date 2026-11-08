@@ -212,6 +212,7 @@ pub(crate) fn render_confirmed_empty_baseline(
 /// 那些根到 T 仍有效，由任务收尾盖到 T 的 `model_sesno` 一并承诺；名单只进回执
 /// （`CredentialAdvanceReceipt::from_plan`）。
 pub async fn finalize_attempt(
+    db: &Surreal<Any>,
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
@@ -220,8 +221,7 @@ pub async fn finalize_attempt(
 ) -> anyhow::Result<()> {
     let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
     for (index, batch) in render.window_batches.iter().enumerate() {
-        SUL_DB
-            .query(batch)
+        db.query(batch)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -236,20 +236,17 @@ pub async fn finalize_attempt(
                 )
             })?;
     }
-    SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-            render.tail
-        ))
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}")
-        })?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
-        })?;
-    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+    db.query(format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render.tail
+    ))
+    .await
+    .map_err(|error| anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}"))?
+    .check()
+    .map_err(|error| {
+        anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
+    })?;
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
     Ok(())
 }
 
@@ -264,17 +261,121 @@ pub async fn finalize_baseline(
     end_sesno_time: Option<&str>,
     confirmed_empty: bool,
 ) -> anyhow::Result<()> {
+    finalize_baseline_on(&SUL_DB, dbnum, end_sesno, end_sesno_time, confirmed_empty).await
+}
+
+/// [`finalize_baseline`] 的显式句柄版。
+pub(crate) async fn finalize_baseline_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+    confirmed_empty: bool,
+) -> anyhow::Result<()> {
     let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, confirmed_empty);
-    SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-            render.tail
+    db.query(format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render.tail
+    ))
+    .await
+    .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
+    .check()
+    .map_err(|error| {
+        anyhow::anyhow!("finalize baseline dbnum={dbnum} statement failed: {error}")
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Watermark {
+        applied_sesno: Option<i64>,
+        applied_sesno_time: Option<String>,
+        confirmed_empty_baseline_sesno: Option<i64>,
+    }
+
+    async fn mem_library(name: &str) -> Surreal<Any> {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("increment_tail")
+            .use_db(name)
+            .await
+            .expect("use db");
+        db
+    }
+
+    async fn watermark(db: &Surreal<Any>, dbnum: u32) -> Option<Watermark> {
+        db.query(format!(
+            "SELECT applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno \
+             FROM ONLY dbnum_watermark:{dbnum};"
         ))
         .await
-        .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
+        .expect("read transport")
         .check()
-        .map_err(|error| {
-            anyhow::anyhow!("finalize baseline dbnum={dbnum} statement failed: {error}")
-        })?;
-    Ok(())
+        .expect("read watermark")
+        .take(0)
+        .expect("decode watermark")
+    }
+
+    /// 收口写进调用方给的那个库：窗口语句批先落，水位与右端写入时刻随尾事务推进。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_attempt_lands_the_window_and_the_watermark_in_the_library_it_is_given() {
+        let db = mem_library("finalize_attempt").await;
+        let window = vec!["UPSERT tail_probe:window SET landed = true;".to_string()];
+        finalize_attempt(
+            &db,
+            7993,
+            12,
+            Some("2026-11-07T10:00:00+08:00"),
+            &ModelUpdatePlan::default(),
+            &window,
+        )
+        .await
+        .expect("finalize on the given library");
+
+        let landed: Option<bool> = db
+            .query("SELECT VALUE landed FROM ONLY tail_probe:window;")
+            .await
+            .expect("read transport")
+            .check()
+            .expect("read probe")
+            .take(0)
+            .expect("decode probe");
+        assert_eq!(landed, Some(true), "窗口语句批落在同一个库");
+        assert_eq!(
+            watermark(&db, 7993).await,
+            Some(Watermark {
+                applied_sesno: Some(12),
+                applied_sesno_time: Some("2026-11-07T10:00:00+08:00".to_string()),
+                confirmed_empty_baseline_sesno: None,
+            })
+        );
+    }
+
+    /// 基线的幂等收口同样只写给定的库：钉上空基线凭据，水位单调、低版本不回退。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_baseline_on_advances_the_library_it_is_given_monotonically() {
+        let db = mem_library("finalize_baseline").await;
+        finalize_baseline_on(&db, 7994, 25, None, true)
+            .await
+            .expect("baseline on the given library");
+        assert_eq!(
+            watermark(&db, 7994).await,
+            Some(Watermark {
+                applied_sesno: Some(25),
+                applied_sesno_time: None,
+                confirmed_empty_baseline_sesno: Some(25),
+            })
+        );
+
+        finalize_baseline_on(&db, 7994, 18, None, false)
+            .await
+            .expect("older baseline");
+        let after = watermark(&db, 7994).await.expect("row stays");
+        assert_eq!(after.applied_sesno, Some(25), "低于存量的基线不回退水位");
+    }
 }

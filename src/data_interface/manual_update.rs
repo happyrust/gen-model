@@ -8867,7 +8867,7 @@ mod tests {
             .expect("apply_one 还在")
             .1;
         let guarded = pipeline
-            .find("if crate::options::data_face().is_read_through() {")
+            .find("if env.data_face.is_read_through() {")
             .expect("反向索引渲染必须先问形态（ADR-063 D2）");
         let rendered = pipeline
             .find("build_reverse_index_statements(&range_eles)")
