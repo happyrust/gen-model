@@ -19,16 +19,25 @@
 //!
 //! | 字 | 布局 | 依据 |
 //! |---|---|---|
-//! | `[word_count]` | 数组总字数，含自身（假设） | 自检 1 |
+//! | `[word_count]` | 数组总字数，**含自身** | 27 条真实样本逐条成立 |
 //! | `100016,1` | 头部，值必须是 `1` | 取证文档 §1 |
-//! | `100009,N,<class>×N` | `N` 个 class id，`N` 不含自身（假设；文档 §5 未查清） | 自检 4 |
+//! | `100009,N,<word>×(N-1)` | `N` 是段字数，**含 `N` 自身、不含 `100009`**。`N=3` → 段是 `3,100007,640493`，下一个字正好是 `100015` | 27 条真实样本逐条成立 |
 //! | `100007,<attr>` | 规则组，一个操作数，其后紧跟它的 `100015` 段 | 文档 §1 形状 |
-//! | `100015,<len>,1,<expr>×len` | `len` 是 `1` 之后的表达式字数（假设） | 自检 2、3 |
+//! | `100015,<len>,1,<expr>×(<len>-2)` | `len` **含自身**。35 字样本 `len=27` 落在下标 8，`8+27=35` 正好是数组末 | 27 条真实样本逐条成立 |
 //! | `100011` / `100012` | 段边界，无操作数（假设） | 自检 4 |
 //! | `100001` | 显式成员组：布局未查清，遇到即报 [`ScoselError::Undecoded`]，不猜后面几个字 | 文档 §5 |
-//! | `106,4,<attr>,<t1>,<t2>,<t3>` | 属性引用：计数字必须是 `4`，尾部 3 字语义未查清、原样留存 | 文档 §5、样本聚类 |
-//! | `118,N,<char>×N` | 文本字面量，一字一个 ASCII 字符 | 样本聚类 |
-//! | `1307` / `402` / `301` / `302` | 纯栈算子，无内联操作数，二元（假设） | 自检 3 |
+//! | `106,4,<attr>,<t1>,<t2>,<t3>` | 属性引用：计数字必须是 `4`，尾部 3 字原样留存。**入栈一个操作数** | 文档 §5、样本聚类 |
+//! | `1602,<count>,<word>×<count>` | 属性引用的限定段，紧跟 `106`，**不入栈**；`count=4` 时末字是 `1701` 类型标记 | 27 条真实样本逐条成立 |
+//! | `120,<value>` | 条件内部限定，**不入栈** | 样本聚类 |
+//! | `118,N,<char>×N` | 文本字面量，一字一个 ASCII 字符。**入栈一个操作数** | 样本聚类 |
+//! | `402` / `301` / `302` | 纯栈算子，无内联操作数，二元：弹两个、压回一个 | 自检 3 |
+//!
+//! **`1306` / `1307` / `1317` 在 27 条真实样本里一个都不出现**：这 27 组是等值分组（`402`
+//! 全串相等），不是前缀分组。常量与分支保留给已确认的前缀形状，v1 用不上。
+//!
+//! 表达式层因此是**普通后缀栈**，不是「条件结构」：`106` 压一个、`118` 压一个、`402` 弹两个
+//! 压回一个，段末栈深恰好 1。`1602` 与 `120` 是 `106` 条件的内部限定，不参与栈运算——把它们
+//! 也各压一个才会算出「段末剩 2 个」，27 条逐条演算都是这个结论。
 //!
 //! 样本聚类见 `docs/plans/2026-11-08-gpwl-gpset-group-nodes.md` §0。
 
@@ -48,6 +57,12 @@ pub const OP_FILTER: i32 = 100_015;
 pub const OP_SEGMENT_BOUNDARIES: [i32; 2] = [100_011, 100_012];
 /// 属性引用：`106,4,<attr>,<t1>,<t2>,<t3>`。
 pub const OP_ATTR_REF: i32 = 106;
+/// 属性引用的限定段：`1602,<count>,<word>×<count>`，紧跟 `106`，不入栈。
+pub const OP_ATTR_QUALIFIER: i32 = 1602;
+/// 条件内部限定：`120,<value>`，不入栈。
+pub const OP_QUALIFIER: i32 = 120;
+/// 限定段的末字类型标记，出现在 `1602` 的最后一个字位置。
+pub const OP_QUALIFIER_TYPE: i32 = 1701;
 /// 文本字面量：`118,N,<char>×N`。
 pub const OP_TEXT: i32 = 118;
 /// 字符串相等。
@@ -83,10 +98,16 @@ pub struct ScoselRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoselExpr {
     /// `106`：属性引用；`tail` 是属性 hash 之后的 3 个字，语义未查清，原样留存。
-    Attr { hash: i32, tail: [i32; 3] },
+    /// `qualifiers` 是紧随其后的 `1602` / `120` 限定段——它们描述这个属性引用怎么取，
+    /// 不参与栈运算（各压一个会让段末栈深变成 2，27 条真实样本逐条演算都是这个结果）。
+    Attr {
+        hash: i32,
+        tail: [i32; 3],
+        qualifiers: Vec<ScoselQualifier>,
+    },
     /// `118`：文本字面量。
     Text(String),
-    /// `1307`：before。
+    /// `1307`：before（`1306` 才是 after）。27 条真实样本里不出现，v1 用不上。
     Before(Box<ScoselExpr>, Box<ScoselExpr>),
     /// `402`：字符串相等。
     StrEq(Box<ScoselExpr>, Box<ScoselExpr>),
@@ -94,6 +115,15 @@ pub enum ScoselExpr {
     Or(Box<ScoselExpr>, Box<ScoselExpr>),
     /// `302`：AND（交集）。
     And(Box<ScoselExpr>, Box<ScoselExpr>),
+}
+
+/// `106` 属性引用后面的限定段，原样留存：v1 不解它的语义，只保证逐字往返。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScoselQualifier {
+    /// `1602,<count>,<word>×<count>`：`words` 是计数字之后的那些字（含末字类型标记 `1701`）。
+    Typed { words: Vec<i32> },
+    /// `120,<value>`。
+    Value { value: i32 },
 }
 
 /// 解码失败；下标都是在 `SCOSEL` 数组里的位置，拿真库样本能直接对上。
@@ -152,18 +182,45 @@ pub fn decode(words: &[i32]) -> Result<Scosel, ScoselError> {
         return Err(malformed(2, "100016 的值应为 1"));
     }
     let mut scosel = Scosel::default();
+    // `100009` 段里读到的规则组属性 hash，按段内原序，等它后面的 `100015` 段来配对。
+    // 这是解码过程中的中间态，不属于 `Scosel`：`Scosel` 只描述「有哪些规则」，配对完就该空。
+    let mut pending_attrs: std::collections::VecDeque<i32> = std::collections::VecDeque::new();
     let mut at = 3;
     while at < len {
         let opcode = words[at];
         match opcode {
             OP_CLASS => {
-                let count = count_operand(words, at, len)?;
-                scosel
-                    .classes
-                    .extend_from_slice(slice(words, at, at + 2, count, len)?);
-                at += 2 + count;
+                // `100009,<N>,<word>×(N-1)`：`N` 是段字数，含自身、不含 opcode。
+                //
+                // 35 字真实样本里段是 `100009,3,100007,640493`：N=3 覆盖 `3,100007,640493`
+                // 三个字，段内除 N 之外的内容是 `100007,640493`——**规则组的 opcode 与它的属性
+                // hash 就在 class 段里面**，不是独立的一段。段尾下一个字正好是 `100015`。
+                //
+                // 所以这一段不产出 `classes`（样本里没有 class id），它只承载规则组的标记。
+                // 把 N 当 class 个数会让 `100007` 被当成 class id、`100015` 被当成普通字，
+                // 27 条真实样本全部错位。
+                let segment = count_operand(words, at, len)?;
+                if segment == 0 {
+                    return Err(malformed(at + 1, "100009 的段字数不能为 0（至少含自身）"));
+                }
+                let body = slice(words, at, at + 2, segment - 1, len)?;
+                let mut cursor = 0;
+                while cursor < body.len() {
+                    if body[cursor] == OP_RULE_GROUP {
+                        let attr = *body.get(cursor + 1).ok_or_else(|| {
+                            malformed(at + 2 + cursor, "100009 段里的 100007 后面缺属性 hash")
+                        })?;
+                        pending_attrs.push_back(attr);
+                        cursor += 2;
+                    } else {
+                        scosel.classes.push(body[cursor]);
+                        cursor += 1;
+                    }
+                }
+                at += 1 + segment;
             }
             OP_RULE_GROUP => {
+                // 段外的 `100007,<attr>` 形式（老形状）：属性直接跟在这里。
                 let attr = slice(words, at, at + 1, 1, len)?[0];
                 let filter_at = at + 2;
                 if slice(words, at, filter_at, 1, len)?[0] != OP_FILTER {
@@ -176,7 +233,16 @@ pub fn decode(words: &[i32]) -> Result<Scosel, ScoselError> {
                 scosel.rules.push(ScoselRule { attr, filter });
                 at = next;
             }
-            OP_FILTER => return Err(malformed(at, "100015 filter 段前面没有 100007 规则组")),
+            OP_FILTER => {
+                // `100009` 段里读到的 `100007,<attr>` 标记，与紧随其后的 `100015` 段按序配对。
+                // 27 条真实样本都是这个形状：段内一个标记、段后一个 filter。
+                let Some(attr) = pending_attrs.pop_front() else {
+                    return Err(malformed(at, "100015 filter 段前面没有 100007 规则组"));
+                };
+                let (filter, next) = decode_filter(words, at)?;
+                scosel.rules.push(ScoselRule { attr, filter });
+                at = next;
+            }
             OP_EXPLICIT_GROUP => return Err(ScoselError::Undecoded { opcode, index: at }),
             _ if OP_SEGMENT_BOUNDARIES.contains(&opcode) => at += 1,
             _ => return Err(ScoselError::Unsupported { opcode, index: at }),
@@ -185,15 +251,24 @@ pub fn decode(words: &[i32]) -> Result<Scosel, ScoselError> {
     Ok(scosel)
 }
 
-/// `100015,<len>,1,<expr>×len`：返回表达式树与段后的下标。
+/// `100015,<len>,1,<expr>×…`：返回表达式树与段后的下标。
+///
+/// `len` **含自身**：35 字真实样本 `len=27` 落在下标 8，`8+27=35` 正好是数组末；60 字样本
+/// `len=52` 同理。`len` 在 `at+1`，所以段尾是 `at + 1 + len`，表达式从 `at+3` 读到那里。
 fn decode_filter(words: &[i32], at: usize) -> Result<(ScoselExpr, usize), ScoselError> {
-    let count = count_operand(words, at, words.len())?;
+    let segment = count_operand(words, at, words.len())?;
+    if segment < 2 {
+        return Err(malformed(
+            at + 1,
+            "100015 的段字数至少为 2（含自身与 1）",
+        ));
+    }
     if slice(words, at, at + 2, 1, words.len())?[0] != FILTER_LEAD {
         return Err(malformed(at + 2, "100015 的长度之后应为 1"));
     }
     let start = at + 3;
-    slice(words, at, start, count, words.len())?;
-    let end = start + count;
+    let end = at + 1 + segment;
+    slice(words, at, start, end.saturating_sub(start), words.len())?;
     Ok((decode_expr(words, start, end)?, end))
 }
 
@@ -209,11 +284,38 @@ fn decode_expr(words: &[i32], start: usize, end: usize) -> Result<ScoselExpr, Sc
                     return Err(malformed(at + 1, "106 的计数字应为 4"));
                 }
                 let body = slice(words, at, at + 2, ATTR_REF_WORDS, end)?;
-                stack.push(ScoselExpr::Attr {
+                let mut expr = ScoselExpr::Attr {
                     hash: body[0],
                     tail: [body[1], body[2], body[3]],
-                });
+                    qualifiers: Vec::new(),
+                };
                 at += 2 + ATTR_REF_WORDS;
+                // `106` 的条件常常紧跟限定段（`1602,<count>,…` 与 `120,<value>`）。它们描述
+                // 这个属性引用怎么取，不是独立操作数：各压一个会让段末栈深变成 2，27 条真实
+                // 样本逐条演算都是这个结果。所以在这里一并吃掉，挂在 Attr 上。
+                let mut qualifiers = Vec::new();
+                while at < end {
+                    match words[at] {
+                        OP_ATTR_QUALIFIER => {
+                            let count = count_operand(words, at, end)?;
+                            let body = slice(words, at, at + 2, count, end)?;
+                            qualifiers.push(ScoselQualifier::Typed {
+                                words: body.to_vec(),
+                            });
+                            at += 2 + count;
+                        }
+                        OP_QUALIFIER => {
+                            let value = slice(words, at, at + 1, 1, end)?[0];
+                            qualifiers.push(ScoselQualifier::Value { value });
+                            at += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                if let ScoselExpr::Attr { qualifiers: slot, .. } = &mut expr {
+                    *slot = qualifiers;
+                }
+                stack.push(expr);
             }
             OP_TEXT => {
                 let count = count_operand(words, at, end)?;
@@ -299,19 +401,27 @@ fn malformed(index: usize, reason: &'static str) -> ScoselError {
 /// `Text` 只应含 ASCII（[`decode`] 只产出 ASCII）：非 ASCII 字符按码位写出，[`decode`] 读回时在
 /// 该下标报 [`ScoselError::Malformed`]，不会静默改字。
 pub fn encode(scosel: &Scosel) -> Vec<i32> {
-    let mut words = vec![
-        0,
-        OP_ATTRIBUTE_ID,
-        ATTRIBUTE_ID_VALUE,
-        OP_CLASS,
-        count_word(scosel.classes.len()),
-    ];
-    words.extend_from_slice(&scosel.classes);
+    // `100009` 段里既放 class id，也放 `100007,<attr>` 规则组标记（27 条真实样本的形状：
+    // `100009,3,100007,640493`）。段字数 N 含自身、不含 opcode，所以 N = 1 + 段内容字数。
+    let mut segment = Vec::new();
+    for class in &scosel.classes {
+        segment.push(*class);
+    }
     for rule in &scosel.rules {
-        words.extend_from_slice(&[OP_RULE_GROUP, rule.attr, OP_FILTER, 0, FILTER_LEAD]);
+        segment.push(OP_RULE_GROUP);
+        segment.push(rule.attr);
+    }
+    let mut words = vec![0, OP_ATTRIBUTE_ID, ATTRIBUTE_ID_VALUE, OP_CLASS];
+    words.push(count_word(1 + segment.len()));
+    words.extend_from_slice(&segment);
+    for rule in &scosel.rules {
+        words.push(OP_FILTER);
+        // `100015` 的 `len` 含自身：`len = 1(len 自己) + 1(前导 1) + 表达式字数`。
+        let len_at = words.len();
+        words.extend_from_slice(&[0, FILTER_LEAD]);
         let start = words.len();
         encode_expr(&rule.filter, &mut words);
-        words[start - 2] = count_word(words.len() - start);
+        words[len_at] = count_word(2 + (words.len() - start));
     }
     words[0] = count_word(words.len());
     words
@@ -319,9 +429,24 @@ pub fn encode(scosel: &Scosel) -> Vec<i32> {
 
 fn encode_expr(expr: &ScoselExpr, words: &mut Vec<i32>) {
     match expr {
-        ScoselExpr::Attr { hash, tail } => {
+        ScoselExpr::Attr {
+            hash,
+            tail,
+            qualifiers,
+        } => {
             words.extend_from_slice(&[OP_ATTR_REF, count_word(ATTR_REF_WORDS), *hash]);
             words.extend_from_slice(tail);
+            for qualifier in qualifiers {
+                match qualifier {
+                    ScoselQualifier::Typed { words: body } => {
+                        words.extend_from_slice(&[OP_ATTR_QUALIFIER, count_word(body.len())]);
+                        words.extend_from_slice(body);
+                    }
+                    ScoselQualifier::Value { value } => {
+                        words.extend_from_slice(&[OP_QUALIFIER, *value]);
+                    }
+                }
+            }
         }
         ScoselExpr::Text(text) => {
             words.extend_from_slice(&[OP_TEXT, count_word(text.chars().count())]);
@@ -369,13 +494,15 @@ mod tests {
     }
 
     fn class(ids: &[i32]) -> Vec<i32> {
-        [&[OP_CLASS, word(ids.len())][..], ids].concat()
+        // `N` 是段字数，含自身：`1(N 自己) + ids.len()`。
+        [&[OP_CLASS, word(1 + ids.len())][..], ids].concat()
     }
 
     /// 规则组：`100007,<attr>` + `100015,<len>,1,<expr>`。
+    /// `len` 含自身：`1(len 自己) + 1(前导 1) + expr.len()`。
     fn rule(expr: &[i32]) -> Vec<i32> {
         [
-            &[OP_RULE_GROUP, RULE_ATTR, OP_FILTER, word(expr.len()), 1][..],
+            &[OP_RULE_GROUP, RULE_ATTR, OP_FILTER, word(2 + expr.len()), 1][..],
             expr,
         ]
         .concat()
@@ -402,6 +529,7 @@ mod tests {
         Box::new(ScoselExpr::Attr {
             hash: NAME,
             tail: NAME_TAIL,
+            qualifiers: Vec::new(),
         })
     }
 
@@ -716,14 +844,24 @@ mod tests {
 
     #[test]
     fn encode_writes_the_layout_that_decode_reads() {
+        // 真实形状（27 条样本）：class id 与 `100007,<attr>` 规则组标记同在 `100009` 段里，
+        // 段后跟各规则组的 `100015` filter 段。段字数 N 含自身、不含 opcode：
+        // 段内容是 `11,12,100007,640001` 四个字，所以 N = 1 + 4 = 5。
         let x = Scosel {
             classes: vec![11, 12],
             rules: vec![prefix_rule("/AREA01_PIPE")],
         };
-        assert_eq!(
-            encode(&x),
-            scosel(&[class(&[11, 12]), rule(&before_name("/AREA01_PIPE"))].concat())
+        let segment = [11, 12, OP_RULE_GROUP, RULE_ATTR];
+        let expected = scosel(
+            &[
+                [&[OP_CLASS, word(1 + segment.len())][..], &segment[..]].concat(),
+                [&[OP_FILTER, word(2 + before_name("/AREA01_PIPE").len()), 1][..],
+                 &before_name("/AREA01_PIPE")[..]].concat(),
+            ]
+            .concat(),
         );
+        assert_eq!(encode(&x), expected);
+        assert_eq!(decode(&expected), Ok(x));
     }
 
     #[test]
@@ -756,4 +894,76 @@ mod tests {
             matches!(decode(&words), Err(ScoselError::Malformed { index, .. }) if index == bad)
         );
     }
+
+    /// 真库取出的 27 条 `SCOSEL` 原字（aps250204 的 27 个 GPSET），最高证据。
+    ///
+    /// 验收线是逐字相等：`encode(decode(样本)) == 样本`。近似相等不算——`SCOSEL` 是栈机，
+    /// 长度口径差一个字，E3D 读到的就是另一段字节。
+    fn real_samples() -> Vec<(String, Vec<i32>)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/group-contract/scosel-real-samples.json"
+        );
+        let text = std::fs::read_to_string(path).expect("read scosel-real-samples.json");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("parse json");
+        let samples = value["samples"].as_array().expect("samples array");
+        samples
+            .iter()
+            .map(|sample| {
+                let name = sample["name"].as_str().unwrap_or_default().to_owned();
+                let words = sample["words"]
+                    .as_array()
+                    .expect("words array")
+                    .iter()
+                    .map(|word| i32::try_from(word.as_i64().expect("int word")).expect("fits i32"))
+                    .collect();
+                (name, words)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_real_sample_decodes() {
+        let samples = real_samples();
+        assert_eq!(samples.len(), 27, "样本数");
+        for (name, words) in &samples {
+            if let Err(error) = decode(words) {
+                panic!("{name} 解不开：{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_real_sample_round_trips_word_for_word() {
+        let samples = real_samples();
+        assert_eq!(samples.len(), 27, "样本数");
+        let mut failures = Vec::new();
+        for (name, words) in &samples {
+            match decode(words) {
+                Ok(parsed) => {
+                    let re = encode(&parsed);
+                    if &re != words {
+                        let at = re
+                            .iter()
+                            .zip(words.iter())
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(re.len().min(words.len()));
+                        failures.push(format!(
+                            "{name}: 往返不等，首个差异在下标 {at}（写出 {} 字，样本 {} 字）",
+                            re.len(),
+                            words.len()
+                        ));
+                    }
+                }
+                Err(error) => failures.push(format!("{name}: 解不开：{error}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} / 27 条未逐字往返：\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 }
+
