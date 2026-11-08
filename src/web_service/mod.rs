@@ -1206,9 +1206,15 @@ mod tests {
             .split_once("\nfn resolve_asset_root")
             .expect("router must end before asset resolution")
             .0;
+        // `nearby/branches` 按路径与 handler 两段断言，不钉 `.route(...)` 的单行形态：
+        // rustfmt 会把这条折成三行，钉形态会让「只是重排缩进」也报红。
+        assert!(
+            serve.contains("\"/api/v1/spatial/nearby/branches\"")
+                && serve.contains("get(handlers::spatial_nearby_branches)"),
+            "missing spatial GET route: nearby/branches"
+        );
         for route in [
             ".route(\"/api/v1/spatial/nearby\", get(handlers::spatial_nearby))",
-            ".route(\"/api/v1/spatial/nearby/branches\", get(handlers::spatial_nearby_branches))",
             "\"/api/v1/spatial/nearby/refnos\",\n            get(handlers::spatial_nearby_refnos)",
             "\"/api/v1/spatial/nearby/tree\",\n            get(handlers::spatial_nearby_tree)",
             "\"/api/v1/spatial/negative-nouns\",\n            get(handlers::spatial_negative_nouns)",
