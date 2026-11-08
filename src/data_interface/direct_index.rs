@@ -18,6 +18,11 @@
 //!   （SPRE/CATR/LSTU/PSPE…，按描述符抽取）、显式流 ref 型属性。文件里没有反向边，
 //!   这是 direct 唯一必须「预建」的东西（D3 原文）。
 //!
+//! 第四张表 **attr_text**（G3 分组规则求值加）：字符串显式属性原文 → refno，键是
+//! `(属性 hash, 原文)`。SCOSEL 规则的 `402` 是全串相等，所以它要的是「原文精确
+//! 命中」而不是 name 那种「按名字查」——两者键不同，不能共用 `by_name`。
+//! 它在**同一遍**扫描里建，不增加 `scan_elements` 次数。
+//!
 //! **失效**：索引钉在 `(dbnum, pinned_sesno, 文件身份)` 上。文件被换、时点被换，
 //! 指纹不中就重建——宁可重扫一遍，不读一个「看着像」的旧索引。
 //! 磁盘缓存默认在系统临时目录下，[`INDEX_DIR_ENV`] 可改；读不出、版本不合、指纹
@@ -37,7 +42,13 @@ use serde::{Deserialize, Serialize};
 pub const INDEX_DIR_ENV: &str = "AIOS_DIRECT_INDEX_DIR";
 
 /// 序列化格式版本。索引结构一变就递增，旧缓存整个作废，没有迁移。
-const FORMAT_VERSION: u32 = 1;
+///
+/// 2：新增 `by_attr_text`（字符串属性倒排表，G3 的 SCOSEL 求值要用）。提到 2 之后
+/// 缓存文件名（`idx-v2-*.bin`）与指纹里的 `format_version` 两处都变，旧的
+/// `idx-v1-*.bin` 既不会被打开、就算改名也过不了 `read_cache` 的相等比较——
+/// 少任何一道，bincode 都会把旧结构反序列化成 `by_attr_text` 为空的新结构，
+/// 不报错，只是规则组永远查空。
+const FORMAT_VERSION: u32 = 2;
 
 /// 一条入边是从哪种出边反转来的。
 ///
@@ -108,7 +119,7 @@ pub struct BuildStats {
     pub build_ms: u64,
 }
 
-/// 一个库在一个时点上的三个派生索引。
+/// 一个库在一个时点上的派生索引：type / name / backref / attr_text。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbIndexes {
     pub fingerprint: IndexFingerprint,
@@ -119,6 +130,17 @@ pub struct DbIndexes {
     by_name: HashMap<String, Vec<u64>>,
     /// target → 入边。
     inbound: HashMap<u64, Vec<BackRef>>,
+    /// 字符串属性倒排表：属性 hash → 原文 → refnos。G3 的 SCOSEL 求值靠它。
+    ///
+    /// 只收 `ExplicitValue::Text`。hunk（`RawWords`，DESC 超过 120 字符时走 type-22）
+    /// 与 `TextList` 都不进——当前语料里规则匹配的 `DESC` 全是 inline 文本
+    /// （`library/scosel-semantics.md` §6：全库 18482 个元素有显式 DESC，形态
+    /// `type_code = 10240` / `ExplicitValue::Text`），hunk 值既不进表也不报错，
+    /// 求值器把它记成 `unsupported` 而不是静默。
+    ///
+    /// 重名保留多值：两个元素可以有同一个 DESC 原文（APS 实测 `AREA01PIPE`
+    /// 在两个库各有一个 ZONE），求值域由调用方按 MDB 收窄，索引不折叠。
+    by_attr_text: HashMap<u32, HashMap<String, Vec<u64>>>,
 }
 
 impl DbIndexes {
@@ -163,6 +185,24 @@ impl DbIndexes {
         self.by_name.len()
     }
 
+    /// 字符串属性原文 → refnos：`(attr_hash, 原文)` 全串相等。
+    ///
+    /// 这是 SCOSEL 求值的两次查表之一（另一次是 noun 限定，走
+    /// [`Self::refnos_of_noun_hash`]）。口径是**全串相等**、**区分大小写**，
+    /// 与真实字节一致：`402` 是全串相等不是子串（`AREA01` 子串命中 20、全串 0），
+    /// 语料里 DESC 全大写、无大小写混合样本，首版取保守口径（契约 VAL-EVAL-009
+    /// 钉住这个决定）。
+    ///
+    /// 查不到就是没有——空索引、未知属性 hash、原文不在表里，三种都回空 `Vec`，
+    /// 不 panic 不报错。求值器把空集当「没命中」，一条规则不该把请求打挂。
+    pub fn refnos_of_attr_text(&self, attr_hash: u32, text: &str) -> Vec<RefU64> {
+        self.by_attr_text
+            .get(&attr_hash)
+            .and_then(|by_text| by_text.get(text))
+            .map(|rows| rows.iter().map(|raw| RefU64(*raw)).collect())
+            .unwrap_or_default()
+    }
+
     /// Case-insensitive NAME substring search over the frozen index.
     pub fn search_names(&self, query: &str) -> Vec<(String, RefU64)> {
         let needle = query.trim().to_ascii_lowercase();
@@ -204,6 +244,7 @@ impl DbIndexes {
         let mut by_type: HashMap<u32, Vec<(u64, bool)>> = HashMap::new();
         let mut by_name: HashMap<String, Vec<u64>> = HashMap::new();
         let mut inbound: HashMap<u64, Vec<BackRef>> = HashMap::new();
+        let mut by_attr_text: HashMap<u32, HashMap<String, Vec<u64>>> = HashMap::new();
         let mut stats = BuildStats {
             elements: scanned.len() as u64,
             ..Default::default()
@@ -243,7 +284,9 @@ impl DbIndexes {
                 push(*member, BackRefVia::Member);
             }
 
-            // 显式流的 ref 型属性。
+            // 显式流的两件事都在这一遍里做完：ref 型属性反转入边，文本型属性进
+            // 字符串倒排表。不另开 `scan_elements`——APS 全扫实测 0.8s / 499839
+            // 元素，翻倍是不可接受的（VAL-INDEX-005 钉 `scan_calls == 1`）。
             for attribute in &parsed.explicit_attributes {
                 use e3d_io::record::explicit::ExplicitValue;
                 match &attribute.value {
@@ -254,6 +297,12 @@ impl DbIndexes {
                         }
                     }
                     _ => {}
+                }
+                // `indexed_text` 只对 inline `Text` 给 `Some`；hunk（`RawWords`）与
+                // `TextList` 都是 `None`，于是「hunk 不进表」由这一个函数决定，
+                // 可以被单测直接钉住（VAL-INDEX-002）。
+                if let Some(text) = indexed_text(&attribute.value) {
+                    index_text_attribute(&mut by_attr_text, attribute.hash, text, source);
                 }
             }
 
@@ -313,6 +362,7 @@ impl DbIndexes {
             by_type,
             by_name,
             inbound,
+            by_attr_text,
         })
     }
 
@@ -342,6 +392,51 @@ impl DbIndexes {
 
 fn raw(refno: RefNo) -> u64 {
     RefU64::from_two_nums(refno.word0, refno.word1).0
+}
+
+/// 字符串属性倒排表的一格：`by_attr_text[属性 hash][原文] = [refno...]`。
+///
+/// 在 `build()` 的**同一遍** `scan_elements(ScanTier::Full)` 里被调，不另开扫描
+/// （APS 全扫实测 0.8s / 499839 元素，翻倍是不可接受的；VAL-INDEX-005 用
+/// `read_stats.scan_calls == 1` 钉住这件事）。
+///
+/// 独立函数而不是内联在 match 臂里：`build()` 那个循环已经背着 `push` 闭包，
+/// 再加一段建表逻辑会把「边反转」和「文本倒排」两件事糊在一起。
+fn index_text_attribute(
+    by_attr_text: &mut HashMap<u32, HashMap<String, Vec<u64>>>,
+    attr_hash: u32,
+    text: &str,
+    source: u64,
+) {
+    by_attr_text
+        .entry(attr_hash)
+        .or_default()
+        .entry(text.to_string())
+        .or_default()
+        .push(source);
+}
+
+/// 一个显式属性的值是否该进字符串倒排表——`Some(原文)` 才进。
+///
+/// **只收 inline 的 `ExplicitValue::Text`**，其余一律 `None`：
+///
+/// * **hunk（`RawWords`）**：`DESC` 超过 120 字符时走 type-22 hunk，在
+///   `explicit_attributes` 里是五字地址 `[1,page,packed,count,words]`，原文在别处。
+///   这里是「记录原样解析」的那一遍，没有 pages 可读（`resolve_hunks` 是另一个
+///   入口），所以原文根本拿不到——跳过它，并且**不报错**：求值侧会把命不中记成
+///   `unsupported`，不静默。当前语料里规则匹配的 DESC 全是 inline 文本
+///   （`library/scosel-semantics.md` §6；APS 全库实测 0 个 hunk 形态的 DESC）。
+/// * `TextList`（type 19，字符串数组）也不进：`402` 比的是单个标量原文。
+///
+/// 抽成纯函数是为了让「hunk 不进表」成为**可判定**的断言（VAL-INDEX-002）：
+/// `build()` 只能通过它把值放进表，所以 `indexed_text(RawWords) == None` 就等价于
+/// 「hunk 永远进不了表」。
+fn indexed_text(value: &e3d_io::record::explicit::ExplicitValue) -> Option<&str> {
+    use e3d_io::record::explicit::ExplicitValue;
+    match value {
+        ExplicitValue::Text(text) => Some(text.as_str()),
+        _ => None,
+    }
 }
 
 /// 缓存文件路径：目录来自环境或系统临时目录，文件名带 dbnum 与会话号。
@@ -389,9 +484,8 @@ mod tests {
         assert!(!fingerprint.cacheable());
     }
 
-    #[test]
-    fn queries_on_an_empty_index_answer_empty_not_panic() {
-        let indexes = DbIndexes {
+    fn empty_indexes() -> DbIndexes {
+        DbIndexes {
             fingerprint: IndexFingerprint {
                 format_version: FORMAT_VERSION,
                 dbnum: 1,
@@ -403,9 +497,377 @@ mod tests {
             by_type: HashMap::new(),
             by_name: HashMap::new(),
             inbound: HashMap::new(),
-        };
+            by_attr_text: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn queries_on_an_empty_index_answer_empty_not_panic() {
+        let indexes = empty_indexes();
         assert!(indexes.refnos_of_noun("SITE", None).is_empty());
         assert!(indexes.find_named("/NOWHERE").is_empty());
         assert!(indexes.inbound_of(RefU64(7)).is_empty());
+    }
+
+    /// VAL-INDEX-003：空索引查空不 panic——包括新加的字符串属性倒排表。
+    ///
+    /// 两个维度都要空：属性 hash 不认识（表里没有这个外层键）、属性 hash 认识但
+    /// 原文不在（内层表里没有这个字符串）。求值器会把这两种情况当成「没命中」，
+    /// 一旦这里 panic 或报错，一条规则就能把整个请求打挂。
+    #[test]
+    fn an_empty_attr_text_index_answers_empty_without_panicking() {
+        let indexes = empty_indexes();
+        assert!(indexes.refnos_of_attr_text(999_999, "不存在").is_empty());
+        assert!(
+            indexes
+                .refnos_of_attr_text(e3d_attlib::db1_hash("DESC"), "不存在")
+                .is_empty()
+        );
+        assert!(indexes.refnos_of_attr_text(0, "").is_empty());
+    }
+
+    /// VAL-INDEX-004：`FORMAT_VERSION` 提到 2，缓存文件名与指纹都跟着变。
+    ///
+    /// 双闸的意义：文件名变了，旧的 `idx-v1-db1-s2.bin` 根本不会被打开；指纹里的
+    /// `format_version` 变了，就算有人手工把旧文件改成新名字，`read_cache` 的相等
+    /// 比较也会把它判为「别人的索引」而重建。少任何一道，bincode 都会把旧结构
+    /// （没有 `by_attr_text`）反序列化成一个「字段全默认」的新结构——不报错，只是
+    /// 字符串属性索引永远空，规则组永远空转。
+    #[test]
+    fn the_format_version_bump_invalidates_old_cache_names() {
+        assert_eq!(FORMAT_VERSION, 2, "FORMAT_VERSION 必须是 2");
+        let fingerprint = IndexFingerprint {
+            format_version: FORMAT_VERSION,
+            dbnum: 7,
+            pinned_sesno: 11,
+            file_len: 1,
+            file_mtime_ns: Some(1),
+        };
+        let path = cache_path(&fingerprint);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(name, "idx-v2-db7-s11.bin", "缓存文件名要带 v2");
+        // 指纹里的 format_version 由 `IndexFingerprint::of` 从 FORMAT_VERSION 填；
+        // 这里对一个真实文件走一遍，确认落盘的那一份也带 2。
+        let probe = std::env::temp_dir().join("aios-direct-index-fingerprint-probe.bin");
+        std::fs::write(&probe, b"probe").expect("probe file writes");
+        let real = IndexFingerprint::of(&probe, 7, 11).expect("probe file stats");
+        assert_eq!(real.format_version, 2, "指纹里的 format_version 也要是 2");
+        let _ = std::fs::remove_file(&probe);
+        // 旧版本号在指纹里必须判不相等——这是「旧文件改成新名字也读不进来」那一道闸。
+        let stale = IndexFingerprint {
+            format_version: 1,
+            ..fingerprint.clone()
+        };
+        assert_ne!(stale, fingerprint);
+    }
+
+    /// VAL-INDEX-001 / VAL-INDEX-003：`by_attr_text` 按 `(属性 hash, 原文)` 反查。
+    ///
+    /// 这里用字面量构造钉住访问器语义（`build()` 真的填表由 APS 真库的
+    /// `aps_text_attributes_land_in_the_inverted_index` 证明）：同名属性下不同原文
+    /// 各自成组，同名不同属性互不串味，查回来的是 `RefU64` 而不是裸 u64。
+    #[test]
+    fn text_attributes_are_indexed_by_hash_and_value() {
+        let desc = e3d_attlib::db1_hash("DESC");
+        let name = e3d_attlib::db1_hash("NAME");
+        let mut by_attr_text: HashMap<u32, HashMap<String, Vec<u64>>> = HashMap::new();
+        by_attr_text
+            .entry(desc)
+            .or_default()
+            .insert("AREA01PIPE".to_string(), vec![1, 2]);
+        by_attr_text
+            .entry(desc)
+            .or_default()
+            .insert("AREA01GRID".to_string(), vec![3]);
+        by_attr_text
+            .entry(name)
+            .or_default()
+            .insert("AREA01PIPE".to_string(), vec![9]);
+        let indexes = DbIndexes {
+            by_attr_text,
+            ..empty_indexes()
+        };
+
+        assert_eq!(
+            indexes.refnos_of_attr_text(desc, "AREA01PIPE"),
+            vec![RefU64(1), RefU64(2)],
+            "DESC=AREA01PIPE 的两个元素都要查回来"
+        );
+        assert_eq!(
+            indexes.refnos_of_attr_text(desc, "AREA01GRID"),
+            vec![RefU64(3)]
+        );
+        assert_eq!(
+            indexes.refnos_of_attr_text(name, "AREA01PIPE"),
+            vec![RefU64(9)],
+            "同原文不同属性互不串味"
+        );
+        assert!(indexes.refnos_of_attr_text(desc, "AREAGRID").is_empty());
+        assert!(indexes.refnos_of_attr_text(desc, "area01pipe").is_empty(), "首版区分大小写");
+    }
+
+    /// VAL-INDEX-002：hunk 型属性值被跳过，且不是「悄悄跳过」——是**由类型判定**
+    /// 决定的跳过。
+    ///
+    /// `build()` 只通过 [`indexed_text`] 把值放进 `by_attr_text`，所以把四种形状喂
+    /// 进去就等于把整条建表路径钉住了：inline `Text` 进表；hunk 的五字地址
+    /// `RawWords([1,page,packed,count,words])`、字符串数组 `TextList`、整型数组
+    /// `IntArray` 全部不进。`DESC` 超过 120 字符时就是 `RawWords` 形态
+    /// （`library/scosel-semantics.md` §6），这类值既不进表也不报错，求值侧把它记成
+    /// `unsupported`。
+    #[test]
+    fn hunk_values_are_skipped_without_failing_the_build() {
+        use e3d_io::record::explicit::ExplicitValue;
+
+        assert_eq!(
+            indexed_text(&ExplicitValue::Text("AREA01PIPE".into())),
+            Some("AREA01PIPE")
+        );
+        assert_eq!(
+            indexed_text(&ExplicitValue::RawWords(vec![1, 4211, 0, 3, 60])),
+            None,
+            "hunk 的五字地址不是原文，不得进表"
+        );
+        assert_eq!(
+            indexed_text(&ExplicitValue::TextList(vec!["A".into(), "B".into()])),
+            None,
+            "字符串数组不是 SCOSEL 的 402 要比较的标量"
+        );
+        assert_eq!(indexed_text(&ExplicitValue::IntArray(vec![1, 2])), None);
+        assert_eq!(indexed_text(&ExplicitValue::Integer(7)), None);
+
+        // hunk 值喂给建表入口不会 panic、也不会留下任何桶——`build()` 根本不会调它。
+        let mut table: HashMap<u32, HashMap<String, Vec<u64>>> = HashMap::new();
+        if let Some(text) = indexed_text(&ExplicitValue::RawWords(vec![1, 0, 0, 3, 60])) {
+            index_text_attribute(&mut table, 604_480, text, 42);
+        }
+        assert!(table.is_empty(), "hunk 值不该建出任何桶");
+    }
+
+    /// APS 真库里 `/ZONE-PIPING-AREA01` 所在的库（dbno 250132）与模板目录。
+    const APS_LIBRARY: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000\aps250132_0001";
+    const APS_LIBRARY_DIR: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000";
+    const APS_TEMPLATE_DIR: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
+
+    /// 扫一个库，分出「DESC 是 inline 文本」与「DESC 是 hunk」的元素。
+    fn desc_shapes(library: &Path) -> (Vec<(String, RefU64)>, Vec<RefU64>) {
+        use e3d_io::record::explicit::ExplicitValue;
+        let desc_hash = e3d_attlib::db1_hash("DESC");
+        let mut engine = ReadOnlyEngine::open(library).expect("library opens");
+        let mut inline: Vec<(String, RefU64)> = Vec::new();
+        let mut hunks: Vec<RefU64> = Vec::new();
+        for element in engine.scan_elements(ScanTier::Full).expect("scans") {
+            let element = element.expect("every element reads");
+            let parsed = element.parsed.as_ref().expect("full tier");
+            let refno = RefU64::from_two_nums(element.refno.word0, element.refno.word1);
+            for attribute in &parsed.explicit_attributes {
+                if attribute.hash != desc_hash {
+                    continue;
+                }
+                match &attribute.value {
+                    ExplicitValue::Text(text) => inline.push((text.clone(), refno)),
+                    ExplicitValue::RawWords(_) => hunks.push(refno),
+                    _ => {}
+                }
+            }
+        }
+        (inline, hunks)
+    }
+
+    /// VAL-INDEX-001 / VAL-INDEX-002 / VAL-INDEX-005：真库上建表，与独立扫描逐条对齐。
+    ///
+    /// 一次扫描收集「文件说的」（哪些元素的 DESC 是 inline 文本、哪些是 hunk），
+    /// 然后 `reset()` 计数、调 `build()`、再断言：
+    ///
+    /// * `scan_calls == 1`——`by_attr_text` 复用既有那一遍 `ScanTier::Full`，
+    ///   没有为它再扫一次（APS 全扫 0.8s，翻倍是不可接受的）。
+    /// * 每个 inline `DESC` 文本桶与独立扫描逐条相等（VAL-INDEX-001）。
+    /// * hunk 形态的 `DESC`（`RawWords`）**不进表**且 build 不 panic（VAL-INDEX-002）。
+    /// * 查空不 panic（VAL-INDEX-003 的真库侧）。
+    ///
+    /// `read_stats` 是进程全局计数器，这条要与其它真库测试分开单跑：
+    /// `cargo test --lib aps_text_attributes -- --ignored --nocapture --test-threads=1`
+    #[test]
+    #[ignore = "requires local APS source files"]
+    fn aps_text_attributes_land_in_the_inverted_index() {
+        let library = Path::new(APS_LIBRARY);
+        let templates = Path::new(APS_TEMPLATE_DIR);
+        if !library.is_file() || !templates.join("attlib.dat").is_file() {
+            eprintln!("SKIP: APS fixtures not present ({library:?}, {templates:?})");
+            return;
+        }
+        let desc_hash = e3d_attlib::db1_hash("DESC");
+        assert_eq!(desc_hash, 604_480, "DESC hash 变了，下面的断言要重定");
+
+        // ── 1. 独立扫描：文件说的 inline 文本各是哪些元素 ──
+        let (inline, _hunks) = desc_shapes(library);
+        assert!(
+            !inline.is_empty(),
+            "APS 的 aps250132 里没有 inline DESC，这条门证明不了任何事"
+        );
+
+        // ── 2. 同一遍扫描建表（计数从 0 起，断言只扫了一次）──
+        let attlib = e3d_attlib::AttlibData::parse_file(&templates.join("attlib.dat"))
+            .expect("attlib parses");
+        let mut provider = TemplateProvider::open(
+            templates.join("desvir.dat"),
+            Some(e3d_attlib::db1_hash("DESI")),
+        )
+        .expect("DESI template opens");
+        let mut engine = ReadOnlyEngine::open(library).expect("APS library opens");
+        let sesno = engine.session().sesno;
+        let fingerprint = IndexFingerprint::of(library, 250_132, sesno).expect("fingerprint");
+        e3d_io::read_stats::reset();
+        let indexes = DbIndexes::build(&mut engine, &mut provider, &attlib, fingerprint)
+            .expect("indexes build");
+        let stats = e3d_io::read_stats::snapshot();
+        assert_eq!(
+            stats.scan_calls, 1,
+            "by_attr_text 必须复用既有那一遍扫描，实际扫了 {} 次: {}",
+            stats.scan_calls,
+            stats.summary()
+        );
+
+        // ── 3. 每个 inline 文本桶与独立扫描逐条相等（VAL-INDEX-001 / VAL-INDEX-002）──
+        //
+        // 用「文件说的」建一张期望表：文本 → refno 集合。索引必须与它逐桶相等。
+        // 这条同时排掉两类错误：漏收（某条 inline 文本没进表）与多收（hunk 元素的
+        // refno 混进了某个文本桶——它没有 inline 文本，期望表里不该有它）。
+        let mut expected: std::collections::BTreeMap<&str, Vec<RefU64>> =
+            std::collections::BTreeMap::new();
+        for (text, refno) in &inline {
+            expected.entry(text.as_str()).or_default().push(*refno);
+        }
+        for (text, mut want) in expected {
+            want.sort();
+            want.dedup();
+            let mut got = indexes.refnos_of_attr_text(desc_hash, text);
+            got.sort();
+            got.dedup();
+            assert_eq!(got, want, "DESC={text:?} 的索引答案与独立扫描不一致");
+        }
+        // 索引里 DESC 下的桶数不得超过扫描看到的 distinct 原文数——多出来的桶只可能
+        // 来自不该进表的值（hunk / TextList）。
+        let distinct_texts = inline
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let indexed_desc_texts = indexes
+            .by_attr_text
+            .get(&desc_hash)
+            .map(HashMap::len)
+            .unwrap_or_default();
+        assert_eq!(
+            indexed_desc_texts, distinct_texts,
+            "DESC 的文本桶数与 inline 原文数不一致（hunk/TextList 混进来了？）"
+        );
+
+        // ── 4. 查空不 panic（VAL-INDEX-003 的真库侧）──
+        assert!(indexes.refnos_of_attr_text(desc_hash, "不可能存在的 DESC 原文").is_empty());
+        assert!(indexes.refnos_of_attr_text(999_999, "任意").is_empty());
+
+        // ── 5. 已知基准：`/ZONE-PIPING-AREA01` 的 DESC 是 AREA01PIPE ──
+        let known = RefU64::from_two_nums(2_013_286_676, 490);
+        let zone_hits = indexes.refnos_of_attr_text(desc_hash, "AREA01PIPE");
+        eprintln!(
+            "DESC=AREA01PIPE -> {zone_hits:?}；inline DESC {} 个 / DESC 文本桶 {} 个 / {}",
+            inline.len(),
+            indexed_desc_texts,
+            stats.summary()
+        );
+        assert!(
+            zone_hits.contains(&known),
+            "库内应含 /ZONE-PIPING-AREA01（{known:?}），实际 {zone_hits:?}"
+        );
+        let zones = indexes.refnos_of_noun_hash(e3d_attlib::db1_hash("ZONE"), None);
+        assert!(
+            zones.contains(&known),
+            "ZONE 的 noun 索引里也应有 {known:?}"
+        );
+
+        // ── 6. hunk 形态的 DESC 不进表（VAL-INDEX-002 的真库侧）──
+        //
+        // APS 语料的实测事实：`DESC` 全是 inline 文本（`library/scosel-semantics.md`
+        // §6：全库 18482 个元素有显式 DESC，形态 `type_code = 10240` /
+        // `ExplicitValue::Text`；`scosel_eval_probe` 的 desc_shape 统计也全是
+        // `Text(inline)`）。所以真库侧**没有** hunk 观测对象，这里探 4 个库确认这
+        // 一点（探全部 98 个库要 30 秒，不值得），找不到就明说这条只由单测覆盖——
+        // 不让门静默通过。
+        let mut scanned_libraries = 0usize;
+        let mut hunk_case = None;
+        for entry in std::fs::read_dir(APS_LIBRARY_DIR).expect("APS library dir reads") {
+            if scanned_libraries >= 4 {
+                break;
+            }
+            let path = entry.expect("entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            scanned_libraries += 1;
+            let (lib_inline, lib_hunks) = desc_shapes(&path);
+            if !lib_hunks.is_empty() {
+                hunk_case = Some((path, lib_inline, lib_hunks));
+                break;
+            }
+        }
+        let Some((hunk_library, hunk_inline, hunk_refnos)) = hunk_case else {
+            eprintln!(
+                "APS 语料里探了 {scanned_libraries} 个库都没有 hunk 形态的 DESC；\
+                 VAL-INDEX-002 的真库侧无可观测对象，只由单测 \
+                 hunk_values_are_skipped_without_failing_the_build 覆盖"
+            );
+            return;
+        };
+        let dbnum = hunk_library
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut hunk_engine = ReadOnlyEngine::open(&hunk_library).expect("hunk library opens");
+        let hunk_sesno = hunk_engine.session().sesno;
+        let mut hunk_provider = TemplateProvider::open(
+            templates.join("desvir.dat"),
+            Some(e3d_attlib::db1_hash("DESI")),
+        )
+        .expect("DESI template opens");
+        let hunk_fingerprint =
+            IndexFingerprint::of(&hunk_library, 0, hunk_sesno).expect("fingerprint");
+        let hunk_indexes =
+            DbIndexes::build(&mut hunk_engine, &mut hunk_provider, &attlib, hunk_fingerprint)
+                .expect("hunk library indexes build");
+        // 逐桶检查：hunk 元素没有 inline DESC 原文，所以它不该出现在 DESC 下的**任何**
+        // 文本桶里。遍历全部桶（而不是只查 inline 集合里的原文）才能覆盖「hunk 元素的
+        // refno 被别的属性混进来」这种情况。
+        let desc_buckets = hunk_indexes
+            .by_attr_text
+            .get(&desc_hash)
+            .map(|by_text| by_text.len())
+            .unwrap_or_default();
+        for refno in &hunk_refnos {
+            for (text, rows) in hunk_indexes
+                .by_attr_text
+                .get(&desc_hash)
+                .map(|by_text| by_text.iter().collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                assert!(
+                    !rows.contains(&refno.0),
+                    "hunk 形态的 DESC 元素 {refno:?}（{dbnum}）不该出现在 DESC={text:?} 的桶里"
+                );
+            }
+        }
+        assert!(
+            !hunk_refnos.is_empty(),
+            "{dbnum} 里找到了 hunk 形态的 DESC 元素清单，不该为空"
+        );
+        eprintln!(
+            "hunk DESC：{dbnum} 里 {} 个元素走 hunk，未进表；同库 inline DESC {} 个 / DESC 桶 {} 个",
+            hunk_refnos.len(),
+            hunk_inline.len(),
+            desc_buckets
+        );
     }
 }
