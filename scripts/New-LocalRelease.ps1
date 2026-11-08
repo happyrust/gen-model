@@ -576,6 +576,43 @@ if ((Get-Sha256Compat $SurrealExe) -ne
 }
 Write-Step "SurrealDB 二进制已就绪：$packagedSurrealExe / $surrealVersion"
 
+# VC++ 2015-2022 运行时随包（GitHub #115）：目标机可能没装新版 Redist——Win2012R2 自带的
+# MSVCP140 14.0.24215 会在模型生成阶段 0xC0000005（实测 fault offset 0x18c34）。exe 同目录
+# 优先于 System32 加载，副本放包根（aios-database.exe）；tools\ 目录若已存在也各补一份
+# （gen_ams / rvm_compare 同为 MSVC Rust 二进制）。只在 x64 打包机上拷：别的架构 System32
+# 里是别的架构 DLL，放进去反而让 x64 exe 起不来。
+$vcRuntimeDlls = @(
+    'concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+    'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll',
+    'vcruntime140.dll', 'vcruntime140_1.dll', 'vcruntime140_threads.dll'
+)
+if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+    $system32 = Join-Path $env:SystemRoot 'System32'
+    $vcRuntimeDirs = @($stage)
+    $vcToolsDir = Join-Path $stage 'tools'
+    if (Test-Path -LiteralPath $vcToolsDir -PathType Container) { $vcRuntimeDirs += $vcToolsDir }
+    $vcCopied = 0
+    foreach ($dll in $vcRuntimeDlls) {
+        $src = Join-Path $system32 $dll
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+            Write-Warn2 "System32 缺 $dll，这份不进包（目标机需自备对应 Redist）"
+            continue
+        }
+        foreach ($dir in $vcRuntimeDirs) {
+            $dst = Join-Path $dir $dll
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+            if ((Get-Sha256Compat $src) -ne (Get-Sha256Compat $dst)) {
+                throw "VC++ 运行时复制后校验失败：$dll -> $dir"
+            }
+        }
+        $vcCopied++
+    }
+    Write-Step "VC++ 运行时已随包：$vcCopied 个 DLL × $($vcRuntimeDirs.Count) 处"
+}
+else {
+    Write-Warn2 "打包机架构 $env:PROCESSOR_ARCHITECTURE 不是 x64，跳过 VC++ 运行时打包（目标机需自备 Redist）"
+}
+
 # ── 4. 生成包内脚本与文档 ────────────────────────────────────────────────────
 Write-Step "生成 Start-AMS / Rollback / Start-Surreal / README / CHANGELOG"
 
@@ -861,6 +898,7 @@ $firstRunNote
 
 ## 包内布局（一体化，解压即跑）
 - ``aios-database.exe`` —— 后端服务（gen-model $BackendVersion）
+- ``msvcp140*.dll`` / ``vcruntime140*.dll`` / ``concrt140.dll`` —— VC++ 2015-2022 运行时；目标机没装 Redist（如 Win2012R2 自带旧版会 0xC0000005）也能跑，``tools\`` 下另有一份给 gen_ams / rvm_compare
 - ``web\`` —— plant-ui $WebVersion 的 Web 静态资源（wasm + 字体 + 贴图）
 - ``resource\surreal\`` —— 与后端同版的数据库函数脚本；直接启动时不可缺（``Start-AMS.ps1 -Workspace`` 指向外部目录时，起服务前会把它整目录放进那个工作区）
 - ``schema\e3d210|e3d31\`` —— ``e3d_version`` 选用的 attlib / *vir.dat；未配置时默认 e3d210
