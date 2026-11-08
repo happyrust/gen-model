@@ -8933,4 +8933,543 @@ mod tests {
         assert!(attributes.refno.is_none());
         assert!(attributes.sesno.is_none());
     }
+
+    // ── G3 真库对照（VAL-LIVE-001..005）─────────────────────────────────────
+    //
+    // 这些用例要读 APS 真库（`D:\AVEVA\Projects\E3D3.1\AvevaPlantSample`，**只读**）与
+    // E3D 的实跑日志，所以默认 `#[ignore]`。取证命令：
+    //
+    // ```text
+    // cargo test --lib live_rule_groups -- --ignored --nocapture --test-threads=1
+    // ```
+    //
+    // **必须 `--test-threads=1`**：开关用进程级静态量（`GroupScoselOverride`），与要求
+    // 「29 个 GPSET 全部 resolved=0」的既有真库测试并发会互相干扰（见
+    // `data_interface::direct_tree::lazy_live_tests` 里那条的注释）。
+
+    /// E3D 侧的真值夹具：27 条规则组的 `Q ATT` 原文、`Q ALL` 成员名、成员 refno。
+    ///
+    /// 由 `output/live-rule-groups/` 下两个只读宏（`live27.mac` / `refs27.mac`）实跑产出，
+    /// 脚本见同目录 `build_fixture.py` / `merge_refs.py`。E3D 侧不能从 Rust 测试里驱动
+    /// （`des.exe` 会话要串行、单次 6-13 秒、且 `l3_suite` 是独立二进制），所以把它的输出
+    /// 固化成夹具，测试只做「Rust 结果 vs E3D 真值」的比对。
+    fn e3d_rule_groups() -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/group-contract/e3d-rule-groups.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读 E3D 真值夹具 {} 失败：{error}", path.display()));
+        serde_json::from_str(&raw).expect("E3D 真值夹具必须是合法 JSON")
+    }
+
+    /// 一条 E3D `Scosel` 原文 → `(noun, attr, op, texts)` 四元组。
+    ///
+    /// 解析口径来自实跑输出（`library/e3d-reference.md` §3）：
+    /// * 原文形如 `Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01PIPE' )`
+    /// * `ZONE` 与 `EQ` 之间是**两个**空格（PML 对齐留下的），按单空格切会切出空段
+    /// * 双规则形如 `... EQ 'AREA01GRID' OR ATTRIB DESC OF REFGRD  EQ 'PLANTGRID' )`
+    ///
+    /// 这里只做**逐字文本抽取**，不解释语义：`op` 恒为 `全串相等`（`402`），因为 E3D
+    /// 只输出这一种比较。
+    fn parse_e3d_scosel(text: &str) -> (String, String, String, Vec<String>) {
+        let body = text
+            .strip_prefix("Scosel")
+            .unwrap_or_else(|| panic!("Scosel 行必须以 `Scosel` 开头：{text:?}"))
+            .trim();
+        let rest = body
+            .strip_prefix("ALL ")
+            .unwrap_or_else(|| panic!("Scosel 原文应以 `ALL <noun>` 开头：{text:?}"));
+        let noun = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| panic!("Scosel 原文缺 noun：{text:?}"))
+            .to_string();
+        let mut attrs = Vec::new();
+        let mut texts = Vec::new();
+        let mut remaining = rest;
+        while let Some(at) = remaining.find("ATTRIB ") {
+            let tail = &remaining[at + "ATTRIB ".len()..];
+            let attr = tail
+                .split_whitespace()
+                .next()
+                .unwrap_or_else(|| panic!("ATTRIB 后缺属性名：{text:?}"));
+            attrs.push(attr.to_string());
+            remaining = tail;
+            if let Some(quote) = remaining.find('\'') {
+                let after = &remaining[quote + 1..];
+                let end = after
+                    .find('\'')
+                    .unwrap_or_else(|| panic!("文本字面量没有闭合引号：{text:?}"));
+                texts.push(after[..end].to_string());
+                remaining = &after[end..];
+            }
+        }
+        assert!(
+            !attrs.is_empty() && !texts.is_empty(),
+            "Scosel 原文应含至少一条 `ATTRIB <attr> ... EQ '<text>'`：{text:?}"
+        );
+        assert!(
+            attrs.iter().all(|attr| attr == &attrs[0]),
+            "一条规则里出现多个属性名（{attrs:?}）——求值器只认 DESC，夹具不该有这种形状"
+        );
+        // `ZONE` 与 `EQ` 之间必须是两个空格：这是 PML 输出的原样，按单空格切会丢字。
+        assert!(
+            text.contains("  EQ '"),
+            "E3D 原文的 `EQ` 前必须是两个空格（PML 对齐）：{text:?}"
+        );
+        (noun, attrs[0].clone(), "全串相等".to_string(), texts)
+    }
+
+    /// Rust 侧对同一条 `SCOSEL` 的 `(noun, attr, op, texts)` 四元组，口径与
+    /// [`parse_e3d_scosel`] 对齐，好逐项比。
+    ///
+    /// `op` 用中文 `全串相等`：求值器只实现 `StrEq`（`402`），别的形状进 `unsupported`，
+    /// 所以这里出现别的算子本身就说明夹具里混进了求值器不认的样本。
+    fn rust_scosel_tuple(words: &[i32]) -> (String, String, String, Vec<String>) {
+        use crate::data_interface::scosel::{ScoselExpr, ScoselQualifier, decode};
+
+        fn walk(
+            expr: &ScoselExpr,
+            attr: &mut Option<String>,
+            texts: &mut Vec<String>,
+            op: &mut Option<String>,
+        ) {
+            match expr {
+                ScoselExpr::StrEq(lhs, rhs) => {
+                    let ScoselExpr::Attr { hash, .. } = lhs.as_ref() else {
+                        panic!("StrEq 左侧应是属性引用：{lhs:?}");
+                    };
+                    let name = e3d_attlib::db1_dehash(*hash as u32)
+                        .unwrap_or_else(|| panic!("属性 hash {hash} 反查不出名字"));
+                    *attr = Some(name);
+                    let ScoselExpr::Text(text) = rhs.as_ref() else {
+                        panic!("StrEq 右侧应是文本字面量：{rhs:?}");
+                    };
+                    texts.push(text.clone());
+                    *op = Some("全串相等".to_string());
+                }
+                ScoselExpr::Or(lhs, rhs) | ScoselExpr::And(lhs, rhs) => {
+                    walk(lhs, attr, texts, op);
+                    walk(rhs, attr, texts, op);
+                }
+                other => panic!("求值器不认的算子出现在真值样本里：{other:?}"),
+            }
+        }
+
+        fn find_noun(expr: &ScoselExpr, noun: &mut Option<String>) {
+            match expr {
+                ScoselExpr::Attr { qualifiers, .. } => {
+                    for qualifier in qualifiers {
+                        if let ScoselQualifier::Typed { words } = qualifier {
+                            assert_eq!(
+                                words[words.len() - 2],
+                                6,
+                                "限定类型码必须是 6（noun），实际 {words:?}"
+                            );
+                            let hash = words[words.len() - 3] as u32;
+                            *noun = Some(
+                                e3d_attlib::db1_dehash(hash)
+                                    .unwrap_or_else(|| panic!("noun hash {hash} 反查不出名字")),
+                            );
+                        }
+                    }
+                }
+                ScoselExpr::StrEq(lhs, rhs)
+                | ScoselExpr::Or(lhs, rhs)
+                | ScoselExpr::And(lhs, rhs) => {
+                    find_noun(lhs, noun);
+                    find_noun(rhs, noun);
+                }
+                _ => {}
+            }
+        }
+
+        let decoded = decode(words).unwrap_or_else(|error| panic!("SCOSEL 解不出来：{error}"));
+        assert_eq!(decoded.rules.len(), 1, "本函数只处理单规则样本");
+        let rule = &decoded.rules[0];
+        let mut attr = None;
+        let mut texts = Vec::new();
+        let mut op = None;
+        walk(&rule.filter, &mut attr, &mut texts, &mut op);
+        let mut noun = None;
+        find_noun(&rule.filter, &mut noun);
+        (
+            noun.expect("样本里应带 noun 限定"),
+            attr.expect("样本里应带属性引用"),
+            op.expect("样本里应带比较算子"),
+            texts,
+        )
+    }
+
+    /// 真库服务：APS /ALL，开关开。
+    ///
+    /// 开关是进程级静态量，`#[ignore]` 用例必须 `--test-threads=1` 单跑；这个 helper
+    /// 只负责建服务，不设开关（调用方自己持守卫，好在用例结束前落掉）。
+    fn live_rule_group_service() -> crate::data_interface::direct_tree::DirectTreeService {
+        crate::data_interface::direct_tree::DirectTreeService::open("AvevaPlantSample", "ALL")
+            .expect("APS 真库必须可读（只读）")
+    }
+
+    /// 求值域按 `ScoselScope` 的口径问（`MdbScoselScope` 实现这个 trait）。
+    fn live_scope_hits(
+        scope: &crate::data_interface::direct_tree::MdbScoselScope,
+        text: &str,
+    ) -> Vec<RefU64> {
+        use crate::data_interface::scosel_eval::ScoselScope;
+        let desc_hash = crate::data_interface::scosel_eval::desc_attribute_hash();
+        let mut hits: Vec<RefU64> = ScoselScope::refnos_with_attr_text(scope, desc_hash, text)
+            .into_iter()
+            .collect();
+        hits.sort_unstable_by_key(|refno| refno.0);
+        hits
+    }
+
+    /// 把一层解析结果搬到响应体：与 [`tree_children_resolved`] 同一段搬运。
+    fn live_resolved_body(
+        service: &crate::data_interface::direct_tree::DirectTreeService,
+        parent: RefU64,
+    ) -> Value {
+        let layer = service.resolved_children(parent).expect("解析一层");
+        resolved_children_body(parent, &layer, |refno| service.dbnum_of(refno))
+            .expect("回执本体")
+    }
+
+    /// 27 条规则组的名字 → refno（`library/scosel-semantics.md` §7 的样本夹具同一份数据）。
+    fn live_rule_group_refnos() -> Vec<(String, RefU64)> {
+        e3d_rule_groups()["rows"]
+            .as_array()
+            .expect("rows 必须是数组")
+            .iter()
+            .map(|row| {
+                let name = row["name"].as_str().expect("name").to_string();
+                let refno = row["refno"].as_str().expect("refno");
+                let (high, low) = refno.split_once('_').expect("refno 形如 high_low");
+                (
+                    name,
+                    RefU64::from_two_nums(
+                        high.parse().expect("high 是数字"),
+                        low.parse().expect("low 是数字"),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// VAL-LIVE-001：APS `/AREA01_PIPE`（`2013286748_2`）在开关开时解析出非空 ZONE 行，
+    /// 每行 `rule: true` / `via: null` / `secondary: true`。
+    ///
+    /// 同时打印被求值域过滤掉的域外副本与它所属的库号——契约要求「收窄是显式的，不是静默丢弃」。
+    #[test]
+    #[ignore = "requires local APS source files (read-only); run with --test-threads=1"]
+    fn live_rule_groups_area01_pipe_resolves_to_zone_rows_with_the_three_keys() {
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let service = live_rule_group_service();
+        let gpset = RefU64::from_two_nums(2013286748, 2);
+        let body = live_resolved_body(&service, gpset);
+
+        let nodes = body["nodes"].as_array().expect("nodes 必须是数组");
+        assert!(
+            !nodes.is_empty(),
+            "/AREA01_PIPE 在开关开时必须回非空成员（接线前是 0 行）：{body}"
+        );
+        for node in nodes {
+            assert_eq!(
+                node["noun"].as_str(),
+                Some("ZONE"),
+                "规则 `ALL ZONE WITH (...)` 的命中必须是 ZONE：{node}"
+            );
+            assert_eq!(node["rule"], json!(true), "{node}");
+            assert!(
+                node.as_object().expect("行是对象").contains_key("via"),
+                "规则成员的 via 键必须出现（值为 null，不是省略）：{node}"
+            );
+            assert_eq!(node["via"], Value::Null, "{node}");
+            assert_eq!(node["secondary"], json!(true), "{node}");
+        }
+        eprintln!("/AREA01_PIPE 解析出 {} 行：{body}", nodes.len());
+
+        // 求值域收窄的证据：全盘全扫会多出的同名副本不在 members 里，它的库不在域里。
+        let outside = RefU64::from_two_nums(2013287044, 56);
+        let scope = service.scosel_scope().expect("求值域");
+        let all_hits = live_scope_hits(scope.as_ref(), "AREA01PIPE");
+        let outside_dbnum = service.dbnum_of(outside);
+        assert!(
+            !all_hits.contains(&outside),
+            "MDB 未声明库里的同名副本 {outside} 不得进求值域（{all_hits:?}）"
+        );
+        eprintln!(
+            "求值域内 DESC==AREA01PIPE 命中 {} 个：{all_hits:?}；\
+             域外副本 {outside} 属于库 {outside_dbnum:?}（该库在求值域里？{}），\
+             它落在 aps000/aps250500_0001 文件里，MDB 未声明该库 → 显式过滤",
+            all_hits.len(),
+            outside_dbnum.is_some_and(|dbnum| scope.index_of(dbnum).is_some())
+        );
+    }
+
+    /// VAL-LIVE-002：`/AREA01_GRID`（`2013286748_28`）的两条规则取并集，noun 全 REFGRD。
+    #[test]
+    #[ignore = "requires local APS source files (read-only); run with --test-threads=1"]
+    fn live_rule_groups_area01_grid_is_the_union_of_its_two_rules() {
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let service = live_rule_group_service();
+        let gpset = RefU64::from_two_nums(2013286748, 28);
+        let body = live_resolved_body(&service, gpset);
+        let nodes = body["nodes"].as_array().expect("nodes 必须是数组");
+        assert!(!nodes.is_empty(), "/AREA01_GRID 必须非空：{body}");
+        for node in nodes {
+            assert_eq!(node["noun"].as_str(), Some("REFGRD"), "{node}");
+            assert_eq!(node["rule"], json!(true), "{node}");
+        }
+
+        // 并集：两条文本各自命中集的并集，数量与成员集合都要对上。
+        let scope = service.scosel_scope().expect("求值域");
+        let area01 = live_scope_hits(scope.as_ref(), "AREA01GRID");
+        let plant = live_scope_hits(scope.as_ref(), "PLANTGRID");
+        let mut union: Vec<RefU64> = area01.iter().chain(plant.iter()).copied().collect();
+        union.sort_unstable_by_key(|refno| refno.0);
+        union.dedup();
+        let mut resolved: Vec<RefU64> = nodes
+            .iter()
+            .map(|node| {
+                let text = node["refno"].as_str().expect("refno");
+                let (high, low) = text.split_once('_').expect("refno 形如 high_low");
+                RefU64::from_two_nums(high.parse().unwrap(), low.parse().unwrap())
+            })
+            .collect();
+        resolved.sort_unstable_by_key(|refno| refno.0);
+        assert_eq!(
+            resolved, union,
+            "两条规则必须取并集：Rust 解析出的成员与「AREA01GRID ∪ PLANTGRID」不一致"
+        );
+        eprintln!(
+            "/AREA01_GRID 并集 {} 个 REFGRD：{resolved:?}（AREA01GRID {} + PLANTGRID {}）",
+            resolved.len(),
+            area01.len(),
+            plant.len()
+        );
+    }
+
+    /// VAL-LIVE-003：APS 的 29 个 GPSET 在开关开时，无一个是「0 节点且 0 unresolved」。
+    ///
+    /// **实测口径**（`output/live-rule-groups` 的探针输出）：MDB 声明范围内 GPSET 共
+    /// **28** 个——27 条规则组（`aps250204`）+ `/ACCEPT-GROUP`（`aps250220`，无规则无成员）。
+    /// 契约文字写「29 个」是按「APS 共 29 个 GPSET」的历史口径；按 GPWL 展开与按 noun 索引
+    /// 两条路都得 28。这里按**实测 28** 断言，并把两者都打印出来，不让数字差异被静默吞掉。
+    #[test]
+    #[ignore = "requires local APS source files (read-only); run with --test-threads=1"]
+    fn live_rule_groups_no_gpset_is_a_silent_empty_turn() {
+        use crate::data_interface::direct_tree::TreeStore;
+        use crate::data_interface::group_membership::GROUP_RULE_ATTRIBUTE;
+
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let service = live_rule_group_service();
+        let store = service.tree_store();
+
+        // 按 GPWL 世界展开枚举（这是「APS 有哪些 GPSET」的权威口径）。
+        let mut sets: Vec<RefU64> = Vec::new();
+        for world in service.roots_of_nouns(&["GPWL"]).expect("GPWL 根") {
+            for node in service.children(world.refno.refno()).expect("GPWL 成员") {
+                if node.noun.eq_ignore_ascii_case("GPSET") {
+                    sets.push(node.refno.refno());
+                }
+            }
+        }
+        sets.sort_unstable_by_key(|refno| refno.0);
+        sets.dedup();
+        eprintln!("按 GPWL 枚举的 GPSET：{} 个", sets.len());
+        assert!(
+            !sets.is_empty(),
+            "APS 必须有 GPSET（按 GPWL 展开一个都没找到，说明枚举口径坏了）"
+        );
+
+        let mut silent: Vec<String> = Vec::new();
+        let mut no_match: Vec<String> = Vec::new();
+        let mut empty: Vec<String> = Vec::new();
+        for refno in &sets {
+            let layer = service.resolved_children(*refno).expect("解析一层");
+            let name = service.name_of(*refno).unwrap_or_default();
+            let reasons: Vec<&str> = layer
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect();
+            let members = store.members(*refno).expect("存储成员").len();
+            let rule_words = store
+                .explicit_int_array(*refno, GROUP_RULE_ATTRIBUTE)
+                .expect("SCOSEL")
+                .map(|words| words.len())
+                .unwrap_or(0);
+            eprintln!(
+                "{refno} {name}: resolved={} unresolved={reasons:?} \
+                 （存储成员 {members}，SCOSEL {rule_words} 字）",
+                layer.nodes.len()
+            );
+            if layer.nodes.is_empty() && layer.unresolved.is_empty() {
+                silent.push(format!("{refno} {name}"));
+            }
+            if reasons.contains(&"scosel_no_match") {
+                no_match.push(name.clone());
+            }
+            if reasons.contains(&"group_empty") {
+                empty.push(name.clone());
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "这些 GPSET 是「0 节点 + 0 unresolved」的静默空转：{silent:?}"
+        );
+
+        // 三条已知 0 命中必须带明确原因码（不是静默 0 成员）。
+        for expected in ["/AREA01_HVAC", "/AREA03_HVAC", "/AREA03_SUPP"] {
+            assert!(
+                no_match.iter().any(|name| name == expected),
+                "{expected} 必须出 scosel_no_match（实测 no_match={no_match:?}）"
+            );
+        }
+        eprintln!("scosel_no_match：{no_match:?}；group_empty：{empty:?}");
+    }
+
+    /// VAL-LIVE-004：E3D `Q ATT` 的规则原文与 Rust `decode` 的四元组逐项对得上。
+    ///
+    /// 27 条逐条比，两边原文都打印出来（契约要求 Evidence 里两边都在）。
+    #[test]
+    #[ignore = "requires local APS source files (read-only); run with --test-threads=1"]
+    fn live_rule_groups_e3d_q_att_text_matches_the_rust_decode_tuple() {
+        let fixture = e3d_rule_groups();
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 27, "E3D 真值夹具必须是 27 条规则组");
+
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/group-contract/scosel-real-samples.json"),
+        )
+        .expect("读 27 条真实 SCOSEL 样本");
+        let samples: Value = serde_json::from_str(&raw).expect("样本夹具必须是合法 JSON");
+        let words_of = |name: &str| -> Vec<i32> {
+            let sample = samples["samples"]
+                .as_array()
+                .expect("samples")
+                .iter()
+                .find(|sample| sample["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("样本夹具里没有 {name}"));
+            sample["words"]
+                .as_array()
+                .expect("words")
+                .iter()
+                .map(|item| item.as_i64().expect("word 是整数") as i32)
+                .collect()
+        };
+
+        for row in rows {
+            let name = row["name"].as_str().expect("name");
+            let e3d_text = row["e3d_scosel"].as_str().expect("e3d_scosel");
+            let e3d = parse_e3d_scosel(e3d_text);
+            let rust = rust_scosel_tuple(&words_of(name));
+            eprintln!("{name}");
+            eprintln!("  E3D 原文：{e3d_text}");
+            eprintln!("  E3D 四元组：noun={} attr={} op={} text={:?}", e3d.0, e3d.1, e3d.2, e3d.3);
+            eprintln!(
+                "  Rust 四元组：noun={} attr={} op={} text={:?}",
+                rust.0, rust.1, rust.2, rust.3
+            );
+            assert_eq!(rust.0, e3d.0, "{name} 的 noun 对不上");
+            assert_eq!(rust.1, e3d.1, "{name} 的属性名对不上");
+            assert_eq!(rust.2, e3d.2, "{name} 的算子对不上");
+            assert_eq!(rust.3, e3d.3, "{name} 的文本字面量对不上");
+        }
+        eprintln!("27 条规则组的 E3D 原文与 Rust 四元组逐条一致");
+    }
+
+    /// VAL-LIVE-005：E3D `Q ALL <noun> WITH (...)` 的成员集合与 Rust `evaluate` 的
+    /// `members` 集合相等（27 条逐条比，三条空的两边都必须空）。
+    #[test]
+    #[ignore = "requires local APS source files (read-only); run with --test-threads=1"]
+    fn live_rule_groups_e3d_q_all_members_match_the_rust_evaluation() {
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let service = live_rule_group_service();
+        let scope = service.scosel_scope().expect("求值域");
+
+        let fixture = e3d_rule_groups();
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 27, "E3D 真值夹具必须是 27 条规则组");
+
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/group-contract/scosel-real-samples.json"),
+        )
+        .expect("读 27 条真实 SCOSEL 样本");
+        let samples: Value = serde_json::from_str(&raw).expect("样本夹具必须是合法 JSON");
+
+        let mut empties = Vec::new();
+        for row in rows {
+            let name = row["name"].as_str().expect("name");
+            let refno_text = row["refno"].as_str().expect("refno");
+            let (high, low) = refno_text.split_once('_').expect("refno 形如 high_low");
+            let gpset = RefU64::from_two_nums(high.parse().unwrap(), low.parse().unwrap());
+
+            // Rust 侧：直接走真库的成员解析（与 /tree/children?resolved=1 同一条路）。
+            let resolved = crate::data_interface::group_membership::resolved_members_with_rules(
+                service.tree_store().as_ref(),
+                gpset,
+                Some(scope.as_ref()),
+            )
+            .expect("成员解析");
+            let mut rust: Vec<String> = resolved
+                .members
+                .iter()
+                .map(|member| member.element().to_string())
+                .collect();
+            rust.sort();
+
+            // E3D 侧：`Q ALL` 的成员名 + `Q REF` 的 refno，两边都要对上。
+            // 顺序无关（契约 VAL-LIVE-005 判的是**集合相等**），两边都排序后比。
+            let mut e3d_names: Vec<String> = row["e3d_members"]
+                .as_array()
+                .expect("e3d_members")
+                .iter()
+                .map(|value| value.as_str().expect("成员名").to_string())
+                .collect();
+            e3d_names.sort();
+            let mut e3d_refnos: Vec<String> = row["e3d_member_refnos"]
+                .as_array()
+                .expect("e3d_member_refnos")
+                .iter()
+                .map(|value| value.as_str().expect("refno").to_string())
+                .collect();
+            e3d_refnos.sort();
+            let mut rust_names: Vec<String> = resolved
+                .members
+                .iter()
+                .map(|member| service.name_of(member.element()).unwrap_or_default())
+                .collect();
+            rust_names.sort();
+
+            eprintln!("{name}");
+            eprintln!("  E3D 成员（{}）：{e3d_names:?}", e3d_names.len());
+            eprintln!("  Rust 成员（{}）：{rust_names:?}", rust_names.len());
+            eprintln!("  E3D refno：{e3d_refnos:?}");
+            eprintln!("  Rust refno：{rust:?}");
+
+            assert_eq!(
+                rust_names, e3d_names,
+                "{name} 的成员名集合与 E3D `Q ALL` 不一致"
+            );
+            assert_eq!(
+                rust, e3d_refnos,
+                "{name} 的成员 refno 集合与 E3D `Q ALL` 不一致"
+            );
+            if e3d_refnos.is_empty() {
+                empties.push(name.to_string());
+            }
+        }
+        assert_eq!(
+            empties,
+            vec![
+                "/AREA01_HVAC".to_string(),
+                "/AREA03_HVAC".to_string(),
+                "/AREA03_SUPP".to_string(),
+            ],
+            "命中 0 个的三条必须两边都是空（E3D 回 None）"
+        );
+        eprintln!("27 条规则组的成员集合与 E3D `Q ALL` 逐条一致；空的三条：{empties:?}");
+    }
 }

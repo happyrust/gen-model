@@ -86,6 +86,22 @@ pub enum UnresolvedReason {
     ///
     /// 命中到的合法成员**仍然返回**（部分成功）——这一码只说「还缺一块」，不是「全丢」。
     ScoselUnsupported,
+    /// 规则完整解出、求值器也没有认不出的形状，但**一个成员都没命中**。
+    ///
+    /// 为什么单独一码（`validation-contract.md` VAL-LIVE-003）：APS 的 `/AREA01_HVAC`、
+    /// `/AREA03_HVAC`、`/AREA03_SUPP` 三条规则在当前语料里命中 0 个。若这里只回空表、不出槽，
+    /// 前端看到的就是「0 行 + 无原因」——与「这条规则坏了」无法区分，正是本 mission 要消灭的
+    /// 静默空转。`scosel_eval` 的注释说「空 members + 空 unsupported 是真正的没命中，可以
+    /// 安全地当成空分组」，那是**求值器**的语义（它答「命中了谁」）；上层要把「没命中」
+    /// 这件事说出来，才不是静默。实测 27 条规则组里正好 3 条走这条码。
+    ScoselNoMatch,
+    /// 分组既没有存储成员、也没有规则（或规则为空），展开出来什么都没有。
+    ///
+    /// 为什么也要一条码：VAL-LIVE-003 的判定是「29 个 GPSET 里无一个是 0 节点且 0 unresolved」。
+    /// APS 的 `/ACCEPT-GROUP`（`2013286764_3`）就是这种组——0 个 GPITEM、0 字 `SCOSEL`。
+    /// 它不属于「规则组」，但同样会让前端点开是空白且无任何提示，所以按「空分组」点名。
+    /// **开关关着时不会出现**（前两层判据在它之前就返回），所以「开关关 = 逐字不变」不受影响。
+    GroupEmpty,
 }
 
 impl UnresolvedReason {
@@ -96,6 +112,8 @@ impl UnresolvedReason {
             Self::TargetMissing => "target_missing",
             Self::ScoselEvalFailed => "scosel_eval_failed",
             Self::ScoselUnsupported => "scosel_unsupported",
+            Self::ScoselNoMatch => "scosel_no_match",
+            Self::GroupEmpty => "group_empty",
         }
     }
 }
@@ -207,9 +225,11 @@ pub fn resolved_members_with_rules(
     // `group_write.rs` 的 SetRules 注释说明空 Vec 写的是 len=0 的 hunk，读侧「空数组」与
     // 「没这个属性」都要当成没有规则，否则清完规则的组会变成一条坏槽。
     let Some(words) = store.explicit_int_array(parent, GROUP_RULE_ATTRIBUTE)? else {
+        note_empty_group(store, parent, &mut out)?;
         return Ok(out);
     };
     if words.is_empty() {
+        note_empty_group(store, parent, &mut out)?;
         return Ok(out);
     }
     let decoded = match super::scosel::decode(&words) {
@@ -228,6 +248,9 @@ pub fn resolved_members_with_rules(
     };
     let mut seen: HashSet<RefU64> = out.members.iter().map(ResolvedMember::element).collect();
     let mut unsupported: Vec<String> = Vec::new();
+    // 本次规则一共算出几个成员（去重后）。用来判「规则完整解出但一个都没命中」——
+    // 那种情况必须出一条 `scosel_no_match`，否则前端看到的就是「0 行 + 无原因」的静默空转。
+    let mut rule_hits = 0usize;
     for rule in &decoded.rules {
         let outcome = evaluate(rule, scope);
         for issue in &outcome.unsupported {
@@ -235,6 +258,7 @@ pub fn resolved_members_with_rules(
         }
         for refno in outcome.members {
             if seen.insert(refno) {
+                rule_hits += 1;
                 out.members.push(ResolvedMember::Rule { element: refno });
             }
         }
@@ -253,7 +277,53 @@ pub fn resolved_members_with_rules(
             reason: UnresolvedReason::ScoselUnsupported,
         });
     }
+    // 「规则完整解出、没有认不出的形状，但一个成员都没命中」——不能什么都不说。
+    //
+    // 判据同时要求 `unsupported` 为空：有认不出的形状时已经出了 `scosel_unsupported`，
+    // 再叠一条 no_match 会让同一条规则出两个槽，前端只能猜哪个才是原因。
+    // 存储成员有没有不影响这条判定——它说的是「规则这条来源没命中」，与 GPITEM 那条无关。
+    if rule_hits == 0 && unsupported.is_empty() {
+        log::warn!(
+            "GPSET {parent} 的 SCOSEL 完整解出（{} 条规则）但命中 0 个元素——规则本身没有坏，\
+             是当前语料里没有 DESC 等于这些文本的元素",
+            decoded.rules.len()
+        );
+        out.unresolved.push(UnresolvedSlot {
+            via: parent,
+            target: None,
+            reason: UnresolvedReason::ScoselNoMatch,
+        });
+    }
     Ok(out)
+}
+
+/// 分组既没有存储成员、也没有规则（或规则为空）时，把「这个分组是空的」记成一条槽。
+///
+/// 只在**真的什么都没解析出来**时记：已经出了坏槽（`gpref_missing` / `db_not_in_mdb` /
+/// `target_missing`）的分组不算静默——那三条本身就是「为什么没有成员」的答案，再叠一条
+/// `group_empty` 会让同一次解析出两个互相矛盾的原因码（`VAL-MEMBER-008` 钉住既有三码的语义）。
+///
+/// 开关关着时走不到这里：`resolved_members_with_rules` 的前两层判据在调用它之前就返回了，
+/// 所以「开关关 = 逐字不变」不受影响。
+fn note_empty_group(
+    store: &dyn TreeStore,
+    parent: RefU64,
+    out: &mut GroupMembers,
+) -> anyhow::Result<()> {
+    if !out.members.is_empty() || !out.unresolved.is_empty() {
+        return Ok(());
+    }
+    // 复核一遍存储成员：调用方可能已经解析过，但这里要的是「这条分组真的空」这个事实。
+    if !store.members(parent)?.is_empty() {
+        return Ok(());
+    }
+    log::warn!("分组 {parent} 既没有存储成员、也没有规则，展开出来是空的");
+    out.unresolved.push(UnresolvedSlot {
+        via: parent,
+        target: None,
+        reason: UnresolvedReason::GroupEmpty,
+    });
+    Ok(())
 }
 
 /// 某个元素被哪个分组经哪个 GPITEM 收录（`element ← GPITEM.GPREF ← group`）。
@@ -945,6 +1015,119 @@ mod tests {
             vec!["scosel_unsupported"],
             "认不出的形状只能出 scosel_unsupported"
         );
+    }
+
+    /// VAL-LIVE-003 的单元侧底座：规则完整解出、求值器没有认不出的形状、但命中 0 个成员时，
+    /// 必须出一条 `scosel_no_match`——不能回「0 成员 + 0 槽」的静默空转。
+    ///
+    /// APS 实测正好三条走这条码（`/AREA01_HVAC`、`/AREA03_HVAC`、`/AREA03_SUPP`），
+    /// 见 `library/g3-rule-members.md` §5 与 E3D `Q ALL` 的 `None`。
+    #[test]
+    fn a_rule_that_matches_nothing_reports_scosel_no_match() {
+        let mut store = sample();
+        // 存储成员清零：这条码只说「规则这条来源没命中」，别被 GPITEM 成员的成败干扰。
+        store.add(r(2, 11), "GPSET", &[]);
+        store.scosel(r(2, 11), &zone_rule_words("AREA01HVAC"));
+        // 求值域里没有任何 DESC == AREA01HVAC 的元素（真库语料就是这样）。
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert!(resolved.members.is_empty(), "{:?}", resolved.members);
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scosel_no_match"],
+            "规则没坏、只是没命中：必须出 scosel_no_match，不能静默"
+        );
+
+        // 反向：命中非空时不许出这条码。
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(resolved.members.len(), 1, "{:?}", resolved.members);
+        assert!(resolved.unresolved.is_empty(), "{:?}", resolved.unresolved);
+
+        // 反向：有认不出的形状时只出 `scosel_unsupported`，不叠一条 no_match
+        // （同一规则两个槽，前端只能猜哪个是原因）。
+        let mut bad = zone_rule_words("AREA01PIPE");
+        let desc_at = bad
+            .iter()
+            .position(|word| *word == super::super::scosel_eval::desc_attribute_hash() as i32)
+            .expect("夹具里应有 DESC hash");
+        bad[desc_at] = e3d_attlib::db1_hash("NAME") as i32;
+        store.scosel(r(2, 11), &bad);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scosel_unsupported"],
+            "认不出的形状已经出了槽，不再叠 no_match"
+        );
+    }
+
+    /// 空分组也要点名：既没有存储成员、也没有规则时，出 `group_empty`。
+    ///
+    /// APS 的 `/ACCEPT-GROUP`（`2013286764_3`）就是这种组——0 个 GPITEM、0 字 `SCOSEL`。
+    /// 它是 VAL-LIVE-003「无一个是 0 节点且 0 unresolved」在真库上的最后一个缺口。
+    #[test]
+    fn a_group_with_neither_members_nor_rules_reports_group_empty() {
+        let mut store = sample();
+        store.add(r(2, 11), "GPSET", &[]);
+        let scope = RuleScope::default();
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert!(resolved.members.is_empty());
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group_empty"],
+            "空分组必须出 group_empty，不能 0 节点 + 0 槽"
+        );
+
+        // 空 SCOSEL 也是空分组（不是一条坏槽）。
+        store.scosel(r(2, 11), &[]);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group_empty"]
+        );
+
+        // 已有坏槽的分组不再叠 group_empty（同一次解析两个原因码会自相矛盾）。
+        let mut bad = sample();
+        bad.add(r(2, 11), "GPSET", &[r(2, 20)]);
+        bad.item(r(2, 20), None);
+        let resolved = resolved_members_with_rules(&bad, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpref_missing"],
+            "坏 GPREF 槽本身就是「为什么没有成员」，不再叠 group_empty"
+        );
+
+        // 开关关着时一个槽都不多（「开关关 = 逐字不变」）。
+        // 注意：`GroupScoselOverride::set` 是进程级互斥量，两个守卫同时在栈上会自锁——
+        // 先把上一个守卫落掉（作用域结束）再取下一个。
+        drop(_on);
+        let _off = crate::options::GroupScoselOverride::set(false);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert!(resolved.unresolved.is_empty(), "{:?}", resolved.unresolved);
     }
 
     /// VAL-MEMBER-008：三个既有原因码仍然只表示 GPREF 链的三种失败，语义没被复用。

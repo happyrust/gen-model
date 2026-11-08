@@ -1,0 +1,362 @@
+{
+  "source": "l3_suite --check-driver",
+  "project": "AvevaPlantSample",
+  "mdb": "ALL",
+  "macro": "scripts/e3d/g3-rule-groups/live27.mac",
+  "log": "output/live-rule-groups/run1/check-driver.log",
+  "note": "E3D 自身对 27 条规则组的求值真值。规则原文取 `/<name>` 换行 + `Q ATT` 的 Scosel 行（原样，`ZONE` 与 `EQ` 之间是两个空格）；成员取 `Q ALL <noun> WITH (...)` 的输出，空列表表示 E3D 回 `None`（0 命中）。 每个成员另有 `Q REF` 取到的 refno（`e3d_member_refnos`，形式 ref0_ref1），用于与 Rust `evaluate` 的 members 做集合相等比对。",
+  "rows": [
+    {
+      "name": "/AREA01_PIPE",
+      "refno": "2013286748_2",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01PIPE' )",
+      "e3d_members": [
+        "/ZONE-PIPING-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286676_490"
+      ]
+    },
+    {
+      "name": "/AREA01_CABLE",
+      "refno": "2013286748_3",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01CABLE' )",
+      "e3d_members": [
+        "/ZONE-CWAY-AREA01",
+        "/ZONE-CABLES-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286726_2",
+        "2013286726_197"
+      ]
+    },
+    {
+      "name": "/AREA01_CIVIL",
+      "refno": "2013286748_4",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01CIVIL' )",
+      "e3d_members": [
+        "/ZONE-CIVIL-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286716_2"
+      ]
+    },
+    {
+      "name": "/AREA01_EQUI",
+      "refno": "2013286748_5",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01EQUI' )",
+      "e3d_members": [
+        "/ZONE-EQUIPMENT-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286708_2"
+      ]
+    },
+    {
+      "name": "/AREA01_ELEC",
+      "refno": "2013286748_6",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01ELEC' )",
+      "e3d_members": [
+        "/ZONE-ELECTRICAL-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286700_27"
+      ]
+    },
+    {
+      "name": "/AREA01_HVAC",
+      "refno": "2013286748_7",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01HVAC' )",
+      "e3d_members": [],
+      "e3d_member_refnos": []
+    },
+    {
+      "name": "/AREA01_STRUC",
+      "refno": "2013286748_8",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01STRUC' )",
+      "e3d_members": [
+        "/ZONE-STRUCTURAL-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286656_2"
+      ]
+    },
+    {
+      "name": "/AREA01_SUPP",
+      "refno": "2013286748_9",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA01SUPP' )",
+      "e3d_members": [
+        "/ZONE-SUPPORTS-AREA01"
+      ],
+      "e3d_member_refnos": [
+        "2013286648_2"
+      ]
+    },
+    {
+      "name": "/AREA01_GRID",
+      "refno": "2013286748_28",
+      "e3d_scosel": "Scosel  ALL REFGRD WITH ( ATTRIB DESC OF REFGRD  EQ 'AREA01GRID' OR ATTRIB DESC OF REFGRD  EQ 'PLANTGRID' )",
+      "e3d_members": [
+        "/AREA01_PIPERACK_GRID",
+        "/AREA01_EQUIP_SUPPORT_GRID",
+        "/PLANT_GRID"
+      ],
+      "e3d_member_refnos": [
+        "23414_760",
+        "23414_927",
+        "23414_2028"
+      ]
+    },
+    {
+      "name": "/AREA02_PIPE",
+      "refno": "2013286748_11",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02PIPE' )",
+      "e3d_members": [
+        "/ZONE-PIPING-AREA02-WORKSHOP"
+      ],
+      "e3d_member_refnos": [
+        "2013286672_14"
+      ]
+    },
+    {
+      "name": "/AREA02_CABLE",
+      "refno": "2013286748_12",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02CABLE' )",
+      "e3d_members": [
+        "/ZONE-CABLES-POWER-AREA02",
+        "/ZONE-CWAY-AREA02",
+        "/ZONE-CTRAY-AREA02-WORKSHOP"
+      ],
+      "e3d_member_refnos": [
+        "2013286723_5",
+        "2013286723_145",
+        "2013286723_789"
+      ]
+    },
+    {
+      "name": "/AREA02_CIVIL",
+      "refno": "2013286748_13",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02CIVIL' )",
+      "e3d_members": [
+        "/ZONE-CIVIL-AREA02"
+      ],
+      "e3d_member_refnos": [
+        "2013286714_2"
+      ]
+    },
+    {
+      "name": "/AREA02_EQUI",
+      "refno": "2013286748_14",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02EQUI' )",
+      "e3d_members": [
+        "/ZONE-EQUIPMENT-AREA02-WORKSHOP",
+        "/ZONE-EQUIPMENT-AREA02-B01",
+        "/ZONE-EQUIPMENT-AREA02-B02",
+        "/ZONE-EQUIPMENT-AREA02",
+        "/ZONE-EQUIPMENT-AREA02-B02-RES",
+        "/ZONE-EQUIPMENT-AREA02-WORKSHOP/MEI-MISC-EQUI"
+      ],
+      "e3d_member_refnos": [
+        "2013286706_2",
+        "2013286706_101",
+        "2013286706_409",
+        "2013286706_685",
+        "2013286706_706",
+        "2013286706_1037"
+      ]
+    },
+    {
+      "name": "/AREA02_ELEC",
+      "refno": "2013286748_15",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02ELEC' )",
+      "e3d_members": [
+        "/ZONE-ELECTRICAL-AREA2-WORKSHOP",
+        "/ZONE-ELECTRICAL-AREA02",
+        "/ZONE-ELECTRICAL-AREA02-B01",
+        "/ZONE-ELECTRICAL-AREA02-B02",
+        "/ZONE-SUBSTATION-AREA02"
+      ],
+      "e3d_member_refnos": [
+        "2013286698_2",
+        "2013286698_170",
+        "2013286698_215",
+        "2013286698_238",
+        "2013286698_1587"
+      ]
+    },
+    {
+      "name": "/AREA02_HVAC",
+      "refno": "2013286748_16",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02HVAC' )",
+      "e3d_members": [
+        "/ZONE-HVAC-AREA02-WORKSHOP",
+        "/ZONE-HVAC-AREA02-B01",
+        "/ZONE-HVAC-AREA02-B02"
+      ],
+      "e3d_member_refnos": [
+        "2013286686_2",
+        "2013286686_75",
+        "2013286686_308"
+      ]
+    },
+    {
+      "name": "/AREA02_STRUC",
+      "refno": "2013286748_17",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02STRUC' )",
+      "e3d_members": [
+        "/BUILDING_B01",
+        "/BUILDING_B02",
+        "/ZONE-STRUCTURAL-AREA02",
+        "/WORKSHOP_BUILDING",
+        "/PUMP_KIOSK_01"
+      ],
+      "e3d_member_refnos": [
+        "2013286654_2",
+        "2013286654_619",
+        "2013286654_1635",
+        "2013286654_1843",
+        "2013286654_2378"
+      ]
+    },
+    {
+      "name": "/AREA02_SUPP",
+      "refno": "2013286748_18",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA02SUPP' )",
+      "e3d_members": [
+        "/ZONE-SUPPORTS-AREA02-WORKSHOP"
+      ],
+      "e3d_member_refnos": [
+        "2013286646_2"
+      ]
+    },
+    {
+      "name": "/AREA02_GRID",
+      "refno": "2013286748_29",
+      "e3d_scosel": "Scosel  ALL REFGRD WITH ( ATTRIB DESC OF REFGRD  EQ 'AREA02GRID' OR ATTRIB DESC OF REFGRD  EQ 'PLANTGRID' )",
+      "e3d_members": [
+        "/AREA02_PIPERACK_GRID",
+        "/AREA02_BUILDING_B01_GRID",
+        "/AREA02_BUILDING_B02_GRID",
+        "/AREA02_WORKSHOP_GRID",
+        "/PLANT_GRID"
+      ],
+      "e3d_member_refnos": [
+        "23414_1069",
+        "23414_1161",
+        "23414_1278",
+        "23414_1519",
+        "23414_2028"
+      ]
+    },
+    {
+      "name": "/AREA03_PIPE",
+      "refno": "2013286748_20",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03PIPE' )",
+      "e3d_members": [
+        "/ZONE-PIPING-AREA03",
+        "/ZONE-ROUTER-AREA03"
+      ],
+      "e3d_member_refnos": [
+        "2013286668_54",
+        "2013286668_375"
+      ]
+    },
+    {
+      "name": "/AREA03_CABLE",
+      "refno": "2013286748_21",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03CABLE' )",
+      "e3d_members": [
+        "/ZONE-CABLES-POWER-AREA03",
+        "/ZONE-CABLES-CONTROL-AREA03",
+        "/ZONE-CWAY-AREA03"
+      ],
+      "e3d_member_refnos": [
+        "2013286720_2",
+        "2013286720_104",
+        "2013286720_212"
+      ]
+    },
+    {
+      "name": "/AREA03_CIVIL",
+      "refno": "2013286748_22",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03CIVIL' )",
+      "e3d_members": [
+        "/ZONE-CIVIL-AREA03"
+      ],
+      "e3d_member_refnos": [
+        "2013286712_2"
+      ]
+    },
+    {
+      "name": "/AREA03_EQUI",
+      "refno": "2013286748_23",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03EQUI' )",
+      "e3d_members": [
+        "/ZONE-EQUIPMENT-AREA03",
+        "/03SKID1",
+        "/03SKID2",
+        "/03SKID3",
+        "/03SKID4"
+      ],
+      "e3d_member_refnos": [
+        "2013286704_12",
+        "2013286704_449",
+        "2013286704_635",
+        "2013286704_821",
+        "2013286704_1072"
+      ]
+    },
+    {
+      "name": "/AREA03_ELEC",
+      "refno": "2013286748_24",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03ELEC' )",
+      "e3d_members": [
+        "/ZONE-ELECTRICAL-AREA03"
+      ],
+      "e3d_member_refnos": [
+        "2013286696_2"
+      ]
+    },
+    {
+      "name": "/AREA03_HVAC",
+      "refno": "2013286748_25",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03HVAC' )",
+      "e3d_members": [],
+      "e3d_member_refnos": []
+    },
+    {
+      "name": "/AREA03_STRUC",
+      "refno": "2013286748_26",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03STRUC' )",
+      "e3d_members": [
+        "/ZONE-STRUCTURAL-AREA03"
+      ],
+      "e3d_member_refnos": [
+        "2013286652_2"
+      ]
+    },
+    {
+      "name": "/AREA03_SUPP",
+      "refno": "2013286748_27",
+      "e3d_scosel": "Scosel  ALL ZONE WITH ( ATTRIB DESC OF ZONE  EQ 'AREA03SUPP' )",
+      "e3d_members": [],
+      "e3d_member_refnos": []
+    },
+    {
+      "name": "/AREA03_GRID",
+      "refno": "2013286748_30",
+      "e3d_scosel": "Scosel  ALL REFGRD WITH ( ATTRIB DESC OF REFGRD  EQ 'AREA03GRID' OR ATTRIB DESC OF REFGRD  EQ 'PLANTGRID' )",
+      "e3d_members": [
+        "/AREA03_PIPERACK_GRID01",
+        "/AREA03_PIPERACK_GRID02",
+        "/PLANT_GRID"
+      ],
+      "e3d_member_refnos": [
+        "23414_1694",
+        "23414_1861",
+        "23414_2028"
+      ]
+    }
+  ],
+  "refs_log": "output/live-rule-groups/run2/check-driver.log"
+}
