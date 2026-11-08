@@ -30,7 +30,7 @@ use std::time::Instant;
 use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
 use e3d_io::record::element::ParsedElement;
-use e3d_io::record::explicit::ExplicitAttribute;
+use e3d_io::record::explicit::{ExplicitAttribute, ExplicitValue};
 use e3d_io::record::template::TemplateProvider;
 use e3d_io::schema::MANIFEST_FILE;
 use e3d_io::{E3dVersion, ReadOnlyEngine, SchemaPack};
@@ -850,6 +850,41 @@ impl DirectStore {
             extraction,
             explicit_attributes: parsed.explicit_attributes,
         })
+    }
+
+    /// 读一个元素的显式 int 数组属性（按属性名），没写就 `None`。
+    ///
+    /// 与 [`Self::element_snapshot`] 同一把会话锁、同一次 `parse`：`SCOSEL` 在真库里是
+    /// type-20 hunk，`parse` 之后 `resolve_hunks` 已经把它换成 `IntArray`（见
+    /// `e3d_io::db_element` 的 `parsed()`，那里显式调了 `engine.resolve_hunks`），所以这里
+    /// 读到的是**值**而不是五个地址字。`RawWords` 也照收：那说明 hunk 链没解开，把它按
+    /// 原字交给 `scosel::decode` 会当场报错——正是我们要的「不静默」。
+    pub fn explicit_int_array(
+        &self,
+        refno: RefU64,
+        attr: &str,
+    ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+        let dbnum = self.dbnum_of(refno)?;
+        if self.pinned(dbnum).is_none() {
+            self.pin_from_locator(dbnum)?;
+        }
+        let hash = e3d_attlib::db1_hash(attr);
+        let session = self.session_of(dbnum)?;
+        let mut session = session
+            .lock()
+            .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
+        let parsed = self.parse(&mut session, dbnum, refno)?;
+        Ok(parsed
+            .explicit_attributes
+            .iter()
+            .find(|attribute| attribute.hash == hash)
+            .map(|attribute| match &attribute.value {
+                ExplicitValue::IntArray(words) => words.clone(),
+                ExplicitValue::RawWords(words) => words.iter().map(|word| *word as i32).collect(),
+                // 不是数组：交空数组，让 `scosel::decode` 当场报「首字 word_count 与数组长度
+                // 不符」。假装这个属性不存在才是错的——那会静默变成「这条规则没命中」。
+                _ => Vec::new(),
+            }))
     }
 
     /// 一个元素的直接成员，**按记录里存的原序**。

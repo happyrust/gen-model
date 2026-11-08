@@ -233,6 +233,15 @@ model_transform_cheap_path = true
 #   false：关回旧路（整根重算）。环境变量 AIOS_MODEL_UNIT_LEVEL_PUBLISH 压过本键。
 model_unit_level_publish = true
 
+#【新增 2026-11-08，分组节点 G3】**默认关** group_scosel —— GPSET 规则组 SCOSEL 求值
+# APS 真库 29 个 GPSET 全部是存储成员为 0 的 SCOSEL 规则组，引入前点开是空白。
+#   true ：解析视图按 SCOSEL 求值追加规则命中的成员（ResolvedMember::Rule，via 为 null）；
+#          子树展开与生成根解析由现有机制自动继承，/model/generate、/model/records 一并回成员。
+#   false：默认。全部响应与引入前逐字相同（契约快照 tests/fixtures/group-contract/ 钉住）。
+# 环境变量 AIOS_GROUP_SCOSEL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+# 注意：求值域是 MDB 全量跨库——规则组所在的 aps250204 里 0 个 ZONE，2622 个 ZONE 分布在 68 个库。
+group_scosel = false
+
 #【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
 # 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
 # SYS meta（SYST/DICT/GLB/GLOB）不受限：MDB 的成员名单就存在那些库里，圈掉它们

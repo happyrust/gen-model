@@ -4,13 +4,22 @@
 //! `GPREF`（可跨库）；GPWL 的成员就是 GPSET。这里只产出解析结果，不改任何存储视图的
 //! 口径——`children` / `subtree_refnos` / 共用的生成根遍历照旧按存储成员走。
 //! 取证见 `docs/plans/2026-11-08-gpwl-gpset-group-nodes.md` §0，接口契约见同目录 `-dev-plan.md` §2。
+//!
+//! **规则组（G3）**：APS 的 29 个 GPSET 全部是存储成员为 0 的 `SCOSEL` 规则组，存储成员
+//! 这条路解出空表。 [`resolved_members_with_rules`] 在存储成员之后按规则求值补上命中成员，
+//! 来源是 [`ResolvedMember::Rule`]——它没有 GPITEM，`via()` 是 `None`。规则求值本身在
+//! `scosel_eval`（纯函数），这里只负责「读 `SCOSEL` → decode → evaluate → 去重追加」。
+//! 坏槽走 [`UnresolvedReason::ScoselEvalFailed`] / [`UnresolvedReason::ScoselUnsupported`]，
+//! 与 GPREF 链的三条原因码分开，既有语义一个不复用（`library/scosel-semantics.md` §9）。
 
 use std::collections::{HashMap, HashSet};
 
 use aios_core::RefU64;
+use e3d_io::record::explicit::ExplicitValue;
 
 use super::direct_store::DirectStoreError;
 use super::direct_tree::TreeStore;
+use super::scosel_eval::{ScoselScope, evaluate};
 
 pub const GROUP_WORLD_NOUN: &str = "GPWL";
 pub const GROUP_SET_NOUN: &str = "GPSET";
@@ -29,6 +38,9 @@ pub enum ResolvedMember {
     Owned(RefU64),
     /// GPITEM 经 `GPREF` 解引用得到的元素；它的属主是自己的主链，不是这个分组。
     Reference { via: RefU64, target: RefU64 },
+    /// 规则组 `SCOSEL` 求值命中的元素。它**没有** GPITEM：分组里根本没写这个成员，
+    /// 是规则把它算了进来，所以 `via()` 是 `None`（不是「丢了 via」，是本来就没有）。
+    Rule { element: RefU64 },
 }
 
 impl ResolvedMember {
@@ -36,6 +48,7 @@ impl ResolvedMember {
         match *self {
             Self::Owned(element) => element,
             Self::Reference { target, .. } => target,
+            Self::Rule { element } => element,
         }
     }
 
@@ -43,11 +56,19 @@ impl ResolvedMember {
         match *self {
             Self::Owned(_) => None,
             Self::Reference { via, .. } => Some(via),
+            // 规则成员没有经由的 GPITEM。契约里这一格必须是 `null` 而不是省略
+            // （`AGENTS.md` 实现约束 11），所以调用方拿 `None` 要照常发键。
+            Self::Rule { .. } => None,
         }
+    }
+
+    /// 这个成员是规则命中的（而不是存储成员链上写的）。契约的 `rule` 字段由它决定。
+    pub fn is_rule(&self) -> bool {
+        matches!(*self, Self::Rule { .. })
     }
 }
 
-/// 解析不出真身的 GPITEM 槽为什么解析不出。
+/// 解析不出真身的槽为什么解析不出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnresolvedReason {
     /// GPITEM 没有 `GPREF`，或是空引用。
@@ -56,6 +77,15 @@ pub enum UnresolvedReason {
     DbNotInMdb,
     /// 库在，元素不在。
     TargetMissing,
+    /// 规则组的 `SCOSEL` 字节解不出来（`ScoselError`），整条规则没参与求值。
+    ///
+    /// 与 GPREF 链的三条原因码分家：`SCOSEL` 坏掉时槽上没有 `via` 也没有 `target`，
+    /// 它描述的是「这条规则没算」，不是「某个成员指针断了」。
+    ScoselEvalFailed,
+    /// 规则解出来了，但求值器有部分形状认不出（`EvalOutcome.unsupported` 非空）。
+    ///
+    /// 命中到的合法成员**仍然返回**（部分成功）——这一码只说「还缺一块」，不是「全丢」。
+    ScoselUnsupported,
 }
 
 impl UnresolvedReason {
@@ -64,6 +94,8 @@ impl UnresolvedReason {
             Self::GprefMissing => "gpref_missing",
             Self::DbNotInMdb => "db_not_in_mdb",
             Self::TargetMissing => "target_missing",
+            Self::ScoselEvalFailed => "scosel_eval_failed",
+            Self::ScoselUnsupported => "scosel_unsupported",
         }
     }
 }
@@ -134,6 +166,92 @@ pub fn resolved_members_on(store: &dyn TreeStore, parent: RefU64) -> anyhow::Res
                 });
             }
         }
+    }
+    Ok(out)
+}
+
+/// 规则组 `SCOSEL` 的属性名（`db1_hash("SCOSEL")` = 175760542，见
+/// `library/scosel-semantics.md` §4）。真库里它是 type-20 hunk，读侧走
+/// [`TreeStore::explicit_int_array`] 取解好的 int 数组。
+pub const GROUP_RULE_ATTRIBUTE: &str = "SCOSEL";
+
+/// 按存储原序解析 `parent` 的成员，**再按规则求值追加命中成员**（G3）。
+///
+/// 三层判据依次收窄，任一层不成立就与 [`resolved_members_on`] **逐字相同**：
+///
+/// 1. `scope` 是 `None`——调用方没有求值域，规则无从算起（这是 wiring 之前的老路径）；
+/// 2. 开关 `group_scosel` 关——默认关，关着时所有响应与 HEAD 逐字相同；
+/// 3. `parent` 上没有非空 `SCOSEL`——普通分组、或显式写了个空规则组。
+///
+/// 三层都过了才读规则：`decode` 失败记 [`UnresolvedReason::ScoselEvalFailed`]，求值有
+/// 认不出的形状记 [`UnresolvedReason::ScoselUnsupported`] 但**已算出的成员照常返回**
+/// （部分成功）。两条原因码与 GPREF 链的三条彻底分开——坏的是规则，不是成员指针。
+///
+/// 存储成员在前（原序、`via` 有值），规则命中在后（按求值顺序、`via` 是 `None`）。
+/// `seen` 去重且**存储成员优先**：同一个元素既写在 GPITEM 里又被规则命中时，保留存储
+/// 那条路径（它有 `via`，前端据此显示「引用」角标）。
+pub fn resolved_members_with_rules(
+    store: &dyn TreeStore,
+    parent: RefU64,
+    scope: Option<&dyn ScoselScope>,
+) -> anyhow::Result<GroupMembers> {
+    let mut out = resolved_members_on(store, parent)?;
+    // 判据 1 / 2：没有求值域、或开关关着，一个字节都不多读。
+    let Some(scope) = scope else {
+        return Ok(out);
+    };
+    if !crate::options::group_scosel() {
+        return Ok(out);
+    }
+    // 判据 3：没有 SCOSEL 就不是规则组。空数组（len=0 的 hunk）同样是「没有规则」——
+    // `group_write.rs` 的 SetRules 注释说明空 Vec 写的是 len=0 的 hunk，读侧「空数组」与
+    // 「没这个属性」都要当成没有规则，否则清完规则的组会变成一条坏槽。
+    let Some(words) = store.explicit_int_array(parent, GROUP_RULE_ATTRIBUTE)? else {
+        return Ok(out);
+    };
+    if words.is_empty() {
+        return Ok(out);
+    }
+    let decoded = match super::scosel::decode(&words) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            // 字节坏了：整条规则都没参与求值。槽挂在分组自己身上（`via` = parent）——
+            // 坏的是这个分组的规则，不是某个 GPITEM。
+            log::warn!("GPSET {parent} 的 SCOSEL 解不出来：{error}");
+            out.unresolved.push(UnresolvedSlot {
+                via: parent,
+                target: None,
+                reason: UnresolvedReason::ScoselEvalFailed,
+            });
+            return Ok(out);
+        }
+    };
+    let mut seen: HashSet<RefU64> = out.members.iter().map(ResolvedMember::element).collect();
+    let mut unsupported: Vec<String> = Vec::new();
+    for rule in &decoded.rules {
+        let outcome = evaluate(rule, scope);
+        for issue in &outcome.unsupported {
+            unsupported.push(format!("{:?}: {}", issue.kind, issue.detail));
+        }
+        for refno in outcome.members {
+            if seen.insert(refno) {
+                out.members.push(ResolvedMember::Rule { element: refno });
+            }
+        }
+    }
+    if !unsupported.is_empty() {
+        // 一条槽聚合本次所有认不出的形状：`UnresolvedSlot` 没有 detail 字段，逐条开槽
+        // 会把前端列表撑成噪声。合法命中已经在 `members` 里了（部分成功）。
+        log::warn!(
+            "GPSET {parent} 的 SCOSEL 有 {} 处求值器认不出的形状：{}",
+            unsupported.len(),
+            unsupported.join("；")
+        );
+        out.unresolved.push(UnresolvedSlot {
+            via: parent,
+            target: None,
+            reason: UnresolvedReason::ScoselUnsupported,
+        });
     }
     Ok(out)
 }
@@ -257,13 +375,15 @@ pub(crate) mod fake_store {
 
     use aios_core::{NamedAttrMap, NamedAttrValue, RefU64};
 
-    use super::GROUP_ITEM_NOUN;
+    use super::{GROUP_ITEM_NOUN, GROUP_RULE_ATTRIBUTE};
     use crate::data_interface::direct_store::DirectStoreError;
     use crate::data_interface::direct_tree::TreeStore;
 
     #[derive(Default)]
     pub(crate) struct FakeStore {
         elements: HashMap<RefU64, (&'static str, Vec<RefU64>, Option<RefU64>)>,
+        /// 显式 int 数组属性（只有 `SCOSEL` 用得上），按属性名存原字。
+        int_arrays: HashMap<(RefU64, String), Vec<i32>>,
         /// 这些高位字的库不在 MDB，指过去回 `DbNotInMdb`；其余缺失回 `NoSuchElement`。
         pub(crate) foreign: HashSet<u32>,
     }
@@ -276,6 +396,12 @@ pub(crate) mod fake_store {
         pub(crate) fn item(&mut self, refno: RefU64, gpref: Option<RefU64>) {
             self.elements
                 .insert(refno, (GROUP_ITEM_NOUN, Vec::new(), gpref));
+        }
+
+        /// 给元素挂一段 `SCOSEL` 原字（夹具里的规则组用）。
+        pub(crate) fn scosel(&mut self, refno: RefU64, words: &[i32]) {
+            self.int_arrays
+                .insert((refno, GROUP_RULE_ATTRIBUTE.to_string()), words.to_vec());
         }
 
         fn missing(&self, refno: RefU64) -> DirectStoreError {
@@ -319,6 +445,19 @@ pub(crate) mod fake_store {
                 .get(&refno)
                 .map(|(_, members, _)| members.clone())
                 .ok_or_else(|| self.missing(refno))
+        }
+
+        fn explicit_int_array(
+            &self,
+            refno: RefU64,
+            attr: &str,
+        ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+            // 元素本身不存在时要报错（与真实现一致：先定位元素，再找属性），
+            // 元素在但没这个属性才回 `None`。
+            if !self.elements.contains_key(&refno) {
+                return Err(self.missing(refno));
+            }
+            Ok(self.int_arrays.get(&(refno, attr.to_string())).cloned())
         }
     }
 }
@@ -499,6 +638,321 @@ mod tests {
         assert_eq!(
             expand_group_on(&store, r(2, 10)).unwrap(),
             GroupScope::default()
+        );
+    }
+
+    // ── G3：规则成员 ──────────────────────────────────────────────────────────
+
+    /// 夹具求值域：`DESC` 文本表 + noun 表，口径与 `scosel_eval` 的 `FixtureScope` 一致。
+    #[derive(Default)]
+    struct RuleScope {
+        texts: HashMap<(u32, String), HashSet<RefU64>>,
+        nouns: HashMap<u32, HashSet<RefU64>>,
+    }
+
+    impl RuleScope {
+        fn with_text(mut self, text: &str, refnos: &[RefU64]) -> Self {
+            self.texts.insert(
+                (
+                    super::super::scosel_eval::desc_attribute_hash(),
+                    text.to_string(),
+                ),
+                refnos.iter().copied().collect(),
+            );
+            self
+        }
+
+        fn with_noun(mut self, noun: u32, refnos: &[RefU64]) -> Self {
+            self.nouns.insert(noun, refnos.iter().copied().collect());
+            self
+        }
+    }
+
+    impl ScoselScope for RuleScope {
+        fn refnos_with_attr_text(&self, attr_hash: u32, text: &str) -> HashSet<RefU64> {
+            self.texts
+                .get(&(attr_hash, text.to_string()))
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn refnos_of_noun(&self, noun_hash: u32) -> HashSet<RefU64> {
+            self.nouns.get(&noun_hash).cloned().unwrap_or_default()
+        }
+    }
+
+    const ZONE_HASH: u32 = 640_493;
+
+    /// 一条 `ALL ZONE WITH ( ATTRIB DESC OF ZONE EQ '<text>' )` 的 SCOSEL 原字，
+    /// 逐字照 `library/scosel-semantics.md` §2 的 35 字真实样本，只换文本。
+    fn zone_rule_words(text: &str) -> Vec<i32> {
+        use super::super::scosel::{
+            OP_ATTR_QUALIFIER, OP_ATTRIBUTE_ID, OP_CLASS, OP_FILTER, OP_RULE_GROUP, OP_STR_EQ,
+            OP_TEXT,
+        };
+        let chars: Vec<i32> = text.chars().map(|c| c as i32).collect();
+        let mut words = vec![
+            0,
+            OP_ATTRIBUTE_ID,
+            1,
+            OP_CLASS,
+            3,
+            OP_RULE_GROUP,
+            ZONE_HASH as i32,
+            OP_FILTER,
+            0,
+            1,
+            // 106,4,<DESC>,1,120,0
+            106,
+            4,
+            super::super::scosel_eval::desc_attribute_hash() as i32,
+            1,
+            120,
+            0,
+            // 1602,4,2,<ZONE>,6,1701
+            OP_ATTR_QUALIFIER,
+            4,
+            2,
+            ZONE_HASH as i32,
+            6,
+            1701,
+            OP_TEXT,
+        ];
+        words.push(chars.len() as i32);
+        words.extend(chars);
+        words.push(OP_STR_EQ);
+        // `100015` 的 len **含自身**：`len = 1(len) + 1(前导 1) + 表达式字数`。
+        // 表达式从 `filter_at + 3` 起（`filter_at` 是 `100015` 自己），所以表达式字数
+        // = `words.len() - (filter_at + 3)`。
+        let filter_at = 7;
+        words[filter_at + 1] = (2 + (words.len() - filter_at - 3)) as i32;
+        words[0] = words.len() as i32;
+        words
+    }
+
+    /// VAL-MEMBER-001：`Rule` 变体的两个访问器；两个既有变体行为不变。
+    #[test]
+    fn a_rule_member_returns_its_element_and_carries_no_via() {
+        let element = r(1, 3);
+        let rule = ResolvedMember::Rule { element };
+        assert_eq!(
+            rule.element(),
+            element,
+            "规则成员的 element() 必须是那个元素"
+        );
+        assert_eq!(
+            rule.via(),
+            None,
+            "规则成员没有经由的 GPITEM，via() 必须是 None"
+        );
+        assert!(rule.is_rule());
+
+        // 既有两个变体不变。
+        let owned = ResolvedMember::Owned(r(2, 11));
+        assert_eq!(owned.element(), r(2, 11));
+        assert_eq!(owned.via(), None);
+        assert!(!owned.is_rule());
+
+        let reference = ResolvedMember::Reference {
+            via: r(2, 12),
+            target: r(1, 3),
+        };
+        assert_eq!(reference.element(), r(1, 3));
+        assert_eq!(reference.via(), Some(r(2, 12)));
+        assert!(!reference.is_rule());
+    }
+
+    /// VAL-MEMBER-002：`scope = None` 时与 `resolved_members_on` 逐字相同。
+    #[test]
+    fn without_a_scope_the_result_is_word_for_word_the_stored_members() {
+        let store = sample();
+        for parent in [r(2, 10), r(2, 11), r(1, 2), r(1, 3)] {
+            assert_eq!(
+                resolved_members_with_rules(&store, parent, None).unwrap(),
+                resolved_members_on(&store, parent).unwrap(),
+                "{parent} 在 scope=None 时必须与存储成员逐字相同"
+            );
+        }
+    }
+
+    /// VAL-MEMBER-003：开关关着时，即使有非空 SCOSEL、即使给了 scope，也不追加规则成员。
+    #[test]
+    fn a_closed_switch_appends_no_rule_member_even_with_a_non_empty_scosel() {
+        let mut store = sample();
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _off = crate::options::GroupScoselOverride::set(false);
+        assert_eq!(
+            resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap(),
+            resolved_members_with_rules(&store, r(2, 11), None).unwrap(),
+            "开关关着时结果必须与 scope=None 相同"
+        );
+    }
+
+    /// VAL-MEMBER-004：GPSET 没有 SCOSEL 时，即使开关开、即使给了 scope，也不追加。
+    #[test]
+    fn a_set_without_scosel_gets_no_rule_member_even_with_the_switch_on() {
+        let store = sample();
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        assert_eq!(
+            resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap(),
+            resolved_members_on(&store, r(2, 11)).unwrap(),
+            "没有 SCOSEL 的分组不该凭空多出规则成员"
+        );
+    }
+
+    /// 空数组（len=0 的 hunk）等同于「没有规则」，不是一条坏槽。
+    #[test]
+    fn an_empty_scosel_counts_as_no_rule_at_all() {
+        let mut store = sample();
+        store.scosel(r(2, 11), &[]);
+        let scope = RuleScope::default().with_text("AREA01PIPE", &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(resolved, resolved_members_on(&store, r(2, 11)).unwrap());
+        assert!(resolved.unresolved.is_empty(), "空规则组不该产生坏槽");
+    }
+
+    /// VAL-MEMBER-005：存储成员在前（原序、via 有值），规则命中在后；重复的元素只留存储那条。
+    #[test]
+    fn stored_members_come_first_and_rule_hits_are_appended_without_duplicates() {
+        let mut store = sample();
+        // 规则命中 BRAN 1/4（已在存储成员里，经 GPITEM 2/13）与 ZONE 1/3（不在存储成员里）。
+        // 夹具改成：存储成员只留 GPITEM 2/13 → BRAN 1/4。
+        store.add(r(2, 11), "GPSET", &[r(2, 13)]);
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3), r(1, 4)])
+            .with_noun(ZONE_HASH, &[r(1, 3), r(1, 4)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(
+            resolved.members,
+            vec![
+                ResolvedMember::Reference {
+                    via: r(2, 13),
+                    target: r(1, 4)
+                },
+                ResolvedMember::Rule { element: r(1, 3) },
+            ],
+            "存储成员在前（via 有值），规则命中在后；BRAN 1/4 已在存储里，不再作为规则成员重复出现"
+        );
+        assert!(resolved.unresolved.is_empty());
+    }
+
+    /// VAL-MEMBER-006：`SCOSEL` 字节解不出来 → `scosel_eval_failed`，且不混进既有三码。
+    #[test]
+    fn a_broken_scosel_reports_scosel_eval_failed_and_nothing_else() {
+        let mut store = sample();
+        store.scosel(r(2, 11), &[9, 9, 9]);
+        let scope = RuleScope::default();
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        // 存储成员照常解析（坏的是规则，不是 GPREF 链）。
+        assert_eq!(
+            resolved.members,
+            resolved_members_on(&store, r(2, 11)).unwrap().members
+        );
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scosel_eval_failed"],
+            "坏 SCOSEL 只能出一条 scosel_eval_failed，不能混进 gpref_missing / db_not_in_mdb / target_missing"
+        );
+    }
+
+    /// VAL-MEMBER-007：`unsupported` 非空 → `scosel_unsupported`，且已算出的合法成员仍然返回。
+    #[test]
+    fn an_unsupported_rule_reports_scosel_unsupported_and_keeps_the_good_hits() {
+        let mut store = sample();
+        // 存储成员只留 GPITEM 2/13（→ BRAN 1/4），让第一条规则算出的 ZONE 1/3 不在存储成员里，
+        // 这样「部分成功」的成员一定是规则路径带进来的。
+        store.add(r(2, 11), "GPSET", &[r(2, 13)]);
+        // 两条规则：第一条认得出（ZONE + DESC），第二条属性 hash 不是 DESC（NAME）。
+        let good = zone_rule_words("AREA01PIPE");
+        let mut bad = zone_rule_words("WHATEVER");
+        // 把 `106,4,<DESC>` 的 hash 换成 NAME（639374）。
+        let desc_at = bad
+            .iter()
+            .position(|word| *word == super::super::scosel_eval::desc_attribute_hash() as i32)
+            .expect("夹具里应有 DESC hash");
+        bad[desc_at] = e3d_attlib::db1_hash("NAME") as i32;
+        // 第二条规则自成一段：用段外的老形状 `100007,<attr>,100015,...`——decode 两种形状
+        // 都认（`scosel.rs` 的 `OP_RULE_GROUP` 分支），而 class 段里的规则组标记只够配第一条。
+        let mut words = good.clone();
+        words[0] = 0;
+        words.extend_from_slice(&[super::super::scosel::OP_RULE_GROUP, ZONE_HASH as i32]);
+        words.extend_from_slice(&bad[7..]);
+        words[0] = words.len() as i32;
+        store.scosel(r(2, 11), &words);
+
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert!(
+            resolved
+                .members
+                .contains(&ResolvedMember::Rule { element: r(1, 3) }),
+            "第一条规则算出的合法成员必须仍然返回（部分成功）：{:?}",
+            resolved.members
+        );
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scosel_unsupported"],
+            "认不出的形状只能出 scosel_unsupported"
+        );
+    }
+
+    /// VAL-MEMBER-008：三个既有原因码仍然只表示 GPREF 链的三种失败，语义没被复用。
+    #[test]
+    fn the_three_gpref_reason_codes_keep_their_meaning() {
+        assert_eq!(UnresolvedReason::GprefMissing.as_str(), "gpref_missing");
+        assert_eq!(UnresolvedReason::DbNotInMdb.as_str(), "db_not_in_mdb");
+        assert_eq!(UnresolvedReason::TargetMissing.as_str(), "target_missing");
+        assert_eq!(
+            UnresolvedReason::ScoselEvalFailed.as_str(),
+            "scosel_eval_failed"
+        );
+        assert_eq!(
+            UnresolvedReason::ScoselUnsupported.as_str(),
+            "scosel_unsupported"
+        );
+
+        // 开关开着 + 有 scope，坏 GPREF 槽仍然出原三条码，一条规则码都不多。
+        let mut store = sample();
+        store.foreign.insert(9);
+        store.add(r(2, 11), "GPSET", &[r(2, 20), r(2, 21), r(2, 22)]);
+        store.item(r(2, 20), None);
+        store.item(r(2, 21), Some(r(9, 5)));
+        store.item(r(2, 22), Some(r(1, 999)));
+        let scope = RuleScope::default();
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let resolved = resolved_members_with_rules(&store, r(2, 11), Some(&scope)).unwrap();
+        assert_eq!(
+            resolved
+                .unresolved
+                .iter()
+                .map(|slot| slot.reason)
+                .collect::<Vec<_>>(),
+            vec![
+                UnresolvedReason::GprefMissing,
+                UnresolvedReason::DbNotInMdb,
+                UnresolvedReason::TargetMissing,
+            ]
         );
     }
 }

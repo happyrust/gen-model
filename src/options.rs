@@ -284,6 +284,14 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_design_reference_cascade: Option<bool>,
 
+    /// GPSET 规则组 `SCOSEL` 求值（分组节点 G3，**默认 false = 关**）。
+    ///
+    /// 开着时 `/tree/children?resolved=1`、`/model/generate`、`/model/records` 对规则组会
+    /// 额外回规则命中的成员（`ResolvedMember::Rule`，`via` 是 `null`）；关着时全部响应与
+    /// 引入前**逐字相同**。详见 [`group_scosel`]。
+    #[serde(default)]
+    pub group_scosel: Option<bool>,
+
     /// `[review_auth]`：三维校审接口的 JWT 鉴权。详见 [`ReviewAuthSection`]。
     #[serde(default)]
     pub review_auth: Option<ReviewAuthSection>,
@@ -604,6 +612,7 @@ impl From<DbOption> for DbOptionExt {
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
             model_design_reference_cascade: None,
+            group_scosel: None,
             review_auth: None,
             platform_auth: None,
             review_attachments: None,
@@ -730,6 +739,8 @@ struct DbOptionExtFields {
     model_cable_endpoint_cascade: Option<bool>,
     #[serde(default)]
     model_design_reference_cascade: Option<bool>,
+    #[serde(default)]
+    group_scosel: Option<bool>,
     #[serde(default)]
     review_auth: Option<ReviewAuthSection>,
     #[serde(default)]
@@ -1046,6 +1057,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
         model_design_reference_cascade: ext.model_design_reference_cascade,
+        group_scosel: ext.group_scosel,
         review_auth: ext.review_auth.clone(),
         platform_auth: ext.platform_auth.clone(),
         review_attachments: ext.review_attachments.clone(),
@@ -2794,6 +2806,62 @@ fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&
         .unwrap_or(false)
 }
 
+/// 环境变量名：一次性打开 [`group_scosel`]，不必改配置文件。
+pub const GROUP_SCOSEL_ENV: &str = "AIOS_GROUP_SCOSEL";
+
+/// GPSET 规则组 `SCOSEL` 求值开不开（`DbOption.toml` 的 `group_scosel`，**默认 false**）。
+///
+/// 这是分组节点 G3 的灰度开关。APS 真库 29 个 GPSET **全部**是存储成员为 0 的规则组，
+/// 引入前点开是空白；开着时解析视图按 `SCOSEL` 求值追加命中成员（`ResolvedMember::Rule`，
+/// `via` 是 `null`），子树展开与生成根解析由现有机制自动继承。
+///
+/// 关着时全部响应与引入前**逐字相同**（契约快照 `tests/fixtures/group-contract/` 钉住）。
+/// 环境变量 [`GROUP_SCOSEL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn group_scosel() -> bool {
+    #[cfg(test)]
+    match GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().group_scosel,
+        std::env::var(GROUP_SCOSEL_ENV).ok().as_deref(),
+    )
+}
+
+/// 单测里摁住 [`group_scosel`] 的进程内覆盖（0 = 按配置来）。形状与
+/// [`XgeometryGateOverride`] 一致，理由见那里：lib 测试是多线程进程，`std::env::set_var`
+/// 在 2024 edition 起是 unsafe 的。
+#[cfg(test)]
+static GROUP_SCOSEL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static GROUP_SCOSEL_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct GroupScoselOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl GroupScoselOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = GROUP_SCOSEL_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        GROUP_SCOSEL_OVERRIDE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GroupScoselOverride {
+    fn drop(&mut self) {
+        GROUP_SCOSEL_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 环境变量名：一次性关掉 [`model_element_cache`]，不必改配置文件。
 pub const MODEL_ELEMENT_CACHE_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE";
 
@@ -4168,6 +4236,40 @@ mod tests {
         {
             let _off = DesignReferenceCascadeOverride::set(false);
             assert!(!model_design_reference_cascade());
+        }
+        {
+            let _on = GroupScoselOverride::set(true);
+            assert!(group_scosel());
+        }
+        {
+            let _off = GroupScoselOverride::set(false);
+            assert!(!group_scosel());
+        }
+    }
+
+    /// VAL-WIRE-003 / VAL-WIRE-004：`group_scosel` 默认关，环境变量双向压过配置，拼错退回配置值。
+    ///
+    /// 配置侧「没写」这一格用 `effective_default_off_switch(None, None)` 断言，与
+    /// `DbOption.toml` 里写死的 `group_scosel = false` 同口径（那一行由 grep 钉住）。
+    #[test]
+    fn the_group_scosel_switch_is_off_by_default_and_the_environment_wins() {
+        assert!(!effective_default_off_switch(None, None));
+        assert!(effective_default_off_switch(None, Some("1")));
+        assert!(effective_default_off_switch(None, Some("true")));
+        assert!(effective_default_off_switch(None, Some("yes")));
+        assert!(effective_default_off_switch(None, Some("on")));
+        assert!(!effective_default_off_switch(Some(true), Some("0")));
+        assert!(!effective_default_off_switch(Some(true), Some("false")));
+        assert!(!effective_default_off_switch(Some(true), Some("no")));
+        assert!(!effective_default_off_switch(Some(true), Some("off")));
+        // 拼错的环境变量退回配置值（这里配置是 true）。
+        assert!(effective_default_off_switch(Some(true), Some("ture")));
+        assert!(!effective_default_off_switch(Some(false), Some("ture")));
+
+        // getter 本身在没有进程内覆盖时也必须是关（DbOption.toml 写 false）。
+        // 同一进程里别的测试可能已设环境变量，所以只在没有任何 AIOS_GROUP_SCOSEL 时断言。
+        if std::env::var(GROUP_SCOSEL_ENV).is_err() {
+            assert!(!group_scosel(), "没设环境变量、配置写 false 时必须默认关");
         }
     }
 

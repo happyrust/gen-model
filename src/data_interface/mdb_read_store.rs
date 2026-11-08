@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aios_core::{NamedAttrMap, RefU64};
 use e3d_io::db_element::{DbElement, DbElementError, DbMetadata, DbSet};
+use e3d_io::record::explicit::ExplicitValue;
 
 use super::direct_store::{DbPin, DirectElementSnapshot, DirectSchema, DirectStore, DirectStoreError};
 use super::mdb_membership::MdbMembership;
@@ -73,6 +74,33 @@ impl MdbReadStore {
         let extraction = element.extraction().map_err(|error| domain_error(element.db_no(), error))?;
         super::direct_attmap::to_named_attmap(&extraction).map(|attrs| attrs.map)
             .map_err(|source| DirectStoreError::Convert { refno: refno.to_string(), source })
+    }
+
+    /// 读一个元素的显式 int 数组属性（按属性名），没写就 `None`。
+    ///
+    /// `element.parsed()` 已经调过 `engine.resolve_hunks`（`e3d_io::db_element` 的
+    /// `parsed_uncounted`），所以 type-20 hunk 在这里是 `IntArray` 值。形状口径与
+    /// [`super::direct_store::DirectStore::explicit_int_array`] 逐字相同，两处必须一起改。
+    pub fn explicit_int_array(
+        &self,
+        refno: RefU64,
+        attr: &str,
+    ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+        let element = self.element(refno)?;
+        let parsed = element
+            .parsed()
+            .map_err(|error| domain_error(element.db_no(), error))?;
+        let hash = e3d_attlib::db1_hash(attr);
+        Ok(parsed
+            .explicit_attributes
+            .iter()
+            .find(|attribute| attribute.hash == hash)
+            .map(|attribute| match &attribute.value {
+                ExplicitValue::IntArray(words) => words.clone(),
+                ExplicitValue::RawWords(words) => words.iter().map(|word| *word as i32).collect(),
+                // 不是数组：交空数组让 `scosel::decode` 报 malformed，不假装属性不存在。
+                _ => Vec::new(),
+            }))
     }
 
     pub fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {

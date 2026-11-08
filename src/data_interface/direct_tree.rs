@@ -420,6 +420,24 @@ impl DirectTreeService {
 pub trait TreeStore {
     fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError>;
     fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError>;
+
+    /// 读一个元素的**显式 int 数组属性**（`SCOSEL` 就是这种），按属性名。
+    ///
+    /// 单独开一条通道，是因为 `named_attmap` 交的是 schema 投影后的兼容视图：`SCOSEL`
+    /// 在 GPSET 的模板里没有声明，投影把它当「schema 外的自然值」塞进去，形状随库而变；
+    /// 而规则组要的是**记录里的原字**（`scosel::decode` 对字节敏感）。所以这里直接取
+    /// `explicit_attributes`，按 `db1_hash(attr)` 找那一项。
+    ///
+    /// 默认 `Ok(None)`：只走树 / 成员两条路的实现（`group_membership` 的测试替身、
+    /// 写侧的只读视图）不需要为它多写一份。真实现见 `DirectStore` / `MdbReadStore`。
+    fn explicit_int_array(
+        &self,
+        refno: RefU64,
+        attr: &str,
+    ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+        let _ = (refno, attr);
+        Ok(None)
+    }
 }
 impl TreeStore for DirectStore {
     fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> {
@@ -428,6 +446,13 @@ impl TreeStore for DirectStore {
     fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
         DirectStore::members(self, refno)
     }
+    fn explicit_int_array(
+        &self,
+        refno: RefU64,
+        attr: &str,
+    ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+        DirectStore::explicit_int_array(self, refno, attr)
+    }
 }
 impl TreeStore for MdbReadStore {
     fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> {
@@ -435,6 +460,13 @@ impl TreeStore for MdbReadStore {
     }
     fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
         MdbReadStore::members(self, refno)
+    }
+    fn explicit_int_array(
+        &self,
+        refno: RefU64,
+        attr: &str,
+    ) -> Result<Option<Vec<i32>>, DirectStoreError> {
+        MdbReadStore::explicit_int_array(self, refno, attr)
     }
 }
 
@@ -628,7 +660,9 @@ impl DirectTreeService {
         for (order, member) in members.into_iter().enumerate() {
             let expected_owner = match member {
                 ResolvedMember::Owned(_) => Some(parent),
-                ResolvedMember::Reference { .. } => None,
+                // 规则成员与 GPREF 引用成员一样：它的属主是自己主链上的属主，不是这个分组。
+                // 这里只做「不校验属主」的判定；`rule` 字段的发出由响应层（handlers）决定。
+                ResolvedMember::Reference { .. } | ResolvedMember::Rule { .. } => None,
             };
             let mut node = self.node(member.element(), expected_owner, order)?;
             if is_group_noun(&node.noun) {
