@@ -3526,8 +3526,9 @@ impl AiosDBManager {
         .await
     }
 
-    /// 同 [`Self::initialize_dbnum_baseline`]：身份门、水位与幂等收口读写 `env.db`，初始化收
-    /// `env.db` 与 `env.db_option`；这里的计数与清库仍走本进程的库。
+    /// 同 [`Self::initialize_dbnum_baseline`]：身份门、水位、计数、半截基线清理与幂等收口读写
+    /// `env.db`，初始化收 `env.db` 与 `env.db_option`；初始化前清模型面
+    /// （`clear_model_face_before_initial`）仍走本进程的库。
     pub(crate) async fn initialize_dbnum_baseline_in(
         &self,
         env: TaskEnv<'_>,
@@ -3541,7 +3542,7 @@ impl AiosDBManager {
         model: crate::data_interface::dbnum_initialize::ModelHalf,
     ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
         use crate::data_interface::dbnum_initialize::{
-            InitializationOutcome, InitializationRequest, ModelHalf, baseline_counts,
+            InitializationOutcome, InitializationRequest, ModelHalf, baseline_counts_on,
             clear_model_face_before_initial, initialize,
         };
 
@@ -3575,10 +3576,11 @@ impl AiosDBManager {
         }
 
         let applied_sesno = DbnumState::applied_sesno_on(env.db, dbnum).await?;
-        let (mut count, root_count) = baseline_counts(dbnum).await?;
+        let (mut count, root_count) = baseline_counts_on(env.db, dbnum).await?;
         if baseline_has_uncommitted_rows(count, applied_sesno) {
             // 半截基线只有一种清法（ADR-071 S5，d-300）：没有「预备中的初始化 run」可认领它。
-            let wiped = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?;
+            let wiped =
+                crate::data_interface::fast_delete::wipe_dbnum_for_reinit_on(env.db, dbnum).await?;
             println!(
                 "dbnum={dbnum} 清理未提交基线残留 PE={}，从水位 0 重新解析",
                 wiped.pe_rows
@@ -5214,7 +5216,7 @@ impl AiosDBManager {
             let wiped = if purge_geometry {
                 crate::data_interface::fast_delete::wipe_dbnum_for_upgrade(dbnum).await
             } else {
-                crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await
+                crate::data_interface::fast_delete::wipe_dbnum_for_reinit_on(env.db, dbnum).await
             };
             match wiped {
                 Ok(report) => {
@@ -6268,7 +6270,9 @@ mod tests {
         let applied = body
             .find("DbnumState::applied_sesno")
             .expect("裁决后才读水位");
-        let counts = body.find("baseline_counts(dbnum)").expect("基线计数");
+        let counts = body
+            .find("baseline_counts_on(env.db, dbnum)")
+            .expect("基线计数");
         assert!(
             scan < proceed
                 && proceed < applied
@@ -6952,7 +6956,7 @@ mod tests {
             .find("FileAnomaly::requires_reinit")
             .expect("executor must gate the wipe on the reinit predicate");
         let wipe = body
-            .find("wipe_dbnum_for_reinit(")
+            .find("wipe_dbnum_for_reinit_on(")
             .expect("executor must wipe through the shared fast_delete routine");
         let backing = body
             .find("dbnum_has_any_pe_row_on(")
@@ -6973,7 +6977,7 @@ mod tests {
             .split_once("pub(crate) async fn execute_one_dbnum(")
             .expect("execute_one_dbnum must exist")
             .1;
-        let wipe = body.find("wipe_dbnum_for_reinit(").expect("wipe");
+        let wipe = body.find("wipe_dbnum_for_reinit_on(").expect("wipe");
         let empty = body
             .find("reinitialized && cand.file_latest_sesno == 0")
             .expect("zero-session exit");
@@ -6997,7 +7001,8 @@ mod tests {
         // 但任何扫描路径出现对它的调用就是破坏性动作越过了队列闸门。
         let scan_side = include_str!("increment_manager.rs");
         assert!(
-            !scan_side.contains("wipe_dbnum_for_reinit("),
+            !scan_side.contains("wipe_dbnum_for_reinit(")
+                && !scan_side.contains("wipe_dbnum_for_reinit_on("),
             "自动扫描路径（sweep/watch）不得调用整库清空"
         );
         let source = include_str!("manual_update.rs");
@@ -7009,7 +7014,8 @@ mod tests {
             .expect("execute_one_dbnum follows enqueue_manual_update")
             .0;
         assert!(
-            !enqueue_body.contains("wipe_dbnum_for_reinit("),
+            !enqueue_body.contains("wipe_dbnum_for_reinit(")
+                && !enqueue_body.contains("wipe_dbnum_for_reinit_on("),
             "手动入队路径不得清库（清库归 worker 执行体）: {enqueue_body}"
         );
     }
@@ -7077,11 +7083,11 @@ mod tests {
             .find("reinit_wipe_decision(")
             .expect("冻结点必须经三格裁决");
         let wipe = execute_body
-            .find("wipe_dbnum_for_reinit(")
+            .find("wipe_dbnum_for_reinit_on(")
             .expect("清库仍在执行体");
         assert!(decision < wipe, "先裁决再清库: {execute_body}");
         assert_eq!(
-            execute_body.matches("wipe_dbnum_for_reinit(").count(),
+            execute_body.matches("wipe_dbnum_for_reinit_on(").count(),
             1,
             "执行体里清库只有一处调用"
         );

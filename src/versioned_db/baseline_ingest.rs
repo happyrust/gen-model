@@ -198,7 +198,7 @@ pub(crate) fn frozen_source_for(
 /// 自己清库。不推进水位。给不带模型半边的调用方用；双 lane 初始化走
 /// `data_interface::dbnum_initialize`（它自己拿 [`stream_frozen_into`]）。
 ///
-/// 写入标记、属性 lane 与解析失败落库写 `db`；失败清库仍走本进程的库。
+/// 写入标记、属性 lane、解析失败落库与失败清库都写 `db`。
 pub async fn ingest_file(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     db_option: &DbOption,
@@ -236,7 +236,7 @@ pub async fn ingest_file(
             let file_name = file_name_of(&frozen);
             log::error!("baseline failed: file={file_name} dbnum={dbnum}: {summary}");
             println!("{file_name}: 基线失败，清库后重来（dbnum={dbnum}）: {summary}");
-            wipe_after_failure(dbnum).await?;
+            wipe_after_failure_on(db, dbnum).await?;
             anyhow::bail!("dbnum={dbnum} 基线摄入失败: {summary}");
         }
     };
@@ -556,9 +556,12 @@ async fn persist_dependency_closure(
     Ok(summary)
 }
 
-/// 失败收尾：清掉这个 dbnum 的全部行（水位清值不删行，下一轮按首次导入重来）。
-pub(crate) async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
-    crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum)
+/// 失败收尾：清掉 `db` 那个库里这个 dbnum 的全部行（水位清值不删行，下一轮按首次导入重来）。
+pub(crate) async fn wipe_after_failure_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+) -> anyhow::Result<()> {
+    crate::data_interface::fast_delete::wipe_dbnum_for_reinit_on(db, dbnum)
         .await
         .map(|wiped| {
             println!("dbnum={dbnum} 基线失败清库完成：PE={}", wiped.pe_rows);
@@ -773,7 +776,7 @@ mod tests {
         let drain = body.find("lane.drain().await").expect("writer drain");
         let judge = body.find("judge_streamed(").expect("failure judgement");
         let wipe = body
-            .find("wipe_after_failure(dbnum).await?")
+            .find("wipe_after_failure_on(db, dbnum).await?")
             .expect("failure cleanup");
         let success = body.find("Ok(BaselineIngest {").expect("success receipt");
         assert!(
@@ -781,7 +784,8 @@ mod tests {
             "顺序必须是 排空写者 → 裁决 → 清库 → 成功回执"
         );
         assert_eq!(
-            body.matches("wipe_after_failure(dbnum).await?").count(),
+            body.matches("wipe_after_failure_on(db, dbnum).await?")
+                .count(),
             1,
             "裁决失败那条路要清库，且只有这一处"
         );
@@ -850,5 +854,31 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("基线收集失败"), "{message}");
+    }
+
+    /// 失败收尾只清给它的那个库（夹具与 `wipe_dbnum_for_reinit_on` 那条共用）。
+    /// 清库会整份作废进程级目录记忆，拿着 memo 单测那把锁跑；锁留在同步栈上，不跨 `.await`。
+    #[test]
+    fn the_failure_wipe_clears_only_the_given_database() {
+        use crate::data_interface::dbnum_initialize::{
+            baseline_counts_on, two_databases_sharing_a_dbnum,
+        };
+        let _memo = crate::data_interface::cata_dependency::memo_test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (a, b) = two_databases_sharing_a_dbnum(7964, 24364).await;
+
+                wipe_after_failure_on(&b, 7964).await.unwrap();
+
+                assert_eq!(baseline_counts_on(&b, 7964).await.unwrap(), (0, 0));
+                assert_eq!(
+                    baseline_counts_on(&a, 7964).await.unwrap(),
+                    (3, 1),
+                    "另一个库一行不动"
+                );
+            });
     }
 }

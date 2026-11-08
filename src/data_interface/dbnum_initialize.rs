@@ -194,7 +194,7 @@ struct DataHalfReport {
 
 /// 跑一次初始化。返回 `Err` = 库里已经清干净（或清不干净也已经报出来），下一轮从 0 重来。
 ///
-/// 写入标记、两条写入 lane、解析失败落库与收尾一笔写 `db`；核对计数与失败清库仍走本进程的库。
+/// 写入标记、两条写入 lane、解析失败落库、核对计数、失败清库与收尾一笔都走 `db`。
 pub(crate) async fn initialize(
     db: &Surreal<Any>,
     db_option: &DbOption,
@@ -264,7 +264,7 @@ pub(crate) async fn initialize(
     let (data, model) = match halves {
         Ok((data, model)) => (data, model),
         Err(error) => {
-            return wipe_and_bail(dbnum, request.file_name, format!("{error:#}")).await;
+            return wipe_and_bail(db, dbnum, request.file_name, format!("{error:#}")).await;
         }
     };
     let writer_failures = [
@@ -275,7 +275,7 @@ pub(crate) async fn initialize(
     .flatten()
     .collect::<Vec<_>>();
     if !writer_failures.is_empty() {
-        return wipe_and_bail(dbnum, request.file_name, writer_failures.join("；")).await;
+        return wipe_and_bail(db, dbnum, request.file_name, writer_failures.join("；")).await;
     }
     data.leaf.acknowledge(started);
     // 模型 lane 排空成功 = 交出去的每一笔都在库里了：逐根成败进进程内账本（ADR-079）。
@@ -283,7 +283,7 @@ pub(crate) async fn initialize(
 
     // ── 核对（ADR-077 D11）：属性面照旧数两次 `pe`；模型面不数库，任务手里的清单就是证据 ────
     crate::data_interface::batch_worker::set_active_task_stage("verify");
-    let (pe_count, root_count) = baseline_counts(dbnum).await?;
+    let (pe_count, root_count) = baseline_counts_on(db, dbnum).await?;
     let parsed_count = (!data.parent_filled).then_some(data.leaf.stats.elements);
     let confirmed_empty = crate::data_interface::manual_update::baseline_parse_confirmed_empty(
         parsed_count,
@@ -381,10 +381,15 @@ pub(crate) async fn initialize(
 }
 
 /// lane 失败的出口：清库、报错。清库自己失败也要 Err——两个原因并成一句。
-async fn wipe_and_bail<T>(dbnum: u32, file_name: &str, summary: String) -> anyhow::Result<T> {
+async fn wipe_and_bail<T>(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    file_name: &str,
+    summary: String,
+) -> anyhow::Result<T> {
     log::error!("initialization failed: file={file_name} dbnum={dbnum}: {summary}");
     println!("{file_name}: 初始化失败，清库后重来（dbnum={dbnum}）: {summary}");
-    baseline_ingest::wipe_after_failure(dbnum).await?;
+    baseline_ingest::wipe_after_failure_on(db, dbnum).await?;
     anyhow::bail!("dbnum={dbnum} 初始化失败: {summary}")
 }
 
@@ -695,27 +700,30 @@ fn note_published_survivors(units: &mut [ModelUnitResult], root: RefNo, reason: 
     }
 }
 
-/// pe 行数与 WORL 根数（`pe_dbnum_noun` 整键索引，见 `common.surql` 注释）。
-pub(crate) async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
+/// `db` 那个库里的 pe 行数与 WORL 根数（`pe_dbnum_noun` 整键索引，见 `common.surql` 注释）。
+pub(crate) async fn baseline_counts_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<(usize, usize)> {
     #[derive(serde::Deserialize)]
     struct CountRow {
         count: usize,
     }
-    async fn scalar_count(sql: String) -> anyhow::Result<usize> {
-        let rows = aios_core::SUL_DB
-            .query(sql)
-            .await?
-            .check()?
-            .take::<Vec<CountRow>>(0)?;
+    async fn scalar_count(db: &Surreal<Any>, sql: String) -> anyhow::Result<usize> {
+        let rows = db.query(sql).await?.check()?.take::<Vec<CountRow>>(0)?;
         Ok(rows.first().map(|row| row.count).unwrap_or_default())
     }
-    let pe_count = scalar_count(format!(
-        "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"
-    ))
+    let pe_count = scalar_count(
+        db,
+        format!("SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"),
+    )
     .await?;
-    let root_count = scalar_count(format!(
-        "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
-    ))
+    let root_count = scalar_count(
+        db,
+        format!(
+            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
+        ),
+    )
     .await?;
     Ok((pe_count, root_count))
 }
@@ -782,6 +790,35 @@ pub(crate) async fn clear_model_face_before_initial_on(
 /// `clear_model_face_before_initial_on` 的生产入口（`SUL_DB`）。
 pub(crate) async fn clear_model_face_before_initial(dbnum: u32) -> anyhow::Result<usize> {
     clear_model_face_before_initial_on(&aios_core::SUL_DB, dbnum).await
+}
+
+/// 测试夹具：两个互不相干的 `mem://` 库，同一个 `dbnum` 各有一份 `pe`（行号前缀都是 `ref0`）：
+/// `a` 三行、一个 WORL；`b` 五行、两个 WORL。
+#[cfg(test)]
+pub(crate) async fn two_databases_sharing_a_dbnum(
+    dbnum: u32,
+    ref0: u32,
+) -> (Surreal<Any>, Surreal<Any>) {
+    async fn seeded(name: &str, dbnum: u32, ref0: u32, nouns: &[&str]) -> Surreal<Any> {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("two_databases").use_db(name).await.unwrap();
+        let sql = nouns
+            .iter()
+            .enumerate()
+            .map(|(n, noun)| {
+                format!(
+                    "CREATE pe:{ref0}_{} SET dbnum = {dbnum}, noun = '{noun}';",
+                    n + 1
+                )
+            })
+            .collect::<String>();
+        db.query(sql).await.unwrap().check().unwrap();
+        db
+    }
+    (
+        seeded("a", dbnum, ref0, &["WORL", "SITE", "ZONE"]).await,
+        seeded("b", dbnum, ref0, &["WORL", "WORL", "SITE", "ZONE", "EQUI"]).await,
+    )
 }
 
 #[cfg(test)]
@@ -864,7 +901,7 @@ mod tests {
             .expect("both lanes drain together");
         let wipe = body.find("wipe_and_bail(").expect("lane failure wipes");
         let counts = body
-            .find("baseline_counts(dbnum)")
+            .find("baseline_counts_on(db, dbnum)")
             .expect("verification counts");
         let converge = body
             .find("converge_tree_after_persist(")
@@ -970,7 +1007,7 @@ mod tests {
             for forbidden in [
                 "Lane::spawn",
                 "drain(",
-                "wipe_after_failure(",
+                "wipe_after_failure_on(",
                 "commit_task_end_on(",
             ] {
                 assert!(
@@ -979,5 +1016,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `baseline_counts_on` 数给它的那个库：两个库同一 dbnum 行数不同，各数各的。
+    #[tokio::test]
+    async fn baseline_counts_on_counts_the_database_it_is_given() {
+        let (a, b) = super::two_databases_sharing_a_dbnum(7961, 24361).await;
+
+        assert_eq!(super::baseline_counts_on(&a, 7961).await.unwrap(), (3, 1));
+        assert_eq!(super::baseline_counts_on(&b, 7961).await.unwrap(), (5, 2));
+        assert_eq!(
+            super::baseline_counts_on(&a, 7962).await.unwrap(),
+            (0, 0),
+            "别的 dbnum 不算"
+        );
     }
 }

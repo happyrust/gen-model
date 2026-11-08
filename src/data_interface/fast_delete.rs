@@ -801,7 +801,16 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 /// 失败时水位处置尚未执行（它是元数据阶段的最后一句），下一轮仍判回退、
 /// 幂等重放。
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
-    let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
+    wipe_dbnum_for_reinit_on(&SUL_DB, dbnum).await
+}
+
+/// 同 [`wipe_dbnum_for_reinit`]，删的是 `db` 那个库的行（`pe` 事件核对查 `db`，两把写库锁照拿）。
+/// 进程内那两份记忆是本进程的，照样作废。
+pub(crate) async fn wipe_dbnum_for_reinit_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<FastDeleteDbnumResult> {
+    let result = wipe_dbnum_rows_guarded_on(db, dbnum, WatermarkDisposal::ResetForReinit).await?;
     // 进程内模型面与整库模型清理同一串。目录 memo 是数据面，只有整库重建才作废。
     forget_dbnum_model_in_process(dbnum, false)?;
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
@@ -1278,10 +1287,19 @@ async fn wipe_dbnum_rows(
     dbnum: u32,
     watermark: WatermarkDisposal,
 ) -> anyhow::Result<FastDeleteDbnumResult> {
+    wipe_dbnum_rows_guarded_on(&SUL_DB, dbnum, watermark).await
+}
+
+/// [`wipe_dbnum_rows`] 删 `db` 那个库：`pe` 事件核对查的是 `db`，两把写库锁照拿。
+async fn wipe_dbnum_rows_guarded_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    watermark: WatermarkDisposal,
+) -> anyhow::Result<FastDeleteDbnumResult> {
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
-    super::pe_batch::require_no_event_on(&SUL_DB).await?;
+    super::pe_batch::require_no_event_on(db).await?;
     let started = Instant::now();
     let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
@@ -1290,7 +1308,7 @@ async fn wipe_dbnum_rows(
         .write()
         .await;
 
-    let result = wipe_dbnum_rows_on(&SUL_DB, dbnum, watermark).await?;
+    let result = wipe_dbnum_rows_on(db, dbnum, watermark).await?;
     Ok(FastDeleteDbnumResult {
         elapsed_ms: started.elapsed().as_millis() as u64,
         ..result
@@ -1947,7 +1965,7 @@ mod tests {
             .0;
         assert!(
             body.contains("if intent.wipes_whole_dbnum()")
-                && body.contains("wipe_dbnum_for_reinit"),
+                && body.contains("wipe_dbnum_for_reinit("),
             "初始化那一档必须走整库 wipe: {body}"
         );
         assert!(WriteIntent::Initialize.wipes_whole_dbnum());
@@ -2464,5 +2482,32 @@ mod tests {
             .map(|row| row.count)
             .unwrap_or_default();
         assert_eq!(owners, 0, "目录库的 pe_owner 区间必须清空");
+    }
+
+    /// `wipe_dbnum_for_reinit_on` 只清给它的那个库：两个库同一 dbnum 各有行，清 `a`，`b` 一行不少。
+    /// 清库会整份作废进程级目录记忆，拿着 memo 单测那把锁跑；锁留在同步栈上，不跨 `.await`。
+    #[test]
+    fn wiping_for_reinit_on_one_database_leaves_the_other_alone() {
+        use crate::data_interface::dbnum_initialize::{
+            baseline_counts_on, two_databases_sharing_a_dbnum,
+        };
+        let _memo = crate::data_interface::cata_dependency::memo_test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (a, b) = two_databases_sharing_a_dbnum(7963, 24363).await;
+
+                let report = wipe_dbnum_for_reinit_on(&a, 7963).await.unwrap();
+
+                assert_eq!(report.pe_rows, 3);
+                assert_eq!(baseline_counts_on(&a, 7963).await.unwrap(), (0, 0));
+                assert_eq!(
+                    baseline_counts_on(&b, 7963).await.unwrap(),
+                    (5, 2),
+                    "另一个库一行不动"
+                );
+            });
     }
 }

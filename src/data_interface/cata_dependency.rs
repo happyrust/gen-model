@@ -1170,6 +1170,18 @@ pub fn describe_seeds(seeds: &BTreeSet<RefU64>) -> String {
         .join(", ")
 }
 
+/// D6 的两份记忆都是进程级的：碰它们的单测串行跑，别互相清账。整库重初始化清库也会清这里的
+/// 记忆，别的模块里跑它的单测也拿这一把。
+#[cfg(test)]
+static MEMO_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn memo_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    MEMO_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,15 +1522,6 @@ mod tests {
             body[..persisted].contains("if fresh.is_empty()"),
             "整根都是老 seed 时必须直接返回——不建定位器、不解闭包、不发事务"
         );
-    }
-
-    /// D6 的两份记忆都是进程级的：碰它们的单测串行跑，别互相清账。
-    static MEMO_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn memo_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        MEMO_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// 一个目录库的 `n` 个依赖行（同一 sesno——一次 resolve 里同库同版本）。
