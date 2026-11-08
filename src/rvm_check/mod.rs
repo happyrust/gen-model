@@ -393,7 +393,7 @@ pub fn execute(
     tasks.set_stage(task_id, STAGE_OURS);
     tasks.set_units_done(task_id, 2);
     let ours_started = Instant::now();
-    if let Err(message) = generate_ours(spec, &resolved, &task_dir, None) {
+    if let Err(message) = generate_ours(spec, &resolved, &task_dir, None, 0) {
         report.stage = STAGE_OURS.to_string();
         report.message = redact(&message, &spec.password);
         report.timings_ms.generate_ours = elapsed_ms(ours_started);
@@ -580,13 +580,18 @@ pub(crate) struct FusedCompare {
     pub baseline: PathBuf,
     /// 是否还写 `generated.rvm`。false = 纯流式对拍，产物只有 compare/judgement。
     pub emit_rvm: bool,
+    /// 并发核对窗口（字节）：待判成员攒满即并发判一批；0 = vendor 默认 256MB。
+    /// 内存/性能旋钮——大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
+    pub window_bytes: usize,
 }
 
+/// `element_cache_limit`：池级元素缓存上限（条），0 = vendor 默认 200_000——内存/性能旋钮。
 pub(crate) fn generate_ours(
     spec: &RunSpec,
     node: &ResolvedNode,
     task_dir: &Path,
     fused: Option<&FusedCompare>,
+    element_cache_limit: usize,
 ) -> Result<(), String> {
     let template = DirectSchema::template_dir_from_env()
         .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
@@ -612,6 +617,8 @@ pub(crate) fn generate_ours(
         root_world_ordinal: node.world_ordinal,
         rvm: fused.is_none_or(|fused| fused.emit_rvm),
         compare_baseline: fused.map(|fused| fused.baseline.clone()),
+        compare_window_bytes: fused.map(|fused| fused.window_bytes).unwrap_or_default(),
+        element_cache_limit,
         ..RvmExportOptions::default()
     };
     let deadline = Deadline(Instant::now() + spec.tools.timeout);

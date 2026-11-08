@@ -87,6 +87,12 @@ pub struct BatchOptions {
     /// 跑完把每根的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`（[`super::store`]）。
     /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，自动跳过。
     pub store: bool,
+    /// 流式对拍的并发核对窗口（MB）：0 = vendor 默认 256。内存/性能旋钮——
+    /// 大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
+    pub compare_window_mb: usize,
+    /// 池级元素缓存上限（条）：0 = vendor 默认 200_000。
+    /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
+    pub element_cache: usize,
 }
 
 /// `--child`：只为给定的根做生成，产物落在与父进程同一套目录里，别的什么都不写。
@@ -100,6 +106,9 @@ pub struct ChildOptions {
     pub compare_baseline: Option<PathBuf>,
     /// 是否写 `generated.rvm`（false = 纯流式对拍模式）。
     pub emit_rvm: bool,
+    /// 与父进程同一口径的内存/性能旋钮（0 = vendor 默认）。
+    pub compare_window_mb: usize,
+    pub element_cache: usize,
 }
 
 pub struct BatchOutcome {
@@ -450,8 +459,10 @@ pub fn run_child(opts: &ChildOptions) -> Result<()> {
         let fused = opts.compare_baseline.as_ref().map(|baseline| FusedCompare {
             baseline: baseline.clone(),
             emit_rvm: opts.emit_rvm,
+            window_bytes: opts.compare_window_mb * 1024 * 1024,
         });
-        generate_ours(&spec, &node, &dir, fused.as_ref()).map_err(anyhow::Error::msg)?;
+        generate_ours(&spec, &node, &dir, fused.as_ref(), opts.element_cache)
+            .map_err(anyhow::Error::msg)?;
         println!("generated ={refno} -> {}", dir.join("ours").display());
     }
     Ok(())
@@ -1125,12 +1136,20 @@ fn process_root(
             .map(|baseline| FusedCompare {
                 baseline,
                 emit_rvm: opts.emit_rvm,
+                window_bytes: opts.compare_window_mb * 1024 * 1024,
             });
         let generation = if opts.in_process {
             let _serial = in_process_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            generate_in_process(job, spec, tree, opts.gen_timeout, fused.as_ref())
+            generate_in_process(
+                job,
+                spec,
+                tree,
+                opts.gen_timeout,
+                fused.as_ref(),
+                opts.element_cache,
+            )
         } else {
             generate_in_child(job, spec, out_root, opts, fused.as_ref())
         };
@@ -1252,6 +1271,7 @@ fn generate_in_process(
     tree: &DirectTreeService,
     gen_timeout: Duration,
     fused: Option<&FusedCompare>,
+    element_cache: usize,
 ) -> StageRecord {
     let started = Instant::now();
     let mut spec = spec.clone();
@@ -1261,7 +1281,7 @@ fn generate_in_process(
         Ok(node) => node,
         Err(message) => return StageRecord::new(1, started, message),
     };
-    match generate_ours(&spec, &node, &job.dir, fused) {
+    match generate_ours(&spec, &node, &job.dir, fused, element_cache) {
         Ok(()) => StageRecord::new(0, started, ""),
         Err(message) => StageRecord::new(1, started, message),
     }
@@ -1312,6 +1332,11 @@ fn generate_in_child(
             .arg("--emit-rvm")
             .arg(fused.emit_rvm.to_string());
     }
+    command
+        .arg("--compare-window-mb")
+        .arg(opts.compare_window_mb.to_string())
+        .arg("--element-cache")
+        .arg(opts.element_cache.to_string());
     command
         .env("RUST_BACKTRACE", "1")
         .stdin(std::process::Stdio::null())
@@ -1777,6 +1802,8 @@ mod tests {
             fused_compare: false,
             emit_rvm: true,
             store: false,
+            compare_window_mb: 0,
+            element_cache: 0,
         };
         let spec = RunSpec {
             install_dir: PathBuf::new(),

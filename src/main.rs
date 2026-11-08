@@ -175,6 +175,15 @@ struct RvmCheckArgs {
     /// 子进程是否写 `generated.rvm`（--emit-rvm=false 仅在 --fused-compare 下成立）。
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     emit_rvm: bool,
+    /// 流式对拍的并发核对窗口（MB）：待判成员攒满即并发判一批。
+    /// 内存/性能旋钮——大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
+    /// 0 = 默认 256。
+    #[arg(long, default_value_t = 0, value_name = "MB")]
+    compare_window_mb: usize,
+    /// 池级元素缓存上限（条）：跨元素复用解析好的库记录，0 = 默认 200_000。
+    /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    element_cache: usize,
     /// 内部用：子进程模式，只生成 --only 指定的根。
     #[arg(long, hide = true)]
     child: bool,
@@ -320,6 +329,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
             compare_baseline: args.compare_baseline.clone(),
             emit_rvm: args.emit_rvm,
+            compare_window_mb: args.compare_window_mb,
+            element_cache: args.element_cache,
         });
     }
 
@@ -341,6 +352,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
         fused_compare: args.fused_compare,
         emit_rvm: args.emit_rvm,
+        compare_window_mb: args.compare_window_mb,
+        element_cache: args.element_cache,
         store: !args.no_store,
     })?;
     if !outcome.clean {
