@@ -866,6 +866,57 @@ async fn enumerate_live_equips() -> anyhow::Result<Vec<RefnoEnum>> {
     Ok(response.take(0)?)
 }
 
+/// 全量补边入口只枚举**还没有楼板边**的未删设备。
+///
+/// 原因：SurrealDB Rust SDK 的 `response.take::<Vec<T>>(0)` 遇到非数组值（比如
+/// `(SELECT VALUE <arr> FROM pe:x WHERE array::len(->nearest_relate) = 0)[0]`
+/// 在已有边时因无匹配行而返回 `CoreValue::None`）会先把 `None` 包成
+/// `vec![CoreValue::None]` 再反序列化 `T`（`crates/sdk/src/api/opt/query.rs:366`）。
+/// 于是热库重跑 `cal_equip_nearest_floor` 时，已挂边的 1147 台设备不仅空跑 1147 次
+/// 串行 SQL，还会逐台报 `expected an object-like struct named Aabb, found None`，
+/// 打出 1147 条假 `warn!("读取设备子件 aabb 失败，跳过")`。
+///
+/// 把 `array::len(->nearest_relate) = 0` 提到外层枚举一次滤掉后，内层直接用
+/// `SELECT VALUE <expr> FROM ONLY {e};`（与 [`relink_floor`] 一致），热库重跑只需
+/// 算那 18 台真正未挂边的设备，不再产生任何假告警。
+fn unlinked_live_equips_sql() -> &'static str {
+    "SELECT VALUE record::id(id) FROM pe WHERE noun = 'EQUI' AND deleted != true \
+     AND array::len(->nearest_relate) = 0;"
+}
+
+async fn enumerate_unlinked_live_equips() -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut response = SUL_DB
+        .query(unlinked_live_equips_sql())
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
+}
+
+/// 把已经挂上楼板边的未删设备从 `geom_error` 账本里销掉。
+///
+/// 走 [`clear_equip_floor_miss`]（内部靠 `KNOWN` 播种过滤），只有账本里确实有行的目标
+/// 才会真正发 `DELETE`，正常库上是内存 O(1) 空操作。
+async fn clear_linked_equip_floor_misses() {
+    let targets = match SUL_DB
+        .query(
+            "SELECT VALUE <string>id FROM pe WHERE noun = 'EQUI' AND deleted != true \
+             AND array::len(->nearest_relate) > 0;",
+        )
+        .await
+        .and_then(|response| response.check())
+        .and_then(|mut response| response.take::<Vec<String>>(0))
+    {
+        Ok(v) => v,
+        Err(error) => {
+            log::warn!("[geom_error] 反查已挂边设备失败: {error}");
+            return;
+        }
+    };
+    for target in targets {
+        clear_floor_miss(&target).await;
+    }
+}
+
 //将equip的 world transform 这些放到cal_equip 这张表里，存储一些需要计算的缓存数据
 //这样可以减少查询次数，提高性能
 //这个表的数据是在equip的数据变更时，由equip的数据变更触发的
@@ -907,7 +958,8 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
 
 //取得设备下的所有aabb，然后取下面的点到楼板的最近距离
 pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
-    let equips = enumerate_live_equips().await?;
+    clear_linked_equip_floor_misses().await;
+    let equips = enumerate_unlinked_live_equips().await?;
     if equips.is_empty() {
         return Ok(());
     }
@@ -935,13 +987,11 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         // 子件 aabb 大多齐全（如 pe:24381_100725 的 38 个子件全有），只是其中
         // 掺了一两个 NONE。过滤掉 NONE 后这些设备就能正常参与计算。
         let e = equip.to_pe_key();
-        let sql = format!(
-            "(SELECT VALUE {} FROM {e} WHERE array::len(->nearest_relate) = 0)[0]",
-            child_aabbs_expr(&e)
-        );
-        let mut response = SUL_DB.query(sql).await?;
+        let sql = format!("SELECT VALUE {} FROM ONLY {e};", child_aabbs_expr(&e));
+        let mut response = SUL_DB.query(sql).await?.check()?;
         // 不要再静默 `continue`：反序列化失败以前意味着「这台设备被悄悄丢掉」，
-        // 排查时看不到任何线索。现在过滤过 NONE，真失败就是数据异常，得留痕。
+        // 排查时看不到任何线索。现在过滤过 NONE 且外层已过滤掉已有边的设备，
+        // 真失败就是数据异常，得留痕。
         let aabbs = match response.take::<Vec<Aabb>>(0) {
             Ok(v) => v,
             Err(err) => {
@@ -1119,6 +1169,81 @@ mod nearest_floor_live_tests {
 
         Ok(())
     }
+
+    /// 热库重跑只碰「还没有楼板边」的设备，且不产生任何假告警。
+    ///
+    /// 修前：全量入口枚举全部 1165 台未删设备，再用
+    /// `(SELECT VALUE <arr> FROM pe:x WHERE array::len(->nearest_relate) = 0)[0]`
+    /// 过滤。已挂边的 1147 台让子查询返回 `CoreValue::None`，
+    /// `response.take::<Vec<Aabb>>(0)` 把它包成 `vec![CoreValue::None]` 后反序列化失败
+    /// （`crates/sdk/src/api/opt/query.rs:366`），于是热库每跑一次全量就打 1147 条
+    /// 假 `warn!("读取设备子件 aabb 失败，跳过")`、空耗 1147 次串行 SQL。
+    ///
+    /// 修后：枚举阶段就按 `array::len(->nearest_relate) = 0` 过滤，热库只剩真正
+    /// 挂不上的那十几台要算。
+    ///
+    /// ```text
+    /// cargo test --lib hot_rerun_only_touches_unlinked_equips -- --ignored --test-threads=1
+    /// ```
+    #[tokio::test]
+    #[ignore = "live: 需要真库 8009；会先跑一遍全量再重跑一次；必须单跑"]
+    async fn hot_rerun_only_touches_unlinked_equips() -> anyhow::Result<()> {
+        attach_store_connected().await?;
+        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
+
+        // 先跑一遍全量，把热库状态建立起来（有边的设备占绝大多数）。
+        cal_equip_nearest_floor().await?;
+
+        let mut r = SUL_DB
+            .query(
+                "RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND deleted != true \
+                 AND array::len(->nearest_relate) = 0);",
+            )
+            .await?;
+        let unlinked: Option<i64> = r.take(0)?;
+        let unlinked = unlinked.unwrap_or(0);
+        let mut r = SUL_DB
+            .query("RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND deleted != true);")
+            .await?;
+        let total: Option<i64> = r.take(0)?;
+        let total = total.unwrap_or(0);
+        assert!(total > 0, "库里没有 EQUI");
+
+        // 枚举口径必须与「未挂边」严格一致：这是「热库不再空跑」的根。
+        let enumerated = enumerate_unlinked_live_equips().await?;
+        assert_eq!(
+            enumerated.len() as i64,
+            unlinked,
+            "枚举出来的必须恰好是没挂边的那些设备"
+        );
+        assert!(
+            (unlinked as f64) < (total as f64) * 0.2,
+            "热库里挂不上的应只是少数：{unlinked}/{total}"
+        );
+
+        // 热库重跑：应当只算这 {unlinked} 台，耗时与写出的边数都要跟着掉下来。
+        let started = std::time::Instant::now();
+        cal_equip_nearest_floor().await?;
+        let elapsed = started.elapsed();
+        eprintln!("热库重跑 {unlinked}/{total} 台未挂边，耗时 {elapsed:?}");
+
+        // 假告警的判据：重跑后挂边数不能因为反序列化失败而掉下来。
+        let mut r = SUL_DB
+            .query(
+                "RETURN count(SELECT * FROM pe WHERE noun = 'EQUI' AND deleted != true \
+                 AND array::len(->nearest_relate) > 0);",
+            )
+            .await?;
+        let covered: Option<i64> = r.take(0)?;
+        let covered = covered.unwrap_or(0);
+        assert_eq!(
+            covered,
+            total - unlinked,
+            "热库重跑不该改变挂边数（{covered} vs {}）",
+            total - unlinked
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1187,6 +1312,52 @@ mod equip_scan_tests {
         assert!(
             src.contains("async fn clear_soft_deleted_equip_rows()"),
             "软删清理要有独立函数，两条入口共用"
+        );
+    }
+
+    /// 全量补边入口只能枚举「还没有楼板边」的设备。
+    ///
+    /// 热库重跑时若枚举全部未删设备、再用
+    /// `(SELECT VALUE <arr> FROM pe:x WHERE array::len(->nearest_relate) = 0)[0]`
+    /// 过滤，已挂边的设备会让子查询无匹配行、返回 `CoreValue::None`，而
+    /// `response.take::<Vec<Aabb>>(0)` 会把 `None` 包成 `vec![CoreValue::None]`
+    /// 再反序列化（`crates/sdk/src/api/opt/query.rs:366`），报
+    /// `expected an object-like struct named Aabb, found None`。
+    ///
+    /// 后果是热库每跑一次全量：1147 次无效串行 SQL + 1147 条假
+    /// `warn!("读取设备子件 aabb 失败，跳过")`。真库 2026-11-08 实测。
+    #[test]
+    fn the_full_pass_only_visits_equips_without_a_floor_edge() {
+        let src = include_str!("equip_model.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let body = src
+            .split_once("pub async fn cal_equip_nearest_floor()")
+            .expect("全量补边入口")
+            .1;
+
+        assert!(
+            body.contains("enumerate_unlinked_live_equips().await?"),
+            "全量补边入口必须先按「还没有边」过滤再枚举"
+        );
+        assert!(
+            !body.contains("WHERE array::len(->nearest_relate) = 0)[0]"),
+            "子查询过滤会让已挂边的设备返回 None，进而反序列化失败打出假告警"
+        );
+        assert!(
+            body.contains("FROM ONLY {e};"),
+            "读 aabb 用 FROM ONLY，与 relink_floor 同口径，不产生 None 分支"
+        );
+
+        let sql = unlinked_live_equips_sql();
+        assert!(
+            sql.contains("noun = 'EQUI'") && sql.contains("deleted != true"),
+            "枚举口径要与增量路径同源（pe + 未软删）: {sql}"
+        );
+        assert!(
+            sql.contains("array::len(->nearest_relate) = 0"),
+            "必须只枚举没有楼板边的设备: {sql}"
         );
     }
 
