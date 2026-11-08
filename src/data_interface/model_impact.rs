@@ -563,8 +563,34 @@ pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
     if attribute_no_event(raw_name) {
         return true;
     }
+    // 分组成员指针门（在 DCHC 之前）：`GPREF` 改的是「这个分组收录谁」，不是几何输入。
+    // 它拿不到 DCHC 票（隐式属性，`desvir.dat` 声明、字典与运行库 schema 都不收），
+    // 却因为是 `att_type=ELEMENT` 的引用而被判成 `DependencyCascade`——默认配置
+    // （`model_entry_drop_no_geometry` 关）下每次分组改动都会整根重算一次几何。
+    if attribute_is_group_member_pointer(raw_name) {
+        return true;
+    }
     (raw_dchc_code(raw_name) == Some(0) || attribute_is_cache_stamp(raw_name))
         && !generation_reads_attribute(raw_name)
+}
+
+/// 分组成员指针：`GPREF`，GPITEM 指向被收录元素的隐式属性。
+///
+/// 语义是**显示域**而非几何域——改它只改变分组展开出哪些元素，被收录元素自己的网格由
+/// 它自己的 owner 链决定，一分不动（`group_membership.rs` 模块文档与计划
+/// `2026-11-08-gpwl-gpset-group-nodes.md` Phase E：GPITEM 的 create/delete/update
+/// 「影响显示域而非几何生成」）。
+///
+/// 为什么不进效果表 [`DATA_ONLY_ATTR_NAMES`]：`GPREF` 是隐式属性，`desvir.dat` 2.10
+/// 模板里声明，E3D 字典 4270 名与运行库 descriptor 表都没有它，进了那张表会被
+/// [`tests::curated_tables_are_reconciled_against_the_runtime_schema`] 判成死名——
+/// 那条守护是对的，减免表上挂一个永远匹配不到真属性的名字等于白写。所以单独走这一条。
+///
+/// 与 `GPWL` / `GPSET` / `GPITEM` 的关系：那三个是 **noun** 不是属性，它们自身的
+/// create/delete 走 [`noun_is_no_geometry_model_entry`]（实测三者都判 true）；那条门
+/// 默认关闭（`model_entry_drop_no_geometry` 缺省 false），所以属性这一侧的短路是必要的。
+pub fn attribute_is_group_member_pointer(raw_name: &str) -> bool {
+    normalize_attribute_name(raw_name) == "GPREF"
 }
 
 /// 这个名字是不是**戳**（e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES`：`CACHID`，2026-09-19 起还有 `SPAMAP`）：
@@ -2782,6 +2808,79 @@ mod tests {
         // 模型属性不受影响：事件门对它们一律 false。
         for name in ["POS", "ORI", "BORE", "DIAM", "HEIG", "NAME", "UDA:7"] {
             assert!(!attribute_no_event(name), "{name} 不该命中 WNOEVT 事件门");
+        }
+    }
+
+    /// 分组成员指针门（分组节点 M5 · G5）：`GPREF` 改的是「分组收录谁」，属显示域，不是几何输入。
+    ///
+    /// 修的是实测出来的真实误判：`GPREF` 是隐式属性（`desvir.dat` 2.10 声明，E3D 字典 4270 名
+    /// 与运行库 descriptor 表都不收它），拿不到 DCHC 票；它又恰好是 `att_type=ELEMENT` 的引用，
+    /// 于是落进 `classify_attribute_effect_with_meta` 的 A2 分支被判成 `DependencyCascade`。
+    /// `model_entry_drop_no_geometry` 缺省关闭，所以默认配置下每次分组改动都会整根重算一次几何。
+    ///
+    /// 三条边界：① 只有 `GPREF` 这一个名字命中，`GPWL`/`GPSET`/`GPITEM` 是 **noun** 不是属性，
+    /// 它们走 `noun_is_no_geometry_model_entry`；② 真几何依赖（`SPRE` 这类引用属性）一格不动；
+    /// ③ `GPREF` 不进 `DATA_ONLY_ATTR_NAMES`——它是死名，进了会被
+    /// `curated_tables_are_reconciled_against_the_runtime_schema` 判红。
+    #[test]
+    fn the_group_member_pointer_is_not_a_geometry_dependency() {
+        // 前提坐实：字典确实没有它，否则这条例外就不该存在。
+        assert_eq!(
+            raw_dchc_code("GPREF"),
+            None,
+            "GPREF 进了字典快照？那这条例外该撤掉，改走两票"
+        );
+        assert!(
+            attribute_is_reference("GPREF"),
+            "GPREF 不再是 ELEMENT 引用，A2 分支不再命中，本例外需重新评估"
+        );
+        assert!(
+            !generation_reads_attribute("GPREF"),
+            "生成器读了 GPREF？那是显示域之外的用途，短路会漏算"
+        );
+
+        // 门本身：归一化前后同答。
+        for spelling in ["GPREF", "gpref", "att.GPREF", " GPREF "] {
+            assert!(
+                attribute_is_group_member_pointer(spelling),
+                "{spelling} 应命中分组成员指针门"
+            );
+            assert!(
+                attribute_is_metadata_only(spelling),
+                "{spelling} 应被放行（不排几何工作）"
+            );
+        }
+        assert!(!attribute_is_group_member_pointer("GPWL"));
+        assert!(!attribute_is_group_member_pointer("GPSET"));
+        assert!(!attribute_is_group_member_pointer("GPITEM"));
+        assert!(!attribute_is_group_member_pointer("NAME"));
+
+        // 端到端：单独改 GPREF → 不重算几何。
+        assert_eq!(
+            classify_operation_impact(&modified_operation("GPREF")),
+            OperationImpact::Skip,
+            "GPREF 改动不该触发几何重算"
+        );
+        // SCOSEL 早就靠两票放行（字典 DCHC=0 ∧ 生成器不读），不依赖这道新门。
+        assert_eq!(raw_dchc_code("SCOSEL"), Some(0));
+        assert!(
+            !attribute_is_group_member_pointer("SCOSEL"),
+            "SCOSEL 不该走指针门，它有 DCHC 票"
+        );
+        assert_eq!(
+            classify_operation_impact(&modified_operation("SCOSEL")),
+            OperationImpact::Skip,
+            "SCOSEL 改动不该触发几何重算"
+        );
+
+        // 边界：真几何依赖一格不动。
+        for name in ["SPRE", "SPREF", "CATR", "DIAM", "POS"] {
+            assert!(!attribute_is_group_member_pointer(name), "{name}");
+            assert_ne!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Skip,
+                "{name} 是几何输入，不该被这道门放过"
+            );
         }
     }
 
