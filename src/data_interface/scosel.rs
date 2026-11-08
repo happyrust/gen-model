@@ -1,4 +1,4 @@
-//! GPSET 规则成员 `SCOSEL` 的解码：序列化栈机 → 表达式树（G3 第一步，只解码，不求值、不接线）。
+//! GPSET 规则成员 `SCOSEL` 的编解码：序列化栈机 ↔ 表达式树（只管编解码，不求值、不接线）。
 //!
 //! `SCOSEL` 是 `DB_Collection` 的序列化栈机：头部、class 段、规则组与它的 filter 表达式段；表达式是
 //! 后缀写法——操作数入栈，算子弹两个、压回一个。opcode 语义见
@@ -287,6 +287,63 @@ fn slice(
 
 fn malformed(index: usize, reason: &'static str) -> ScoselError {
     ScoselError::Malformed { index, reason }
+}
+
+/// 把 [`Scosel`] 写回 `SCOSEL` int 数组（含首字 `word_count`），是 [`decode`] 的逆：
+/// `decode(&encode(&x)) == Ok(x)`。写侧（M5 的 `set_gpset_rules` 收 `&[i32]`）用它产出数组。
+///
+/// 按文件头的布局表写：头部、一段 `100009`（`N` 可以是 0）、各规则组按原序。段边界 `100011` /
+/// `100012` 不写——样本里它们的位置还没查清，[`decode`] 也不靠它们分段。所以往返只证明与 [`decode`]
+/// 自洽；和 E3D 自己写出的数组逐字一致，要等真库样本做到 `encode(decode(样本)) == 样本` 才算核实。
+///
+/// `Text` 只应含 ASCII（[`decode`] 只产出 ASCII）：非 ASCII 字符按码位写出，[`decode`] 读回时在
+/// 该下标报 [`ScoselError::Malformed`]，不会静默改字。
+pub fn encode(scosel: &Scosel) -> Vec<i32> {
+    let mut words = vec![
+        0,
+        OP_ATTRIBUTE_ID,
+        ATTRIBUTE_ID_VALUE,
+        OP_CLASS,
+        count_word(scosel.classes.len()),
+    ];
+    words.extend_from_slice(&scosel.classes);
+    for rule in &scosel.rules {
+        words.extend_from_slice(&[OP_RULE_GROUP, rule.attr, OP_FILTER, 0, FILTER_LEAD]);
+        let start = words.len();
+        encode_expr(&rule.filter, &mut words);
+        words[start - 2] = count_word(words.len() - start);
+    }
+    words[0] = count_word(words.len());
+    words
+}
+
+fn encode_expr(expr: &ScoselExpr, words: &mut Vec<i32>) {
+    match expr {
+        ScoselExpr::Attr { hash, tail } => {
+            words.extend_from_slice(&[OP_ATTR_REF, count_word(ATTR_REF_WORDS), *hash]);
+            words.extend_from_slice(tail);
+        }
+        ScoselExpr::Text(text) => {
+            words.extend_from_slice(&[OP_TEXT, count_word(text.chars().count())]);
+            words.extend(text.chars().map(|c| c as i32));
+        }
+        ScoselExpr::Before(lhs, rhs) => encode_operator(OP_BEFORE, lhs, rhs, words),
+        ScoselExpr::StrEq(lhs, rhs) => encode_operator(OP_STR_EQ, lhs, rhs, words),
+        ScoselExpr::Or(lhs, rhs) => encode_operator(OP_OR, lhs, rhs, words),
+        ScoselExpr::And(lhs, rhs) => encode_operator(OP_AND, lhs, rhs, words),
+    }
+}
+
+/// 后缀写法：左、右两棵子树在前，算子在后——[`decode`] 先弹出的是右操作数。
+fn encode_operator(opcode: i32, lhs: &ScoselExpr, rhs: &ScoselExpr, words: &mut Vec<i32>) {
+    encode_expr(lhs, words);
+    encode_expr(rhs, words);
+    words.push(opcode);
+}
+
+/// 计数字与首字都是 i32，超过 `i32::MAX` 的长度写不进 `SCOSEL`。
+fn count_word(n: usize) -> i32 {
+    i32::try_from(n).expect("SCOSEL 的计数超出 i32")
 }
 
 #[cfg(test)]
@@ -580,6 +637,123 @@ mod tests {
         words[filter_at + 1] += 1;
         assert!(
             matches!(decode(&words), Err(ScoselError::Malformed { index, .. }) if index == words.len() - 1)
+        );
+    }
+
+    fn rule_of(filter: ScoselExpr) -> ScoselRule {
+        ScoselRule {
+            attr: RULE_ATTR,
+            filter,
+        }
+    }
+
+    fn prefix_rule(prefix: &str) -> ScoselRule {
+        rule_of(before_node(prefix))
+    }
+
+    fn rules_only(rules: Vec<ScoselRule>) -> Scosel {
+        Scosel {
+            classes: vec![],
+            rules,
+        }
+    }
+
+    /// decode 单测里出现过的形状，外加右嵌套与全空。
+    fn shapes() -> Vec<(&'static str, Scosel)> {
+        vec![
+            (
+                "纯 NAME 前缀",
+                rules_only(vec![prefix_rule("/AREA01_PIPE")]),
+            ),
+            (
+                "两个前缀用 301 合并",
+                rules_only(vec![rule_of(ScoselExpr::Or(
+                    Box::new(before_node("/AREA01_PIPE")),
+                    Box::new(before_node("/AREA02_PIPE")),
+                ))]),
+            ),
+            (
+                "同一属性两个条件用 302",
+                rules_only(vec![rule_of(ScoselExpr::And(
+                    Box::new(before_node("/AREA01")),
+                    Box::new(ScoselExpr::StrEq(
+                        name_node(),
+                        text_node("/AREA01_PIPE-100"),
+                    )),
+                ))]),
+            ),
+            (
+                "右嵌套：前缀 OR（前缀 AND 相等）",
+                rules_only(vec![rule_of(ScoselExpr::Or(
+                    Box::new(before_node("/A")),
+                    Box::new(ScoselExpr::And(
+                        Box::new(before_node("/B")),
+                        Box::new(ScoselExpr::StrEq(name_node(), text_node("/B-1"))),
+                    )),
+                ))]),
+            ),
+            (
+                "class 段",
+                Scosel {
+                    classes: vec![11, 12],
+                    rules: vec![prefix_rule("/A")],
+                },
+            ),
+            (
+                "空 rules",
+                Scosel {
+                    classes: vec![11],
+                    rules: vec![],
+                },
+            ),
+            (
+                "空 classes、两个规则组",
+                rules_only(vec![prefix_rule("/A"), prefix_rule("/B")]),
+            ),
+            ("全空", Scosel::default()),
+        ]
+    }
+
+    #[test]
+    fn encode_writes_the_layout_that_decode_reads() {
+        let x = Scosel {
+            classes: vec![11, 12],
+            rules: vec![prefix_rule("/AREA01_PIPE")],
+        };
+        assert_eq!(
+            encode(&x),
+            scosel(&[class(&[11, 12]), rule(&before_name("/AREA01_PIPE"))].concat())
+        );
+    }
+
+    #[test]
+    fn every_decoded_shape_survives_an_encode_round_trip() {
+        for (shape, x) in shapes() {
+            assert_eq!(decode(&encode(&x)), Ok(x), "{shape}");
+        }
+    }
+
+    #[test]
+    fn the_first_encoded_word_counts_the_whole_array() {
+        for (shape, x) in shapes() {
+            let words = encode(&x);
+            assert_eq!(words[0], word(words.len()), "{shape}");
+        }
+    }
+
+    #[test]
+    fn an_empty_scosel_encodes_to_a_header_and_an_empty_class_segment() {
+        let words = encode(&Scosel::default());
+        assert_eq!(words, scosel(&class(&[])));
+        assert_eq!(decode(&words), Ok(Scosel::default()));
+    }
+
+    #[test]
+    fn a_non_ascii_literal_is_written_as_its_code_point_and_refused_on_decode() {
+        let words = encode(&rules_only(vec![prefix_rule("/管")]));
+        let bad = words.iter().position(|&w| w == '管' as i32).unwrap();
+        assert!(
+            matches!(decode(&words), Err(ScoselError::Malformed { index, .. }) if index == bad)
         );
     }
 }
