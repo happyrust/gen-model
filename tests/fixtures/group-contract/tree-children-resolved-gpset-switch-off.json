@@ -1,0 +1,72 @@
+{
+  "source": "direct",
+  "parent": "2/11",
+  "view": "resolved",
+  "nodes": [
+    {
+      "refno": "1_4",
+      "noun": "BRAN",
+      "name": "/PIPE-100/B1",
+      "owner": "1_3",
+      "order": 0,
+      "children_count": 1,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null,
+      "dbnum": 7001,
+      "via": "2_12",
+      "secondary": true,
+      "rule": false
+    },
+    {
+      "refno": "3_5",
+      "noun": "EQUI",
+      "name": "/P-201",
+      "owner": "3_2",
+      "order": 1,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null,
+      "dbnum": 7003,
+      "via": "2_13",
+      "secondary": true,
+      "rule": false
+    },
+    {
+      "refno": "1_6",
+      "noun": "VALV",
+      "name": "/PIPE-100/B1/V1",
+      "owner": "1_4",
+      "order": 2,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null,
+      "dbnum": 7001,
+      "via": "2_14",
+      "secondary": true,
+      "rule": false
+    }
+  ],
+  "unresolved": [
+    {
+      "via": "2_15",
+      "target": null,
+      "reason": "gpref_missing"
+    },
+    {
+      "via": "2_16",
+      "target": "9_1",
+      "reason": "db_not_in_mdb"
+    },
+    {
+      "via": "2_17",
+      "target": "1_99",
+      "reason": "target_missing"
+    }
+  ]
+}

@@ -7439,6 +7439,10 @@ mod tests {
             ("VALV", "/PIPE-100/B1/V1", r(1, 4), 0)
         } else if refno == r(3, 5) {
             ("EQUI", "/P-201", r(3, 2), 0)
+        } else if refno == r(1, 8) {
+            // 规则快照专用：`SCOSEL` 命中的 ZONE。它不在任何 GPITEM 上，只由规则算进来，
+            // 所以存储成员快照里不会出现这一行（两份基准的差别只在这里）。
+            ("ZONE", "/PIPE-100/Z1", r(1, 3), 0)
         } else {
             panic!("夹具里没有 {refno}")
         };
@@ -7453,15 +7457,125 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolved_children_of_a_gpset_match_the_group_contract() {
-        use crate::data_interface::direct_tree::{ResolvedChild, ResolvedChildren};
-        use crate::data_interface::group_membership::resolved_members_on;
+    /// 分组契约快照的求值域（内存版 `MdbScoselScope`）：`DESC` 文本表 + noun 表。
+    ///
+    /// 真库的 `scosel_scope` 是「逐库 `DbIndexes` 跨库并集」，这里把同一份语义压成两张
+    /// HashMap——契约快照要钉的是**响应形状**，不该为了它去读 98 个 DESI 库（单次建索引
+    /// 1.3 秒），更不能碰真库（本 feature 的 expectedBehavior 明写「不碰真库」）。
+    #[derive(Default)]
+    struct ContractScope {
+        texts: std::collections::HashMap<(u32, String), std::collections::HashSet<RefU64>>,
+        nouns: std::collections::HashMap<u32, std::collections::HashSet<RefU64>>,
+    }
 
-        let gpset = RefU64::from_two_nums(2, 11);
-        let resolved = resolved_members_on(&group_contract_store(), gpset).unwrap();
-        let layer = ResolvedChildren {
-            nodes: resolved
+    impl ContractScope {
+        fn with_text(mut self, attr_hash: u32, text: &str, refnos: &[RefU64]) -> Self {
+            self.texts
+                .insert((attr_hash, text.to_string()), refnos.iter().copied().collect());
+            self
+        }
+
+        fn with_noun(mut self, noun_hash: u32, refnos: &[RefU64]) -> Self {
+            self.nouns.insert(noun_hash, refnos.iter().copied().collect());
+            self
+        }
+    }
+
+    impl crate::data_interface::scosel_eval::ScoselScope for ContractScope {
+        fn refnos_with_attr_text(
+            &self,
+            attr_hash: u32,
+            text: &str,
+        ) -> std::collections::HashSet<RefU64> {
+            self.texts
+                .get(&(attr_hash, text.to_string()))
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn refnos_of_noun(&self, noun_hash: u32) -> std::collections::HashSet<RefU64> {
+            self.nouns.get(&noun_hash).cloned().unwrap_or_default()
+        }
+    }
+
+    /// 契约快照里 `ZONE` 的 noun hash（`library/scosel-semantics.md` §4）。
+    const CONTRACT_ZONE_HASH: u32 = 640_493;
+
+    /// 规则快照的内存夹具：在 [`group_contract_store`] 之上给 GPSET 2/11 挂一条 `SCOSEL`，
+    /// 并加一个**只由规则命中**的 ZONE 1/8（它不在任何 GPITEM 上）。
+    ///
+    /// 规则写两条，各有分工：
+    /// 1. `ALL ZONE WITH ( ATTRIB DESC OF ZONE EQ 'AREA01PIPE' )` —— 合法规则，命中 1/8，
+    ///    产出 `rule: true` / `via: null` 那一行；
+    /// 2. 属性 hash 用 `NAME`（639374）—— 求值器只认 `DESC`，这条记 `UnsupportedAttribute`，
+    ///    于是回执里多一条 `scosel_unsupported` 槽。VAL-CONTRACT-005 要求「unresolved 里若有
+    ///    规则槽，原因码是 scosel_unsupported / scosel_eval_failed」，不真的放一条规则槽进去，
+    ///    那一格就没有证据。
+    ///
+    /// 用 `encode` 生成字节而不是手写数组：手写一份等于在测试里放第二份布局真相
+    /// （`scosel.rs` 的 encode 有 27 条真实样本逐字往返作为证据）。
+    fn group_contract_rule_store() -> crate::data_interface::group_membership::fake_store::FakeStore
+    {
+        use crate::data_interface::scosel::{
+            Scosel, ScoselExpr, ScoselQualifier, ScoselRule, encode,
+        };
+        use crate::data_interface::scosel_eval::desc_attribute_hash;
+
+        let r = RefU64::from_two_nums;
+        let mut store = group_contract_store();
+        store.add(r(1, 8), "ZONE", &[]);
+        let desc_rule = ScoselRule {
+            attr: CONTRACT_ZONE_HASH as i32,
+            filter: ScoselExpr::StrEq(
+                Box::new(ScoselExpr::Attr {
+                    hash: desc_attribute_hash() as i32,
+                    tail: [1, 120, 0],
+                    qualifiers: vec![ScoselQualifier::Typed {
+                        words: vec![2, CONTRACT_ZONE_HASH as i32, 6, 1701],
+                    }],
+                }),
+                Box::new(ScoselExpr::Text("AREA01PIPE".into())),
+            ),
+        };
+        let name_rule = ScoselRule {
+            attr: CONTRACT_ZONE_HASH as i32,
+            filter: ScoselExpr::StrEq(
+                Box::new(ScoselExpr::Attr {
+                    hash: 639_374, // NAME：求值器只认 DESC，这条必然进 unsupported
+                    tail: [1, 120, 0],
+                    qualifiers: Vec::new(),
+                }),
+                Box::new(ScoselExpr::Text("PIPE-100".into())),
+            ),
+        };
+        let rule = Scosel {
+            classes: Vec::new(),
+            rules: vec![desc_rule, name_rule],
+        };
+        store.scosel(r(2, 11), &encode(&rule));
+        store
+    }
+
+    /// 规则快照的求值域：`DESC == AREA01PIPE` 与 `noun == ZONE` 都指向 1/8，
+    /// 取交之后只留它（1/3 也是 ZONE，但 DESC 不匹配，正是交集该筛掉的那个）。
+    fn group_contract_rule_scope() -> ContractScope {
+        use crate::data_interface::scosel_eval::desc_attribute_hash;
+
+        let r = RefU64::from_two_nums;
+        ContractScope::default()
+            .with_text(desc_attribute_hash(), "AREA01PIPE", &[r(1, 8)])
+            .with_noun(CONTRACT_ZONE_HASH, &[r(1, 3), r(1, 8)])
+    }
+
+    /// [`ResolvedChildren`] 的搬运：成员按序建行，`via` / `rule` 照成员自己的语义。
+    /// 与 `DirectTreeService::read_resolved_children` 里那段搬运同形。
+    fn contract_layer(
+        members: crate::data_interface::group_membership::GroupMembers,
+    ) -> crate::data_interface::direct_tree::ResolvedChildren {
+        use crate::data_interface::direct_tree::{ResolvedChild, ResolvedChildren};
+
+        ResolvedChildren {
+            nodes: members
                 .members
                 .iter()
                 .enumerate()
@@ -7471,8 +7585,17 @@ mod tests {
                     rule: member.is_rule(),
                 })
                 .collect(),
-            unresolved: resolved.unresolved,
-        };
+            unresolved: members.unresolved,
+        }
+    }
+
+    #[test]
+    fn resolved_children_of_a_gpset_match_the_group_contract() {
+        use crate::data_interface::group_membership::resolved_members_on;
+
+        let gpset = RefU64::from_two_nums(2, 11);
+        let resolved = resolved_members_on(&group_contract_store(), gpset).unwrap();
+        let layer = contract_layer(resolved);
         let body = resolved_children_body(gpset, &layer, group_contract_dbnum).unwrap();
         let reasons: Vec<&str> = body["unresolved"]
             .as_array()
@@ -7492,6 +7615,124 @@ mod tests {
             "{body}"
         );
         assert_group_contract("tree-children-resolved-gpset.json", &body);
+    }
+
+    /// VAL-CONTRACT-004：开关**关**时的基准必须与现有 `tree-children-resolved-gpset.json` 逐字相同。
+    ///
+    /// 这条不是重复上一用例，而是钉住「开关关 = 逐字不变」这个不变量：驱动的是**带规则**的
+    /// 夹具（GPSET 2/11 上有非空 `SCOSEL`、求值域也给了），只有开关是关的。若哪天判据顺序
+    /// 被改动（比如开关判据被挪到读规则之后），这一条会立刻变红。
+    ///
+    /// 两份基准文件内容相同是**有意为之**：`tree-children-resolved-gpset-switch-off.json`
+    /// 与 `tree-children-resolved-gpset.json` 逐字相同，差异只在文件名与它背后的场景。
+    #[test]
+    fn resolved_children_with_the_switch_off_match_the_group_contract_word_for_word() {
+        use crate::data_interface::group_membership::{
+            resolved_members_on, resolved_members_with_rules,
+        };
+
+        let r = RefU64::from_two_nums;
+        let gpset = r(2, 11);
+        let scope = group_contract_rule_scope();
+
+        // 开关关：即使夹具带规则、即使传了 scope，也不许追加规则成员。
+        let body = {
+            let _off = crate::options::GroupScoselOverride::set(false);
+            let resolved =
+                resolved_members_with_rules(&group_contract_rule_store(), gpset, Some(&scope))
+                    .unwrap();
+            assert_eq!(
+                resolved,
+                resolved_members_on(&group_contract_store(), gpset).unwrap(),
+                "开关关时必须与纯存储成员解析逐字相同（多一个规则成员就说明判据顺序错了）"
+            );
+            assert!(
+                resolved.members.iter().all(|member| !member.is_rule()),
+                "开关关时不许出现规则成员：{:?}",
+                resolved.members
+            );
+            resolved_children_body(gpset, &contract_layer(resolved), group_contract_dbnum).unwrap()
+        };
+
+        assert_group_contract("tree-children-resolved-gpset-switch-off.json", &body);
+
+        // 两份基准必须逐字相同（除文件名）——VAL-CONTRACT-004 的判定就是这条。
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/group-contract");
+        let read = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .replace("\r\n", "\n")
+        };
+        assert_eq!(
+            read("tree-children-resolved-gpset-switch-off.json"),
+            read("tree-children-resolved-gpset.json"),
+            "开关关的基准必须与现有分组契约基准逐字相同"
+        );
+    }
+
+    /// VAL-CONTRACT-003 / 005：开关**开**时的基准钉住规则成员的三键形状与规则槽原因码。
+    ///
+    /// 夹具里 GPSET 2/11 同时有存储成员（三条 GPITEM 链 + 三个坏槽）与 `SCOSEL` 规则，
+    /// 于是这一份回执同时覆盖四件事：
+    /// 1. 存储成员在前、`via` 是 GPITEM、`rule: false`（与开关关基准同形）；
+    /// 2. 规则命中行追加在后，`via: null` + `secondary: true` + `rule: true`；
+    /// 3. 三条 GPREF 原因码原样保留（不被规则槽复用）；
+    /// 4. 规则里有一条非 `DESC` 属性的规则，产出 `scosel_unsupported` 槽——规则槽的原因码
+    ///    只能是 `scosel_unsupported` / `scosel_eval_failed` 这两个之一。
+    #[test]
+    fn resolved_children_of_a_gpset_with_rules_match_the_group_contract() {
+        use crate::data_interface::group_membership::resolved_members_with_rules;
+
+        let r = RefU64::from_two_nums;
+        let gpset = r(2, 11);
+        let scope = group_contract_rule_scope();
+
+        let resolved = {
+            let _on = crate::options::GroupScoselOverride::set(true);
+            resolved_members_with_rules(&group_contract_rule_store(), gpset, Some(&scope)).unwrap()
+        };
+        let rule_members: Vec<RefU64> = resolved
+            .members
+            .iter()
+            .filter(|member| member.is_rule())
+            .map(|member| member.element())
+            .collect();
+        assert_eq!(
+            rule_members,
+            vec![r(1, 8)],
+            "规则只应命中 ZONE 1/8（1/3 虽是 ZONE 但 DESC 不匹配，交集把它筛掉）"
+        );
+
+        let body = resolved_children_body(gpset, &contract_layer(resolved), group_contract_dbnum)
+            .unwrap();
+
+        // 规则行的三键：`via` 必须在且为 null，`secondary: true`，`rule: true`。
+        let rule_row = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["refno"] == json!("1_8"))
+            .unwrap_or_else(|| panic!("规则成员 1_8 不在回执里：{body}"));
+        assert_eq!(rule_row["via"], Value::Null, "{body}");
+        assert_eq!(rule_row["secondary"], json!(true), "{body}");
+        assert_eq!(rule_row["rule"], json!(true), "{body}");
+
+        // 规则槽的原因码只能是 scosel_unsupported / scosel_eval_failed。
+        let rule_reasons: Vec<&str> = body["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|slot| slot["reason"].as_str())
+            .filter(|reason| reason.starts_with("scosel_"))
+            .collect();
+        assert_eq!(
+            rule_reasons,
+            ["scosel_unsupported"],
+            "非 DESC 属性的规则必须落成 scosel_unsupported 槽：{body}"
+        );
+
+        assert_group_contract("tree-children-resolved-gpset-with-rules.json", &body);
     }
 
     /// VAL-CONTRACT-001 / 002 / 003：同一份回执里三种行的三键形状。
