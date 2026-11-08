@@ -276,17 +276,48 @@ pub(crate) async fn note_equip_floor_miss(target: &str, noun: &str, reason: &str
 /// 与 [`note_success`] 同一条纪律：先播种，只对**表里确实有行**的目标发 DELETE，
 /// 否则每轮几千台正常设备都要陪跑一条 DELETE。
 pub(crate) async fn clear_equip_floor_miss(target: &str) -> anyhow::Result<()> {
-    seed().await?;
-    let key = known_key(EQUIP_FLOOR_MISS, target);
-    if !known().as_ref().is_some_and(|set| set.contains(&key)) {
+    clear_equip_floor_misses(std::slice::from_ref(&target.to_string())).await
+}
+
+/// 批量销账：一次 `DELETE ... WHERE target IN [...]` 替掉逐条 DELETE。
+///
+/// 阀门侧每轮要对 500+ 台已挂边的阀门销账，逐条一个请求在真库实测要 2～3 秒；
+/// 合并成一条后降到几十毫秒。仍然先过 [`KNOWN`]：不在册的目标不点名，
+/// 语句长度只跟「账本里真有的行」走。
+pub(crate) async fn clear_equip_floor_misses(targets: &[String]) -> anyhow::Result<()> {
+    if targets.is_empty() {
         return Ok(());
     }
+    seed().await?;
+    let listed: Vec<&String> = {
+        let guard = known();
+        targets
+            .iter()
+            .filter(|target| {
+                guard
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&known_key(EQUIP_FLOOR_MISS, target)))
+            })
+            .collect()
+    };
+    if listed.is_empty() {
+        return Ok(());
+    }
+    let list = listed
+        .iter()
+        .map(|target| format!("'{}'", escape_surql_str(target)))
+        .collect::<Vec<_>>()
+        .join(",");
     SUL_DB
-        .query(render_clear_kind(EQUIP_FLOOR_MISS, target))
+        .query(format!(
+            "DELETE {TABLE} WHERE kind = '{EQUIP_FLOOR_MISS}' AND target IN [{list}];"
+        ))
         .await?
         .check()?;
     if let Some(set) = known().as_mut() {
-        set.remove(&key);
+        for target in &listed {
+            set.remove(&known_key(EQUIP_FLOOR_MISS, target));
+        }
     }
     Ok(())
 }
@@ -448,8 +479,14 @@ mod tests {
     fn the_two_miss_reasons_stay_distinguishable() {
         let no_geom = render_equip_floor_miss_upsert("pe:1_1", "EQUI", "no_child_geometry");
         let no_floor = render_equip_floor_miss_upsert("pe:1_1", "EQUI", "no_floor_below");
-        assert!(no_geom.contains("last_error = 'no_child_geometry'"), "{no_geom}");
-        assert!(no_floor.contains("last_error = 'no_floor_below'"), "{no_floor}");
+        assert!(
+            no_geom.contains("last_error = 'no_child_geometry'"),
+            "{no_geom}"
+        );
+        assert!(
+            no_floor.contains("last_error = 'no_floor_below'"),
+            "{no_floor}"
+        );
         assert_ne!(no_geom, no_floor);
     }
 

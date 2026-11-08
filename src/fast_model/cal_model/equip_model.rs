@@ -1046,6 +1046,74 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 一次 SQL 里点名多少台设备去取子件 aabb。
+///
+/// 全量补边以前是逐台一次 SQL（热库 18 台尚可，冷库 1165 台就是 1165 次串行 RTT）。
+/// 一批 200 台时语句约 60KB，实测 8009 单请求 200～400ms，比逐台快一个数量级。
+const CHILD_AABB_BATCH: usize = 200;
+
+/// 批量读一批设备的子件 aabb（一层子件 + 两层孙件，滤掉 `NONE`）。
+///
+/// 返回 `(设备 → 子件盒列表)`。**只把取到结果（含空数组）的设备放进返回值**：
+/// 查询里没出现的设备说明它在库里没有 `pe` 行，调用方据此区分「读不到」与「没几何」。
+///
+/// 逐台查询的版本在 `cal_equip_nearest_floor` 里被换成这个，原因见 [`CHILD_AABB_BATCH`]。
+async fn child_aabbs_batch(
+    equips: &[RefnoEnum],
+) -> anyhow::Result<HashMap<RefnoEnum, Vec<Aabb>>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: RefnoEnum,
+        aabbs: Vec<Aabb>,
+    }
+    let mut result = HashMap::new();
+    for chunk in equips.chunks(CHILD_AABB_BATCH) {
+        let keys = pe_keys(chunk);
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, {} AS aabbs FROM [{keys}];",
+                child_aabbs_expr("$this.id")
+            ))
+            .await?
+            .check()?;
+        let rows: Vec<Row> = response.take(0)?;
+        for row in rows {
+            result.insert(row.id, row.aabbs);
+        }
+    }
+    Ok(result)
+}
+
+/// 一批「设备 → 楼板 + 距离」，按 [`CHILD_AABB_BATCH`] 规模分块写成一个事务。
+///
+/// 以前全量补边把所有 `relate` 拼成一条语句发一次（冷库 1165 条约 200KB），单请求
+/// 体积过大时服务端会拒绝整条、一条边都写不进去。分块后单请求可控，块内用
+/// `BEGIN/COMMIT` 保证「要么这批都写进去、要么都不写」，重跑幂等。
+///
+/// 每块先 `DELETE` 这些设备的旧边再 `RELATE`，与 [`relink_floor`] 同语义：一台设备
+/// 只允许有一条最近楼板边。
+const EDGE_WRITE_BATCH: usize = 200;
+
+async fn write_floor_edges(edges: &[(RefnoEnum, RefnoEnum, f32)]) -> anyhow::Result<()> {
+    for chunk in edges.chunks(EDGE_WRITE_BATCH) {
+        let mut sql = String::from("BEGIN TRANSACTION;");
+        for (equip, floor, dist) in chunk {
+            let e = equip.to_pe_key();
+            sql.push_str(&format!(
+                "DELETE {e}->nearest_relate; RELATE {e}->nearest_relate->{} SET dist = {dist};",
+                floor.to_table_key("FLOOR")
+            ));
+        }
+        sql.push_str("COMMIT TRANSACTION;");
+        SUL_DB
+            .query(sql)
+            .await
+            .and_then(|response| response.check())
+            .map_err(|error| anyhow::anyhow!("写入 nearest_relate 失败: {error}"))?;
+    }
+    Ok(())
+}
+
 //取得设备下的所有aabb，然后取下面的点到楼板的最近距离
 pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
     clear_linked_equip_floor_misses().await;
@@ -1054,40 +1122,21 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut equip_sql = String::new();
+    // 子件 aabb 按批读：逐台一次 SQL 时冷库 1165 台就是 1165 次串行 RTT。
+    //
+    // 读法（`child_aabbs_expr`）的由来见该函数：`->inst_relate` 是错写法（`inst_relate`
+    // 是普通表不是从 `pe` 出去的边），孙件必须写成 `<-pe_owner<-pe<-pe_owner`（连写两次
+    // `<-pe_owner` 时第二跳从边记录出发恒为空），最外层必须 `array::filter(..., |$v| $v != NONE)`
+    // （`parry3d::Aabb` 的反序列化遇到一个 `NONE` 整个数组就失败）。
+    let aabbs_by_equip = child_aabbs_batch(&equips).await?;
+
+    let mut edges: Vec<(RefnoEnum, RefnoEnum, f32)> = Vec::new();
     for equip in equips {
-        // 2026-11-01 修：`->inst_relate` 是**错的边写法**。`inst_relate` 是普通表
-        // （`inst_relate:⟨ref0_ref1⟩`），不是从 `pe` 出去的边，所以
-        // `<-pe_owner<-pe->inst_relate` 恒为空——真库实测该 EQUI 的 13 个子件
-        // aabb 一条都取不到（原写法返回 0 条，修后 13 条）。同一个坑
-        // `fn::get_world_pos` 在 2026-10-29 已经修过，这里是漏掉的一处。
-        //
-        // 读法改成 `array::map(... |$c| type::thing('inst_relate', record::id($c)).aabb.d)`：
-        // 一层是子件、两层是孙件，与原来那两段子查询的范围一致（见 `child_aabbs_raw_expr`）。
-        //
-        // 2026-11-01 修：最外层必须 `array::filter(..., |$v| $v != NONE)`。
-        // `parry3d::Aabb` 的 `Deserialize` 是严格的对象结构体，数组里混进一个
-        // `NONE` 就会让**整个** `Vec<Aabb>` 反序列化失败（实测：
-        // `[{mins,..},{mins,..}]` 成功 2 个；`[{mins,..}, NONE, {mins,..}]` 直接
-        // `expected an object-like struct named Aabb, found None`）。
-        //
-        // 而设备子件里缺 aabb 是常态（没有几何的 SUBE/NOZZ 子件、只存在于历史
-        // 数据里的构件）。原来 `let Ok(aabbs) = ... else { continue }` 会把这台
-        // 设备整个静默跳过——真库实测 1165 台里 525 台是这样被丢掉的，它们
-        // 子件 aabb 大多齐全（如 pe:24381_100725 的 38 个子件全有），只是其中
-        // 掺了一两个 NONE。过滤掉 NONE 后这些设备就能正常参与计算。
         let e = equip.to_pe_key();
-        let sql = format!("SELECT VALUE {} FROM ONLY {e};", child_aabbs_expr(&e));
-        let mut response = SUL_DB.query(sql).await?.check()?;
-        // 不要再静默 `continue`：反序列化失败以前意味着「这台设备被悄悄丢掉」，
-        // 排查时看不到任何线索。现在过滤过 NONE 且外层已过滤掉已有边的设备，
-        // 真失败就是数据异常，得留痕。
-        let aabbs = match response.take::<Vec<Aabb>>(0) {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!(equip = ?equip, error = %err, "读取设备子件 aabb 失败，跳过");
-                continue;
-            }
+        let Some(aabbs) = aabbs_by_equip.get(&equip) else {
+            // 库里没有这台 `pe` 行（刚被删 / 权限问题）。以前这里会静默跳过。
+            tracing::warn!(equip = ?equip, "读取设备子件 aabb 失败，跳过");
+            continue;
         };
         if aabbs.is_empty() {
             tracing::debug!(equip = ?equip, "设备无子件 aabb，跳过");
@@ -1095,27 +1144,15 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
             continue;
         }
         // 逐子件底角打射线，取最近的一块楼板（合并盒四角见 `nearest_floor_below` 的说明）。
-        match nearest_floor_below(&aabbs).await {
+        match nearest_floor_below(aabbs).await {
             Some((nearest, dist)) => {
                 clear_floor_miss(&e).await;
-                equip_sql.push_str(&format!(
-                    "relate {}->nearest_relate->FLOOR:{} set dist={};",
-                    equip.to_pe_key(),
-                    nearest.to_string(),
-                    dist
-                ))
+                edges.push((equip, nearest, dist));
             }
             None => note_floor_miss(&e, "EQUI", "no_floor_below").await,
         }
     }
-    if !equip_sql.is_empty() {
-        // 同上：`unwrap()` 在启动序列里等于「一条边写不进去就杀进程」。
-        SUL_DB
-            .query(equip_sql)
-            .await
-            .and_then(|response| response.check())
-            .map_err(|error| anyhow::anyhow!("写入 nearest_relate 失败: {error}"))?;
-    }
+    write_floor_edges(&edges).await?;
     Ok(())
 }
 
@@ -1438,8 +1475,12 @@ mod equip_scan_tests {
             "子查询过滤会让已挂边的设备返回 None，进而反序列化失败打出假告警"
         );
         assert!(
-            body.contains("FROM ONLY {e};"),
-            "读 aabb 用 FROM ONLY，与 relink_floor 同口径，不产生 None 分支"
+            body.contains("child_aabbs_batch(&equips)"),
+            "子件 aabb 必须按批读，逐台一次 SQL 在冷库是 1165 次串行 RTT"
+        );
+        assert!(
+            body.contains("write_floor_edges(&edges)"),
+            "边必须走分块事务写入，单条 SQL 拼 1165 条 relate 会被服务端整条拒绝"
         );
 
         let sql = unlinked_live_equips_sql();
