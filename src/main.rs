@@ -175,11 +175,19 @@ struct RvmCheckArgs {
     /// 子进程是否写 `generated.rvm`（--emit-rvm=false 仅在 --fused-compare 下成立）。
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     emit_rvm: bool,
-    /// 流式对拍的并发核对窗口（MB）：待判成员攒满即并发判一批。
-    /// 内存/性能旋钮——大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
-    /// 0 = 默认 256。
-    #[arg(long, default_value_t = 0, value_name = "MB")]
-    compare_window_mb: usize,
+    /// 比对内存预算（MB），按根算：只管比对，不含生成占的内存。0 = 不设预算。
+    ///
+    /// 现状：这个值目前**只映射到 vendor 的核对窗口**（`RvmExportOptions.compare_window_bytes`），
+    /// 也就是待判成员攒满即并发判一批的那个窗口；预算切分（按预算切批）与超预算拒收都还没实现，
+    /// 要等 vendor 暴露摘要大小与记账。所以 0 的当前行为是：核对窗口取 256MB，负载全在内存。
+    /// 旧名 `--compare-window-mb` 保留作 alias，脚本不必立刻改。
+    #[arg(
+        long = "compare-memory-mb",
+        alias = "compare-window-mb",
+        default_value_t = 0,
+        value_name = "MB"
+    )]
+    compare_memory_mb: usize,
     /// 池级元素缓存上限（条）：跨元素复用解析好的库记录，0 = 默认 200_000。
     /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
     #[arg(long, default_value_t = 0, value_name = "N")]
@@ -347,7 +355,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
             compare_baseline: args.compare_baseline.clone(),
             emit_rvm: args.emit_rvm,
-            compare_window_mb: args.compare_window_mb,
+            compare_memory_mb: args.compare_memory_mb,
             element_cache: args.element_cache,
             emit_compare: args.emit_compare,
             threads: args.threads,
@@ -372,7 +380,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
         fused_compare: args.fused_compare,
         emit_rvm: args.emit_rvm,
-        compare_window_mb: args.compare_window_mb,
+        compare_memory_mb: args.compare_memory_mb,
         element_cache: args.element_cache,
         emit_compare: args.emit_compare,
         threads: args.threads,

@@ -87,9 +87,11 @@ pub struct BatchOptions {
     /// 跑完把每根的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`（[`super::store`]）。
     /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，自动跳过。
     pub store: bool,
-    /// 流式对拍的并发核对窗口（MB）：0 = vendor 默认 256。内存/性能旋钮——
-    /// 大窗口并发摊得开、驻留多；小窗口省内存、核对近串行。
-    pub compare_window_mb: usize,
+    /// 比对内存预算（MB），按根算：只管比对，不含生成占的内存。0 = 不设预算。
+    /// 现状：只映射到 vendor 的核对窗口（`FusedCompare.window_bytes`），也就是待判成员
+    /// 攒满即并发判一批的那个窗口；按预算切批与超预算拒收都还没实现，要等 vendor 暴露
+    /// 摘要大小与记账。所以 0 的当前行为是：核对窗口取 vendor 默认 256MB，负载全在内存。
+    pub compare_memory_mb: usize,
     /// 池级元素缓存上限（条）：0 = vendor 默认 200_000。
     /// 大缓存换解析速度、多占驻留；小缓存省内存、满了要重解析。
     pub element_cache: usize,
@@ -111,8 +113,8 @@ pub struct ChildOptions {
     pub compare_baseline: Option<PathBuf>,
     /// 是否写 `generated.rvm`（false = 纯流式对拍模式）。
     pub emit_rvm: bool,
-    /// 与父进程同一口径的内存/性能旋钮（0 = vendor 默认）。
-    pub compare_window_mb: usize,
+    /// 与父进程同一口径的比对内存预算（0 = 不设预算，vendor 默认核对窗口 256MB）。
+    pub compare_memory_mb: usize,
     pub element_cache: usize,
     /// 是否落 `compare.json` 全量报告（false = 结果只入库）。
     pub emit_compare: bool,
@@ -519,7 +521,7 @@ pub fn run_child(opts: &ChildOptions) -> Result<()> {
         let fused = opts.compare_baseline.as_ref().map(|baseline| FusedCompare {
             baseline: baseline.clone(),
             emit_rvm: opts.emit_rvm,
-            window_bytes: opts.compare_window_mb * 1024 * 1024,
+            window_bytes: opts.compare_memory_mb * 1024 * 1024,
             emit_compare: opts.emit_compare,
         });
         generate_ours(&spec, &node, &dir, fused.as_ref(), opts.element_cache)
@@ -670,6 +672,21 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         baseline_source,
         out_root.display()
     );
+    // 比对内存台账：每根预算 × 并发根数（`--jobs`）= 总量。预算 0 时没有上限可乘，
+    // 只说清当前行为（预算只映射到 vendor 的核对窗口，按预算切批与超预算拒收还没实现）。
+    if opts.compare_memory_mb == 0 {
+        println!(
+            "比对内存：每根不设预算（核对窗口 256MB，负载全在内存），jobs {} → 总量不设上限",
+            opts.jobs
+        );
+    } else {
+        println!(
+            "比对内存：每根 {} MB，jobs {} → 总量 {} MB",
+            opts.compare_memory_mb,
+            opts.jobs,
+            opts.compare_memory_mb.saturating_mul(opts.jobs)
+        );
+    }
     for job in &jobs {
         println!(
             "  {} {} {} {}",
@@ -1210,7 +1227,7 @@ fn process_root(
             .map(|baseline| FusedCompare {
                 baseline,
                 emit_rvm: opts.emit_rvm,
-                window_bytes: opts.compare_window_mb * 1024 * 1024,
+                window_bytes: opts.compare_memory_mb * 1024 * 1024,
                 emit_compare: opts.emit_compare,
             });
         let (generation, measured) = if opts.in_process {
@@ -1482,8 +1499,8 @@ fn generate_in_child(
             .arg(fused.emit_rvm.to_string());
     }
     command
-        .arg("--compare-window-mb")
-        .arg(opts.compare_window_mb.to_string())
+        .arg("--compare-memory-mb")
+        .arg(opts.compare_memory_mb.to_string())
         .arg("--element-cache")
         .arg(opts.element_cache.to_string())
         .arg("--emit-compare")
@@ -2030,7 +2047,7 @@ mod tests {
             fused_compare: false,
             emit_rvm: true,
             store: false,
-            compare_window_mb: 0,
+            compare_memory_mb: 0,
             element_cache: 0,
             emit_compare: false,
             threads: 0,
