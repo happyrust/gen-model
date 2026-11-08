@@ -5015,7 +5015,7 @@ mod tests {
                 .find("refresh_room_reference_before_task(job.dbnum)")
                 .unwrap_or_else(|| panic!("{label}的模型半边开工前必须对齐常驻房间模型: {body}"));
             let side_actions = body
-                .find("run_model_side_actions(mgr, &side_actions)")
+                .find("run_model_side_actions(env, mgr, &side_actions)")
                 .unwrap_or_else(|| panic!("{label}: 位姿 / 删除 / 级联"));
             let worklist = body
                 .find("run_unit_worklist(")

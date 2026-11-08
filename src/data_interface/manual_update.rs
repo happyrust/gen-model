@@ -56,6 +56,7 @@ use crate::data_interface::db_file_header::DbBasicInfo;
 use crate::data_interface::batch_scheduler::{
     ManualEnqueueOptions, ManualEnqueueReceipt, ShadowedCandidate,
 };
+use crate::data_interface::batch_worker::TaskEnv;
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
@@ -184,7 +185,15 @@ fn needs_initial_load(
 /// `pub(crate)`：worker 的冻结点开窗预判（`batch_worker::batch_reroutes_to_initial_load`）
 /// 与执行体路由必须用同一个探针，否则「开不开暂存窗口」与「走不走基线」会各判各的。
 pub(crate) async fn dbnum_has_any_pe_row(dbnum: u32) -> anyhow::Result<bool> {
-    let mut response = SUL_DB
+    dbnum_has_any_pe_row_on(&SUL_DB, dbnum).await
+}
+
+/// 同 [`dbnum_has_any_pe_row`]，探的是 `db` 那个库。
+pub(crate) async fn dbnum_has_any_pe_row_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+) -> anyhow::Result<bool> {
+    let mut response = db
         .query(format!(
             "SELECT VALUE record::id(id) FROM pe WHERE dbnum = {dbnum} LIMIT 1;"
         ))
@@ -1452,20 +1461,26 @@ async fn fetch_ref_rev_edges_on(
 /// 空集与「这个元素真的没有引用者」长得一模一样——而后者会让引用它的根静默不重生成。
 /// 报错让调用方走既有的退化路：`resolve_unit_rollup` 置 `cascade_deferred`、
 /// `expand_live_reverse_cascade` 让那条工作项失败，两条都是看得见的。
+///
+/// `face` 必须是 `db` 那个库的形态：形态决定它维不维护 `ref_rev`。
 async fn fetch_ref_rev_edges(
+    face: crate::options::DataFace,
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>> {
     anyhow::ensure!(
-        !crate::options::data_face().is_read_through(),
+        !face.is_read_through(),
         "ref_rev 在读透形态下不维护（ADR-063），不能当反向查询的源；反查请走文件引用表"
     );
-    fetch_ref_rev_edges_on(&SUL_DB, seeds).await
+    fetch_ref_rev_edges_on(db, seeds).await
 }
 
 pub(crate) async fn load_ref_reversal(
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
-    Ok(assemble_ref_reversal(&fetch_ref_rev_edges(seeds).await?))
+    Ok(assemble_ref_reversal(
+        &fetch_ref_rev_edges(crate::options::data_face(), &SUL_DB, seeds).await?,
+    ))
 }
 
 /// Catalogue/spec reference chains (`TABITE→SPCO→SCOM→BRAN`) are only a few hops
@@ -1560,7 +1575,9 @@ pub(crate) async fn load_ref_reversal_closure(
         seeds,
         MAX_REVERSE_CASCADE_REFERRERS,
         Some(MAX_REVERSE_CASCADE_HOPS),
-        |frontier| async move { fetch_ref_rev_edges(&frontier).await },
+        |frontier| async move {
+            fetch_ref_rev_edges(crate::options::data_face(), &SUL_DB, &frontier).await
+        },
     )
     .await
 }
@@ -1658,6 +1675,14 @@ pub(crate) async fn load_base_graph(
     seeds: HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
     collect_base_graph(seeds, fetch_base_graph_nodes).await
+}
+
+/// 同 [`load_base_graph`]，走的是 `db` 那个库的 PE/OWNER 图。
+async fn load_base_graph_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    seeds: HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
+    collect_base_graph(seeds, |frontier| fetch_base_graph_nodes_on(db, frontier)).await
 }
 
 /// Delivery-unit accumulator (internal to [`build_unit_rollup`]).
@@ -2078,13 +2103,15 @@ async fn resolve_report_rollups(
 /// DICT / …). Exclusion set on purpose: a row with a missing db_type keeps the
 /// conservative design-side treatment, so a legacy watermark record can only
 /// over-regenerate, never drop a cascade root.
-async fn load_non_design_dbnums() -> anyhow::Result<HashSet<u32>> {
+async fn load_non_design_dbnums_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<HashSet<u32>> {
     #[derive(Deserialize)]
     struct Row {
         dbnum: Option<u32>,
     }
     let table = crate::data_interface::dbnum_state::WATERMARK_TABLE;
-    let mut response = SUL_DB
+    let mut response = db
         .query(format!(
             "SELECT dbnum FROM {table} WHERE db_type != NONE AND db_type != '' \
              AND db_type != 'DESI';"
@@ -2115,12 +2142,6 @@ pub(crate) fn referrer_is_design(dbnum: Option<u32>, non_design_dbnums: &HashSet
 ///
 /// 查不到记录、或记录上没有这个字段的引用者不出现在返回值里，由
 /// [`referrer_is_design`] 按「未知 → 保守保留」处理。
-async fn load_referrer_dbnums(
-    referrers: &HashSet<RefnoEnum>,
-) -> anyhow::Result<HashMap<RefnoEnum, u32>> {
-    load_referrer_dbnums_on(&SUL_DB, referrers).await
-}
-
 async fn load_referrer_dbnums_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     referrers: &HashSet<RefnoEnum>,
@@ -2174,6 +2195,7 @@ async fn load_referrer_dbnums_on(
 /// would otherwise be mistaken for a normal-granularity root and enqueue
 /// junk regen work that fails forever.
 pub(crate) async fn expand_live_reverse_cascade(
+    env: TaskEnv<'_>,
     seed: RefnoEnum,
 ) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
     use crate::data_interface::generation_root::{
@@ -2181,17 +2203,17 @@ pub(crate) async fn expand_live_reverse_cascade(
     };
 
     let unit_types = configured_delivery_unit_types();
-    let non_design_dbnums = load_non_design_dbnums().await?;
+    let non_design_dbnums = load_non_design_dbnums_on(env.db).await?;
     let (reversal, _) = collect_ref_reversal_closure_with_limit(
         &HashSet::from([seed]),
         usize::MAX,
         None,
-        |frontier| async move { fetch_ref_rev_edges(&frontier).await },
+        |frontier| async move { fetch_ref_rev_edges(env.data_face, env.db, &frontier).await },
     )
     .await?;
     let referrers = reversal.values().flatten().copied().collect::<HashSet<_>>();
-    let graph = load_base_graph(referrers.clone()).await?;
-    let referrer_dbnums = load_referrer_dbnums(&referrers).await?;
+    let graph = load_base_graph_on(env.db, referrers.clone()).await?;
+    let referrer_dbnums = load_referrer_dbnums_on(env.db, &referrers).await?;
     let mut unresolved: Vec<String> = Vec::new();
     let mut roots = BTreeMap::new();
 
@@ -3490,6 +3512,34 @@ impl AiosDBManager {
         file_latest_sesno: i32,
         model: crate::data_interface::dbnum_initialize::ModelHalf,
     ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
+        self.initialize_dbnum_baseline_in(
+            TaskEnv::process(),
+            project,
+            dbnum,
+            file_name,
+            file_path,
+            extract_parent,
+            db_type,
+            file_latest_sesno,
+            model,
+        )
+        .await
+    }
+
+    /// 同 [`Self::initialize_dbnum_baseline`]：身份门、水位与幂等收口读写 `env.db`；计数、清库与
+    /// 初始化编排仍走本进程的库。
+    pub(crate) async fn initialize_dbnum_baseline_in(
+        &self,
+        env: TaskEnv<'_>,
+        project: &str,
+        dbnum: u32,
+        file_name: &str,
+        file_path: &std::path::Path,
+        extract_parent: Option<&std::path::Path>,
+        db_type: &str,
+        file_latest_sesno: i32,
+        model: crate::data_interface::dbnum_initialize::ModelHalf,
+    ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
         use crate::data_interface::dbnum_initialize::{
             InitializationOutcome, InitializationRequest, ModelHalf, baseline_counts,
             clear_model_face_before_initial, initialize,
@@ -3503,7 +3553,8 @@ impl AiosDBManager {
         // 都定位不到（2026-08-13）。身份裁决仍是基线的硬门：阻断异常不得借
         // 基线覆盖旧身份，回退必须经共享队列进入 worker 冻结点复核和清库。
         match self
-            .scan_and_check_file(
+            .scan_and_check_file_on(
+                env.db,
                 project,
                 file_path,
                 file_name,
@@ -3523,7 +3574,7 @@ impl AiosDBManager {
             ),
         }
 
-        let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
+        let applied_sesno = DbnumState::applied_sesno_on(env.db, dbnum).await?;
         let (mut count, root_count) = baseline_counts(dbnum).await?;
         if baseline_has_uncommitted_rows(count, applied_sesno) {
             // 半截基线只有一种清法（ADR-071 S5，d-300）：没有「预备中的初始化 run」可认领它。
@@ -3567,7 +3618,8 @@ impl AiosDBManager {
         }
         // 已有行、水位也在——只有规格工具重复点名一个已建基线的库才走到这里：不重解析、不动模型，
         // 只把这一版的水位与空基线凭据再收口一次（单调 `math::max`，幂等）。
-        crate::data_interface::increment_tail::finalize_baseline(
+        crate::data_interface::increment_tail::finalize_baseline_on(
+            env.db,
             dbnum,
             file_latest_sesno,
             target_time.as_deref(),
@@ -5019,6 +5071,7 @@ impl AiosDBManager {
 
     pub(crate) async fn execute_one_dbnum(
         &self,
+        env: TaskEnv<'_>,
         project: &str,
         cand: &FileCandidate,
         previous_observed_sesno: i32,
@@ -5074,7 +5127,7 @@ impl AiosDBManager {
         // 故障就把没应用的窗口伪装成已完成——水位不动、无人重试、面板全绿。
         // Skipped 只留给判得出结论的主动裁决（阻断异常、排除）。
         Self::stage(dbnum, "identity_check", "复核文件身份与水位");
-        let verdict = match DbnumState::classify_scan(&obs).await {
+        let verdict = match DbnumState::classify_scan_on(env.db, &obs).await {
             Ok(verdict) => verdict,
             Err(error) => {
                 return (
@@ -5102,7 +5155,7 @@ impl AiosDBManager {
             }
         };
         println!("dbnum={dbnum} 阶段完成: 文件身份复核");
-        if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
+        if let Err(e) = DbnumState::record_observation_on(env.db, &obs, &verdict).await {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
         let mut applied = verdict.applied_sesno();
@@ -5153,7 +5206,7 @@ impl AiosDBManager {
                 &format!("{reason}，按 ADR-021 整库清空重建"),
             );
             let purge_geometry =
-                crate::data_interface::storage_upgrade::purges_geometry(dbnum).await;
+                crate::data_interface::storage_upgrade::purges_geometry_on(env.db, dbnum).await;
             let wiped = if purge_geometry {
                 crate::data_interface::fast_delete::wipe_dbnum_for_upgrade(dbnum).await
             } else {
@@ -5238,7 +5291,7 @@ impl AiosDBManager {
         // 才付这一次存在性查询；读失败必须 Failed，不许猜（吞成「没有」会整库
         // 重建一个正常大库，吞成「有」会让缺口继续静默）。
         let has_any_data = if applied > 0 && cand.file_latest_sesno >= applied {
-            match dbnum_has_any_pe_row(dbnum).await {
+            match dbnum_has_any_pe_row_on(env.db, dbnum).await {
                 Ok(has_any_data) => has_any_data,
                 Err(error) => {
                     return (
@@ -5305,7 +5358,8 @@ impl AiosDBManager {
             // ADR-077：属性面与模型面在 `dbnum_initialize` 里并发直写、收尾一笔盖两枚水位并收写入标记。
             // 模型单元的回执与「任务已收尾」经 `initialization` 交回 batch body，本函数不再回传 UnitTask。
             return match self
-                .initialize_dbnum_baseline(
+                .initialize_dbnum_baseline_in(
+                    env,
                     project,
                     dbnum,
                     &cand.file_name,
@@ -5563,7 +5617,7 @@ impl AiosDBManager {
         precollected.insert(cand.path.clone(), (plan.range.clone(), collected));
         Self::stage(dbnum, "stage_apply", "增量收集完成，开始暂存应用");
         let incr = IncrementPipeline::new()
-            .apply_with_precollected(apply_map, precollected)
+            .apply_with_precollected_in(env, apply_map, precollected)
             .await;
         println!("dbnum={dbnum} 阶段完成: 暂存应用返回");
         warnings.extend(incr.warnings.iter().map(|w| format!("dbnum={dbnum}: {w}")));
@@ -6152,7 +6206,7 @@ mod tests {
             "执行体不得绕过 collect_window 直调回放收集——那会造出第二个口径决定点"
         );
         assert!(
-            body.contains("apply_with_precollected("),
+            body.contains("apply_with_precollected_in("),
             "收集结果必须交给 apply_with_precollected，否则 pipeline 会把同一文件重新解析一遍"
         );
     }
@@ -6194,7 +6248,7 @@ mod tests {
     fn baseline_consumes_all_three_scan_gate_outcomes_before_data_work() {
         let source = include_str!("manual_update.rs");
         let body = source
-            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .split_once("pub(crate) async fn initialize_dbnum_baseline_in(")
             .expect("initialize_dbnum_baseline 必须存在")
             .1
             .split_once("pub async fn preview_manual_update(")
@@ -6227,7 +6281,7 @@ mod tests {
     fn the_baseline_clears_the_model_face_before_an_initial_write() {
         let source = include_str!("manual_update.rs");
         let body = source
-            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .split_once("pub(crate) async fn initialize_dbnum_baseline_in(")
             .expect("initialize_dbnum_baseline 必须存在")
             .1
             .split_once("pub async fn preview_manual_update(")
@@ -6888,7 +6942,7 @@ mod tests {
             .0;
 
         let classify = body
-            .find("DbnumState::classify_scan(")
+            .find("DbnumState::classify_scan_on(")
             .expect("executor must re-classify at the freeze point");
         let gate = body
             .find("FileAnomaly::requires_reinit")
@@ -6897,7 +6951,7 @@ mod tests {
             .find("wipe_dbnum_for_reinit(")
             .expect("executor must wipe through the shared fast_delete routine");
         let backing = body
-            .find("dbnum_has_any_pe_row(")
+            .find("dbnum_has_any_pe_row_on(")
             .expect("executor must probe data backing before routing");
         let route = body
             .find("needs_initial_load(")
@@ -7248,7 +7302,7 @@ mod tests {
     #[test]
     fn on_demand_baseline_ingests_exactly_the_named_file() {
         let shell = include_str!("manual_update.rs")
-            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .split_once("pub(crate) async fn initialize_dbnum_baseline_in(")
             .expect("initialize_dbnum_baseline 必须存在")
             .1
             .split_once("pub async fn preview_manual_update(")
@@ -7316,7 +7370,7 @@ mod tests {
         assert!(!baseline_needs_full_parse(34_653, 83));
         // `pe_count == info_count` 那道对账随 ADR-071 D6 退役：基线分支不许再读 dbnum_info_table。
         let baseline = include_str!("manual_update.rs")
-            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .split_once("pub(crate) async fn initialize_dbnum_baseline_in(")
             .expect("initialize_dbnum_baseline")
             .1
             .split_once("pub async fn preview_manual_update(")
@@ -7343,7 +7397,7 @@ mod tests {
             .find("// 已有行、水位也在")
             .expect("idempotent tail");
         assert!(
-            !full_parse[..idempotent].contains("finalize_baseline("),
+            !full_parse[..idempotent].contains("finalize_baseline"),
             "全量解析那条路的 applied 由 dbnum_initialize 的收尾一笔盖"
         );
     }
@@ -9262,7 +9316,7 @@ mod tests {
             .split_once("pub(crate) async fn execute_one_dbnum(")
             .expect("execute_one_dbnum 必须存在")
             .1
-            .split_once("match DbnumState::classify_scan(&obs).await")
+            .split_once("match DbnumState::classify_scan_on(env.db, &obs).await")
             .expect("执行侧必须复核扫描裁决")
             .1
             .split_once("DbnumState::record_observation")
@@ -9744,6 +9798,7 @@ mod tests {
                 ),
                 // 预览不拦执行，它把裁决原样报进 DTO 让界面显示。
                 "blocked",
+                ("classify_scan(", "record_observation("),
             ),
             (
                 "enqueue_manual_update",
@@ -9752,6 +9807,7 @@ mod tests {
                     concat!("pub(crate) async fn ", "execute_one_dbnum("),
                 ),
                 "block_reason()",
+                ("classify_scan(", "record_observation("),
             ),
             (
                 "execute_one_dbnum",
@@ -9760,21 +9816,23 @@ mod tests {
                     concat!("fn ", "fill_change_summary("),
                 ),
                 "block_reason()",
+                // 执行体走任务给的库。
+                ("classify_scan_on(", "record_observation_on("),
             ),
         ];
 
-        for (name, body, gate) in cases {
+        for (name, body, gate, (classify, record)) in cases {
             assert!(
-                body.contains("classify_scan("),
+                body.contains(classify),
                 "{name}: 必须用共用裁决，不得自己拼 check_file_against_state"
             );
             assert!(
                 body.contains(gate),
                 "{name}: 拿到裁决还得真的去拦，否则阻断类异常照常放行"
             );
-            let classify_at = body.find("classify_scan(").expect("已在上面断言过存在");
+            let classify_at = body.find(classify).expect("已在上面断言过存在");
             let record_at = body
-                .find("record_observation(")
+                .find(record)
                 .unwrap_or_else(|| panic!("{name}: 仍应落一次扫描观察"));
             assert!(
                 classify_at < record_at,
@@ -9782,6 +9840,141 @@ mod tests {
                  而它们正是判据本身"
             );
         }
+    }
+
+    async fn mem_db(label: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("manual_update").use_db(label).await.unwrap();
+        db
+    }
+
+    async fn seed(db: &surrealdb::Surreal<surrealdb::engine::any::Any>, sql: &str) {
+        db.query(sql).await.unwrap().check().unwrap();
+    }
+
+    /// 指向 `db` 的任务环境：数据面形态由用例给，配置取默认值。
+    fn mem_env(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        data_face: crate::options::DataFace,
+    ) -> TaskEnv<'_> {
+        use crate::fast_model::model_db_adapter::{PersistMedium, PersistTarget};
+        static DB_OPTION: std::sync::OnceLock<aios_core::options::DbOption> =
+            std::sync::OnceLock::new();
+        TaskEnv {
+            db,
+            store_mode: crate::options::StoreMode::Mem,
+            data_face,
+            persist: PersistTarget::new(db, PersistMedium::Mem),
+            db_option: DB_OPTION.get_or_init(Default::default),
+        }
+    }
+
+    /// 数据支撑探针探的是给它的库：有行的库号为真，没有行的库号为假。
+    #[tokio::test]
+    async fn the_backing_probe_reads_the_given_database() {
+        let db = mem_db("backing_probe").await;
+        let row = RefnoEnum::from("7/1").to_pe_key();
+        seed(&db, &format!("CREATE {row} SET dbnum = 7;")).await;
+
+        assert!(dbnum_has_any_pe_row_on(&db, 7).await.unwrap());
+        assert!(!dbnum_has_any_pe_row_on(&db, 8).await.unwrap());
+    }
+
+    /// 非设计库号取自给它的库的水位登记：只算登记了非 `DESI` 类型的库，缺类型或空类型按设计侧。
+    #[tokio::test]
+    async fn non_design_dbnums_come_from_the_given_database() {
+        let db = mem_db("non_design").await;
+        seed(
+            &db,
+            "CREATE dbnum_watermark:1 SET dbnum = 1, db_type = 'DESI';
+             CREATE dbnum_watermark:2 SET dbnum = 2, db_type = 'CATA';
+             CREATE dbnum_watermark:3 SET dbnum = 3, db_type = '';
+             CREATE dbnum_watermark:4 SET dbnum = 4;
+             CREATE dbnum_watermark:5 SET dbnum = 5, db_type = 'SYST';",
+        )
+        .await;
+
+        assert_eq!(
+            load_non_design_dbnums_on(&db).await.unwrap(),
+            HashSet::from([2, 5])
+        );
+    }
+
+    /// 反向级联的引用边、拓扑与引用者库号都读任务给的库：目录库里的 SPCO 只穿过、不成根，
+    /// 设计库里经它引用到种子的 EQUI 成为生成根。
+    #[tokio::test]
+    async fn the_live_cascade_walks_the_task_database() {
+        let db = mem_db("cascade").await;
+        let [scom, spco, zone, equi] = ["100/1", "100/2", "200/1", "200/2"].map(RefnoEnum::from);
+        let [scom_key, spco_key, zone_key, equi_key] =
+            [scom, spco, zone, equi].map(|refno| refno.to_pe_key());
+        seed(
+            &db,
+            &format!(
+                "CREATE dbnum_watermark:100 SET dbnum = 100, db_type = 'CATA';
+                 CREATE dbnum_watermark:200 SET dbnum = 200, db_type = 'DESI';
+                 CREATE {scom_key} SET dbnum = 100, noun = 'SCOM', name = '/S1';
+                 CREATE {spco_key} SET dbnum = 100, noun = 'SPCO', name = '/P1';
+                 CREATE {zone_key} SET dbnum = 200, noun = 'ZONE', name = '/Z1';
+                 CREATE {equi_key} SET dbnum = 200, noun = 'EQUI', name = '/E1', owner = {zone_key};
+                 RELATE {spco_key}->ref_rev->{scom_key};
+                 RELATE {equi_key}->ref_rev->{spco_key};"
+            ),
+        )
+        .await;
+
+        let env = mem_env(&db, crate::options::DataFace::Ingest);
+        let roots = expand_live_reverse_cascade(env, scom).await.unwrap();
+
+        assert_eq!(
+            roots.iter().map(|root| root.root).collect::<Vec<_>>(),
+            vec![equi]
+        );
+    }
+
+    /// 读透形态取自任务环境：那一档不维护 `ref_rev`，级联必须报错而不是返回空集（ADR-063）。
+    #[tokio::test]
+    async fn the_live_cascade_refuses_a_read_through_task() {
+        let db = mem_db("cascade_read_through").await;
+        let env = mem_env(&db, crate::options::DataFace::ReadThrough);
+
+        let error = expand_live_reverse_cascade(env, RefnoEnum::from("100/1"))
+            .await
+            .expect_err("读透形态下级联必须报错");
+
+        assert!(format!("{error:#}").contains("ADR-063"), "{error:#}");
+    }
+
+    /// 基线的身份门读写任务给的库：那里登记的已应用水位比文件新，就裁成回退重建、在读计数之前拒绝
+    /// （本进程的库在单测里没连，读它只会得到「身份异常阻断」）。
+    #[tokio::test]
+    async fn the_baseline_identity_gate_reads_the_task_database() {
+        let db = mem_db("baseline_gate").await;
+        seed(
+            &db,
+            "CREATE dbnum_watermark:7997 SET dbnum = 7997, owner_project = 'AMS', \
+             db_type = 'DESI', file_name = 'ams7997', file_path = 'ams7997', file_size = 0, \
+             file_latest_sesno = 26, applied_sesno = 26, state_revision = 3;",
+        )
+        .await;
+        let mgr = crate::data_interface::increment_manager::offline_manager_for_tests();
+
+        let error = mgr
+            .initialize_dbnum_baseline_in(
+                mem_env(&db, crate::options::DataFace::Ingest),
+                "AMS",
+                7997,
+                "ams7997",
+                std::path::Path::new("ams7997"),
+                None,
+                "DESI",
+                12,
+                crate::data_interface::dbnum_initialize::ModelHalf::Skip,
+            )
+            .await
+            .expect_err("文件会话比已应用水位旧，基线必须拒绝");
+
+        assert!(format!("{error:#}").contains("回退重建"), "{error:#}");
     }
 }
 
@@ -10257,9 +10450,10 @@ mod live_tests {
             consumers.len()
         );
 
-        let roots = expand_live_reverse_cascade(RefnoEnum::from("23274/295504"))
-            .await
-            .expect("expand shared-SPCO cascade");
+        let roots =
+            expand_live_reverse_cascade(TaskEnv::process(), RefnoEnum::from("23274/295504"))
+                .await
+                .expect("expand shared-SPCO cascade");
         println!(
             "shared SPCO generation roots = {:?}",
             roots

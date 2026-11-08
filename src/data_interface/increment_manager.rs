@@ -155,6 +155,25 @@ fn park_blocker_before_enqueue(
     .with_project(found.project.clone())
 }
 
+/// 不连任何外部服务的管理器，给 `_on` 系列在 mem:// 上做行为测试。MQTT 客户端没有事件循环，
+/// 发布会失败：要发 MQTT 的路径不能拿它测。
+#[cfg(test)]
+pub(crate) fn offline_manager_for_tests() -> AiosDBManager {
+    let (mqtt_client, _event_loop) = rumqttc::AsyncClient::new(
+        rumqttc::MqttOptions::new("gen-model-offline-test", "127.0.0.1", 1883),
+        1,
+    );
+    AiosDBManager {
+        projects: Vec::new(),
+        needed_parse_files: None,
+        project_path: String::new(),
+        db_option: Default::default(),
+        watcher: Default::default(),
+        mqtt_client: std::sync::Arc::new(mqtt_client),
+        rtree: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2492,7 +2511,7 @@ mod tests {
     fn the_auto_path_blocks_by_the_shared_anomaly_verdict() {
         let src = include_str!("increment_manager.rs");
         let body = src
-            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file("))
+            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file_on("))
             .expect("scan_and_check_file 未找到")
             .1;
         // 用「下一个函数定义」而不是缩进花括号来收边：这个文件是 CRLF 的，
@@ -2503,7 +2522,7 @@ mod tests {
             .0;
 
         assert!(
-            body.contains("classify_scan(") && body.contains("record_observation("),
+            body.contains("classify_scan_on(") && body.contains("record_observation_on("),
             "分类与落库都必须走共用裁决，自动路径不得自己拼 check_file_against_state"
         );
         assert!(
@@ -2511,9 +2530,9 @@ mod tests {
             "不许有放行式兜底：新增一种异常时必须显式决定它阻不阻断"
         );
 
-        let classify_at = body.find("classify_scan(").expect("已在上面断言过存在");
+        let classify_at = body.find("classify_scan_on(").expect("已在上面断言过存在");
         let record_at = body
-            .find("record_observation(")
+            .find("record_observation_on(")
             .expect("已在上面断言过存在");
         assert!(
             classify_at < record_at,
@@ -2571,7 +2590,7 @@ mod tests {
     fn the_rollback_line_reports_disposition_not_a_presumed_enqueue() {
         let src = include_str!("increment_manager.rs");
         let body = src
-            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file("))
+            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file_on("))
             .expect("scan_and_check_file 未找到")
             .1
             .split_once(concat!("pub async fn ", "init_watcher("))
@@ -2584,6 +2603,37 @@ mod tests {
         assert!(
             body.contains("转整库重建"),
             "回退处置（转整库重建）必须仍然喊出来"
+        );
+    }
+
+    /// `scan_and_check_file_on` 的裁决与落库都走给它的库：空库首见即放行，观察值登记在那个库里。
+    #[tokio::test]
+    async fn the_scan_verdict_and_observation_use_the_given_database() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("increment").use_db("scan_on").await.unwrap();
+        let mgr = super::offline_manager_for_tests();
+
+        let check = mgr
+            .scan_and_check_file_on(
+                &db,
+                "AMS",
+                std::path::Path::new("ams7997"),
+                "ams7997",
+                "DESI",
+                7997,
+                12,
+            )
+            .await;
+
+        assert_eq!(check.gate, super::ScanGate::Proceed);
+        assert_eq!(check.previous_observed_sesno, 0);
+        let state = crate::data_interface::dbnum_state::DbnumState::read_on(&db, 7997)
+            .await
+            .unwrap()
+            .expect("首见的观察值必须登记在给定的库里");
+        assert_eq!(
+            (state.owner_project.as_str(), state.file_latest_sesno),
+            ("AMS", 12)
         );
     }
 
@@ -3757,6 +3807,29 @@ impl AiosDBManager {
         db_num: u32,
         file_latest_sesno: i32,
     ) -> ScanCheck {
+        self.scan_and_check_file_on(
+            &aios_core::SUL_DB,
+            project,
+            path,
+            file_name,
+            db_type,
+            db_num,
+            file_latest_sesno,
+        )
+        .await
+    }
+
+    /// 同 [`Self::scan_and_check_file`]，裁决与落库都走 `db` 那个库。
+    pub(crate) async fn scan_and_check_file_on(
+        &self,
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        project: &str,
+        path: &std::path::Path,
+        file_name: &str,
+        db_type: &str,
+        db_num: u32,
+        file_latest_sesno: i32,
+    ) -> ScanCheck {
         use crate::data_interface::dbnum_state::{DbnumState, FileAnomaly, FileObservation};
 
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -3772,7 +3845,7 @@ impl AiosDBManager {
         };
         // 读状态失败按阻断处理：水位读不出来就不知道有没有回退，宁可这一轮不入队，
         // 也不能拿一个默认的 0 当水位去跑（那会把老库判成首次导入）。
-        let verdict = match DbnumState::classify_scan(&obs).await {
+        let verdict = match DbnumState::classify_scan_on(db, &obs).await {
             Ok(verdict) => verdict,
             Err(e) => {
                 println!("F6 读取 DBNUM 状态失败，本轮跳过 dbnum={db_num}: {e:#}");
@@ -3784,7 +3857,7 @@ impl AiosDBManager {
         };
         // 基线在 record_observation 覆盖它之前冻结（merged_sesnos 的语义锚点）。
         let previous_observed_sesno = verdict.previous_file_latest_sesno();
-        if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
+        if let Err(e) = DbnumState::record_observation_on(db, &obs, &verdict).await {
             println!("F6 记录扫描观察失败 dbnum={db_num}: {e}");
             return ScanCheck {
                 gate: ScanGate::Blocked,

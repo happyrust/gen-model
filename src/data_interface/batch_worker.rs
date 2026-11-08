@@ -3319,7 +3319,7 @@ async fn execute_model_only_body(
         .work_items
         .into_iter()
         .partition(|item| item.action == ModelWorkAction::RegenRoot);
-    let (derived_units, side_failures) = run_model_side_actions(mgr, &side_actions).await;
+    let (derived_units, side_failures) = run_model_side_actions(env, mgr, &side_actions).await;
     if !side_failures.is_empty() {
         warnings.push(format!(
             "模型恢复前置动作失败: {}",
@@ -3472,6 +3472,7 @@ fn unit_task_from_derived_root(
 /// 返回 `(级联展开出来的交付单元, 失败原因)`。一条失败不拦别的条——都是幂等动作，
 /// 调用方按「有没有失败」决定本批的模型生成让不让位。
 async fn run_model_side_actions(
+    env: TaskEnv<'_>,
     mgr: &AiosDBManager,
     items: &[ModelWorkItem],
 ) -> (Vec<UnitTask>, Vec<String>) {
@@ -3524,7 +3525,8 @@ async fn run_model_side_actions(
                     .await
             }
             ModelWorkAction::CascadeExpand => {
-                match crate::data_interface::manual_update::expand_live_reverse_cascade(refno).await
+                match crate::data_interface::manual_update::expand_live_reverse_cascade(env, refno)
+                    .await
                 {
                     Ok(roots) => {
                         derived.extend(roots.into_iter().map(|root| {
@@ -3816,6 +3818,7 @@ async fn execute_frozen_batch_body(
         let _data_write = crate::data_interface::batch_scheduler::BatchScheduler::global()
             .begin_data_write(job.dbnum);
         mgr.execute_one_dbnum(
+            env,
             &job.project,
             &cand,
             job.previous_observed_sesno,
@@ -3948,7 +3951,7 @@ async fn execute_frozen_batch_body(
     registry.set_stage(&job.task_id, "side_actions");
     let mut derived_units = Vec::new();
     if !defer_model_phase {
-        let (derived, failures) = run_model_side_actions(mgr, &side_actions).await;
+        let (derived, failures) = run_model_side_actions(env, mgr, &side_actions).await;
         derived_units = derived;
         if !failures.is_empty() {
             warnings.push(format!(
@@ -7362,7 +7365,7 @@ mod tests {
         // 直写路径的模型前置与补刷就地执行（ADR-072 D5）：计划随 `execute_one_dbnum` 交回，
         // 不再写 pending 行再由本任务领回来。
         assert!(
-            body.contains("run_model_side_actions(mgr, &side_actions)")
+            body.contains("run_model_side_actions(env, mgr, &side_actions)")
                 && body.contains("refresh_post_regen_aabbs_for(&side_actions)"),
             "模型前置 / 补刷必须就地执行任务手里的计划: {body}"
         );

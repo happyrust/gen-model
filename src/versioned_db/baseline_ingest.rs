@@ -249,7 +249,17 @@ pub async fn ingest_file(
 /// 走到基线说明冻结点重解窗口判了「按首次导入」，worker 那一刻按队列行算出来的 S 可能不是 0
 /// （回退检出的 `Reinitialize` 行尤其如此）。标记只有一行，重写即纠正。
 pub(crate) async fn mark_initialization_writing(dbnum: u32, target_sesno: u32) -> anyhow::Result<()> {
-    crate::data_interface::write_state::mark_writing(
+    mark_initialization_writing_on(&aios_core::SUL_DB, dbnum, target_sesno).await
+}
+
+/// 同 [`mark_initialization_writing`]，标记落在 `db` 那个库。
+pub(crate) async fn mark_initialization_writing_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+    target_sesno: u32,
+) -> anyhow::Result<()> {
+    crate::data_interface::write_state::mark_writing_on(
+        db,
         dbnum,
         0,
         target_sesno as i32,
@@ -296,6 +306,17 @@ pub(crate) async fn stream_frozen_into(
     frozen: &FrozenSource,
     sender: &flume::Sender<WriteJob>,
 ) -> anyhow::Result<StreamedBaseline> {
+    stream_frozen_into_on(&aios_core::SUL_DB, db_option, project, frozen, sender).await
+}
+
+/// 同 [`stream_frozen_into`]：摘 legacy 事件走 `db` 那个库；UDA 键表仍读本进程的库。
+pub(crate) async fn stream_frozen_into_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    db_option: &DbOption,
+    project: &str,
+    frozen: &FrozenSource,
+    sender: &flume::Sender<WriteJob>,
+) -> anyhow::Result<StreamedBaseline> {
     anyhow::ensure!(
         db_option.is_save_db(),
         "save_db = false 下不做基线：基线的唯一产出就是库里的行"
@@ -320,7 +341,7 @@ pub(crate) async fn stream_frozen_into(
     );
 
     // 老库摘 legacy 事件；`execute_on` 里的 `require_no_event_on` 是硬闸，这一步让老库能过闸。
-    crate::versioned_db::database::retire_dbnum_event().await?;
+    crate::data_interface::pe_batch::retire_event_on(db).await?;
     // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`；DICT 相先于 DESI 相，定义此时已在库里。
     // 查不到的键记账、随文件回执打一行，不静默丢。
     let uda_keys = Arc::new(UdaKeyMap::load().await.with_context(|| {
@@ -759,5 +780,48 @@ mod tests {
             1,
             "裁决失败那条路要清库，且只有这一处"
         );
+    }
+
+    /// 初始化写入标记 `writing{0, T}` 落在给它的库里。
+    #[tokio::test]
+    async fn the_initialization_marker_lands_in_the_given_database() {
+        use crate::data_interface::write_state::{WriteIntent, load_on};
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("baseline_ingest").use_db("marker").await.unwrap();
+
+        mark_initialization_writing_on(&db, 7997, 43).await.unwrap();
+
+        let marker = load_on(&db, 7997)
+            .await
+            .unwrap()
+            .expect("写入标记必须落在给定的库里");
+        assert!(marker.is_writing(), "{marker:?}");
+        assert_eq!(
+            (marker.start_sesno, marker.end_sesno, marker.intent),
+            (0, 43, WriteIntent::Initialize)
+        );
+    }
+
+    /// 流那一半摘 legacy 事件摘的是给它的库。UDA 键表仍读本进程的库，拼出来的冻结源也不指向
+    /// 真实文件，所以这一趟本身必然失败——这里只看事件有没有从给定的库里摘掉。
+    #[tokio::test]
+    async fn the_streaming_half_retires_the_legacy_event_on_the_given_database() {
+        use crate::data_interface::pe_batch::require_no_event_on;
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("baseline_ingest").use_db("retire").await.unwrap();
+        db.query("DEFINE EVENT update_dbnum_event ON pe WHEN true THEN { RETURN NONE; };")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(require_no_event_on(&db).await.is_err());
+        let frozen = FrozenSource::synthetic("ams8000", 8000, "DESI", 42);
+        let (sender, _receiver) = flume::unbounded();
+
+        let streamed =
+            stream_frozen_into_on(&db, &DbOption::default(), "AMS", &frozen, &sender).await;
+
+        assert!(streamed.is_err(), "拼出来的冻结源不该流得通");
+        require_no_event_on(&db).await.unwrap();
     }
 }
