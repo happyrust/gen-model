@@ -50,6 +50,14 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 启动脚本按 `DbOption.toml` 的 `[rvm_check] e3d_launcher` 找，缺省是可执行文件同目录或当前目录下的
 `scripts/e3d/run_ams_c_entrymacro.bat`。
 
+## 基准目录（`--baseline-dir`）的版本要求
+
+目录里的 `<tag>_<w0>_<w1>.rvm` 必须是**同一份项目数据、同一 E3D 版本**导出的基准。拿旧版本
+（如 E3D 3.1 时代）导出的基准去比 E3D 2.1 项目数据，差异不是系统性的：表现为少量构件的
+`only_baseline` / `only_generated` / `off` / `kind_differ`（个位到数十个），逐根排查会误判成
+模型缺陷（issue #116 即此类）。换项目数据或换 E3D 版本后，要用 `--stage export`（或 `full`）
+重新导一批基准，并在目录里留一份来源说明（批次目录、schema 版本、日期）。
+
 ## 根的终态
 
 `pass` `empty`（两侧都没有可比几何，如 `/1AXIS`）`kind_differ` `fail` `no-baseline` `gen-failed`
@@ -105,3 +113,13 @@ SELECT run_id, verdict, mismatch_by_kind FROM rvm_check_run WHERE refno = '23406
 全部 `pass`（`/1AXIS` 为 `empty`）：both 243,522 / exact 243,522，off、only_*、unkeyable、
 kind_differ 全 0。E3D 导出合计 441 s（每库一次会话，ams7333 两根 211 s），生成 175 s（ams7333
 两根各 9.1 GB 峰值），比对 8.9 s；整批 10 分钟出头，产物 5.0 GB。
+
+## 2026-11-08 实测（AMS E3D 2.1 数据，14 根）
+
+腾讯云 Win2012R2（4 vCPU / 8 GB + 16 GB pagefile）部署验证时发现 3 个根报 `fail`，排查结论是
+**基准版本错配而非模型缺陷**：随包基准是 E3D 3.1 时代导出的，与 E3D 2.1 项目数据存在少量构件
+差异。用 `e3d_version = "e3d210"` 重新导出基准后全量复验：13 `pass` + 1 `empty`，off / only_* /
+kind_differ 全 0；三个原 fail 根（`ams8000 =24384/24932`、`=24384/22399`、`ams7999 =24383/66456`）
+分别 129 / 1,982 / 4,118 个构件全部 exact。ams7333 两根生成峰值约 9.0 GB，8 GB 内存机器必须
+保留 ≥16 GB pagefile 并 `--jobs 1` 串行；可提交内存余量不足时 `--min-commit-free-gb` 会把
+单个根记成 `commit-guard`，属资源保护而非比对失败。
