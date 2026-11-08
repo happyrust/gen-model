@@ -274,7 +274,24 @@ pub struct GroupIndex {
 }
 
 impl GroupIndex {
+    /// 不含规则成员的建表：等价于 [`Self::build_with_scope`] 传 `None`。
+    ///
+    /// 写侧校验（`group_write`）与既有调用方走这条，形状与 G3 引入前逐字相同。
     pub fn build(store: &dyn TreeStore, worlds: &[RefU64]) -> anyhow::Result<Self> {
+        Self::build_with_scope(store, worlds, None)
+    }
+
+    /// 含规则成员的建表：`scope` 给了且 `group_scosel` 开着时，规则组按 `SCOSEL` 求值补成员。
+    ///
+    /// 规则成员的 `via()` 是 `None`，本来就不会进这张反查表（它没有经由的 GPITEM），所以
+    /// 传 scope 的实际作用是**嵌套规则组继续往下展开**（`is_group_noun` 分支要按解析成员走），
+    /// 而不是给规则成员自己造一条二级收录。`scope = None` 时与 [`Self::build`] 逐字相同
+    /// （`resolved_members_with_rules` 的第一层判据）。
+    pub fn build_with_scope(
+        store: &dyn TreeStore,
+        worlds: &[RefU64],
+        scope: Option<&dyn ScoselScope>,
+    ) -> anyhow::Result<Self> {
         let mut index = Self::default();
         let mut stack = Vec::new();
         for &world in worlds {
@@ -290,7 +307,7 @@ impl GroupIndex {
             if !visited.insert(group) {
                 continue;
             }
-            for member in resolved_members_on(store, group)?.members {
+            for member in resolved_members_with_rules(store, group, scope)?.members {
                 let element = member.element();
                 if let Some(via) = member.via() {
                     index
@@ -333,11 +350,24 @@ pub struct GroupScope {
 /// 一次，引用成环也会停；非分组成员原样收下，同一元素经多条路径收录只留第一次。分组本身不进
 /// `members`——它不出几何，交给生成 / 记录的是它管的元素。
 pub fn expand_group_on(store: &dyn TreeStore, group: RefU64) -> anyhow::Result<GroupScope> {
-    let mut scope = GroupScope::default();
+    expand_group_with_rules_on(store, group, None)
+}
+
+/// [`expand_group_on`] 的规则感知版：每一层成员都走 [`resolved_members_with_rules`]，
+/// 于是规则组在嵌套展开时也补出 `SCOSEL` 命中的成员。
+///
+/// `scope = None`（或开关关、或该层没有非空 `SCOSEL`）时与 [`expand_group_on`] 逐字相同——
+/// 判据全在 [`resolved_members_with_rules`] 里，这里不再重复一遍。
+pub fn expand_group_with_rules_on(
+    store: &dyn TreeStore,
+    group: RefU64,
+    scope: Option<&dyn ScoselScope>,
+) -> anyhow::Result<GroupScope> {
+    let mut scope_out = GroupScope::default();
     let mut expanded = HashSet::from([group]);
     let mut seen = HashSet::new();
-    let top = resolved_members_on(store, group)?;
-    scope.unresolved.extend(top.unresolved);
+    let top = resolved_members_with_rules(store, group, scope)?;
+    scope_out.unresolved.extend(top.unresolved);
     let mut stack = vec![top.members.into_iter()];
     while let Some(level) = stack.last_mut() {
         let Some(member) = level.next() else {
@@ -347,15 +377,15 @@ pub fn expand_group_on(store: &dyn TreeStore, group: RefU64) -> anyhow::Result<G
         let element = member.element();
         if is_group_noun(&noun_of(store, element)?) {
             if expanded.insert(element) {
-                let nested = resolved_members_on(store, element)?;
-                scope.unresolved.extend(nested.unresolved);
+                let nested = resolved_members_with_rules(store, element, scope)?;
+                scope_out.unresolved.extend(nested.unresolved);
                 stack.push(nested.members.into_iter());
             }
         } else if seen.insert(element) {
-            scope.members.push(element);
+            scope_out.members.push(element);
         }
     }
-    Ok(scope)
+    Ok(scope_out)
 }
 
 fn noun_of(store: &dyn TreeStore, refno: RefU64) -> anyhow::Result<String> {
@@ -953,6 +983,86 @@ mod tests {
                 UnresolvedReason::DbNotInMdb,
                 UnresolvedReason::TargetMissing,
             ]
+        );
+    }
+
+    /// 接线：`expand_group_with_rules_on` 在 `scope = None` 时必须与 `expand_group_on`
+    /// 逐字相同——这是「开关关时响应逐字不变」在生成 / 记录这条路上的底座。
+    #[test]
+    fn expanding_without_a_scope_matches_the_stored_only_expansion() {
+        let store = sample();
+        assert_eq!(
+            expand_group_with_rules_on(&store, r(2, 10), None).unwrap(),
+            expand_group_on(&store, r(2, 10)).unwrap()
+        );
+    }
+
+    /// 接线：规则组的成员要能进 `GroupScope.members`，否则 `/model/generate` 与
+    /// `/model/records` 对规则组仍然是空的（G3 的核心修复点）。
+    #[test]
+    fn a_rule_group_expands_to_its_rule_hits_when_the_scope_is_given() {
+        let mut store = sample();
+        // GPSET 2/11 的存储成员清零，只留规则：命中 ZONE 1/3。
+        store.add(r(2, 11), "GPSET", &[]);
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let expanded = expand_group_with_rules_on(&store, r(2, 10), Some(&scope)).unwrap();
+        assert_eq!(
+            expanded.members,
+            vec![r(1, 3)],
+            "规则命中的 ZONE 必须进 GroupScope.members，生成与记录才有范围"
+        );
+        assert!(expanded.unresolved.is_empty());
+    }
+
+    /// 接线：开关关着时即使给了 scope，展开结果也与 `scope = None` 逐字相同。
+    #[test]
+    fn a_closed_switch_leaves_the_expansion_byte_identical() {
+        let mut store = sample();
+        store.add(r(2, 11), "GPSET", &[]);
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _off = crate::options::GroupScoselOverride::set(false);
+        assert_eq!(
+            expand_group_with_rules_on(&store, r(2, 10), Some(&scope)).unwrap(),
+            expand_group_on(&store, r(2, 10)).unwrap(),
+            "开关关着时展开必须与存储视图逐字相同"
+        );
+    }
+
+    /// 接线：`GroupIndex::build_with_scope(None)` 与 `build` 逐字相同（反查表不得因
+    /// G3 接线而变形状）。
+    #[test]
+    fn the_group_index_without_a_scope_matches_the_plain_build() {
+        let store = sample();
+        let worlds = [r(1, 1), r(2, 1)];
+        let plain = GroupIndex::build(&store, &worlds).unwrap();
+        let scoped = GroupIndex::build_with_scope(&store, &worlds, None).unwrap();
+        for element in [r(1, 2), r(1, 3), r(1, 4), r(2, 11)] {
+            assert_eq!(plain.parents_of(element), scoped.parents_of(element), "{element}");
+        }
+    }
+
+    /// 接线：规则成员自己没有 `via`，所以不进反查表——给了 scope 也不会给它凭空造一条
+    /// 「被哪个 GPITEM 收录」的记录（那会让前端显示一个不存在的引用角标）。
+    #[test]
+    fn rule_members_carry_no_secondary_parent() {
+        let mut store = sample();
+        store.add(r(2, 11), "GPSET", &[]);
+        store.scosel(r(2, 11), &zone_rule_words("AREA01PIPE"));
+        let scope = RuleScope::default()
+            .with_text("AREA01PIPE", &[r(1, 3)])
+            .with_noun(ZONE_HASH, &[r(1, 3)]);
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let index = GroupIndex::build_with_scope(&store, &[r(1, 1), r(2, 1)], Some(&scope)).unwrap();
+        assert!(
+            index.parents_of(r(1, 3)).is_empty(),
+            "规则成员没有经由的 GPITEM，反查表不该给它编一条"
         );
     }
 }

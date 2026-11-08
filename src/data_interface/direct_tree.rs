@@ -14,6 +14,7 @@ use aios_core::pdms_types::EleTreeNode;
 use aios_core::{RefU64, RefnoEnum};
 use anyhow::Context;
 
+use super::direct_index::DbIndexes;
 use super::direct_store::{DirectStore, DirectStoreError};
 use super::generation_root::{
     GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
@@ -21,10 +22,11 @@ use super::generation_root::{
 };
 use super::group_membership::{
     GroupIndex, GroupMembers, GroupScope, ResolvedMember, SecondaryParent, UnresolvedSlot,
-    expand_group_on, is_group_noun, resolved_members_on,
+    expand_group_with_rules_on, is_group_noun, resolved_members_with_rules,
 };
 use super::mdb_membership::MdbMembership;
 use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
+use super::scosel_eval::ScoselScope;
 
 /// One element database of the frozen tree view: its identity and the session it is
 /// pinned to, read from the file header through the shared read view. No element count —
@@ -118,6 +120,9 @@ pub struct DirectTreeService {
     resolved_memo: std::sync::Mutex<HashMap<RefU64, Arc<ResolvedChildren>>>,
     /// 分组二级收录的反查表（[`GroupIndex`]），首次要用时建；钩在冻结会话上，换会话即换服务。
     group_index: std::sync::Mutex<Option<Arc<GroupIndex>>>,
+    /// 规则组 `SCOSEL` 求值域（MDB 全量跨库），首次要用时建，理由同 `group_index`：
+    /// 逐库索引钉在本服务那只冻结会话上，会话一换 provider 就换整只服务，所以与服务同寿命即正确。
+    scosel_scope: std::sync::Mutex<Option<Arc<MdbScoselScope>>>,
 }
 
 impl DirectTreeService {
@@ -138,6 +143,7 @@ impl DirectTreeService {
             children_memo: std::sync::Mutex::new(HashMap::new()),
             resolved_memo: std::sync::Mutex::new(HashMap::new()),
             group_index: std::sync::Mutex::new(None),
+            scosel_scope: std::sync::Mutex::new(None),
         })
     }
 
@@ -411,6 +417,94 @@ impl DirectTreeService {
     }
 }
 
+/// `SCOSEL` 求值域：MDB 声明范围内**所有**有文件的元素库的索引，跨库聚合。
+///
+/// 为什么必须跨库（实测，`library/scosel-semantics.md` §3、`library/g3-rule-members.md` §5）：
+/// APS 装 27 个规则组的库 `aps250204` 里 **0 个 ZONE**，2622 个 ZONE 分布在 68 个库。
+/// 只在规则组所在库求值，`/AREA01_PIPE` 必得 0。
+///
+/// 求值域按 MDB 收窄（`membership.element_databases()` 里 `path.is_some()` 的库），不是全盘
+/// 全扫：全盘会多出 MDB 未声明库里的同名副本（实测 `/AREA01_PIPE` 多 `2013287044_56`），
+/// 那部分**不属于**求值域（契约 VAL-LIVE-001 的口径说明）。
+///
+/// 建不成的库（文件打不开 / 索引失败）不静默：进 `problems` 并 `log::warn!`，逐库点名。
+/// 那条规则可能因此少命中，但至少能查到是谁缺的。
+pub struct MdbScoselScope {
+    /// 参与求值的库索引，按 MDB 声明序（命中集合本身与序无关，这里只为可复现的日志）。
+    indexes: Vec<(u32, Arc<DbIndexes>)>,
+    /// 建不成的库：`(dbnum, 原因)`。非空表示求值域缺了一块。
+    problems: Vec<(u32, String)>,
+}
+
+impl MdbScoselScope {
+    fn build(membership: &MdbMembership, store: &MdbReadStore) -> anyhow::Result<Self> {
+        let mut indexes = Vec::new();
+        let mut problems = Vec::new();
+        for db in membership.element_databases() {
+            if db.path.is_none() {
+                continue;
+            }
+            match store.indexes(db.dbnum as i32) {
+                Ok(index) => indexes.push((db.dbnum, index)),
+                Err(error) => {
+                    log::warn!(
+                        "SCOSEL 求值域缺少库 {}（{}）：{error}",
+                        db.dbnum,
+                        db.name
+                    );
+                    problems.push((db.dbnum, error.to_string()));
+                }
+            }
+        }
+        Ok(Self { indexes, problems })
+    }
+
+    /// 参与求值的库号，按声明序——真库测试据此证明「域里有哪些库」。
+    pub fn dbnums(&self) -> Vec<u32> {
+        self.indexes.iter().map(|(dbnum, _)| *dbnum).collect()
+    }
+
+    /// 某一个库的索引；不在求值域里（没文件 / 建索引失败 / 不是元素库）回 `None`。
+    ///
+    /// 给真库测试与诊断用：逐库统计（例如「规则组所在的 `aps250204` 里 0 个 ZONE」）
+    /// 只能按库问，跨库聚合的 trait 方法答不了这个问题。
+    pub fn index_of(&self, dbnum: u32) -> Option<&DbIndexes> {
+        self.indexes
+            .iter()
+            .find(|(db, _)| *db == dbnum)
+            .map(|(_, index)| index.as_ref())
+    }
+
+    /// 建不成的库与原因；空表表示求值域完整。
+    pub fn problems(&self) -> &[(u32, String)] {
+        &self.problems
+    }
+}
+
+/// 把懒建的 scope 槽转成 trait 对象引用（`Option<&Arc<T>>` → `Option<&dyn ScoselScope>`）。
+///
+/// 成员解析只要 `&dyn ScoselScope`，而服务手里存的是具体类型（建索引要它的 `problems()`
+/// 与 `dbnums()`）。四个消费者共用这一处转换，省得每处写一遍 `as_ref() as &dyn`。
+fn scope_ref(scope: &Option<Arc<MdbScoselScope>>) -> Option<&dyn ScoselScope> {
+    scope.as_ref().map(|scope| scope.as_ref() as &dyn ScoselScope)
+}
+
+impl ScoselScope for MdbScoselScope {
+    fn refnos_with_attr_text(&self, attr_hash: u32, text: &str) -> HashSet<RefU64> {
+        self.indexes
+            .iter()
+            .flat_map(|(_, index)| index.refnos_of_attr_text(attr_hash, text))
+            .collect()
+    }
+
+    fn refnos_of_noun(&self, noun_hash: u32) -> HashSet<RefU64> {
+        self.indexes
+            .iter()
+            .flat_map(|(_, index)| index.refnos_of_noun_hash(noun_hash, None))
+            .collect()
+    }
+}
+
 /// `DirectStore` adapter of the shared generation-root traversal: `TYPE` / `NAME`
 /// come from the direct attmap, members from the element record in stored order.
 ///
@@ -652,10 +746,13 @@ impl DirectTreeService {
                 unresolved: Vec::new(),
             });
         }
+        // 规则组的成员要按 `SCOSEL` 求值补上（G3）。`resolved_scope()` 在开关关着时给
+        // `None`，于是这条路径与 G3 引入前逐字相同——这是契约快照「开关关」那一份的底座。
+        let scope = self.resolved_scope()?;
         let GroupMembers {
             members,
             unresolved,
-        } = resolved_members_on(self.store.as_ref(), parent)?;
+        } = resolved_members_with_rules(self.store.as_ref(), parent, scope_ref(&scope))?;
         let mut nodes = Vec::with_capacity(members.len());
         for (order, member) in members.into_iter().enumerate() {
             let expected_owner = match member {
@@ -666,9 +763,13 @@ impl DirectTreeService {
             };
             let mut node = self.node(member.element(), expected_owner, order)?;
             if is_group_noun(&node.noun) {
-                let count = resolved_members_on(self.store.as_ref(), member.element())?
-                    .members
-                    .len();
+                let count = resolved_members_with_rules(
+                    self.store.as_ref(),
+                    member.element(),
+                    scope_ref(&scope),
+                )?
+                .members
+                .len();
                 node.children_count = u16::try_from(count).unwrap_or(u16::MAX);
             }
             nodes.push(ResolvedChild {
@@ -684,6 +785,47 @@ impl DirectTreeService {
     /// 反查表首次调用时从各库 WORLD 扫一遍分组层级建好，之后与服务同寿命。
     pub fn secondary_parents(&self, refno: RefU64) -> anyhow::Result<Vec<SecondaryParent>> {
         Ok(self.group_index()?.parents_of(refno).to_vec())
+    }
+
+    /// `SCOSEL` 求值域（MDB 全量跨库），懒建、与冻结会话同寿命。
+    ///
+    /// 与 [`Self::group_index`] 同一套理由与形状（`Mutex<Option<Arc<_>>>`）：逐库索引钉在
+    /// 本服务那只冻结会话上；文件一动 `is_current()` 就否、provider 换整只服务，于是
+    /// scope 也随服务一起换——不跨服务携带，也不需要失效逻辑。
+    ///
+    /// 代价是一次建索引（APS 59 个有文件的元素库，实测 1.3 秒），所以只在该用的地方调：
+    /// 开关关着时调用方不该碰它（`resolved_members_with_rules` 的第二层判据在 scope
+    /// 已给的情况下才起作用，接线点因此要先看开关——见 [`Self::resolved_scope`]）。
+    pub fn scosel_scope(&self) -> anyhow::Result<Arc<MdbScoselScope>> {
+        let mut slot = self
+            .scosel_scope
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scosel scope lock poisoned"))?;
+        if let Some(scope) = slot.as_ref() {
+            return Ok(scope.clone());
+        }
+        let scope = Arc::new(MdbScoselScope::build(&self.membership, &self.store)?);
+        if !scope.problems().is_empty() {
+            log::warn!(
+                "SCOSEL 求值域不完整：{} 个库建索引失败 {:?}",
+                scope.problems().len(),
+                scope.problems()
+            );
+        }
+        *slot = Some(scope.clone());
+        Ok(scope)
+    }
+
+    /// 交给成员解析的 scope：开关关着时 `None`（一个字节都不多读、一次索引都不建）。
+    ///
+    /// 开关判据放在这里而不是 `resolved_members_with_rules` 里再判一次，是因为建索引
+    /// 有真实代价（APS 1.3 秒）：关着时连 scope 都不该建。`resolved_members_with_rules`
+    /// 内部仍有同一道判据（它不假定调用方看过开关），两层都不成立才逐字不变。
+    fn resolved_scope(&self) -> anyhow::Result<Option<Arc<MdbScoselScope>>> {
+        if !crate::options::group_scosel() {
+            return Ok(None);
+        }
+        Ok(Some(self.scosel_scope()?))
     }
 
     fn group_index(&self) -> anyhow::Result<Arc<GroupIndex>> {
@@ -702,7 +844,14 @@ impl DirectTreeService {
             }
             worlds.extend(metadata.worlds.get(&db.dbnum).copied());
         }
-        let index = Arc::new(GroupIndex::build(self.store.as_ref(), &worlds)?);
+        // 反查表也要认规则成员：嵌套规则组（规则命中一个分组）要按解析成员继续往下展开。
+        // 规则成员自己没有 `via`，不进这张表；`scope = None` 时与 G3 引入前逐字相同。
+        let scope = self.resolved_scope()?;
+        let index = Arc::new(GroupIndex::build_with_scope(
+            self.store.as_ref(),
+            &worlds,
+            scope_ref(&scope),
+        )?);
         *slot = Some(index.clone());
         Ok(index)
     }
@@ -712,7 +861,8 @@ impl DirectTreeService {
         if !is_group_noun(&self.noun_of(root)?) {
             return Ok(None);
         }
-        expand_group_on(self.store.as_ref(), root).map(Some)
+        expand_group_with_rules_on(self.store.as_ref(), root, scope_ref(&self.resolved_scope()?))
+            .map(Some)
     }
 
     /// 分组的生成范围：成员逐个走 [`Self::generation_roots_in_subtree`]，按生成根去重、保留成员先后。
@@ -794,6 +944,220 @@ mod lazy_live_tests {
             roots.len(),
             chain.len(),
             stats.summary()
+        );
+    }
+
+    // ── G3 接线：SCOSEL 求值域 ─────────────────────────────────────────────────
+
+    /// VAL-WIRE-001：`scosel_scope()` 首次调用建、之后复用（`Arc::ptr_eq` 为真）。
+    ///
+    /// 形状与 `group_index` 同款（`Mutex<Option<Arc<T>>>`）：逐库索引钉在这只冻结会话上，
+    /// 文件一动 provider 就换整只服务，所以 scope 与服务同寿命即正确，不需要失效逻辑。
+    #[test]
+    #[ignore = "requires local APS source files"]
+    fn the_scosel_scope_is_built_once_and_shared_for_the_service_lifetime() {
+        let service = DirectTreeService::open("AvevaPlantSample", "ALL").unwrap();
+        let first = service.scosel_scope().unwrap();
+        let second = service.scosel_scope().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "第二次调用必须复用同一个 Arc——重建一次索引是 1.3 秒，不能每次请求都付"
+        );
+        // 求值域必须覆盖 MDB 里所有有文件的元素库：缺的库要么在域里，要么在 problems 里点名。
+        let element_databases = service
+            .membership
+            .element_databases()
+            .filter(|db| db.path.is_some())
+            .count();
+        assert_eq!(
+            first.dbnums().len() + first.problems().len(),
+            element_databases,
+            "有文件的元素库 {} 个，域 {} 个 + 建不成 {} 个",
+            element_databases,
+            first.dbnums().len(),
+            first.problems().len()
+        );
+        assert!(first.problems().is_empty(), "{:?}", first.problems());
+        eprintln!(
+            "SCOSEL 求值域：{} 个库（MDB 声明 {} 个有文件的元素库）",
+            first.dbnums().len(),
+            element_databases
+        );
+    }
+
+    /// VAL-WIRE-002：求值域是 MDB 全量**跨库**，不是规则组所在的单个库。
+    ///
+    /// 实测口径（`library/scosel-semantics.md` §3）：APS 装 27 个规则组的库 `aps250204`
+    /// 里 **0 个 ZONE**。按 MDB 声明范围收窄后实测 ZONE 共 1088 个、分布在 36 个库
+    /// （全盘全扫的 2622 个 / 68 个库包含 MDB 未声明库，那不是求值域）。只在规则组那一库
+    /// 求值，`/AREA01_PIPE` 必然回 0——所以「命中非空」本身就是跨库求值的证明。
+    ///
+    /// 域外副本必须显式报告（AGENTS.md 实现约束 9）：全盘全扫会命中 MDB 未声明库里的
+    /// 同名 `2013287044_56`，它不属于求值域，这里把它点出来而不是静默丢弃。
+    #[test]
+    #[ignore = "requires local APS source files"]
+    fn the_scosel_scope_evaluates_across_databases_not_inside_the_rule_group_database() {
+        let service = DirectTreeService::open("AvevaPlantSample", "ALL").unwrap();
+        let scope = service.scosel_scope().unwrap();
+        let zone_hash = e3d_attlib::db1_hash("ZONE");
+        let desc_hash = e3d_attlib::db1_hash("DESC");
+
+        // 装规则组的库：文件名叫 aps250204 的那一个（27 个规则组在它里面）。
+        let group_db = service
+            .membership
+            .element_databases()
+            .filter(|db| db.path.is_some())
+            .find(|db| {
+                db.path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("aps250204"))
+            })
+            .expect("APS 应有装规则组的库 aps250204");
+        let zones_in_group_db = scope
+            .index_of(group_db.dbnum)
+            .map(|index| index.refnos_of_noun_hash(zone_hash, None).len())
+            .unwrap_or(0);
+        assert_eq!(
+            zones_in_group_db, 0,
+            "库 {} 里 0 个 ZONE——只在单库求值必然为 0，这是「必须跨库」的实证",
+            group_db.dbnum
+        );
+
+        let mut zone_total = 0usize;
+        let mut zone_databases = 0usize;
+        for dbnum in scope.dbnums() {
+            let count = scope
+                .index_of(dbnum)
+                .expect("dbnums 与 index_of 必须自洽")
+                .refnos_of_noun_hash(zone_hash, None)
+                .len();
+            if count > 0 {
+                zone_databases += 1;
+                zone_total += count;
+            }
+        }
+        eprintln!(
+            "ZONE 共 {zone_total} 个，分布在 {zone_databases} 个库；规则组所在库 {} 里 0 个",
+            group_db.dbnum
+        );
+        assert!(
+            zone_databases > 1,
+            "ZONE 必须跨多个库（实测 68 个），只在一个库里说明域没收全"
+        );
+
+        let mut hits: Vec<RefU64> = scope
+            .refnos_with_attr_text(desc_hash, "AREA01PIPE")
+            .into_iter()
+            .collect();
+        hits.sort_unstable_by_key(|refno| refno.0);
+        assert!(
+            !hits.is_empty(),
+            "跨库求值 /AREA01_PIPE 必须命中非空（单库求值会是 0）"
+        );
+        eprintln!(
+            "DESC == AREA01PIPE 在求值域内命中 {} 个：{:?}",
+            hits.len(),
+            hits
+        );
+
+        // 域外副本：全盘全扫会多出的那一个，它所在的库不在 MDB 声明范围里。
+        let outside = RefU64::from_two_nums(2013287044, 56);
+        // 库号走路由目录问，不要拿 refno 的高位字当库号——那只是 refno 的编码，不是 dbnum。
+        let outside_dbnum = service.dbnum_of(outside);
+        assert!(
+            !hits.contains(&outside),
+            "MDB 未声明库里的同名副本 {outside} 不得进求值域"
+        );
+        eprintln!(
+            "域外副本 {outside} 属于库 {outside_dbnum:?}，该库在求值域里？{}",
+            outside_dbnum.is_some_and(|dbnum| scope.index_of(dbnum).is_some())
+        );
+        assert!(
+            outside_dbnum.is_none_or(|dbnum| scope.index_of(dbnum).is_none()),
+            "域外副本所在的库不该在求值域里（{outside_dbnum:?}）"
+        );
+    }
+
+    /// 接线：三个消费者（`read_resolved_children` / `expand_group_on` / `GroupIndex::build`）
+    /// 在开关开时都拿到规则成员。
+    ///
+    /// **进程级开关的并发陷阱**：`GroupScoselOverride` 是进程级静态量。若本测试与要求
+    /// 「规则组解析出 0 行」的既有真库测试（`aps_group_worlds_are_navigable_in_the_resolved_view`）
+    /// 在同一进程里并发跑，两边都会随机失败。所以这条测试**默认跳过**：只有显式设
+    /// `AIOS_RUN_SCOPE_WIRING_LIVE=1` 才真跑（跳过时打印原因，不静默）。
+    ///
+    /// 取证命令（单条过滤 + 单线程，两条要求互斥的测试都覆盖到）：
+    ///
+    /// ```text
+    /// $env:AIOS_RUN_SCOPE_WIRING_LIVE = "1"
+    /// cargo test --lib data_interface::direct_tree::lazy_live_tests::the_three_consumers \
+    ///     -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[test]
+    #[ignore = "requires local APS source files; set AIOS_RUN_SCOPE_WIRING_LIVE=1 (process-wide switch override)"]
+    fn the_three_consumers_see_rule_members_when_the_switch_is_on() {
+        if std::env::var("AIOS_RUN_SCOPE_WIRING_LIVE").ok().as_deref() != Some("1") {
+            eprintln!(
+                "跳过 the_three_consumers_see_rule_members_when_the_switch_is_on：\
+                 未设 AIOS_RUN_SCOPE_WIRING_LIVE=1。本条要用进程级开关覆盖，\
+                 与要求「规则组解析出 0 行」的既有真库测试并发会互相干扰。"
+            );
+            return;
+        }
+        let _on = crate::options::GroupScoselOverride::set(true);
+        let service = DirectTreeService::open("AvevaPlantSample", "ALL").unwrap();
+        // `/AREA01_PIPE` = 2013286748_2（`library/g3-rule-members.md` §5）。
+        let gpset = RefU64::from_two_nums(2013286748, 2);
+
+        let layer = service.resolved_children(gpset).unwrap();
+        assert!(
+            !layer.nodes.is_empty(),
+            "/AREA01_PIPE 的解析视图必须非空（接线前它是 0 行）"
+        );
+        assert!(
+            layer
+                .nodes
+                .iter()
+                .all(|row| row.node.noun.eq_ignore_ascii_case("ZONE")),
+            "{:?}",
+            layer
+                .nodes
+                .iter()
+                .map(|row| (&row.node.noun, row.via))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            layer.nodes.iter().all(|row| row.via.is_none()),
+            "规则成员没有经由的 GPITEM，via 必须是 None"
+        );
+
+        let group_scope = service
+            .group_scope(gpset)
+            .unwrap()
+            .expect("GPSET 是分组，group_scope 必须给 Some");
+        assert!(
+            !group_scope.members.is_empty(),
+            "生成 / 记录的范围必须非空（这条路的消费者是 expand_group_with_rules_on）"
+        );
+
+        // 反查表那一路（`GroupIndex::build_with_scope`）：规则成员不该凭空多出一条二级收录。
+        for row in &layer.nodes {
+            assert!(
+                service
+                    .secondary_parents(row.node.refno.refno())
+                    .unwrap()
+                    .is_empty(),
+                "规则成员没有经由的 GPITEM，反查表不该给它编一条：{}",
+                row.node.refno
+            );
+        }
+        eprintln!(
+            "/AREA01_PIPE：resolved={} 个 ZONE，group_scope.members={} 个，unresolved={:?}",
+            layer.nodes.len(),
+            group_scope.members.len(),
+            layer.unresolved
         );
     }
 }
