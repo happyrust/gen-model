@@ -20,6 +20,7 @@
 
 pub mod artifact;
 
+use aios_core::options::DbOption;
 use anyhow::{Context, ensure};
 use serde::Serialize;
 use surrealdb::{Surreal, engine::any::Any};
@@ -49,9 +50,11 @@ pub struct LandingReport {
 }
 
 /// 把一个数据窗口的内存产物落进 `db`。幂等：同一份产物重放收敛到同一终态。
-/// `sequence` 只进回执（任务用目标会话号填），不参与任何判定。
+/// `sequence` 只进回执（任务用目标会话号填），不参与任何判定。`option` 只在 CATA 依赖行触发前移
+/// 刷新时用来解析目录根。
 pub async fn land_increment_window(
     db: &Surreal<Any>,
+    option: &DbOption,
     sequence: u64,
     window: &IncrementWindowArtifact,
 ) -> anyhow::Result<LandingReport> {
@@ -67,6 +70,7 @@ pub async fn land_increment_window(
     if let Some(rows) = window.cata_rows() {
         let cata = crate::data_interface::cata_dependency::persist_resolved_rows_on(
             db,
+            option,
             &window.project,
             &rows,
         )
@@ -340,9 +344,11 @@ mod tests {
             .expect("direct window statements");
 
         let via_landing = prepared_db("landing").await;
-        let landing = land_increment_window(&via_landing, u64::from(END_SESNO), &artifact())
-            .await
-            .expect("landing");
+        let option = DbOption::default();
+        let landing =
+            land_increment_window(&via_landing, &option, u64::from(END_SESNO), &artifact())
+                .await
+                .expect("landing");
         assert_eq!(
             (landing.sequence, landing.dbnum),
             (u64::from(END_SESNO), DBNUM)
@@ -371,10 +377,13 @@ mod tests {
     #[tokio::test]
     async fn landing_the_same_window_twice_converges() {
         let db = prepared_db("twice").await;
+        let option = DbOption::default();
         let window = artifact();
-        land_increment_window(&db, 1, &window).await.expect("first");
+        land_increment_window(&db, &option, 1, &window)
+            .await
+            .expect("first");
         let once = snapshot_data_tables(&db).await.expect("snapshot");
-        land_increment_window(&db, 1, &window)
+        land_increment_window(&db, &option, 1, &window)
             .await
             .expect("second");
         let twice = snapshot_data_tables(&db).await.expect("snapshot");
@@ -386,6 +395,7 @@ mod tests {
     #[tokio::test]
     async fn a_failing_statement_errors_out_and_a_replay_converges() {
         let db = prepared_db("failing").await;
+        let option = DbOption::default();
         // 随窗语句的目标表在生产里都是启动时 DEFINE 好的；`mem://` 上让一张**在被回滚的事务里
         // 首次隐式定义**的表再被写，写会静默落空（fork 2.1 的怪癖，与本模块无关），所以两边都
         // 先把探针表定义出来，让比对只看落库逻辑。
@@ -401,7 +411,7 @@ mod tests {
         broken
             .window_statements
             .push("THROW 'landing test: forced failure'".into());
-        let error = land_increment_window(&db, u64::from(END_SESNO), &broken)
+        let error = land_increment_window(&db, &option, u64::from(END_SESNO), &broken)
             .await
             .expect_err("must fail");
         assert!(
@@ -409,7 +419,7 @@ mod tests {
             "错误要带出 THROW 原话: {error:#}"
         );
 
-        land_increment_window(&db, u64::from(END_SESNO), &artifact())
+        land_increment_window(&db, &option, u64::from(END_SESNO), &artifact())
             .await
             .expect("replay of the good window");
         let replayed = snapshot_data_tables(&db).await.expect("snapshot");
@@ -420,7 +430,7 @@ mod tests {
             .expect("define")
             .check()
             .expect("define probe tables");
-        land_increment_window(&clean, u64::from(END_SESNO), &artifact())
+        land_increment_window(&clean, &option, u64::from(END_SESNO), &artifact())
             .await
             .expect("clean landing");
         let once = snapshot_data_tables(&clean).await.expect("snapshot");

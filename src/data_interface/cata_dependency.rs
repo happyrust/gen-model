@@ -398,14 +398,16 @@ pub async fn refresh_moved_catalogues(
     dbnums: impl IntoIterator<Item = u32>,
     uda_keys: &UdaKeyMap,
 ) -> anyhow::Result<Vec<CatalogueRefresh>> {
-    refresh_moved_catalogues_on(&SUL_DB, project, dbnums, uda_keys).await
+    refresh_moved_catalogues_on(&SUL_DB, get_db_option(), project, dbnums, uda_keys).await
 }
 
 /// 同 [`refresh_moved_catalogues`]，目标库由调用方给：本地优先化的结构化 sink 在 backup lane 上
 /// 落 CATA 依赖行时用它（`docs/plans/2026-09-09-local-first-data-window-plan.md` §2.3）；
-/// 文件侧的差分 / 闭包解析不变，只有读写库的那几口改打 `db`。
+/// 文件侧的差分不变。读写库的那几口、locator 的文件身份与闭包的解析失败都走 `db`，目录根按
+/// `option` 解析。
 pub async fn refresh_moved_catalogues_on(
     db: &Surreal<Any>,
+    option: &DbOption,
     project: &str,
     dbnums: impl IntoIterator<Item = u32>,
     uda_keys: &UdaKeyMap,
@@ -414,7 +416,7 @@ pub async fn refresh_moved_catalogues_on(
     if dbnums.is_empty() {
         return Ok(Vec::new());
     }
-    let locator = InMemoryCataLocator::build_for_project(project)
+    let locator = InMemoryCataLocator::build_for_project_on(db, option, project)
         .await
         .context("build CATA locator for dependency refresh")?;
     let mut out = Vec::new();
@@ -493,7 +495,8 @@ pub async fn refresh_moved_catalogues_on(
                 cfg.cata_db_types = ["CATA".to_string()].into_iter().collect();
                 cfg
             })
-            .with_retain_attmaps(true);
+            .with_retain_attmaps(true)
+            .with_db(db);
             resolver.seed(seeds.iter().copied());
             let manifest = resolver
                 .resolve()
@@ -905,21 +908,28 @@ pub async fn persist_resolved_rows(
     project: &str,
     rows: &CataDependencyRows,
 ) -> anyhow::Result<CataDependencyReport> {
-    persist_resolved_rows_on(&SUL_DB, project, rows).await
+    persist_resolved_rows_on(&SUL_DB, get_db_option(), project, rows).await
 }
 
 /// 同 [`persist_resolved_rows`]，目标库由调用方给（结构化 sink 在 backup lane 上落本窗的
-/// CATA 依赖行走这里；语句与判据一行不差）。
+/// CATA 依赖行走这里；语句与判据一行不差）。前移刷新建 locator 时目录根按 `option` 解析。
 pub async fn persist_resolved_rows_on(
     db: &Surreal<Any>,
+    option: &DbOption,
     project: &str,
     rows: &CataDependencyRows,
 ) -> anyhow::Result<CataDependencyReport> {
     let uda_keys = UdaKeyMap::load_on(db).await?;
     // D7：本批碰到的目录库，文件比已入库依赖行的版本新的，先把被改的依赖行 Replace 刷新——
     // 排在 Fresh 之前，否则新闭包里「已有行赢」会把旧版本留下。
-    let refreshed =
-        refresh_moved_catalogues_on(db, project, rows.by_dbnum.keys().copied(), &uda_keys).await?;
+    let refreshed = refresh_moved_catalogues_on(
+        db,
+        option,
+        project,
+        rows.by_dbnum.keys().copied(),
+        &uda_keys,
+    )
+    .await?;
     let mut report = land_dependency_rows_on(db, rows, &uda_keys).await?;
     report.refreshed = refreshed;
     Ok(report)
@@ -2385,6 +2395,41 @@ mod tests {
                 .expect("空任务库解出来是全 missing，不是错误");
             assert_eq!(rows.manifest.missing, seeds.len());
             assert!(rows.manifest.by_dbnum.is_empty());
+            watch_scope::clear_for_tests();
+        });
+    }
+
+    /// 前移刷新的 locator 建在调用方给的库上、不进进程级缓存。建在本进程库上的话，单测里没连就
+    /// 报错，被别的测试连上了就按工程名写进缓存——两种都过不了这条。
+    #[test]
+    fn refreshing_moved_catalogues_builds_its_locator_on_the_given_database() {
+        use crate::data_interface::{cata_closure, watch_scope};
+        // 账本锁与监听限定域的处理同上一条：建 locator 要 flush 账本，watch_dbnums 开着时会直接报错。
+        crate::data_interface::parse_error::with_ledger_locked(async {
+            let _watch = watch_scope::test_guard();
+            watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("dep").use_db("refresh_on").await.unwrap();
+            let mut option = DbOption::default();
+            option.project_path = String::new();
+            option.project_name = format!("Q5DepRefreshOn{}", std::process::id());
+            option.mdb_name = format!("Q5DEPREFRESHON-{}", std::process::id());
+            option.project_dirs = None;
+
+            let refreshed = refresh_moved_catalogues_on(
+                &db,
+                &option,
+                &option.project_name,
+                [7600],
+                &UdaKeyMap::empty(),
+            )
+            .await
+            .expect("空任务库上没入过依赖行，什么都不刷，不是错误");
+            assert!(refreshed.is_empty());
+            assert!(
+                !cata_closure::project_locator_cached(&option.project_name).await,
+                "任务库上建的 locator 不得写进进程级缓存"
+            );
             watch_scope::clear_for_tests();
         });
     }

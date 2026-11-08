@@ -225,6 +225,11 @@ pub(crate) async fn invalidate_project_locator_on(db: &Surreal<Any>, project: &s
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn project_locator_cached(project: &str) -> bool {
+    LOCATOR_CACHE.lock().await.contains_key(project)
+}
+
 impl InMemoryCataLocator {
     /// 直接注入（单测 / 自定义来源）。`dbnum_files`：dbnum -> (db_type, project, path)。
     pub fn from_parts(

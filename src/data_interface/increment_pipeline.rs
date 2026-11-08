@@ -1314,6 +1314,7 @@ impl IncrementPipeline {
             &mut timings.persist,
             crate::data_interface::window_landing::land_increment_window(
                 env.db,
+                env.db_option,
                 u64::from(target_sesno),
                 &artifact,
             ),
