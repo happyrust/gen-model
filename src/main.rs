@@ -168,9 +168,19 @@ struct RvmCheckArgs {
     /// SurrealDB；`store_mode` 为 mem 时自动跳过）。
     #[arg(long)]
     no_store: bool,
+    /// 生成即比对：成员流直喂流式对拍，`generated.rvm` 不必为对拍而写。
+    /// 只在 --baseline-dir 模式成立（基准先于生成在盘上）。
+    #[arg(long)]
+    fused_compare: bool,
+    /// 子进程是否写 `generated.rvm`（--emit-rvm=false 仅在 --fused-compare 下成立）。
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    emit_rvm: bool,
     /// 内部用：子进程模式，只生成 --only 指定的根。
     #[arg(long, hide = true)]
     child: bool,
+    /// 内部用（--child）：生成即比对的基准 .rvm 路径。
+    #[arg(long, hide = true, value_name = "PATH")]
+    compare_baseline: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Default)]
@@ -308,6 +318,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             refnos: args.only.clone(),
             out,
             gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
+            compare_baseline: args.compare_baseline.clone(),
+            emit_rvm: args.emit_rvm,
         });
     }
 
@@ -327,6 +339,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         min_commit_free_gb: args.min_commit_free_gb,
         gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
         e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
+        fused_compare: args.fused_compare,
+        emit_rvm: args.emit_rvm,
         store: !args.no_store,
     })?;
     if !outcome.clean {

@@ -393,7 +393,7 @@ pub fn execute(
     tasks.set_stage(task_id, STAGE_OURS);
     tasks.set_units_done(task_id, 2);
     let ours_started = Instant::now();
-    if let Err(message) = generate_ours(spec, &resolved, &task_dir) {
+    if let Err(message) = generate_ours(spec, &resolved, &task_dir, None) {
         report.stage = STAGE_OURS.to_string();
         report.message = redact(&message, &spec.password);
         report.timings_ms.generate_ours = elapsed_ms(ours_started);
@@ -572,10 +572,21 @@ impl GenerationHooks for Deadline {
     }
 }
 
+/// 生成即比对（[`crate::rvm_check::batch`] 的 `--fused-compare`）：生成流直喂
+/// `e3d_model::rvm_compare::StreamingCompare`，`generated.rvm` 不必为对拍而写
+/// （`emit_rvm` 为假时整份不落盘）。报告与判定都按 [`compare_rvms`] 同一套落盘。
+pub(crate) struct FusedCompare {
+    /// E3D 基准 `.rvm`（父进程已放进 `job.dir` 的那一份）。
+    pub baseline: PathBuf,
+    /// 是否还写 `generated.rvm`。false = 纯流式对拍，产物只有 compare/judgement。
+    pub emit_rvm: bool,
+}
+
 pub(crate) fn generate_ours(
     spec: &RunSpec,
     node: &ResolvedNode,
     task_dir: &Path,
+    fused: Option<&FusedCompare>,
 ) -> Result<(), String> {
     let template = DirectSchema::template_dir_from_env()
         .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
@@ -599,7 +610,8 @@ pub(crate) fn generate_ours(
         project_dirs: vec![project_dir.clone()],
         main_project_dir: Some(project_dir),
         root_world_ordinal: node.world_ordinal,
-        rvm: true,
+        rvm: fused.is_none_or(|fused| fused.emit_rvm),
+        compare_baseline: fused.map(|fused| fused.baseline.clone()),
         ..RvmExportOptions::default()
     };
     let deadline = Deadline(Instant::now() + spec.tools.timeout);
@@ -626,8 +638,36 @@ pub(crate) fn generate_ours(
     if let Some(detail) = outcome.accounts_error {
         return Err(format!("生成的账没平：{detail}"));
     }
-    if !outcome.rvm_path.as_deref().is_some_and(Path::is_file) {
+    if fused.is_none_or(|fused| fused.emit_rvm)
+        && !outcome.rvm_path.as_deref().is_some_and(Path::is_file)
+    {
         return Err("生成没有写出 generated.rvm".to_string());
+    }
+    // 流式对拍：与 `compare_rvms` 同一套落盘（compare.json）+ 判定结果另存小文件，
+    // 父进程不必为判色再解析几百 MB 的报告树。
+    if let Some(report) = &outcome.compare {
+        let compare_out = task_dir.join("compare.json");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&compare_out)
+                .map_err(|error| format!("建 compare.json 失败：{error}"))?;
+            let mut writer = std::io::BufWriter::new(file);
+            serde_json::to_writer_pretty(&mut writer, report)
+                .map_err(|error| format!("比对报告无法序列化：{error}"))?;
+            writer
+                .flush()
+                .map_err(|error| format!("写 compare.json 失败：{error}"))?;
+        }
+        let judgement = judge_report_full(report);
+        let judgement_out = task_dir.join("judgement.json");
+        serde_json::to_writer_pretty(
+            std::io::BufWriter::new(
+                std::fs::File::create(&judgement_out)
+                    .map_err(|error| format!("建 judgement.json 失败：{error}"))?,
+            ),
+            &judgement,
+        )
+        .map_err(|error| format!("判定结果无法序列化：{error}"))?;
     }
     Ok(())
 }

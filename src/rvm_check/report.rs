@@ -13,7 +13,7 @@ pub const VERDICT_KIND: &str = "kind_differ";
 pub const VERDICT_FAIL: &str = "fail";
 
 /// 页面上的三色。`Fail` 同时覆盖「比对发现差异」和「某一步没跑完」。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RvmVerdict {
     Pass,
     KindDiffer,
@@ -407,7 +407,7 @@ impl JudgeFacts {
 
 /// 一次判色的完整结果：差异清单**不截断**（入库要全量），页面与 `run.json` 用
 /// [`Judgement::page_mismatches`] 取截到 [`MISMATCH_LIMIT`] 的那一份。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Judgement {
     pub verdict: RvmVerdict,
     pub counts: RvmCounts,

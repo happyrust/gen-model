@@ -29,9 +29,9 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    RunInput, RunSpec, RvmCounts, RvmMismatch, RvmVerdict, compare_rvms, driver_with_grace,
-    evidence_text, export_e3d, export_macro, generate_ours, prepare_connection, redact,
-    resolve_node, tail, verdict_message,
+    FusedCompare, RunInput, RunSpec, RvmCounts, RvmMismatch, RvmVerdict, compare_rvms,
+    driver_with_grace, evidence_text, export_e3d, export_macro, generate_ours, prepare_connection,
+    redact, resolve_node, tail, verdict_message,
 };
 use crate::data_interface::direct_tree::DirectTreeService;
 
@@ -77,6 +77,13 @@ pub struct BatchOptions {
     pub min_commit_free_gb: f64,
     pub gen_timeout: Duration,
     pub e3d_timeout: Duration,
+    /// 生成即比对：子进程把成员流直喂 `StreamingCompare`，compare 不再等
+    /// `generated.rvm` 落盘。只在 `--baseline-dir` 模式成立——基准在生成前就要在盘上，
+    /// E3D 导出模式的基准与生成并行到达，融合无从谈起。
+    pub fused_compare: bool,
+    /// 子进程还写不写 `generated.rvm`。false 时产物只有 compare/judgement，
+    /// 仅在 `fused_compare` 下成立（没有对拍就没有证据链）。
+    pub emit_rvm: bool,
     /// 跑完把每根的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`（[`super::store`]）。
     /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，自动跳过。
     pub store: bool,
@@ -89,6 +96,10 @@ pub struct ChildOptions {
     pub refnos: Vec<String>,
     pub out: PathBuf,
     pub gen_timeout: Duration,
+    /// 给了则生成即比对：流式对拍的基准 `.rvm`（父进程已放入 `job.dir` 的 `e3d.rvm`）。
+    pub compare_baseline: Option<PathBuf>,
+    /// 是否写 `generated.rvm`（false = 纯流式对拍模式）。
+    pub emit_rvm: bool,
 }
 
 pub struct BatchOutcome {
@@ -436,7 +447,11 @@ pub fn run_child(opts: &ChildOptions) -> Result<()> {
             node.dbnum,
             opts.dbno
         );
-        generate_ours(&spec, &node, &dir).map_err(anyhow::Error::msg)?;
+        let fused = opts.compare_baseline.as_ref().map(|baseline| FusedCompare {
+            baseline: baseline.clone(),
+            emit_rvm: opts.emit_rvm,
+        });
+        generate_ours(&spec, &node, &dir, fused.as_ref()).map_err(anyhow::Error::msg)?;
         println!("generated ={refno} -> {}", dir.join("ours").display());
     }
     Ok(())
@@ -467,6 +482,20 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
     if let Some(dir) = &opts.baseline_dir {
         ensure!(dir.is_dir(), "基准目录不存在：{}", dir.display());
     }
+    if opts.fused_compare {
+        ensure!(
+            opts.baseline_dir.is_some(),
+            "--fused-compare 需要 --baseline-dir（基准必须先于生成在盘上）"
+        );
+        ensure!(
+            opts.stage.generates() && opts.stage.compares(),
+            "--fused-compare 只在 生成+比对 同跑的阶段成立"
+        );
+    }
+    ensure!(
+        opts.emit_rvm || opts.fused_compare,
+        "--emit-rvm=false 需要 --fused-compare（没有对拍就没有证据链）"
+    );
 
     let tree = DirectTreeService::open(&spec.project_name, &spec.e3d_mdb)
         .with_context(|| format!("打开 MDB {} 的模型树", spec.e3d_mdb))?;
@@ -1084,19 +1113,43 @@ fn process_root(
     if opts.stage.generates() {
         let generated = job.dir.join("ours").join("generated.rvm");
         let _ = std::fs::remove_file(&generated);
+        // 融合对拍的产物一并清掉：不然上一轮的 compare/judgement 会被当成这一轮的结果。
+        let _ = std::fs::remove_file(job.dir.join("compare.json"));
+        let _ = std::fs::remove_file(job.dir.join("judgement.json"));
+        // `--baseline-dir` 模式下基准在 worker 启动前已同步放好（`place_baseline_from_dir`）；
+        // 在盘上就喂给子进程做生成即比对。没放好（缺失）就不融合，走原路。
+        let fused = opts
+            .fused_compare
+            .then(|| job.dir.join("e3d.rvm"))
+            .filter(|path| path.is_file())
+            .map(|baseline| FusedCompare {
+                baseline,
+                emit_rvm: opts.emit_rvm,
+            });
         let generation = if opts.in_process {
             let _serial = in_process_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            generate_in_process(job, spec, tree, opts.gen_timeout)
+            generate_in_process(job, spec, tree, opts.gen_timeout, fused.as_ref())
         } else {
-            generate_in_child(job, spec, out_root, opts)
+            generate_in_child(job, spec, out_root, opts, fused.as_ref())
         };
+        // 不写 generated.rvm 时，生成成功的物证是子进程落下的 compare.json。
+        let produced = fused.as_ref().map_or_else(
+            || generated.is_file(),
+            |fused| {
+                if fused.emit_rvm {
+                    generated.is_file()
+                } else {
+                    job.dir.join("compare.json").is_file()
+                }
+            },
+        );
         let failed_status = match generation.exit.as_str() {
             Some(status::COMMIT_GUARD) => Some(status::COMMIT_GUARD),
             Some(status::TIMEOUT) => Some(status::TIMEOUT),
             _ if generation.exit != serde_json::Value::from(0) => Some(status::GEN_FAILED),
-            _ if !generated.is_file() => Some(status::GEN_FAILED),
+            _ if !produced => Some(status::GEN_FAILED),
             _ => None,
         };
         if let Some(failed) = failed_status {
@@ -1137,13 +1190,26 @@ fn process_root(
     }
 
     let generated = job.dir.join("ours").join("generated.rvm");
-    if !generated.is_file() {
+    let judgement_path = job.dir.join("judgement.json");
+    if !judgement_path.is_file() && !generated.is_file() {
         record.status = status::GEN_FAILED.to_string();
         record.message = format!("产物目录里没有 {}", generated.display());
         return record;
     }
     let started = Instant::now();
-    match compare_rvms(&job.dir) {
+    // 子进程已做完生成即比对（judgement.json 在盘上）时直接读判定：
+    // `judge_report_full` 在子进程内跑过，compare.json 也是它落的，判色口径一致。
+    let judgement = if judgement_path.is_file() {
+        std::fs::read(&judgement_path)
+            .map_err(|error| format!("读 judgement.json 失败：{error}"))
+            .and_then(|bytes| {
+                serde_json::from_slice::<super::report::Judgement>(&bytes)
+                    .map_err(|error| format!("解析 judgement.json 失败：{error}"))
+            })
+    } else {
+        compare_rvms(&job.dir)
+    };
+    match judgement {
         Ok(judgement) => {
             let verdict = judgement.verdict;
             record.message = verdict_message(verdict, &judgement.counts);
@@ -1154,7 +1220,15 @@ fn process_root(
                 RvmVerdict::Fail => status::FAIL,
             }
             .to_string();
-            record.compare = Some(StageRecord::new(0, started, ""));
+            record.compare = Some(StageRecord::new(
+                if judgement_path.is_file() {
+                    serde_json::Value::from("fused")
+                } else {
+                    serde_json::Value::from(0)
+                },
+                started,
+                "",
+            ));
             let (page_mismatches, truncated) = judgement.page_mismatches();
             record.counts = Some(judgement.counts);
             record.mismatches = page_mismatches;
@@ -1177,6 +1251,7 @@ fn generate_in_process(
     spec: &RunSpec,
     tree: &DirectTreeService,
     gen_timeout: Duration,
+    fused: Option<&FusedCompare>,
 ) -> StageRecord {
     let started = Instant::now();
     let mut spec = spec.clone();
@@ -1186,7 +1261,7 @@ fn generate_in_process(
         Ok(node) => node,
         Err(message) => return StageRecord::new(1, started, message),
     };
-    match generate_ours(&spec, &node, &job.dir) {
+    match generate_ours(&spec, &node, &job.dir, fused) {
         Ok(()) => StageRecord::new(0, started, ""),
         Err(message) => StageRecord::new(1, started, message),
     }
@@ -1198,6 +1273,7 @@ fn generate_in_child(
     spec: &RunSpec,
     out_root: &Path,
     opts: &BatchOptions,
+    fused: Option<&FusedCompare>,
 ) -> StageRecord {
     let started = Instant::now();
     let exe = match std::env::current_exe() {
@@ -1228,7 +1304,15 @@ fn generate_in_child(
         .arg("--e3d-project")
         .arg(&spec.e3d_project)
         .arg("--mdb")
-        .arg(&spec.e3d_mdb)
+        .arg(&spec.e3d_mdb);
+    if let Some(fused) = fused {
+        command
+            .arg("--compare-baseline")
+            .arg(&fused.baseline)
+            .arg("--emit-rvm")
+            .arg(fused.emit_rvm.to_string());
+    }
+    command
         .env("RUST_BACKTRACE", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
@@ -1690,6 +1774,8 @@ mod tests {
             min_commit_free_gb: 1.5,
             gen_timeout: Duration::from_secs(1),
             e3d_timeout: Duration::from_secs(1),
+            fused_compare: false,
+            emit_rvm: true,
             store: false,
         };
         let spec = RunSpec {
