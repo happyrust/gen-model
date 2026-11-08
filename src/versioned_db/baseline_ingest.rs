@@ -197,7 +197,10 @@ pub(crate) fn frozen_source_for(
 /// 把一个库文件按 `Fresh` 整库写进当前 SurrealDB——**单 lane 版**：自己起属性 lane、自己排空、
 /// 自己清库。不推进水位。给不带模型半边的调用方用；双 lane 初始化走
 /// `data_interface::dbnum_initialize`（它自己拿 [`stream_frozen_into`]）。
+///
+/// 写入标记、属性 lane 与解析失败落库写 `db`；失败清库仍走本进程的库。
 pub async fn ingest_file(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     db_option: &DbOption,
     project: &str,
     path: &Path,
@@ -209,17 +212,22 @@ pub async fn ingest_file(
     let started = Instant::now();
     // 写入标记 `writing{0, T}`（ADR-072 D1 / 计划 §4.2-1）：基线的起点恒为 0——库里没有
     // 「S 版本」可退，崩在中途的回退就是整库 wipe 再重排（D2 第 1 条）。
-    mark_initialization_writing(dbnum, frozen.target_sesno()).await?;
+    mark_initialization_writing_on(db, dbnum, frozen.target_sesno()).await?;
 
     // 从这里起有写者在跑：之后的任何失败都要先排空、再清库。
-    let lane = Lane::spawn("element batch", QUEUE_CAPACITY, OnWriteError::Continue);
+    let lane = Lane::spawn_on(
+        db.clone(),
+        "element batch",
+        QUEUE_CAPACITY,
+        OnWriteError::Continue,
+    );
     let sender = lane.sender();
     let streamed = stream_frozen_into(db_option, project, &frozen, &sender).await;
     drop(sender);
     let writer = lane.drain().await;
     // 解析任务是 spawn 出去的，攒下的属性解析失败在这里落库（见 `note_attrs_failure`）。
     // 排在裁决之前：解析失败恰恰是最需要留痕的那一次。
-    if let Err(error) = crate::data_interface::parse_error::flush().await {
+    if let Err(error) = crate::data_interface::parse_error::flush_on(db).await {
         log::warn!("{error:#}");
     }
     let streamed = match judge_streamed(streamed, &writer) {
@@ -243,16 +251,11 @@ pub async fn ingest_file(
     })
 }
 
-/// 基线 / 初始化开工的写入标记 `writing{0, T}`（ADR-072 D1）。
+/// 基线 / 初始化开工的写入标记 `writing{0, T}`（ADR-072 D1），落在 `db` 那个库。
 ///
 /// 数据批次 worker 在冻结点已经落过一次标记，这里**重写**是为了把 S 与 intent 修正成初始化那一档：
 /// 走到基线说明冻结点重解窗口判了「按首次导入」，worker 那一刻按队列行算出来的 S 可能不是 0
 /// （回退检出的 `Reinitialize` 行尤其如此）。标记只有一行，重写即纠正。
-pub(crate) async fn mark_initialization_writing(dbnum: u32, target_sesno: u32) -> anyhow::Result<()> {
-    mark_initialization_writing_on(&aios_core::SUL_DB, dbnum, target_sesno).await
-}
-
-/// 同 [`mark_initialization_writing`]，标记落在 `db` 那个库。
 pub(crate) async fn mark_initialization_writing_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     dbnum: u32,
@@ -638,11 +641,8 @@ mod tests {
         let summary = judge_streamed(Ok(streamed()), &writer).unwrap_err();
         assert!(summary.contains("1 time(s)"), "{summary}");
 
-        let summary = judge_streamed(
-            Err(anyhow::anyhow!("boom").context("基线收集失败")),
-            &clean,
-        )
-        .unwrap_err();
+        let summary = judge_streamed(Err(anyhow::anyhow!("boom").context("基线收集失败")), &clean)
+            .unwrap_err();
         assert!(summary.contains("基线收集失败"), "{summary}");
     }
 
@@ -746,10 +746,10 @@ mod tests {
             "Lane::spawn",
             "spawn_writer",
             "drain(",
-            "wipe_after_failure(",
-            "mark_writing(",
-            "mark_initialization_writing(",
-            "finalize_baseline(",
+            "wipe_after_failure",
+            "mark_writing",
+            "mark_initialization_writing",
+            "finalize_baseline",
             "render_watermark_advance(",
         ] {
             assert!(
@@ -767,7 +767,7 @@ mod tests {
             .split_once("pub async fn ingest_file(")
             .expect("ingest_file")
             .1
-            .split_once("pub(crate) async fn mark_initialization_writing(")
+            .split_once("pub(crate) async fn mark_initialization_writing_on(")
             .expect("marker helper follows")
             .0;
         let drain = body.find("lane.drain().await").expect("writer drain");

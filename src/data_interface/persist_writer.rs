@@ -119,7 +119,12 @@ impl WriterOutcome {
     pub(crate) fn summary(&self, lane: &str) -> String {
         format!(
             "persist lane drained: lane={lane} transactions={} bytes={} elapsed_ms={} conflict_retries={} timeouts={} errors={}",
-            self.transactions, self.bytes, self.elapsed_ms, self.conflict_retries, self.timeouts, self.errors
+            self.transactions,
+            self.bytes,
+            self.elapsed_ms,
+            self.conflict_retries,
+            self.timeouts,
+            self.errors
         )
     }
 }
@@ -273,12 +278,7 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// 在 `SUL_DB` 上起一条 lane。
-    pub(crate) fn spawn(name: &'static str, capacity: usize, on_error: OnWriteError) -> Self {
-        Self::spawn_on(SUL_DB.clone(), name, capacity, on_error)
-    }
-
-    /// [`Lane::spawn`] 的显式句柄版（测试用）。
+    /// 在 `db` 上起一条 lane。库由调用方显式给——`Lane` 自己不设默认库。
     pub(crate) fn spawn_on(
         db: Surreal<Any>,
         name: &'static str,
@@ -359,8 +359,14 @@ mod tests {
     #[test]
     fn the_transaction_timeout_grows_with_bytes_and_caps() {
         assert_eq!(transaction_timeout(0), Duration::from_secs(30));
-        assert_eq!(transaction_timeout(2 * 1024 * 1024), Duration::from_secs(46));
-        assert_eq!(transaction_timeout(64 * 1024 * 1024), Duration::from_secs(180));
+        assert_eq!(
+            transaction_timeout(2 * 1024 * 1024),
+            Duration::from_secs(46)
+        );
+        assert_eq!(
+            transaction_timeout(64 * 1024 * 1024),
+            Duration::from_secs(180)
+        );
     }
 
     /// 解析失败时也要先排空写者：不等待就返回的实现会把已解析的数据连同通道一起丢掉，

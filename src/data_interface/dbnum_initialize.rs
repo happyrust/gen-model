@@ -193,13 +193,20 @@ struct DataHalfReport {
 }
 
 /// 跑一次初始化。返回 `Err` = 库里已经清干净（或清不干净也已经报出来），下一轮从 0 重来。
+///
+/// 写入标记、两条写入 lane、解析失败落库与收尾一笔写 `db`；核对计数与失败清库仍走本进程的库。
 pub(crate) async fn initialize(
+    db: &Surreal<Any>,
     db_option: &DbOption,
     request: InitializationRequest<'_>,
 ) -> anyhow::Result<InitializationOutcome> {
     let dbnum = request.dbnum;
-    let target_sesno = u32::try_from(request.file_latest_sesno)
-        .with_context(|| format!("dbnum={dbnum} 目标会话 {} 不合法", request.file_latest_sesno))?;
+    let target_sesno = u32::try_from(request.file_latest_sesno).with_context(|| {
+        format!(
+            "dbnum={dbnum} 目标会话 {} 不合法",
+            request.file_latest_sesno
+        )
+    })?;
     let started = Instant::now();
     let frozen = baseline_ingest::frozen_source_for(
         request.file_path,
@@ -208,12 +215,22 @@ pub(crate) async fn initialize(
         Some(target_sesno),
     )?;
     // 写入标记 `writing{0, T}`（ADR-072 D1）：从这里起到收尾那一笔之间崩，下次启动整库重来。
-    baseline_ingest::mark_initialization_writing(dbnum, frozen.target_sesno()).await?;
+    baseline_ingest::mark_initialization_writing_on(db, dbnum, frozen.target_sesno()).await?;
 
     // 从这里起有写者在跑：之后的任何失败都要先排空、再清库。
     crate::data_interface::batch_worker::set_active_task_stage("ingest_and_generate");
-    let attributes = Lane::spawn("element batch", QUEUE_CAPACITY, OnWriteError::Continue);
-    let model_lane = Lane::spawn("model slice", MODEL_LANE_DEPTH, OnWriteError::StopWriting);
+    let attributes = Lane::spawn_on(
+        db.clone(),
+        "element batch",
+        QUEUE_CAPACITY,
+        OnWriteError::Continue,
+    );
+    let model_lane = Lane::spawn_on(
+        db.clone(),
+        "model slice",
+        MODEL_LANE_DEPTH,
+        OnWriteError::StopWriting,
+    );
 
     let data = data_half(
         db_option,
@@ -232,13 +249,14 @@ pub(crate) async fn initialize(
     );
     // 数据半边一错就掐掉模型半边（`try_join` 丢掉另一个 future → 生产端下一次 hand-off 自己停）；
     // 模型半边自己的错不是 lane 失败，包成 `Ok` 让数据半边跑完。
-    let halves = futures::future::try_join(data, async { Ok::<_, anyhow::Error>(model.await) }).await;
+    let halves =
+        futures::future::try_join(data, async { Ok::<_, anyhow::Error>(model.await) }).await;
 
     crate::data_interface::batch_worker::set_active_task_stage("drain_lanes");
     let (attribute_writer, model_writer) =
         futures::future::join(attributes.drain(), model_lane.drain()).await;
     // 解析任务是 spawn 出去的，攒下的属性解析失败在这里落库；排在裁决之前——解析失败恰恰是最需要留痕的那一次。
-    if let Err(error) = crate::data_interface::parse_error::flush().await {
+    if let Err(error) = crate::data_interface::parse_error::flush_on(db).await {
         log::warn!("{error:#}");
     }
 
@@ -273,14 +291,13 @@ pub(crate) async fn initialize(
         root_count,
     );
     if !confirmed_empty {
-        anyhow::ensure!(
-            pe_count > 0,
-            "dbnum={dbnum} 基线解析完成后仍没有 PE 数据"
-        );
+        anyhow::ensure!(pe_count > 0, "dbnum={dbnum} 基线解析完成后仍没有 PE 数据");
         if let Some(parsed_count) = parsed_count {
             anyhow::ensure!(
                 crate::data_interface::manual_update::baseline_parse_matches(
-                    pe_count, root_count, parsed_count
+                    pe_count,
+                    root_count,
+                    parsed_count
                 ),
                 "dbnum={dbnum} 基线不完整: PE={pe_count} WORL={root_count} 本次成功解析={parsed_count}; 不推进 applied_sesno"
             );
@@ -292,7 +309,9 @@ pub(crate) async fn initialize(
         warnings.push(format!("dbnum={dbnum} 初始化未生成模型：{reason}"));
     }
     if let Some(reason) = &model.failure {
-        warnings.push(format!("dbnum={dbnum} 初始化模型半边失败（属性面已落库，模型水位不盖）：{reason}"));
+        warnings.push(format!(
+            "dbnum={dbnum} 初始化模型半边失败（属性面已落库，模型水位不盖）：{reason}"
+        ));
     }
 
     // ── 空间树：盒子在内存里攒着，两 lane 都排空成功了才进树（ADR-077 D5 (b)）──────────────
@@ -318,9 +337,11 @@ pub(crate) async fn initialize(
         // 初始化从 0 起算整库，连续性闸恒真（ADR-092 D2）。
         model_base_sesno: Some(0),
     };
-    let receipt = crate::data_interface::task_end::commit_task_end_on(&aios_core::SUL_DB, &end)
+    let receipt = crate::data_interface::task_end::commit_task_end_on(db, &end)
         .await
-        .with_context(|| format!("dbnum={dbnum} 初始化收尾一笔未落（写入标记仍是 writing，下次启动整库重来）"))?;
+        .with_context(|| {
+            format!("dbnum={dbnum} 初始化收尾一笔未落（写入标记仍是 writing，下次启动整库重来）")
+        })?;
 
     println!(
         "dbnum={dbnum} 初始化完成 耗时={}ms pe={pe_count} worl={root_count} 属性 lane: tx={} bytes={} 冲突重试={} 超时={}；模型 lane: tx={} bytes={} 冲突重试={} 超时={} 根={} 失败根={} 记录={} 房间边={} model_sesno={}",
@@ -393,12 +414,8 @@ async fn data_half(
                 );
                 // 母库整库再摄入进同一个 dbnum：`Fresh` 已有行赢，叶子 extract 里正在改的版本不会被
                 // 母库的旧版本覆盖；目标会话取母库最新。
-                let parent_frozen = baseline_ingest::frozen_source_for(
-                    &parent,
-                    dbnum,
-                    &leaf.db_type,
-                    None,
-                )?;
+                let parent_frozen =
+                    baseline_ingest::frozen_source_for(&parent, dbnum, &leaf.db_type, None)?;
                 baseline_ingest::stream_frozen_into(db_option, project, &parent_frozen, &sender)
                     .await
                     .with_context(|| {
@@ -416,7 +433,10 @@ async fn data_half(
         }
     }
     drop(sender);
-    Ok(DataHalfReport { leaf, parent_filled })
+    Ok(DataHalfReport {
+        leaf,
+        parent_filled,
+    })
 }
 
 /// 模型半边：从文件枚举交付单元根 → 并行生成 → 逐片渲成事务文本 → 模型 lane。
@@ -437,7 +457,8 @@ async fn model_half(
     }
     if !crate::options::model_incremental() {
         return ModelHalfReport::skipped(
-            "model_incremental=false，本窗模型工作不执行，模型阶段开启后由恢复任务按凭证缺口重排".to_owned(),
+            "model_incremental=false，本窗模型工作不执行，模型阶段开启后由恢复任务按凭证缺口重排"
+                .to_owned(),
         );
     }
     if let Err(error) = crate::data_interface::initialization_phase::require_model_generation() {
@@ -512,7 +533,8 @@ async fn model_half_inner(
         "dbnum={dbnum} 初始化模型生成开始：交付单元根={}（并行生成 → 切片 → 模型 lane 直写）",
         root_strings.len()
     );
-    let failure_policy = crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
+    let failure_policy =
+        crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
     let cap = crate::fast_model::model_initial_persist::default_transaction_cap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let produce = async {
@@ -568,13 +590,11 @@ async fn model_half_inner(
                 sender
                     .send_async(WriteJob::new(transaction.sql, label))
                     .await
-                    .map_err(|_| anyhow::anyhow!("model lane closed before the slice was queued"))?;
+                    .map_err(|_| {
+                        anyhow::anyhow!("model lane closed before the slice was queued")
+                    })?;
             }
-            for (root, reason) in projection
-                .failures
-                .into_iter()
-                .chain(rendered.dead_letters)
-            {
+            for (root, reason) in projection.failures.into_iter().chain(rendered.dead_letters) {
                 log::error!("dbnum={dbnum} 初始化根 {root} 失败：{reason}");
                 let noun = nouns.get(&root).cloned().unwrap_or_default();
                 // 死信不再往库里写痕（`gen_root` 退役，ADR-079）：失败只进进程内账本
@@ -608,9 +628,12 @@ async fn model_half_inner(
     for (root, noun) in &nouns {
         let key = format!("{}/{}", root.word0, root.word1);
         if !seen.contains(&key) {
-            report
-                .units
-                .push(failed_unit(dbnum, *root, noun, "root was neither generated nor reported"));
+            report.units.push(failed_unit(
+                dbnum,
+                *root,
+                noun,
+                "root was neither generated nor reported",
+            ));
         }
     }
     drop(sender);
@@ -792,7 +815,11 @@ mod tests {
             generated_unit(7330, partial, &nouns),
             failed_unit(7330, dead, "FRMW", "producer failed"),
         ];
-        note_published_survivors(&mut units, partial, "1 geometry element(s) failed: 23714/1013");
+        note_published_survivors(
+            &mut units,
+            partial,
+            "1 geometry element(s) failed: 23714/1013",
+        );
         note_published_survivors(&mut units, dead, "must not replace the failure");
         assert_eq!(units[0].status, UnitGenStatus::Generated);
         assert_eq!(
@@ -836,11 +863,15 @@ mod tests {
             .find("futures::future::join(attributes.drain(), model_lane.drain())")
             .expect("both lanes drain together");
         let wipe = body.find("wipe_and_bail(").expect("lane failure wipes");
-        let counts = body.find("baseline_counts(dbnum)").expect("verification counts");
+        let counts = body
+            .find("baseline_counts(dbnum)")
+            .expect("verification counts");
         let converge = body
             .find("converge_tree_after_persist(")
             .expect("tree convergence after the drains");
-        let tail = body.find("commit_task_end_on(").expect("closing transaction");
+        let tail = body
+            .find("commit_task_end_on(")
+            .expect("closing transaction");
         assert!(
             drain < wipe && wipe < counts && counts < converge && converge < tail,
             "顺序必须是 排空两 lane → 裁决清库 → 核对 → 空间树 → 收尾一笔"
@@ -855,9 +886,38 @@ mod tests {
             "收尾那一笔同时盖 applied、收写入标记"
         );
         assert!(
-            body.find("mark_initialization_writing(").unwrap() < body.find("Lane::spawn(").unwrap(),
+            body.find("mark_initialization_writing_on(").unwrap()
+                < body.find("Lane::spawn_on(").unwrap(),
             "写入标记落在任何写者起来之前（ADR-072 W1）"
         );
+    }
+
+    /// 写入标记、两条写入 lane、解析失败落库与收尾一笔都写调用方给的 `db`。
+    #[test]
+    fn the_marker_the_lanes_the_ledger_and_the_tail_write_to_the_given_database() {
+        let body = production()
+            .split_once("pub(crate) async fn initialize(")
+            .expect("initialize")
+            .1
+            .split_once("async fn wipe_and_bail<")
+            .expect("wipe helper follows")
+            .0;
+        for global in ["SUL_DB", "get_db_option", "Lane::spawn("] {
+            assert!(
+                code_lines_mentioning(body, global).is_empty(),
+                "initialize 体内不许直接用 `{global}`"
+            );
+        }
+        for on_db in [
+            "mark_initialization_writing_on(db, ",
+            "parse_error::flush_on(db)",
+            "commit_task_end_on(db, &end)",
+        ] {
+            assert!(
+                body.contains(on_db),
+                "initialize 里缺 `{on_db}`：这一笔要落在给定的库"
+            );
+        }
     }
 
     /// 跑完即弃：模型半边一结束就把本 dbnum 的生成输入（`DbSet` + 元素缓存 + 属主表）从进程级缓存里放掉。
@@ -871,7 +931,9 @@ mod tests {
             .split_once("async fn model_half_inner(")
             .expect("inner follows")
             .0;
-        let inner = body.find("model_half_inner(dbnum, frozen, sender)").expect("runs the inner half");
+        let inner = body
+            .find("model_half_inner(dbnum, frozen, sender)")
+            .expect("runs the inner half");
         let forget = body
             .find("forget_generation_input(dbnum)")
             .expect("model_half 结束时必须释放生成输入缓存");
@@ -905,7 +967,12 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(!body.is_empty(), "{half} 的函数体为空");
-            for forbidden in ["Lane::spawn", "drain(", "wipe_after_failure(", "commit_task_end_on("] {
+            for forbidden in [
+                "Lane::spawn",
+                "drain(",
+                "wipe_after_failure(",
+                "commit_task_end_on(",
+            ] {
                 assert!(
                     code_lines_mentioning(&body, forbidden).is_empty(),
                     "{half} 不许 `{forbidden}`"

@@ -334,6 +334,7 @@ mod tests {
             .find(|path| path.file_name().is_some_and(|name| name == "ams7999_0001"))
             .expect("ams7999_0001 present in the AMS project");
         let ingested = crate::versioned_db::baseline_ingest::ingest_file(
+            &aios_core::SUL_DB,
             &options,
             "AvevaMarineSample",
             &path,

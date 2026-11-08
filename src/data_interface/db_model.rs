@@ -457,6 +457,7 @@ impl AiosDBManager {
                 .collect(),
         )
         .await;
+        // 启动入口：进程起来时还没有任务库，账本只能落本进程的库。
         if let Err(error) = crate::data_interface::parse_error::flush().await {
             log::warn!("{error:#}");
         }

@@ -3526,8 +3526,8 @@ impl AiosDBManager {
         .await
     }
 
-    /// 同 [`Self::initialize_dbnum_baseline`]：身份门、水位与幂等收口读写 `env.db`；计数、清库与
-    /// 初始化编排仍走本进程的库。
+    /// 同 [`Self::initialize_dbnum_baseline`]：身份门、水位与幂等收口读写 `env.db`，初始化收
+    /// `env.db` 与 `env.db_option`；这里的计数与清库仍走本进程的库。
     pub(crate) async fn initialize_dbnum_baseline_in(
         &self,
         env: TaskEnv<'_>,
@@ -3601,7 +3601,8 @@ impl AiosDBManager {
             // 解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾（applied + model + 写入标记）。
             // 失败先清库再 Err；核对不过 Err 不清库（下一轮按半截基线清）。
             return initialize(
-                &self.db_option,
+                env.db,
+                env.db_option,
                 InitializationRequest {
                     project,
                     dbnum,
@@ -7358,7 +7359,7 @@ mod tests {
             .unwrap()
             .0;
         assert!(
-            parent.contains("&parent,") && parent.contains("None,"),
+            parent.contains("&parent,") && parent.contains("None"),
             "父层补缺摄入母库文件、目标会话取母库最新: {parent}"
         );
     }
