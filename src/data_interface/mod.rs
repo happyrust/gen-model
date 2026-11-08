@@ -199,16 +199,17 @@ pub mod embedded_surql;
 
 pub(crate) mod generation_flight;
 pub mod generation_root;
+pub mod group_exec;
 /// GPWL / GPSET 分组的二级成员解析（GPITEM.GPREF → 设计元素），只供解析视图用，存储视图口径不变。
 pub mod group_membership;
 pub mod group_write;
-pub mod scosel;
 pub(crate) mod room_read_through;
 /// 面板自身的变化 → 本库整库房间归属重算（`RoomOnly`，d-819 / ADR-073 D13）：变更集里的房间定义族
 /// 与开工前对齐换代两条触发，任务在本批根刷盘之后、收尾之前用现有几何重写两张边。
 pub(crate) mod room_recompute;
 /// 反向传播（ADR-073 D13 反查）：面板变了 → 拿新盒查全局树 / 管身（谁进来）+ 库上名下的成员边（谁离开）→ 折成本库受影响的根，整库重算降为兜底。
 pub(crate) mod room_reverse;
+pub mod scosel;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给
 /// `generation_root` / `model_update_plan` 当契约的，见模块头。
