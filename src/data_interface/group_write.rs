@@ -58,6 +58,8 @@ pub enum GroupWriteOp {
     },
     /// 写 SCOSEL。e3d-io 的 `set_gpset_rules` 经 `RecordDraft::set_int_array_hunk` 原样写成 type-20
     /// 二进制 hunk：没有文本中转，也没有 0x3FFF 的计数上限；不要改走收文本的 `Transaction::set_hunk`。
+    /// **空 `Vec` 写的是 len=0 的 hunk，不是删属性**——读侧「SCOSEL 是空数组」与「没有 SCOSEL」
+    /// 是两件事，清规则要走删属性，不在这条路上。
     SetRules {
         gpset: ContainerRef,
         scosel: Vec<i32>,
@@ -642,6 +644,17 @@ mod tests {
             ValidatedBatch::Ready { ops, skipped }
         );
         assert_eq!(SkipReason::AlreadyMember.as_str(), "already_member");
+    }
+
+    /// 已在组里的 target 在同一批里写两遍：第一条标跳过、第二条按本批内重复拒掉，整批不写。
+    /// 不改成「两条都跳过」——同批写两遍是调用方的错，静默放过会把问题藏到读侧。
+    #[test]
+    fn a_repeat_of_an_already_present_target_still_counts_as_a_batch_duplicate() {
+        let ops = [
+            add(Existing(r(2, 11)), r(1, 3)),
+            add(Existing(r(2, 11)), r(1, 3)),
+        ];
+        assert_eq!(rejected(&ops), [(1, "duplicate_member")]);
     }
 
     #[test]
