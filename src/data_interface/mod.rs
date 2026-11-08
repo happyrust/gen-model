@@ -203,6 +203,8 @@ pub mod group_exec;
 /// GPWL / GPSET 分组的二级成员解析（GPITEM.GPREF → 设计元素），只供解析视图用，存储视图口径不变。
 pub mod group_membership;
 pub mod group_write;
+/// 分组写侧的任务体：校验 → 拆阶段 → 执行，交回可序列化的报告（`POST /api/v1/group/write` 的活儿）。
+pub mod group_write_task;
 pub(crate) mod room_read_through;
 /// 面板自身的变化 → 本库整库房间归属重算（`RoomOnly`，d-819 / ADR-073 D13）：变更集里的房间定义族
 /// 与开工前对齐换代两条触发，任务在本批根刷盘之后、收尾之前用现有几何重写两张边。

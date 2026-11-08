@@ -11,6 +11,8 @@ pub(crate) mod handlers;
 mod rvm_check;
 /// 显示用粗网格回填（ADR-096）：`/api/v1/mesh-lod1/backfill`。
 mod mesh_lod1;
+/// 分组写侧（GPWL / GPSET / GPITEM）：`/api/v1/group/write`。
+mod group_write;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
@@ -574,6 +576,8 @@ async fn serve_with_ready(
         .route("/api/v1/rvm-check/runs", post(rvm_check::start_run))
         .route("/api/v1/rvm-check/runs/{id}", get(rvm_check::get_run))
         .route("/api/v1/mesh-lod1/backfill", post(mesh_lod1::backfill_start))
+        // 分组写侧（GPWL / GPSET / GPITEM）：一批 op 后台落库，202 回 `task_id`，进度看 `/tasks/{id}`。
+        .route("/api/v1/group/write", post(group_write::group_write_start))
         .route(
             "/api/v1/mesh-lod1/backfill/{id}",
             get(mesh_lod1::backfill_get),

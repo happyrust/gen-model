@@ -33,6 +33,8 @@ pub const TASK_KIND_ROOM_REBUILD: &str = "room_rebuild";
 pub const TASK_KIND_RVM_CHECK: &str = "rvm_check";
 /// 显示用粗网格回填（ADR-096，`POST /api/v1/mesh-lod1/backfill`）：按库枚举交付单元根、只写 `lod1-v1/`。
 pub const TASK_KIND_MESH_LOD1_BACKFILL: &str = "mesh_lod1_backfill";
+/// 分组写侧（GPWL / GPSET / GPITEM）：把一批 `GroupWriteOp` 落到真库。
+pub const TASK_KIND_GROUP_WRITE: &str = "group_write";
 // 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
 // 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
 // 从此恒回空列表（spec §4.7.2）。
@@ -765,6 +767,25 @@ impl TaskRegistry {
         entry.current_stage = Some("queued".to_string());
         entry.stage_started_at = Some(now);
         entry.detail = Some(detail);
+        self.insert_entry(entry);
+    }
+
+    /// 一次分组写侧（GPWL / GPSET / GPITEM）。一批可以跨库，所以 `dbnum` 留空，op 条数等请求形状
+    /// 记在 `detail` 里；进度只按阶段推进（`validating` → `done`），不细到逐条 op——写侧是
+    /// 一个库一个事务，中途的条数没有对外意义。
+    pub fn insert_running_group_write(
+        &self,
+        task_id: &str,
+        project: &str,
+        request: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        let mut entry = TaskEntry::blank(task_id, TASK_KIND_GROUP_WRITE, project);
+        entry.state = TaskState::Running;
+        entry.started_at = Some(now.clone());
+        entry.current_stage = Some("validating".to_string());
+        entry.stage_started_at = Some(now);
+        entry.detail = Some(request);
         self.insert_entry(entry);
     }
 

@@ -326,6 +326,17 @@ impl DirectTreeService {
         self.store.dbnum_of(refno).ok().map(|dbnum| dbnum as u32)
     }
 
+    /// 本服务钉住的只读视图，供需要 [`TreeStore`] 的写前校验用（`group_write::validate_ops`）。
+    ///
+    /// 校验读的是**写之前**的库状态，所以必须与这个服务同一只冻结会话——另开一个
+    /// `MdbReadStore` 会看到别的 sesno，校验结论与即将写的库对不上。`Arc` 克隆不复制
+    /// 数据，调用方可以放心搬进 `spawn_blocking`。
+    ///
+    /// 写侧不在这里发生：这个视图只读，`Transaction` 由 `group_exec` 自己开。
+    pub fn tree_store(&self) -> Arc<MdbReadStore> {
+        self.store.clone()
+    }
+
     /// 这个元素的 noun（`TYPE`），与 [`Self::children`] 节点上的 `noun` 同一来源。
     ///
     /// 名称索引里没有类型，搜索结果要带 noun 只能回记录读一次；调用方按页调，别对
