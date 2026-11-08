@@ -4376,7 +4376,10 @@ impl AiosDBManager {
                             cand.db_num
                         ));
                     }
-                    crate::data_interface::cata_closure::invalidate_project_locator(project).await;
+                    crate::data_interface::cata_closure::invalidate_project_locator_on(
+                        &SUL_DB, project,
+                    )
+                    .await;
                     warnings.push(format!(
                         "dbnum={}: 范围外 CATA 同号多文件，整组阻断且未登记任何观察值: {}",
                         cand.db_num,

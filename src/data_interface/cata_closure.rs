@@ -24,9 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use aios_core::SUL_DB;
+use aios_core::options::DbOption;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, get_db_option};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use surrealdb::{Surreal, engine::any::Any};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::cata_closure_cache::{
@@ -207,12 +209,20 @@ pub fn dependency_identity_manifest_snapshot() -> Vec<DependencyIdentityFile> {
         .clone()
 }
 
+/// 项目 locator 缓存，只存本进程库（[`is_process_db`]）建出来的：别的库登记的文件身份与本进程
+/// 不同源，按工程名共用一格会两边串。
 static LOCATOR_CACHE: Lazy<TokioMutex<HashMap<String, (u64, InMemoryCataLocator)>>> =
     Lazy::new(|| TokioMutex::new(HashMap::new()));
 
-/// 文件身份门控改变后丢弃项目 locator；下一次按当前 watermark 身份重建。
-pub(crate) async fn invalidate_project_locator(project: &str) {
-    LOCATOR_CACHE.lock().await.remove(project);
+fn is_process_db(db: &Surreal<Any>) -> bool {
+    std::ptr::eq(db, &*SUL_DB)
+}
+
+/// 文件身份门控改变后丢弃项目 locator；下一次按当前 watermark 身份重建。别的库没进过缓存，无格可丢。
+pub(crate) async fn invalidate_project_locator_on(db: &Surreal<Any>, project: &str) {
+    if is_process_db(db) {
+        LOCATOR_CACHE.lock().await.remove(project);
+    }
 }
 
 impl InMemoryCataLocator {
@@ -255,14 +265,26 @@ impl InMemoryCataLocator {
     ///
     /// `project`：工程名（legacy/compare 回读语义需要 + `file_of` 返回）。
     pub async fn build_for_project(project: &str) -> anyhow::Result<Self> {
+        Self::build_for_project_on(&SUL_DB, get_db_option(), project).await
+    }
+
+    /// 同 [`Self::build_for_project`]，文件身份从 `db` 读、目录根按 `option` 解析。不是本进程的库就每次
+    /// 现建，不读也不写 [`LOCATOR_CACHE`]。
+    pub async fn build_for_project_on(
+        db: &Surreal<Any>,
+        option: &DbOption,
+        project: &str,
+    ) -> anyhow::Result<Self> {
+        let cacheable = is_process_db(db);
         let manifest_version = DEPENDENCY_MANIFEST_VERSION.load(Ordering::SeqCst);
-        if let Some((version, locator)) = LOCATOR_CACHE.lock().await.get(project).cloned()
+        if cacheable
+            && let Some((version, locator)) = LOCATOR_CACHE.lock().await.get(project).cloned()
             && version == manifest_version
         {
             return Ok(locator);
         }
 
-        let mut dbnum_files = load_dbnum_files_from_watermark(project).await?;
+        let mut dbnum_files = load_dbnum_files_from_watermark_on(db, project).await?;
         let manifest = dependency_manifest_snapshot();
         let identity_manifest = dependency_identity_manifest_snapshot();
         for entry in &identity_manifest {
@@ -377,7 +399,7 @@ impl InMemoryCataLocator {
         }
 
         // 扫库是同步的，攒下的扫描失败在这里落库（见 `scan_db_ref0s`）。
-        if let Err(error) = crate::data_interface::parse_error::flush().await {
+        if let Err(error) = crate::data_interface::parse_error::flush_on(db).await {
             log::warn!("{error:#}");
         }
 
@@ -398,7 +420,6 @@ impl InMemoryCataLocator {
         // every configured dependency project and merge the deterministic CATA
         // selection.  Watcher mode keeps using its authoritative manifest.
         if manifest.is_empty() {
-            let option = get_db_option();
             let mut projects = vec![project.to_string()];
             // 依赖项目 = MDB 闭包（ADR-078），不再是 `included_projects`。
             projects.extend(crate::data_interface::project_paths::project_names(option));
@@ -421,10 +442,12 @@ impl InMemoryCataLocator {
             }
         }
 
-        LOCATOR_CACHE
-            .lock()
-            .await
-            .insert(project.to_string(), (manifest_version, locator.clone()));
+        if cacheable {
+            LOCATOR_CACHE
+                .lock()
+                .await
+                .insert(project.to_string(), (manifest_version, locator.clone()));
+        }
         Ok(locator)
     }
 
@@ -613,7 +636,8 @@ struct WatermarkFileRow {
 ///
 /// 该表在（只读）扫描期即被 `DbnumState::record_scan` 登记，含**未解析**的 CATA 库，
 /// 因此按需定位不依赖 CATA 是否已整库解析。
-async fn load_dbnum_files_from_watermark(
+async fn load_dbnum_files_from_watermark_on(
+    db: &Surreal<Any>,
     project: &str,
 ) -> anyhow::Result<HashMap<u32, DbFileEntry>> {
     let sql = format!("SELECT dbnum, db_type, file_path FROM {WATERMARK_TABLE};");
@@ -621,7 +645,7 @@ async fn load_dbnum_files_from_watermark(
     // `take(0).unwrap_or_default()` 把语句/解码失败静默降级成「一个登记行都没有」，
     // 整轮闭包的每个 ref0 都会被解析成 missing——一次读表失败被伪装成「登记缺失」，
     // 排障方向从持久层故障被带偏到扫描/登记链路上。
-    let mut response = SUL_DB
+    let mut response = db
         .query(sql)
         .await
         .map_err(|e| anyhow::anyhow!("读取 dbnum_watermark 文件身份失败（CATA 定位器）: {e}"))?
@@ -892,7 +916,9 @@ pub(crate) fn dedupe_members(refno: RefU64, raw: &[RefU64]) -> Vec<RefU64> {
 /// 用已打开会话解析一批 refno（不重读文件 / 不重建索引）。
 ///
 /// `attmap_sink`：可选保留完整属性表（Phase 3 惰性兜底落库需要；闭包发现 pass 传 `None` 省内存）。
+/// 这一批的解析失败落到 `db`。
 async fn parse_refnos_with_session(
+    db: &Surreal<Any>,
     session: &mut OnDemandDbSession,
     refnos: &[RefU64],
     mut attmap_sink: Option<&mut HashMap<RefU64, (NamedAttrMap, Vec<RefU64>)>>,
@@ -941,7 +967,7 @@ async fn parse_refnos_with_session(
     }
     // 攒在进程内的这一批在这里落库：本函数是逐元素循环最近的 async 收口点，
     // 循环里逐条 UPSERT 会把「一个坏文件」变成「解析卡死」。
-    if let Err(error) = crate::data_interface::parse_error::flush().await {
+    if let Err(error) = crate::data_interface::parse_error::flush_on(db).await {
         log::warn!("{error:#}");
     }
     Ok(out)
@@ -957,7 +983,7 @@ pub async fn parse_db_refnos(
         return Ok(HashMap::new());
     }
     let mut session = open_db_session(project, path)?;
-    parse_refnos_with_session(&mut session, refnos, None).await
+    parse_refnos_with_session(&SUL_DB, &mut session, refnos, None).await
 }
 
 /// 闭包行为配置。
@@ -1206,6 +1232,8 @@ pub struct CataClosureResolver<'a, L: CataDbLocator> {
     /// 库身份怎么取：默认读真文件（[`catalogue_identity`]）。单测换成桩，好在没有真 dabacon
     /// 文件的情况下走完「查缓存 → 命中扩边」这条路。
     identity_probe: fn(&Path) -> Option<CatalogueIdentity>,
+    /// 解析失败账本落到哪个库：默认本进程库，任务链用 [`Self::with_db`] 换成自己的。
+    db: &'a Surreal<Any>,
 }
 
 impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
@@ -1220,12 +1248,18 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
             attmaps: HashMap::new(),
             catalogue_scopes: HashMap::new(),
             identity_probe: catalogue_identity,
+            db: &SUL_DB,
         }
     }
 
     /// 开启属性表保留（小闭包惰性兜底场景；大闭包慎用，内存随 visited 线性增长）。
     pub fn with_retain_attmaps(mut self, retain: bool) -> Self {
         self.retain_attmaps = retain;
+        self
+    }
+
+    pub fn with_db(mut self, db: &'a Surreal<Any>) -> Self {
+        self.db = db;
         self
     }
 
@@ -1282,6 +1316,7 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
             .map(|t| t.to_uppercase())
             .collect();
         let excluded_dbnums = self.cfg.excluded_dbnums.clone();
+        let db = self.db;
 
         let seed_count = self.frontier.len();
         let mut by_dbnum: BTreeMap<u32, BTreeSet<RefU64>> = BTreeMap::new();
@@ -1453,7 +1488,8 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                             };
                             let parse_started = std::time::Instant::now();
                             let parsed =
-                                parse_refnos_with_session(session, &misses, attmap_sink).await?;
+                                parse_refnos_with_session(db, session, &misses, attmap_sink)
+                                    .await?;
                             parse_spent += parse_started.elapsed();
                             parsed
                         };
@@ -1788,7 +1824,7 @@ mod tests {
     fn locator_stays_on_the_persistent_store() {
         let source = include_str!("cata_closure.rs");
         let locator = source
-            .split_once("async fn load_dbnum_files_from_watermark(")
+            .split_once("async fn load_dbnum_files_from_watermark_on(")
             .expect("watermark locator exists")
             .1
             .split_once("fn scan_db_ref0s(")
@@ -1796,7 +1832,7 @@ mod tests {
             .0;
         // 定位器读的是持久层（登记契约在 dbnum_watermark），不许被路由进暂存。
         assert!(
-            locator.contains("SUL_DB") && locator.contains(".query("),
+            locator.contains("let mut response = db") && locator.contains(".query("),
             "{locator}"
         );
     }
@@ -1809,7 +1845,7 @@ mod tests {
     fn a_failed_watermark_read_surfaces_instead_of_an_empty_locator() {
         let source = include_str!("cata_closure.rs");
         let body = source
-            .split_once("async fn load_dbnum_files_from_watermark(")
+            .split_once("async fn load_dbnum_files_from_watermark_on(")
             .expect("watermark locator exists")
             .1
             .split_once("fn scan_db_ref0s(")
@@ -1835,6 +1871,89 @@ mod tests {
             window.contains("map_err"),
             "take 失败必须带上下文上浮: {window}"
         );
+    }
+
+    /// 文件身份从调用方给的库读：任务库里登记的就是它自己的身份。空路径只留 CATA 的阻断墓碑，
+    /// 没有路径的行跳过。
+    #[tokio::test]
+    async fn watermark_identities_are_read_from_the_given_database() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("cata").use_db("watermark").await.unwrap();
+        db.query(format!(
+            "CREATE {WATERMARK_TABLE} SET dbnum = 7600, db_type = 'CATA', \
+               file_path = 'D:/p/aps000/aps7600'; \
+             CREATE {WATERMARK_TABLE} SET dbnum = 7601, db_type = 'CATA', file_path = ''; \
+             CREATE {WATERMARK_TABLE} SET dbnum = 1112, db_type = 'DESI', file_path = ''; \
+             CREATE {WATERMARK_TABLE} SET dbnum = 1113, db_type = 'DESI';"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let files = load_dbnum_files_from_watermark_on(&db, "Q5Project")
+            .await
+            .unwrap();
+        let mut dbnums: Vec<u32> = files.keys().copied().collect();
+        dbnums.sort_unstable();
+        assert_eq!(dbnums, vec![7600, 7601]);
+        let cata = &files[&7600];
+        assert_eq!(cata.db_type, "CATA");
+        assert_eq!(cata.project, "Q5Project");
+        assert_eq!(cata.path, PathBuf::from("D:/p/aps000/aps7600"));
+        assert!(files[&7601].path.as_os_str().is_empty());
+    }
+
+    /// 非本进程的库建出来的 locator 不进 [`LOCATOR_CACHE`]：缓存按工程名存，任务库与本进程库的
+    /// 同名工程共用一格就会互相顶替。
+    #[test]
+    fn a_locator_built_on_another_database_is_not_cached() {
+        use crate::data_interface::watch_scope;
+        // 建 locator 的收尾会 flush_on 进程级解析失败账本，和 parse_error 的测试共用一把锁。
+        crate::data_interface::parse_error::with_ledger_locked(async {
+            // 监听限定域是进程级的，跟着 DbOption.toml 的 watch_dbnums 走；开着时依赖清单为空，
+            // build_for_project_on 直接报错。这条测的是缓存，先压成空表，收尾还原成未解析。
+            let _watch = watch_scope::test_guard();
+            watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("cata").use_db("uncached").await.unwrap();
+            let project = format!("Q5Uncached{}", std::process::id());
+            // 空搜索根：目录兜底不碰任何真实项目目录。
+            let mut option = DbOption::default();
+            option.project_path = String::new();
+            option.project_name = project.clone();
+            option.mdb_name = format!("Q5UNCACHED-{}", std::process::id());
+            option.project_dirs = None;
+
+            let locator = InMemoryCataLocator::build_for_project_on(&db, &option, &project)
+                .await
+                .unwrap();
+            assert_eq!(locator.dbnum_count(), 0);
+            assert!(
+                !LOCATOR_CACHE.lock().await.contains_key(&project),
+                "非本进程库建出的 locator 不得写进缓存"
+            );
+            watch_scope::clear_for_tests();
+        });
+    }
+
+    /// 失效只动本进程那一格：别的库从没进过缓存，拿它失效不得顶掉本进程的 locator。
+    #[tokio::test]
+    async fn invalidation_only_touches_the_process_cell() {
+        let other = Surreal::<Any>::init();
+        let project = format!("Q5Invalidate{}", std::process::id());
+        LOCATOR_CACHE.lock().await.insert(
+            project.clone(),
+            (
+                0,
+                InMemoryCataLocator::from_parts(HashMap::new(), HashMap::new()),
+            ),
+        );
+
+        invalidate_project_locator_on(&other, &project).await;
+        assert!(LOCATOR_CACHE.lock().await.contains_key(&project));
+        invalidate_project_locator_on(&SUL_DB, &project).await;
+        assert!(!LOCATOR_CACHE.lock().await.contains_key(&project));
     }
 
     /// 登记行缺 db_type 时不许被静默当「非 CATA」跳过（2026-08-13 审计 P3）：

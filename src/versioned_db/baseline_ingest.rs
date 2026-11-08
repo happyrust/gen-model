@@ -344,7 +344,7 @@ pub(crate) async fn stream_frozen_into_on(
     crate::data_interface::pe_batch::retire_event_on(db).await?;
     // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`；DICT 相先于 DESI 相，定义此时已在库里。
     // 查不到的键记账、随文件回执打一行，不静默丢。
-    let uda_keys = Arc::new(UdaKeyMap::load().await.with_context(|| {
+    let uda_keys = Arc::new(UdaKeyMap::load_on(db).await.with_context(|| {
         format!("baseline UDA key table failed: file={file_name} dbnum={dbnum}")
     })?);
     let chunk_size = db_option
@@ -394,9 +394,11 @@ pub(crate) async fn stream_frozen_into_on(
     );
     let dependency = if is_design && !seeds.is_empty() {
         Some(
-            persist_dependency_closure(project, dbnum, &file_name, &seeds, &uda_keys, sender)
-                .await
-                .context("CATA 依赖闭包失败")?,
+            persist_dependency_closure(
+                db, db_option, project, dbnum, &file_name, &seeds, &uda_keys, sender,
+            )
+            .await
+            .context("CATA 依赖闭包失败")?,
         )
     } else {
         None
@@ -459,6 +461,8 @@ fn dispatch_chunk(
 /// 文件收尾的 CATA 依赖闭包：本库 DESI 元素依赖的目录链元素经同一条 lane `Fresh` 入库，
 /// 每个目录库再补一行 `cata_dependency_state`（不是水位）。
 async fn persist_dependency_closure(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    db_option: &DbOption,
     project: &str,
     dbnum: u32,
     file_name: &str,
@@ -467,7 +471,8 @@ async fn persist_dependency_closure(
     sender: &flume::Sender<WriteJob>,
 ) -> anyhow::Result<DependencySummary> {
     use crate::data_interface::cata_dependency;
-    let rows = cata_dependency::resolve_dependency_rows(project, dbnum, seeds).await?;
+    let rows =
+        cata_dependency::resolve_dependency_rows_on(db, db_option, project, dbnum, seeds).await?;
     let render_started = std::time::Instant::now();
     // D6：只查不记（plan Q3 第一阶段）——这条 lane 是异步单写者，成功要等 drain，
     // 记不了「写成功之后」那一刻；已经被同步出口落过的行照样不必再发一遍。
@@ -802,8 +807,8 @@ mod tests {
         );
     }
 
-    /// 流那一半摘 legacy 事件摘的是给它的库。UDA 键表仍读本进程的库，拼出来的冻结源也不指向
-    /// 真实文件，所以这一趟本身必然失败——这里只看事件有没有从给定的库里摘掉。
+    /// 流那一半摘 legacy 事件摘的是给它的库。拼出来的冻结源不指向真实文件，所以这一趟本身
+    /// 必然失败——这里只看事件有没有从给定的库里摘掉。
     #[tokio::test]
     async fn the_streaming_half_retires_the_legacy_event_on_the_given_database() {
         use crate::data_interface::pe_batch::require_no_event_on;
@@ -823,5 +828,27 @@ mod tests {
 
         assert!(streamed.is_err(), "拼出来的冻结源不该流得通");
         require_no_event_on(&db).await.unwrap();
+    }
+
+    /// UDA 键表从给它的库读：本进程的库在单测里没连，读它会停在「UDA 键表失败」；读给定的库
+    /// 则走到冻结源本身（拼出来的，不指向真实文件）才失败。
+    #[tokio::test]
+    async fn the_streaming_half_reads_uda_keys_from_the_given_database() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("baseline_ingest").use_db("uda").await.unwrap();
+        let frozen = FrozenSource::synthetic("ams8000", 8000, "DESI", 42);
+        let (sender, _receiver) = flume::unbounded();
+
+        let Err(error) =
+            stream_frozen_into_on(&db, &DbOption::default(), "AMS", &frozen, &sender).await
+        else {
+            panic!("拼出来的冻结源不该流得通");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            !message.contains("baseline UDA key table failed"),
+            "{message}"
+        );
+        assert!(message.contains("基线收集失败"), "{message}");
     }
 }

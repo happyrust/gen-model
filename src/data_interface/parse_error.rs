@@ -30,6 +30,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use aios_core::SUL_DB;
+use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 
@@ -136,7 +137,7 @@ fn missing_from_scope(known: &HashSet<Key>, kind: &str, seen: &HashSet<String>) 
 /// 只有调用方能说出「这一批就是全部」时才用得上。项目名单来自配置、就是全集；而
 /// `element` / `attrs` / `file` 每轮只覆盖一个子集，对它们用这个会误删。
 async fn note_scope(kind: &'static str, seen: &HashSet<String>) {
-    if let Err(error) = seed_known_failed().await {
+    if let Err(error) = seed_known_failed_on(&SUL_DB).await {
         log::warn!("[parse_error] 已有解析错误行播种失败（本轮不做范围销账）: {error:#}");
         return;
     }
@@ -251,11 +252,11 @@ fn render_delete(kind: &str, target: &str) -> String {
 ///
 /// 不播种的话，上一个进程记下的行永远等不到销账——它这一轮解析成功，而本进程
 /// 「没见过它失败」，于是 DELETE 发不出去，一条已经修好的记录会一直挂在清单上。
-async fn seed_known_failed() -> anyhow::Result<()> {
+async fn seed_known_failed_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     if known_failed().is_some() {
         return Ok(());
     }
-    let mut response = SUL_DB
+    let mut response = db
         .query(format!("SELECT kind, target FROM {TABLE};"))
         .await?
         .check()?;
@@ -281,10 +282,15 @@ async fn seed_known_failed() -> anyhow::Result<()> {
 /// 播种失败不能连累落库：账本读不出来最多让销账晚一轮，而丢掉这一批失败记录
 /// 等于这一轮解析问题彻底没留痕——那正是这张表要解决的事。
 pub async fn flush() -> anyhow::Result<usize> {
+    flush_on(&SUL_DB).await
+}
+
+/// 同 [`flush`]，播种与落库都走 `db`；缓冲区与已知失败集仍是进程级的。
+pub async fn flush_on(db: &Surreal<Any>) -> anyhow::Result<usize> {
     if pending().is_empty() {
         return Ok(0);
     }
-    if let Err(error) = seed_known_failed().await {
+    if let Err(error) = seed_known_failed_on(db).await {
         log::warn!("[parse_error] 已有解析错误行播种失败（本轮只写不销账）: {error:#}");
     }
     let batch = std::mem::take(&mut *pending());
@@ -316,11 +322,7 @@ pub async fn flush() -> anyhow::Result<usize> {
     let written = statements.len();
     let sql = statements.join("\n");
     // 失败就把这批放回缓冲区：解析侧没有重试通道，这里丢了就是永久丢了。
-    if let Err(error) = SUL_DB
-        .query(sql)
-        .await
-        .and_then(|response| response.check())
-    {
+    if let Err(error) = db.query(sql).await.and_then(|response| response.check()) {
         let mut buffer = pending();
         for (key, entry) in batch {
             buffer.entry(key).or_insert(entry);
@@ -375,6 +377,26 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         "last_error": latest.last_error,
         "last_seen_at": latest.last_seen_at,
     }))
+}
+
+/// 碰进程级账本（[`PENDING`] / [`KNOWN_FAILED`]）的测试共用这一把锁，包括别的模块里经 `flush_on`
+/// 间接落库的：落库会把缓冲区整批取走，不串行的话，另一个测试攒下、正要断言的条目会被写进
+/// 别人的库。
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// 持着 [`TEST_LOCK`] 跑一段异步测试体：锁留在同步栈上，不跨 `.await`。
+#[cfg(test)]
+pub(crate) fn with_ledger_locked<F: std::future::Future>(body: F) -> F::Output {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(body)
 }
 
 #[cfg(test)]
@@ -605,5 +627,47 @@ mod tests {
         assert!(remaining.is_empty(), "销账之后不该还有行: {remaining:?}");
     }
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// 播种与落库都走调用方给的库：旧行从这个库播种（于是这一轮的成功能销掉它），
+    /// 新失败和销账的 DELETE 也都落在这个库。单测里本进程的库没连，走错库就是报错。
+    #[test]
+    fn flush_on_seeds_from_and_lands_in_the_given_database() {
+        with_ledger_locked(async {
+            reset();
+            *known_failed() = None;
+            let db = surrealdb::engine::any::connect("mem://")
+                .await
+                .expect("mem boots");
+            db.use_ns("test")
+                .use_db("parse_error_flush_on")
+                .await
+                .expect("select fixture db");
+            db.query(render_upsert(FILE, "/old/aps7600", 1, "stale"))
+                .await
+                .expect("seed row")
+                .check()
+                .expect("seed row statement");
+
+            seed_known_failed_on(&db)
+                .await
+                .expect("seed from the given db");
+            note_file_success(Path::new("/old/aps7600"));
+            note_element_failure("4000000002/7", "APPDAR not exist");
+            let written = flush_on(&db).await.expect("flush into the given db");
+            assert!(written >= 2, "一条 UPSERT 加一条 DELETE: {written}");
+
+            let mut response = db
+                .query(format!("SELECT kind, target FROM {TABLE};"))
+                .await
+                .expect("read back")
+                .check()
+                .expect("read back statement");
+            let rows: Vec<serde_json::Value> = response.take(0).expect("decode rows");
+            let has = |kind: &str, target: &str| {
+                rows.iter()
+                    .any(|row| row["kind"] == kind && row["target"] == target)
+            };
+            assert!(has(ELEMENT, "4000000002/7"), "新失败落在给定的库: {rows:?}");
+            assert!(!has(FILE, "/old/aps7600"), "播种来的旧行被销掉: {rows:?}");
+        });
+    }
 }

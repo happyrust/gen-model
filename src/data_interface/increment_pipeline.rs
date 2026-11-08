@@ -1212,8 +1212,8 @@ impl IncrementPipeline {
                 let project = env.db_option.project_name.clone();
                 let rows = StageTimings::measure(
                     &mut timings.cata_dependency,
-                    crate::data_interface::cata_dependency::resolve_dependency_rows(
-                        &project, dbnum, &seeds,
+                    crate::data_interface::cata_dependency::resolve_dependency_rows_on(
+                        env.db, env.db_option, &project, dbnum, &seeds,
                     ),
                 )
                 .await?;
@@ -2265,7 +2265,7 @@ mod cache_tests {
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
         // CATA 闭包解析仍在 Task（plan 2026-09-06 §3 D6 (a)：解析失败拦水位的口径保留），
         // 行本身随窗口产物一起落。
-        let cata = at("cata_dependency::resolve_dependency_rows(");
+        let cata = at("cata_dependency::resolve_dependency_rows_on(");
         let invalidate = at("Self::invalidate_caches(&cache_refnos)");
         let reverse_index = at("build_reverse_index_statements(&range_eles)");
         let datacenter = at(

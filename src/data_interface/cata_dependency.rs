@@ -29,7 +29,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, SUL_DB};
+use aios_core::options::DbOption;
+use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, SUL_DB, get_db_option};
 use anyhow::Context;
 use surrealdb::{Surreal, engine::any::Any};
 
@@ -146,13 +147,25 @@ pub async fn resolve_dependency_rows(
     design_dbnum: u32,
     seeds: &BTreeSet<RefU64>,
 ) -> anyhow::Result<CataDependencyRows> {
+    resolve_dependency_rows_on(&SUL_DB, get_db_option(), project, design_dbnum, seeds).await
+}
+
+/// 同 [`resolve_dependency_rows`]：locator 的文件身份从 `db` 读、目录根按 `option` 解析，
+/// 闭包里的解析失败也记到 `db`。
+pub async fn resolve_dependency_rows_on(
+    db: &Surreal<Any>,
+    option: &DbOption,
+    project: &str,
+    design_dbnum: u32,
+    seeds: &BTreeSet<RefU64>,
+) -> anyhow::Result<CataDependencyRows> {
     if seeds.is_empty() {
         return Ok(CataDependencyRows::default());
     }
-    let locator = InMemoryCataLocator::build_for_project(project)
+    let locator = InMemoryCataLocator::build_for_project_on(db, option, project)
         .await
         .context("build CATA locator for dependency closure")?;
-    resolve_dependency_rows_with(&locator, design_dbnum, seeds).await
+    resolve_rows_with_config(db, &locator, closure_config(Some(design_dbnum)), seeds).await
 }
 
 /// 同 [`resolve_dependency_rows`]，定位器由调用方给：闭包路径只有这一条，对拍 oracle
@@ -163,7 +176,7 @@ pub async fn resolve_dependency_rows_with<L: CataDbLocator>(
     design_dbnum: u32,
     seeds: &BTreeSet<RefU64>,
 ) -> anyhow::Result<CataDependencyRows> {
-    resolve_rows_with_config(locator, closure_config(Some(design_dbnum)), seeds).await
+    resolve_rows_with_config(&SUL_DB, locator, closure_config(Some(design_dbnum)), seeds).await
 }
 
 /// 惰性兜底（`cata_closure::ensure_cata_refnos_parsed`）走的**同一条**闭包路：seed 已经是目录侧 refno，
@@ -173,10 +186,11 @@ pub async fn resolve_catalogue_rows_with<L: CataDbLocator>(
     locator: &L,
     seeds: &BTreeSet<RefU64>,
 ) -> anyhow::Result<CataDependencyRows> {
-    resolve_rows_with_config(locator, closure_config(None), seeds).await
+    resolve_rows_with_config(&SUL_DB, locator, closure_config(None), seeds).await
 }
 
 async fn resolve_rows_with_config<L: CataDbLocator>(
+    db: &Surreal<Any>,
     locator: &L,
     config: CataClosureConfig,
     seeds: &BTreeSet<RefU64>,
@@ -184,7 +198,9 @@ async fn resolve_rows_with_config<L: CataDbLocator>(
     if seeds.is_empty() {
         return Ok(CataDependencyRows::default());
     }
-    let mut resolver = CataClosureResolver::new(locator, config).with_retain_attmaps(true);
+    let mut resolver = CataClosureResolver::new(locator, config)
+        .with_retain_attmaps(true)
+        .with_db(db);
     resolver.seed(seeds.iter().copied());
     let resolve_started = std::time::Instant::now();
     let manifest = resolver
@@ -645,7 +661,7 @@ pub async fn refresh_dependency_rows_of_moved_catalogues(
 ) -> CatalogueDependencyRefreshReport {
     let started = std::time::Instant::now();
     let mut report = CatalogueDependencyRefreshReport::default();
-    let dbnums = match dependency_state_dbnums().await {
+    let dbnums = match dependency_state_dbnums_on(&SUL_DB).await {
         Ok(dbnums) => dbnums,
         Err(error) => {
             report
@@ -679,8 +695,8 @@ pub async fn refresh_dependency_rows_of_moved_catalogues(
 }
 
 /// 有依赖状态行的目录库（升序去重）。`dbnum` 缺格的行跳过——它没法对到文件。
-async fn dependency_state_dbnums() -> anyhow::Result<Vec<u32>> {
-    let mut response = SUL_DB
+async fn dependency_state_dbnums_on(db: &Surreal<Any>) -> anyhow::Result<Vec<u32>> {
+    let mut response = db
         .query("SELECT VALUE dbnum FROM cata_dependency_state;")
         .await?
         .check()?;
@@ -1383,7 +1399,7 @@ mod tests {
             .expect("apply_one 还在")
             .1;
         assert!(
-            pipeline.contains("cata_dependency::resolve_dependency_rows("),
+            pipeline.contains("cata_dependency::resolve_dependency_rows_on("),
             "数据窗口 apply_one 必须在 Task 侧解 CATA 依赖闭包"
         );
         let sink = include_str!("window_landing/mod.rs");
@@ -1394,7 +1410,7 @@ mod tests {
         );
         let baseline = include_str!("../versioned_db/baseline_ingest.rs");
         assert!(
-            baseline.contains("cata_dependency::resolve_dependency_rows(")
+            baseline.contains("cata_dependency::resolve_dependency_rows_on(")
                 && baseline.contains("cata_dependency::render_dependency_transactions_unpersisted(")
                 && baseline.contains(".send_async(WriteJob::new(")
                 && baseline.contains("sql.clone(),"),
@@ -1966,7 +1982,7 @@ mod tests {
             .1;
         let body = &body[..body.find("\n}\n").expect("函数体收尾")];
         assert!(
-            body.contains("dependency_state_dbnums().await"),
+            body.contains("dependency_state_dbnums_on(&SUL_DB).await"),
             "候选来自 cata_dependency_state"
         );
         assert!(
@@ -2320,5 +2336,56 @@ mod tests {
             second_account.cache_misses,
             second.account.resolve_ms,
         );
+    }
+
+    /// 前移刷新的候选名单从调用方给的库读：升序去重，缺 `dbnum` 的行跳过。
+    #[tokio::test]
+    async fn dependency_state_candidates_come_from_the_given_database() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("dep").use_db("state_candidates").await.unwrap();
+        db.query(
+            "CREATE cata_dependency_state:7002 SET dbnum = 7002, sesno = 5; \
+             CREATE cata_dependency_state:again SET dbnum = 7002, sesno = 6; \
+             CREATE cata_dependency_state:7001 SET dbnum = 7001, sesno = 3; \
+             CREATE cata_dependency_state:orphan SET sesno = 1;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        assert_eq!(
+            dependency_state_dbnums_on(&db).await.unwrap(),
+            vec![7001, 7002]
+        );
+    }
+
+    /// 闭包定位读调用方给的库：任务库里一个文件都没登记，seed 全记 missing，而不是去读本进程
+    /// 的库（单测里它没连，读了就是错误）。
+    #[test]
+    fn dependency_rows_resolve_against_the_given_database() {
+        use crate::data_interface::watch_scope;
+        // 建 locator 的收尾会 flush_on 进程级解析失败账本，和 parse_error 的测试共用一把锁。
+        crate::data_interface::parse_error::with_ledger_locked(async {
+            // 监听限定域是进程级的，跟着 DbOption.toml 的 watch_dbnums 走；开着时依赖清单为空，
+            // build_for_project_on 直接报错。这条测的是读哪个库，先压成空表，收尾还原成未解析。
+            let _watch = watch_scope::test_guard();
+            watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("dep").use_db("rows_on").await.unwrap();
+            // 空搜索根：目录兜底不碰任何真实项目目录。
+            let mut option = DbOption::default();
+            option.project_path = String::new();
+            option.project_name = format!("Q5DepRowsOn{}", std::process::id());
+            option.mdb_name = format!("Q5DEPROWSON-{}", std::process::id());
+            option.project_dirs = None;
+            let seeds = BTreeSet::from([refu(7600, 1), refu(7600, 2)]);
+
+            let rows = resolve_dependency_rows_on(&db, &option, &option.project_name, 1112, &seeds)
+                .await
+                .expect("空任务库解出来是全 missing，不是错误");
+            assert_eq!(rows.manifest.missing, seeds.len());
+            assert!(rows.manifest.by_dbnum.is_empty());
+            watch_scope::clear_for_tests();
+        });
     }
 }
