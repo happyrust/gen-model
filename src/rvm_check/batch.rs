@@ -29,9 +29,9 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    FusedCompare, RunInput, RunSpec, RvmCounts, RvmMismatch, RvmVerdict, compare_rvms,
-    driver_with_grace, evidence_text, export_e3d, export_macro, generate_ours, prepare_connection,
-    redact, resolve_node, tail, verdict_message,
+    FusedCompare, RunInput, RunSpec, RvmCounts, RvmMismatch, RvmVerdict, driver_with_grace,
+    evidence_text, export_e3d, export_macro, generate_ours_scoped, prepare_connection, redact,
+    resolve_node, tail, verdict_message,
 };
 use crate::data_interface::direct_tree::DirectTreeService;
 
@@ -61,11 +61,60 @@ impl Stage {
     }
 }
 
+/// `--scope` 的取值：在所选根里只比哪一块。
+///
+/// 与 `--only` 分工：`--only` 挑根（进批的作业），`--scope` 挑根里的一块（比对范围）。
+/// 两种档都只从选中节点起算，所以落进 vendor 时 `RvmExportOptions.root` 要换成选中节点；
+/// 而产物目录与基准文件仍按**所属根**算（[`RootJob::refno`] 不动）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeArg {
+    /// 只比这个节点自己，不下探子级。
+    Node(String),
+    /// 比这个节点的整棵子树（含它自己）。
+    Subtree(String),
+}
+
+impl ScopeArg {
+    /// `node:w0/w1` / `subtree:w0/w1` → 归一成 `w0/w1` 的 [`ScopeArg`]。
+    ///
+    /// clap 里没有 `key:value` 的先例（`--stage` 是 `ValueEnum`），所以这里自己拆：
+    /// 只按第一个 `:` 切，refno 里不会出现冒号。
+    pub fn parse(raw: &str) -> Result<Self> {
+        let (kind, refno) = raw.split_once(':').with_context(|| {
+            format!("--scope 要写成 node:<refno> 或 subtree:<refno>，收到 {raw:?}")
+        })?;
+        let refno = normalize_ref(refno)
+            .with_context(|| format!("--scope 里的 refno 无法解析：{refno}"))?;
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "node" => Ok(Self::Node(refno)),
+            "subtree" => Ok(Self::Subtree(refno)),
+            other => bail!("--scope 的档位只认 node / subtree，收到 {other:?}"),
+        }
+    }
+
+    /// 选中节点的 refno（`w0/w1`）。
+    pub fn refno(&self) -> &str {
+        match self {
+            Self::Node(refno) | Self::Subtree(refno) => refno,
+        }
+    }
+
+    /// 命令行原样形态，给子进程透传用。
+    pub fn to_arg(&self) -> String {
+        match self {
+            Self::Node(refno) => format!("node:{refno}"),
+            Self::Subtree(refno) => format!("subtree:{refno}"),
+        }
+    }
+}
+
 pub struct BatchOptions {
     pub connection: RunInput,
     pub dbnums: Vec<u32>,
     pub all_desi: bool,
     pub only: Vec<String>,
+    /// `--scope`：只比所选根里的一块。`None` = 整个根（现状，零介入）。
+    pub scope: Option<ScopeArg>,
     pub site_only: bool,
     pub out: PathBuf,
     pub resume: bool,
@@ -107,6 +156,8 @@ pub struct ChildOptions {
     pub connection: RunInput,
     pub dbno: u32,
     pub refnos: Vec<String>,
+    /// 父进程的 `--scope`：`refnos` 里只有一个是根，比对范围落在它下面。
+    pub scope: Option<ScopeArg>,
     pub out: PathBuf,
     pub gen_timeout: Duration,
     /// 给了则生成即比对：流式对拍的基准 `.rvm`（父进程已放入 `job.dir` 的 `e3d.rvm`）。
@@ -524,11 +575,42 @@ pub fn run_child(opts: &ChildOptions) -> Result<()> {
             window_bytes: opts.compare_memory_mb * 1024 * 1024,
             emit_compare: opts.emit_compare,
         });
-        generate_ours(&spec, &node, &dir, fused.as_ref(), opts.element_cache)
-            .map_err(anyhow::Error::msg)?;
+        generate_ours_scoped(
+            &spec,
+            &node,
+            &dir,
+            fused.as_ref(),
+            opts.element_cache,
+            opts.scope.as_ref(),
+        )
+        .map_err(anyhow::Error::msg)?;
         println!("generated ={refno} -> {}", dir.join("ours").display());
     }
     Ok(())
+}
+
+/// `--scope` 的选中节点属于哪个根：沿 OWNER 链上溯，取第一个出现在 `roots` 里的节点。
+///
+/// 根是 WORLD 的直接成员（SITE / APPLDW），所以「第一个落在根表里的祖先」就是所属根；
+/// 一个都找不到说明这个 refno 压根不在这批根的树里。
+fn scope_root_of(
+    tree: &DirectTreeService,
+    scope_refno: &str,
+    roots: &[RootJob],
+) -> Result<Option<usize>> {
+    let start = RefU64::from_str(scope_refno)
+        .map_err(|error| anyhow::anyhow!("refno 无法解析：{scope_refno}（{error}）"))?;
+    let chain = tree
+        .ancestors(start)
+        .with_context(|| format!("上溯 ={scope_refno} 的属主链失败"))?;
+    for node in chain {
+        let refno = node.refno();
+        let text = format!("{}/{}", refno.get_0(), refno.get_1());
+        if let Some(index) = roots.iter().position(|job| job.refno == text) {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
 }
 
 /// 整批。返回每根记录与 `summary.json` 的路径；`clean` 为真表示每个根都是 `pass` / `empty`。
@@ -625,6 +707,59 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         jobs.retain(|job| wanted.contains(&job.refno));
     }
     ensure!(!jobs.is_empty(), "所选库的 WORLD 下没有 SITE / APPLDW 根");
+
+    // `--scope` 与 `--only` 的冲突：范围指的节点必须落在本批已选的根里。
+    // 不静默忽略、不自动把它的根加回作业列表（那会悄悄多跑一个根）。
+    if let Some(scope) = &opts.scope {
+        let Some(index) = scope_root_of(&tree, scope.refno(), &jobs)? else {
+            let root_list: Vec<String> = jobs
+                .iter()
+                .map(|job| format!("{} {} {}", job.display_ref(), job.noun, job.name))
+                .collect();
+            let chain = tree
+                .ancestors(RefU64::from_str(scope.refno()).map_err(|error| {
+                    anyhow::anyhow!("refno 无法解析：{}（{error}）", scope.refno())
+                })?)
+                .map(|chain| {
+                    chain
+                        .into_iter()
+                        .map(|node| node.refno().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ← ")
+                })
+                .unwrap_or_else(|error| format!("（读不到：{error}）"));
+            bail!(
+                "--scope 与 --only 冲突：选中节点 ={} 不属于本批的任何根。\n\
+                 --scope 的 OWNER 链（自身 → 属主）：{chain}\n\
+                 本批的根（--only 只认 WORLD 下的 SITE / APPLDW）：{}",
+                scope.refno(),
+                if root_list.is_empty() {
+                    "（空）".to_string()
+                } else {
+                    root_list.join("、")
+                }
+            );
+        };
+        if jobs.len() > 1 {
+            // 一份范围只对应一个根：多根并跑会让其余根按「整个根」比对，把范围外成员
+            // 全记成 `only_baseline` 混进同一份汇总。这里直接拒，让调用方用 --only 收窄。
+            let root = &jobs[index];
+            bail!(
+                "--scope {} 属于根 {} {}，但本批有 {} 个根：加 --only {} 收窄到这一个根",
+                scope.to_arg(),
+                root.display_ref(),
+                root.noun,
+                jobs.len(),
+                root.display_ref()
+            );
+        }
+        let kept = jobs.remove(index);
+        // 选中节点必须在根所在的那个库里：`export_rvm` 只把 `db_file` 那一只库当主库，
+        // 跨库的选中节点在 DFS 里根本不会出现（不是「比空」，是「找不到起点」）。
+        scope_same_db(&tree, scope, kept.dbno)?;
+        jobs.clear();
+        jobs.push(kept);
+    }
 
     std::fs::create_dir_all(&out_root).with_context(|| format!("建 {}", out_root.display()))?;
     if !opts.resume && !opts.force && dir_has_entries(&out_root) {
@@ -1218,6 +1353,8 @@ fn process_root(
         // 阶段标记也要清：上一轮留下的 compare_start 会让这一轮的采样一开始就归到比对段。
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_START));
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_END));
+        // `--scope` 落的名字路径同理：不清就会拿上一轮的选中节点去裁这一轮的基准。
+        let _ = std::fs::remove_file(job.dir.join("scope.json"));
         // `--baseline-dir` 模式下基准在 worker 启动前已同步放好（`place_baseline_from_dir`）；
         // 在盘上就喂给子进程做生成即比对。没放好（缺失）就不融合，走原路。
         let fused = opts
@@ -1243,6 +1380,7 @@ fn process_root(
                     opts.gen_timeout,
                     fused.as_ref(),
                     opts.element_cache,
+                    opts.scope.as_ref(),
                 ),
                 None,
             )
@@ -1324,7 +1462,22 @@ fn process_root(
                     .map_err(|error| format!("解析 judgement.json 失败：{error}"))
             })
     } else {
-        compare_rvms(&job.dir)
+        // 比对范围从生成侧落的 `scope.json` 读回：名字路径只能在生成侧算（要 `DbSet` +
+        // `UdetCatalog` 复现 E3D 显示名），父进程手里只有 `DirectTreeService`。
+        if opts.scope.is_some() && !job.dir.join("scope.json").is_file() {
+            // 只比对阶段没跑过生成：没有名字路径就裁不了基准，静默退回「整个根」会把
+            // 范围外成员全记成 `only_baseline` 判红。明说缺什么。
+            Err(format!(
+                "--scope 要生成侧落的 {}（选中节点的名字路径），这个产物目录里没有：\
+                 先跑生成（--stage full 或 generate）",
+                job.dir.join("scope.json").display()
+            ))
+        } else {
+            match super::read_scope_file(&job.dir) {
+                Ok(scope) => super::compare_rvms_scoped(&job.dir, &scope),
+                Err(message) => Err(message),
+            }
+        }
     };
     match judgement {
         Ok(judgement) => {
@@ -1384,6 +1537,7 @@ fn generate_in_process(
     gen_timeout: Duration,
     fused: Option<&FusedCompare>,
     element_cache: usize,
+    scope: Option<&ScopeArg>,
 ) -> StageRecord {
     let started = Instant::now();
     let mut spec = spec.clone();
@@ -1393,7 +1547,7 @@ fn generate_in_process(
         Ok(node) => node,
         Err(message) => return StageRecord::new(1, started, message),
     };
-    match generate_ours(&spec, &node, &job.dir, fused, element_cache) {
+    match super::generate_ours_scoped(&spec, &node, &job.dir, fused, element_cache, scope) {
         Ok(()) => StageRecord::new(0, started, ""),
         Err(message) => StageRecord::new(1, started, message),
     }
@@ -1444,6 +1598,22 @@ impl Phase {
     }
 }
 
+/// 选中节点与根是否同一个库。`export_rvm` 只把 `db_file` 那一只库当主库，
+/// 跨库的选中节点在 DFS 里根本不会出现（不是「比空」，是「找不到起点」）。
+fn scope_same_db(tree: &DirectTreeService, scope: &ScopeArg, dbno: u32) -> Result<()> {
+    let refno = RefU64::from_str(scope.refno())
+        .map_err(|error| anyhow::anyhow!("refno 无法解析：{error}"))?;
+    match tree.dbnum_of(refno) {
+        Some(found) if found == dbno => Ok(()),
+        Some(found) => bail!(
+            "--scope {} 在库 {found}，这个根在库 {dbno}：跨库的选中节点跑不了\
+             （export_rvm 只把根所在库当主库）",
+            scope.to_arg()
+        ),
+        None => bail!("--scope {} 不在当前 MDB 里", scope.to_arg()),
+    }
+}
+
 /// 子进程生成：`aios-database rvm-check --child …`，父进程盯内存与耗时。
 ///
 /// 返回 `(生成段记录, 比对段峰值 MB)`。第二项只有融合对拍且阶段标记落盘时才有值：
@@ -1491,6 +1661,10 @@ fn generate_in_child(
         .arg(&spec.e3d_project)
         .arg("--mdb")
         .arg(&spec.e3d_mdb);
+    // `--scope` 必须透传：子进程才是真正算名字路径、决定 DFS 起点的那一侧。
+    if let Some(scope) = &opts.scope {
+        command.arg("--scope").arg(scope.to_arg());
+    }
     if let Some(fused) = fused {
         command
             .arg("--compare-baseline")
@@ -2033,6 +2207,7 @@ mod tests {
             dbnums: vec![7999],
             all_desi: false,
             only: Vec::new(),
+            scope: None,
             site_only: false,
             out: PathBuf::from("out"),
             resume: false,
@@ -2139,5 +2314,27 @@ mod tests {
         assert_eq!(Phase::Compare.advance(&dir), Phase::Done);
         assert_eq!(Phase::Done.advance(&dir), Phase::Done, "不回退");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--scope` 的解析：两种档、refno 三种写法归一，写错的形态必须报错而不是猜。
+    #[test]
+    fn scope_arg_parses_both_kinds_and_normalizes_refno() {
+        assert_eq!(
+            ScopeArg::parse("node:=9304/2").unwrap(),
+            ScopeArg::Node("9304/2".to_string())
+        );
+        assert_eq!(
+            ScopeArg::parse("subtree:9304_2").unwrap(),
+            ScopeArg::Subtree("9304/2".to_string())
+        );
+        assert_eq!(
+            ScopeArg::parse("Subtree:9304/2").unwrap().to_arg(),
+            "subtree:9304/2"
+        );
+        // 没有冒号 / 档位写错 / refno 解析不出来，三种都当场报错。
+        assert!(ScopeArg::parse("9304/2").is_err());
+        assert!(ScopeArg::parse("leaf:9304/2").is_err());
+        assert!(ScopeArg::parse("node:").is_err());
+        assert_eq!(ScopeArg::Node("1/2".to_string()).refno(), "1/2");
     }
 }
