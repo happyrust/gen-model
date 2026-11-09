@@ -19,6 +19,13 @@
   "scope_kind": "group",
   "scope_refnos": [],
   "unresolved_count": 1,
+  "unresolved": [
+    {
+      "via": "2_21",
+      "target": "1_98",
+      "reason": "target_missing"
+    }
+  ],
   "routes": [],
   "publication_status": "empty"
 }

@@ -495,6 +495,41 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   不取消后台生成；本端点不回 `202`。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
   客户端自身超时不能设得比它更短。
 
+**分组回执（`refno` 是 GPWL / GPSET 时）**
+
+分组（`GPWL` / `GPSET`）不拥有模型，请求它时服务端展开成员、按成员的生成根逐个生成。回执在
+`OnDemandModelResult` 之外多这四格（`handlers::group_generate_receipt`）：
+
+| 格 | 形状 | 说明 |
+|---|---|---|
+| `scope_kind` | `"group"` | 这一份是分组回执 |
+| `scope_refnos` | `["24381/100677", …]` | 展开到的设计元素，**斜杠形**，按前序、去重 |
+| `unresolved_count` | 整数 | 展开时坏槽的条数 |
+| `unresolved` | `[{via, target, reason}]` | 坏槽明细；**空表时这一格不出现**（不是 `[]`） |
+
+`unresolved[]` 每项的字段与 §4.10 的 `/tree/children?resolved=1` **逐字段同形**，客户端共用一份解析：
+
+- `via` — 字符串，**下划线形**（`"24381_100677"`）。GPREF 族坏槽是那个 GPITEM；规则族坏槽（`scosel_*`）
+  与空分组（`group_empty`）没有经由的 GPITEM，此时它记分组自己的 refno。
+- `target` — 字符串（下划线形）或 `null`。GPREF 族坏槽是它指向的元素（`gpref_missing` 时为 `null`）。
+- `reason` — 原因码，取值域**只有这 7 个**（`UnresolvedReason::as_str()`），不得增删：
+  - GPREF 族（引用链断）：`gpref_missing`（GPITEM 没写 GPREF 或空引用）、`db_not_in_mdb`（目标库不在本 MDB）、
+    `target_missing`（库在、元素不在）；
+  - 规则族（`SCOSEL`）：`scosel_eval_failed`（规则字节解不出，整条没参与求值）、`scosel_unsupported`
+    （规则解出来了但有形状求值器认不出；已算出的合法成员**仍然返回**）、`scosel_no_match`
+    （规则完整解出、无认不出的形状，但**一个成员都没命中**）；
+  - 空分组：`group_empty`（分组既没有存储成员、也没有规则）。
+
+**为什么要有这一格**：`unresolved_count` 只是个数字，`group_empty`（分组真的空）与 `scosel_no_match`
+（规则一个也没命中）在只有计数时**逐字段完全相同**（`status` / `generation_roots` /
+`generation_root_count` / `scope_refnos` / `unresolved_count` / `dbnum` / `routes` 全一样），
+前端只能回一句含糊的「分组为空或成员不可解析」。有了 `reason` 才能分流文案。
+
+**开关关时（`group_scosel = false`，默认）**：规则组不追加规则成员、也不产生规则族坏槽，分组本身又
+没有存储成员，所以 `unresolved` 这一格自然不出现；`unresolved_count` 与改动前逐字相同，其余字段一字不改。
+若某个分组在开关关时确有 GPREF 族坏槽（有 GPITEM 但引用链断），`unresolved` 会出现——那是数据事实，
+不是开关带来的行为变化。
+
 ### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树（plant-ui 右键「清理模型」）
 
 - 查询参数：`refno=24381%2F100677&confirm=24381%2F100677`；`confirm` 必须与
@@ -746,6 +781,24 @@ rebuild、不推进应用/模型水位。
   它名下盖过章的生成根再逐根取，在根之下的取它头上那根的记录、按祖先链只留它名下的（每条记录的 `owner` 两种情形下都是
   生成根）。名下一条都没有 → **`200` 空数组**；`409 conflict` 只剩该库正被整库任务占用。`not_generated:` 退役——
   「没生成过」在读接口上不是错误，要生成走 §4.5 `/model/generate`。
+
+**分组回执（`generation_root` 是 GPWL / GPSET 时）**
+
+分组不拥有模型，记录取它管到的设计元素（服务端展开）。回执在单根形状上多这四格
+（`handlers::group_records_body`），与 §4.5 的分组回执**同源同形**：
+
+| 格 | 形状 | 说明 |
+|---|---|---|
+| `expanded_from_group` | `true` | 这一份是分组展开后的记录页 |
+| `scope_refnos` | `["24381/100677", …]` | 展开到的设计元素，**斜杠形**，按前序、去重 |
+| `unresolved_count` | 整数 | 展开时坏槽的条数 |
+| `unresolved` | `[{via, target, reason}]` | 坏槽明细；**空表时这一格不出现**（不是 `[]`） |
+
+`unresolved[]` 每项的字段、`via`/`target` 的下划线形、`reason` 的 7 个取值域、
+「空表省略该键」与「开关关时逐字不变」的口径，与 §4.5 的分组回执**完全一致**（同一份
+`handlers::unresolved_slots_json`），两个端点对同一分组给出的 `(via, target, reason)`
+三元组集合必须相等（`validation-contract.md` VAL-GEN-005）。分组跨库时顶层 `dbnum` /
+`model_source` / `model_source_reason` 记 `null`，逐库明细在 `routes[]`；空组 `source` 记 `none`。
 
 **多根批量（已实现，2026-09-09）**
 
@@ -1240,6 +1293,14 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   兼容），而是 handler 在 JSON 层外包一格。它必须由服务端给：refno 的前半段是 Ref0
   不是库号（`CONTEXT.md`「Ref0 库归属」），而浏览器端的几何缓存、可见性、选中全按
   库号分桶。Ref0 不在本 MDB 骨架里时为 `null`——那是「答不出」，不是 0 号库。
+- `GET /tree/children?refno=a/b&resolved=1` → 解析视图（`"view": "resolved"`）：`GPWL` / `GPSET`
+  的 `GPITEM` 换成 `GPREF` 指向的设计元素，规则组的 `SCOSEL` 命中成员也一并回出（开关
+  `group_scosel` 开着时）。行上按类型多出 `via` / `secondary` / `rule` 三格：主链子节点三格都不出现；
+  `GPITEM` 解析成员是「那个 GPITEM 的 refno + `secondary: true` + `rule: false`」；规则成员是
+  「`via: null`（键必须出现）+ `secondary: true` + `rule: true`」。
+  展开时解析不出的坏槽在顶层 `unresolved` 数组里，每项 `{ via, target, reason }`（`via` / `target`
+  **下划线形**，`reason` 是 7 个原因码之一），**空表时整个键不出现**。这一格与 §4.5 / §4.5.2 分组回执的
+  `unresolved[]` 逐字段同形，同一个 `handlers::unresolved_slots_json`。
 - `GET /search?query=&limit=&cursor=` → `{ "source": "snapshot", "epoch", "session_vector",
   "items": [{ "name", "refno": "a/b", "dbnum", "noun" }], "total", "truncated", "next_cursor" }`：
   NAME 子串、大小写不敏感、全库扫描；`limit` 默认 100、夹在 `1..=500`；`query` 为空 400。

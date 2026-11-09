@@ -26,6 +26,23 @@
     "1/6"
   ],
   "unresolved_count": 3,
+  "unresolved": [
+    {
+      "via": "2_15",
+      "target": null,
+      "reason": "gpref_missing"
+    },
+    {
+      "via": "2_16",
+      "target": "9_1",
+      "reason": "db_not_in_mdb"
+    },
+    {
+      "via": "2_17",
+      "target": "1_99",
+      "reason": "target_missing"
+    }
+  ],
   "routes": [
     {
       "dbnum": 7001,

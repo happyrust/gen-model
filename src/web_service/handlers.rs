@@ -1593,6 +1593,36 @@ async fn tree_children_resolved(
     resolved_children_body(parent, &layer, |refno| service.dbnum_of(refno)).map(Json)
 }
 
+/// 坏槽明细的线上形状：每项 `{ via, target, reason }`。
+///
+/// 三个端点共用这一个函数——`/tree/children?resolved=1`、`/model/generate`、`/model/records`。
+/// 同名键 `unresolved` 必须逐字段同形状，客户端才能共用解析（`validation-contract.md`
+/// VAL-GEN-004 / VAL-GEN-005）。
+///
+/// 两条口径已拍定，不要另选：
+/// 1. `via` / `target` 用 `RefnoEnum` 的**下划线形**（`"2_15"`），与 `resolved_children_body`
+///    的行内 `via` 一致；既有的 `scope_refnos` 保持斜杠形（`"2/15"`）不改，两套写法并存是现状。
+/// 2. `reason` 走 `UnresolvedReason::as_str()`。该枚举**没有** `Serialize`/`Display`
+///    （`group_membership.rs:71-119` 只有 `Debug, Clone, Copy, PartialEq, Eq`），`as_str()` 是
+///    唯一出口，7 个码不得增删、不得自造。
+///
+/// 空表时由调用方**省略**整个键，不写显式 `[]`（沿用 `resolved_children_body` 的
+/// `!is_empty()` 守卫风格）。
+fn unresolved_slots_json(
+    slots: &[crate::data_interface::group_membership::UnresolvedSlot],
+) -> Vec<Value> {
+    slots
+        .iter()
+        .map(|slot| {
+            json!({
+                "via": RefnoEnum::from(slot.via),
+                "target": slot.target.map(RefnoEnum::from),
+                "reason": slot.reason.as_str(),
+            })
+        })
+        .collect()
+}
+
 /// [`tree_children_resolved`] 的回执本体。与取数分开，分组契约的响应快照（`tests/fixtures/group-contract/`）
 /// 才能直接喂内存里的一层。
 fn resolved_children_body(
@@ -1636,17 +1666,7 @@ fn resolved_children_body(
         "nodes": nodes,
     });
     if !layer.unresolved.is_empty() {
-        body["unresolved"] = layer
-            .unresolved
-            .iter()
-            .map(|slot| {
-                json!({
-                    "via": RefnoEnum::from(slot.via),
-                    "target": slot.target.map(RefnoEnum::from),
-                    "reason": slot.reason.as_str(),
-                })
-            })
-            .collect();
+        body["unresolved"] = Value::Array(unresolved_slots_json(&layer.unresolved));
     }
     Ok(body)
 }
@@ -4372,6 +4392,18 @@ fn group_generate_receipt(
             .collect::<Vec<_>>()),
     );
     object.insert("unresolved_count".into(), json!(scope.unresolved.len()));
+    // 坏槽明细（`validation-contract.md` VAL-GEN-004）：`unresolved_count` 只是个数字，
+    // 「分组真的空」（`group_empty`）与「规则一个也没命中」（`scosel_no_match`）在回执上
+    // 逐字段完全相同，前端只能回一句含糊的「分组为空或成员不可解析」。原因码一路都在
+    // `GroupScope.unresolved` 里（`group_membership.rs:410-417`），只在这一行被压成了 `.len()`。
+    // 空表省略该键，与 `/tree/children?resolved=1` 同口径（`resolved_children_body` 的守卫）。
+    if !scope.unresolved.is_empty() {
+        object.insert(
+            "unresolved".into(),
+            Value::Array(unresolved_slots_json(&scope.unresolved)),
+        );
+    }
+    object.insert("routes".into(), json!(routes));
     object.insert("routes".into(), json!(routes));
     object.insert(
         "publication_status".into(),
@@ -6053,7 +6085,7 @@ fn group_records_body(
         [route] => Some(*route),
         _ => None,
     };
-    json!({
+    let mut body = json!({
         "source": source,
         "dbnum": single.as_ref().map(|route| route.dbnum),
         "model_source": single.as_ref().map(|route| route.source.as_str()),
@@ -6074,8 +6106,15 @@ fn group_records_body(
         "expanded_from_group": true,
         "scope_refnos": scope_refnos,
         "unresolved_count": scope.unresolved.len(),
-        "routes": routes,
-    })
+    });
+    // 坏槽明细，与 `/model/generate` 同源（同一个 [`unresolved_slots_json`]）：
+    // `validation-contract.md` VAL-GEN-005 要求两个端点对同一分组给出同一个
+    // `(via, target, reason)` 三元组集合。空表省略该键，与 generate 一致。
+    if !scope.unresolved.is_empty() {
+        body["unresolved"] = Value::Array(unresolved_slots_json(&scope.unresolved));
+    }
+    body["routes"] = json!(routes);
+    body
 }
 
 #[cfg(test)]
@@ -8090,6 +8129,193 @@ mod tests {
         assert_eq!(body["total"], 2, "{body}");
         assert_eq!(body["source"], "mixed", "{body}");
         assert_group_contract("model-records-gpset.json", &body);
+    }
+
+    /// VAL-GEN-004 / VAL-GEN-005 / VAL-GEN-006：分组回执的 `unresolved[]` 明细。
+    ///
+    /// 三个要点，缺一条这个 feature 就没价值：
+    /// 1. **形状与 `/tree/children?resolved=1` 逐字段一致**（`via` / `target` 下划线形、`reason` 走
+    ///    `as_str()`），客户端才能共用解析；
+    /// 2. **两个端点同源**——generate 与 records 对同一份 `scope.unresolved` 必须给出同一个三元组集合，
+    ///    只改一个端点等于没做；
+    /// 3. **`unresolved` 出现时 `unresolved_count == unresolved.len()`**，两个字段不得互相矛盾。
+    ///
+    /// 夹具用 [`group_contract_store`] 的 GPSET 2/11：三条 GPREF 族坏槽（空引用 / 库不在 MDB /
+    /// 元素不在），正好覆盖三个码。
+    #[test]
+    fn group_receipts_carry_the_unresolved_detail_on_both_endpoints() {
+        use crate::data_interface::direct_tree::GroupGenerationScope;
+        use crate::data_interface::group_membership::expand_group_on;
+
+        let r = RefU64::from_two_nums;
+        let expanded = expand_group_on(&group_contract_store(), r(2, 11)).unwrap();
+        assert_eq!(expanded.unresolved.len(), 3, "{:?}", expanded.unresolved);
+
+        // —— generate 端点 ——
+        let scope = GroupGenerationScope {
+            members: expanded.members.clone(),
+            roots: Vec::new(),
+            unresolved: expanded.unresolved.clone(),
+        };
+        let tally = GroupGenerateTally {
+            model_instance_count: 0,
+            generated_instance_count: 0,
+            cached_root_count: 0,
+            generated_root_count: 0,
+            failed_roots: Vec::new(),
+        };
+        let requested = RefnoEnum::from(r(2, 11)).to_pdms_str();
+        let generate =
+            group_generate_receipt(&requested, "GPSET".into(), &scope, tally, &[], Vec::new())
+                .unwrap();
+
+        // —— records 端点 ——
+        let records_scope = expand_group_on(&group_contract_store(), r(2, 11)).unwrap();
+        let fetched = GroupRecordsFetch {
+            by_member: std::collections::HashMap::new(),
+            routes: Vec::new(),
+            routed: Vec::new(),
+            sources: Vec::new(),
+            durable_fallback_roots: Vec::new(),
+            incomplete_roots: Vec::new(),
+        };
+        let records =
+            group_records_body(&requested, &records_scope, fetched, 0, Vec::new(), 0, 500);
+
+        let triples =
+            |body: &Value| -> std::collections::BTreeSet<(String, Option<String>, String)> {
+                body["unresolved"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("回执必须带 unresolved 数组：{body}"))
+                    .iter()
+                    .map(|slot| {
+                        (
+                            slot["via"].as_str().unwrap().to_string(),
+                            slot["target"].as_str().map(str::to_string),
+                            slot["reason"].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect()
+            };
+
+        let generate_triples = triples(&generate);
+        let records_triples = triples(&records);
+        assert_eq!(
+            generate_triples, records_triples,
+            "generate 与 records 对同一分组的 unresolved 必须同源：\ngenerate={generate}\nrecords={records}"
+        );
+
+        // 三个码都在，且 via/target 是下划线形（与 /tree/children?resolved=1 一致）。
+        let expected: std::collections::BTreeSet<(String, Option<String>, String)> = [
+            ("2_15".to_string(), None, "gpref_missing".to_string()),
+            (
+                "2_16".to_string(),
+                Some("9_1".to_string()),
+                "db_not_in_mdb".to_string(),
+            ),
+            (
+                "2_17".to_string(),
+                Some("1_99".to_string()),
+                "target_missing".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(generate_triples, expected, "{generate}");
+
+        // `unresolved` 出现时 `unresolved_count` 必须等于它的长度。
+        for body in [&generate, &records] {
+            let detail = body["unresolved"].as_array().unwrap().len();
+            assert_eq!(
+                body["unresolved_count"].as_u64().unwrap() as usize,
+                detail,
+                "unresolved_count 与 unresolved.len() 不得矛盾：{body}"
+            );
+        }
+    }
+
+    /// 空表时**省略** `unresolved` 键（不写显式 `[]`），沿用
+    /// [`resolved_children_body`] 的 `!is_empty()` 守卫风格；`unresolved_count` 照旧为 0。
+    #[test]
+    fn an_empty_unresolved_list_omits_the_key_on_both_receipts() {
+        use crate::data_interface::direct_tree::GroupGenerationScope;
+        use crate::data_interface::group_membership::{UnresolvedReason, UnresolvedSlot};
+
+        let r = RefU64::from_two_nums;
+        let scope = GroupGenerationScope {
+            members: vec![r(1, 4)],
+            roots: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        let tally = GroupGenerateTally {
+            model_instance_count: 0,
+            generated_instance_count: 0,
+            cached_root_count: 0,
+            generated_root_count: 0,
+            failed_roots: Vec::new(),
+        };
+        let requested = RefnoEnum::from(r(2, 11)).to_pdms_str();
+        let generate =
+            group_generate_receipt(&requested, "GPSET".into(), &scope, tally, &[], Vec::new())
+                .unwrap();
+        assert!(
+            generate.get("unresolved").is_none(),
+            "空表必须省略该键（不是显式 []）：{generate}"
+        );
+        assert_eq!(generate["unresolved_count"], json!(0), "{generate}");
+
+        let records_scope = crate::data_interface::group_membership::GroupScope {
+            members: vec![r(1, 4)],
+            unresolved: Vec::new(),
+        };
+        let fetched = GroupRecordsFetch {
+            by_member: std::collections::HashMap::new(),
+            routes: Vec::new(),
+            routed: Vec::new(),
+            sources: Vec::new(),
+            durable_fallback_roots: Vec::new(),
+            incomplete_roots: Vec::new(),
+        };
+        let records =
+            group_records_body(&requested, &records_scope, fetched, 0, Vec::new(), 0, 500);
+        assert!(
+            records.get("unresolved").is_none(),
+            "空表必须省略该键（不是显式 []）：{records}"
+        );
+        assert_eq!(records["unresolved_count"], json!(0), "{records}");
+
+        // 7 个码不得增删：这是契约里 reason 的取值域。
+        let codes: Vec<&str> = [
+            UnresolvedReason::GprefMissing,
+            UnresolvedReason::DbNotInMdb,
+            UnresolvedReason::TargetMissing,
+            UnresolvedReason::ScoselEvalFailed,
+            UnresolvedReason::ScoselUnsupported,
+            UnresolvedReason::ScoselNoMatch,
+            UnresolvedReason::GroupEmpty,
+        ]
+        .into_iter()
+        .map(UnresolvedReason::as_str)
+        .collect();
+        assert_eq!(
+            codes,
+            [
+                "gpref_missing",
+                "db_not_in_mdb",
+                "target_missing",
+                "scosel_eval_failed",
+                "scosel_unsupported",
+                "scosel_no_match",
+                "group_empty",
+            ],
+            "原因码取值域是契约的一部分，不得增删"
+        );
+        // 这个夹具只是为了让 `UnresolvedSlot` 在测试里被用到一次，保证 import 不落空。
+        let _slot = UnresolvedSlot {
+            via: r(2, 15),
+            target: None,
+            reason: UnresolvedReason::GprefMissing,
+        };
     }
 
     /// **只有 `mem` 报占位地址。**
