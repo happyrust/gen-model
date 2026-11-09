@@ -589,7 +589,7 @@ fn ensure_unique_terminal_operations(
 /// 加载阶段验证这个最终硬依赖。缺失或探针本身失败都阻止启动，避免服务看似健康、
 /// 第一个 DESI 窗口却在收口阶段确定性失败。
 pub async fn selfcheck_surreal_functions() -> anyhow::Result<()> {
-    match desi_finalize_preflight().await {
+    match desi_finalize_preflight_on(&SUL_DB).await {
         FinalizePreflight::Ready => Ok(()),
         FinalizePreflight::Missing(reason) | FinalizePreflight::Unverified(reason) => {
             anyhow::bail!(
@@ -628,11 +628,6 @@ pub enum FinalizePreflight {
 /// `fn::anc_u64`）现在会被正确拒绝，而不是等到含搬迁的窗口在写回里无限重试。
 /// （`fn::find_ancestor_type` 曾同为硬前置，P3 退役 `zone_refno` 后离开收口链，
 /// 探针随之收窄。）
-pub async fn desi_finalize_preflight() -> FinalizePreflight {
-    desi_finalize_preflight_on(&SUL_DB).await
-}
-
-/// [`desi_finalize_preflight`] 的显式句柄版：探的是调用方给的那个库。
 pub(crate) async fn desi_finalize_preflight_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
 ) -> FinalizePreflight {
@@ -1412,7 +1407,7 @@ impl IncrementPipeline {
     /// refno 不会出现在任何 anc 里——对它们渲染出的每条 UPDATE 都是收口事务里
     /// 的一次空转子查询扫描（目录重组一次搬上千元素时把收口拖慢一个量级）；
     /// 且这些语句对 `fn::anc_u64` 的硬依赖只受 DESI 批次预检
-    /// （[`desi_finalize_preflight`]）保护，非 DESI 窗口渲染它们等于把
+    /// （[`desi_finalize_preflight_on`]）保护，非 DESI 窗口渲染它们等于把
     /// 「函数缺失不炸」押在「空集不求值」这个引擎细节上。
     fn anc_repair_statements_for_window(
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,

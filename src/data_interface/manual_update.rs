@@ -948,7 +948,7 @@ pub fn build_owner_overlay(
 //
 // Pure core only. The persist path (increment_pipeline) will call
 // [`extract_reverse_ref_edges`] per changed element and store each
-// `referenced → referrer` edge; [`resolve_unit_rollup`] then loads that index
+// `referenced → referrer` edge; [`resolve_unit_rollup_on`] then loads that index
 // into `OwnershipSnapshot::ref_reversal` so [`build_unit_rollup`] cascades a
 // shared-catalogue/spec or connection change to every referrer's delivery unit.
 // SurrealQL emit + query are the remaining DB wiring (need a live Surreal/E3D).
@@ -1459,7 +1459,7 @@ async fn fetch_ref_rev_edges_on(
 ///
 /// 那一档不维护 `ref_rev`（`increment_pipeline` 跳过 `maintain_reverse_index`），查出来的
 /// 空集与「这个元素真的没有引用者」长得一模一样——而后者会让引用它的根静默不重生成。
-/// 报错让调用方走既有的退化路：`resolve_unit_rollup` 置 `cascade_deferred`、
+/// 报错让调用方走既有的退化路：`resolve_unit_rollup_on` 置 `cascade_deferred`、
 /// `expand_live_reverse_cascade` 让那条工作项失败，两条都是看得见的。
 ///
 /// `face` 必须是 `db` 那个库的形态：形态决定它维不维护 `ref_rev`。
@@ -1478,8 +1478,18 @@ async fn fetch_ref_rev_edges(
 pub(crate) async fn load_ref_reversal(
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
+    load_ref_reversal_on(&SUL_DB, crate::options::data_face(), seeds).await
+}
+
+/// 同 [`load_ref_reversal`]，反查读的是 `db` 那个库，形态取 `data_face`——
+/// 形态决定那个库维不维护 `ref_rev`（ADR-063 D3）。
+pub(crate) async fn load_ref_reversal_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    data_face: crate::options::DataFace,
+    seeds: &HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
     Ok(assemble_ref_reversal(
-        &fetch_ref_rev_edges(crate::options::data_face(), &SUL_DB, seeds).await?,
+        &fetch_ref_rev_edges(data_face, db, seeds).await?,
     ))
 }
 
@@ -1568,16 +1578,17 @@ where
 /// A single-hop load would silently stop [`build_unit_rollup`]'s cascade walk at
 /// the first catalogue intermediate, because that intermediate is not itself a
 /// changed element and so would have no entry in the map (ADR-003 B3).
-pub(crate) async fn load_ref_reversal_closure(
+/// 逐跳反查读的是 `db` 那个库，形态取 `data_face`。
+pub(crate) async fn load_ref_reversal_closure_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    data_face: crate::options::DataFace,
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<(HashMap<RefnoEnum, Vec<RefnoEnum>>, bool)> {
     collect_ref_reversal_closure_with_limit(
         seeds,
         MAX_REVERSE_CASCADE_REFERRERS,
         Some(MAX_REVERSE_CASCADE_HOPS),
-        |frontier| async move {
-            fetch_ref_rev_edges(crate::options::data_face(), &SUL_DB, &frontier).await
-        },
+        |frontier| async move { fetch_ref_rev_edges(data_face, db, &frontier).await },
     )
     .await
 }
@@ -1666,23 +1677,24 @@ async fn fetch_base_graph_nodes_on(
 }
 
 async fn fetch_base_graph_nodes(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     frontier: HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<(RefnoEnum, OwnerNode)>> {
-    fetch_base_graph_nodes_on(&SUL_DB, frontier).await
+    fetch_base_graph_nodes_on(db, frontier).await
 }
 
 pub(crate) async fn load_base_graph(
     seeds: HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
-    collect_base_graph(seeds, fetch_base_graph_nodes).await
+    collect_base_graph(seeds, |frontier| fetch_base_graph_nodes(&SUL_DB, frontier)).await
 }
 
 /// 同 [`load_base_graph`]，走的是 `db` 那个库的 PE/OWNER 图。
-async fn load_base_graph_on(
+pub(crate) async fn load_base_graph_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     seeds: HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
-    collect_base_graph(seeds, |frontier| fetch_base_graph_nodes_on(db, frontier)).await
+    collect_base_graph(seeds, |frontier| fetch_base_graph_nodes(db, frontier)).await
 }
 
 /// Delivery-unit accumulator (internal to [`build_unit_rollup`]).
@@ -1952,7 +1964,7 @@ pub fn build_unit_rollup(
 /// Read-only: loads the pre-update PE/OWNER chains from Surreal, overlays the
 /// window's OWNER coverage graph, then runs the pure [`build_unit_rollup`]. The
 /// reverse index is loaded as a TRANSITIVE closure
-/// ([`load_ref_reversal_closure`]) because the rollup walks it hop by hop.
+/// ([`load_ref_reversal_closure_on`]) because the rollup walks it hop by hop.
 #[derive(Debug, Default)]
 pub(crate) struct ResolvedUnitRollup {
     pub units: Vec<DeliveryUnitSummary>,
@@ -1969,7 +1981,11 @@ pub(crate) struct ResolvedUnitRollup {
 /// `gate_candidates` 是要过 XGEOMETRY 门的那批 refno（位姿目标与删除目标）——它们**不在**
 /// `details` 里（`details` 已被 `mask_details_to_regen` 掩成只剩 Regen 类），所以必须单独
 /// 传进来，否则它们的 owner 链根本不会被加载进快照。
-pub(crate) async fn resolve_unit_rollup(
+/// 反查闭包与属主图都读 `db` 那个库；`data_face` 是那个库的形态
+/// （形态决定它维不维护 `ref_rev`，ADR-063 D3）。
+pub(crate) async fn resolve_unit_rollup_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    data_face: crate::options::DataFace,
     dbnum: u32,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
@@ -1981,7 +1997,7 @@ pub(crate) async fn resolve_unit_rollup(
 
     let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
     let (ref_reversal, cascade_deferred, mut lookup_warnings) =
-        match load_ref_reversal_closure(&change_refnos).await {
+        match load_ref_reversal_closure_on(db, data_face, &change_refnos).await {
             Ok((ref_reversal, truncated)) => {
                 let warnings = truncated
                     .then(|| {
@@ -2006,6 +2022,7 @@ pub(crate) async fn resolve_unit_rollup(
 
     let (units, no_generation, mut warnings, xgeometry_gated) =
         resolve_unit_rollup_with_ref_reversal(
+            db,
             dbnum,
             range_eles,
             details,
@@ -2023,7 +2040,9 @@ pub(crate) async fn resolve_unit_rollup(
     })
 }
 
+/// 反查闭包已经由调用方算好时的下半段。属主图读 `db` 那个库。
 async fn resolve_unit_rollup_with_ref_reversal(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     dbnum: u32,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
@@ -2051,7 +2070,7 @@ async fn resolve_unit_rollup_with_ref_reversal(
     seeds.extend(gate_candidates.iter().copied());
 
     let snap = OwnershipSnapshot {
-        base: load_base_graph(seeds).await.map_err(|error| {
+        base: load_base_graph_on(db, seeds).await.map_err(|error| {
             anyhow::anyhow!("dbnum={dbnum}: owner graph load failed: {error:#}")
         })?,
         overlay,
@@ -4360,8 +4379,11 @@ impl AiosDBManager {
     /// 范围外 CATA 的观察落库（`scan_project_candidates` 的 `out_of_scope_cata`
     /// 出参）。先复用 watcher 的 [`duplicate_dbnums`] 权威判定；同号多文件整组
     /// 阻断且任何一份都不触及 observation，唯一候选才进入统一扫描裁决。
+    ///
+    /// `db` 是这次数据任务的库：旧 locator 的作废只作用于那个库的进程内缓存。
     async fn record_out_of_scope_cata(
         &self,
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         project: &str,
         files: &[FileCandidate],
         duplicate_paths: &BTreeMap<u32, Vec<String>>,
@@ -4379,10 +4401,8 @@ impl AiosDBManager {
                             cand.db_num
                         ));
                     }
-                    crate::data_interface::cata_closure::invalidate_project_locator_on(
-                        &SUL_DB, project,
-                    )
-                    .await;
+                    crate::data_interface::cata_closure::invalidate_project_locator_on(db, project)
+                        .await;
                     warnings.push(format!(
                         "dbnum={}: 范围外 CATA 同号多文件，整组阻断且未登记任何观察值: {}",
                         cand.db_num,
@@ -5214,7 +5234,7 @@ impl AiosDBManager {
             let purge_geometry =
                 crate::data_interface::storage_upgrade::purges_geometry_on(env.db, dbnum).await;
             let wiped = if purge_geometry {
-                crate::data_interface::fast_delete::wipe_dbnum_for_upgrade(dbnum).await
+                crate::data_interface::fast_delete::wipe_dbnum_for_upgrade_on(env.db, dbnum).await
             } else {
                 crate::data_interface::fast_delete::wipe_dbnum_for_reinit_on(env.db, dbnum).await
             };

@@ -2463,6 +2463,9 @@ pub(crate) async fn build_effective_model_update_plan(
     }
     if db_type.eq_ignore_ascii_case("CATA") {
         crate::data_interface::model_update_plan::build_model_update_plan(
+            &aios_core::SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             dbnum,
             target_sesno as i32,
             db_type,

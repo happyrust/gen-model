@@ -22,6 +22,12 @@ use surrealdb::engine::any::Any;
 /// 与房间快照同一个上限。
 pub const MAX_ROOTS: usize = super::unit_room_snapshot::MAX_ROOTS;
 
+/// 门：这一批要不要拍快照。与 [`super::unit_room_snapshot::gate_skips`] 同一套判据，只是几何
+/// 没有「房间归属」这一条（几何行与房间归属无关）。纯函数：`data_face` 由调用方给。
+pub(crate) fn gate_skips(roots: &[String], data_face: crate::options::DataFace) -> bool {
+    roots.is_empty() || roots.len() > MAX_ROOTS || data_face.is_read_through()
+}
+
 /// 位置 / 包围盒差过这个数（mm）才算「动了」：生成器的浮点往返会在最后一位上抖。
 const MOVED_TOLERANCE_MM: f32 = 0.5;
 
@@ -66,16 +72,8 @@ pub struct RootGeometry {
     pub members: HashMap<String, ([f32; 3], [f32; 6])>,
 }
 
-/// 按根拍一次：`a/b` → 这根此刻的几何。不拍（见模块注）回空表。
-pub async fn snapshot(roots: &[String]) -> HashMap<String, RootGeometry> {
-    if roots.is_empty() || roots.len() > MAX_ROOTS || crate::options::data_face().is_read_through()
-    {
-        return HashMap::new();
-    }
-    snapshot_on(&aios_core::SUL_DB, roots).await
-}
-
-/// 在指定库上拍（投影覆盖优先）。解不出的根跳过；读失败的根记一句日志、不进表。
+/// 在指定库上拍（投影覆盖优先）。**不带门**——调用方先用 [`gate_skips`] 判一次（同一批任务的
+/// 前后两次快照必须用同一份形态，所以形态由调用方给）。解不出的根跳过；读失败的根记一句日志、不进表。
 pub(crate) async fn snapshot_on(
     db: &Surreal<Any>,
     roots: &[String],
@@ -254,11 +252,19 @@ mod tests {
         assert!(diff(before, before).is_empty(), "同一份比自己没有差异");
     }
 
-    /// 门：空表、超过根数上限不读库。
-    #[tokio::test]
-    async fn the_gate_skips_empty_and_oversized_batches() {
-        assert!(snapshot(&[]).await.is_empty());
+    /// 门：空表、超过根数上限、读透形态都不读库。
+    #[test]
+    fn the_gate_skips_empty_oversized_and_read_through_batches() {
+        let face = crate::options::DataFace::Ingest;
+        assert!(gate_skips(&[], face), "空表不读库");
         let many: Vec<String> = (0..=MAX_ROOTS).map(|i| format!("1/{i}")).collect();
-        assert!(snapshot(&many).await.is_empty());
+        assert!(gate_skips(&many, face), "超过根数上限不读库");
+        let one = vec!["1/1".to_owned()];
+        assert!(!gate_skips(&one, face), "单根要读库");
+        assert!(!gate_skips(&many[..MAX_ROOTS], face), "正好上限要读库");
+        assert!(
+            gate_skips(&one, crate::options::DataFace::ReadThrough),
+            "读透形态不读库（行在进程 store）"
+        );
     }
 }

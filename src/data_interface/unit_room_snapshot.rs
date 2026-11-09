@@ -27,6 +27,17 @@ use surrealdb::engine::any::Any;
 /// 一批超过这个根数就不拍快照。增量窗口通常一位数；初始化一次规划数千根。
 pub const MAX_ROOTS: usize = 64;
 
+/// 门：这一批要不要拍快照。四个条件全在模块注里——空表、超过 [`MAX_ROOTS`]、本进程算不了房间、
+/// 读透形态（边在进程 store，不在持久层）。纯函数：`room_membership` 与 `data_face` 由调用方给，
+/// 同一批任务的前后两次快照因此可以用同一份形态，不必各自去读全局。
+pub(crate) fn gate_skips(
+    roots: &[String],
+    room_membership: bool,
+    data_face: crate::options::DataFace,
+) -> bool {
+    roots.is_empty() || roots.len() > MAX_ROOTS || !room_membership || data_face.is_read_through()
+}
+
 /// 一根挂在的一间房（按面板）：这根下有 `members` 个构件被判到这块面板的房间里。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomRef {
@@ -44,28 +55,9 @@ struct Edge {
     room_num: Option<String>,
 }
 
-/// 按根拍一次快照：`a/b` → 这根此刻挂在哪些房间。不拍（见模块注）或读失败时返回空表——调用方把「没有这根」
-/// 当「没拍」，回执里那一格缺席；拍了但没有房间的根是 `Some(vec![])`。
-pub async fn snapshot(roots: &[String]) -> HashMap<String, Vec<RoomRef>> {
-    if roots.is_empty()
-        || roots.len() > MAX_ROOTS
-        || !crate::options::room_membership()
-        || crate::options::data_face().is_read_through()
-    {
-        return HashMap::new();
-    }
-    match snapshot_on(&aios_core::SUL_DB, roots).await {
-        Ok(map) => map,
-        Err(error) => {
-            log::warn!("单元房间快照读失败，回执里不带房间前后: {error:#}");
-            HashMap::new()
-        }
-    }
-}
-
-/// 在指定库上拍：每根两步——先按 `anc` / `in` 两路索引拿到根名下的构件（与 `model_record_reader::durable_scope_reads`
-/// 同一条纪律：两路分开、不写 OR），再把每个构件的 `room_relate` 边按边目标一句一构件拼成一次往返
-/// （[`edge_statement`]）。解不出的根跳过。
+/// 按根拍一次快照：`a/b` → 这根此刻挂在哪些房间。**不带门**——调用方先用 [`gate_skips`]
+/// 判一次（同一批任务的前后两次快照必须用同一份形态，所以形态由调用方给），再决定要不要拍。
+/// 调用方把「没有这根」当「没拍」，回执里那一格缺席；拍了但没有房间的根是 `Some(vec![])`。
 pub(crate) async fn snapshot_on(
     db: &Surreal<Any>,
     roots: &[String],
@@ -237,10 +229,28 @@ mod tests {
     }
 
     /// 门：空表、超过根数上限都不读库（回空表，回执里缺席）。
-    #[tokio::test]
-    async fn the_gate_skips_empty_and_oversized_batches() {
-        assert!(snapshot(&[]).await.is_empty());
+    #[test]
+    fn the_gate_skips_empty_and_oversized_batches() {
+        let face = crate::options::DataFace::Ingest;
+        assert!(gate_skips(&[], true, face), "空表不读库");
         let many: Vec<String> = (0..=MAX_ROOTS).map(|i| format!("1/{i}")).collect();
-        assert!(snapshot(&many).await.is_empty());
+        assert!(gate_skips(&many, true, face), "超过根数上限不读库");
+        let one = vec!["1/1".to_owned()];
+        assert!(!gate_skips(&one, true, face), "单根要读库");
+        assert!(!gate_skips(&many[..MAX_ROOTS], true, face), "正好上限要读库");
+    }
+
+    /// 门：本进程算不了房间、读透形态都不读库。
+    #[test]
+    fn the_gate_skips_a_process_that_cannot_hold_rooms_and_the_read_through_face() {
+        let one = vec!["1/1".to_owned()];
+        assert!(
+            gate_skips(&one, false, crate::options::DataFace::Ingest),
+            "房间归属关掉不读库"
+        );
+        assert!(
+            gate_skips(&one, true, crate::options::DataFace::ReadThrough),
+            "读透形态不读库"
+        );
     }
 }

@@ -2,13 +2,16 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aios_core::{RefnoEnum, SUL_DB};
+use aios_core::RefnoEnum;
+use aios_core::options::DbOption;
 use serde::{Deserialize, Serialize};
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail, ModifiedElement};
 use crate::data_interface::manual_update::{
     DeliveryUnitSummary, NetChangeDetail, NetOp, OwnerNode, merge_net_change_details,
-    resolve_unit_rollup,
+    resolve_unit_rollup_on,
 };
 use crate::data_interface::model_impact::{
     OperationImpact, classify_operation_impact, normalize_attribute_name,
@@ -453,9 +456,10 @@ fn select_derived_geometry_units<'a>(
 /// 同一棵 `collect_pe_subtree_refnos`。计划层跑在持久化之前，读到的是**前态**层级
 /// ——纯位姿变更不动 OWNER，前后态子树相同，正是这里要的。
 async fn derived_geometry_units_under(
+    db: &Surreal<Any>,
     targets: &[RefnoEnum],
 ) -> anyhow::Result<BTreeMap<String, String>> {
-    use crate::data_interface::helper::{collect_pe_subtree_refnos, pe_thing_to_refno};
+    use crate::data_interface::helper::{collect_pe_subtree_refnos_from, pe_thing_to_refno};
     use surrealdb::sql::Thing;
 
     #[derive(serde::Deserialize)]
@@ -469,7 +473,7 @@ async fn derived_geometry_units_under(
         .map(|noun| format!("'{noun}'"))
         .collect::<Vec<_>>()
         .join(",");
-    let subtree: Vec<RefnoEnum> = collect_pe_subtree_refnos(targets)
+    let subtree: Vec<RefnoEnum> = collect_pe_subtree_refnos_from(db, targets)
         .await?
         .into_iter()
         .collect();
@@ -481,7 +485,7 @@ async fn derived_geometry_units_under(
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT id, noun FROM [{keys}] WHERE record::exists(id) AND deleted != true \
                  AND string::uppercase(string::trim(noun)) IN [{noun_list}];"
@@ -503,6 +507,7 @@ async fn derived_geometry_units_under(
 /// 少走一步就会重现 2026-08-04 那种口径分歧：管件移动在预览里显示为「便宜路径」，
 /// 执行阶段却整根重生成，而容器移动牵出的那一批分支预览里根本不出现。
 pub(crate) async fn reroute_derived_geometry_units(
+    db: &Surreal<Any>,
     partition: &mut OperationImpactPartition,
 ) -> DerivedGeometryReroute {
     use crate::data_interface::generation_root::configured_delivery_unit_types;
@@ -513,7 +518,7 @@ pub(crate) async fn reroute_derived_geometry_units(
         return out;
     }
     let unit_types = configured_delivery_unit_types();
-    match crate::data_interface::manual_update::load_base_graph(targets.iter().copied().collect())
+    match crate::data_interface::manual_update::load_base_graph_on(db, targets.iter().copied().collect())
         .await
     {
         Ok(graph) => {
@@ -537,7 +542,7 @@ pub(crate) async fn reroute_derived_geometry_units(
     // 派生几何单元的话，重生成外层那根并不会重推内层的管段。多扫出来的那条与 rollup
     // 撞车时由 `append_derived_geometry_units` 去重，代价只是一次子树遍历——而漏扫
     // 之后没有任何东西会红。
-    match derived_geometry_units_under(&targets).await {
+    match derived_geometry_units_under(db, &targets).await {
         Ok(units) => out.descendant_units = units,
         Err(error) => out.warnings.push(format!(
             "位姿目标的子树派生几何单元枚举失败，容器移动后其隐含直管段会滞后到\
@@ -612,6 +617,7 @@ fn restore_baseline_deletes(
 }
 
 async fn baseline_existing_cancelled(
+    db: &Surreal<Any>,
     details: &[NetChangeDetail],
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     use crate::data_interface::helper::pe_thing_to_refno;
@@ -629,7 +635,7 @@ async fn baseline_existing_cancelled(
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT VALUE id FROM [{keys}] WHERE record::exists(id);"
             ))
@@ -768,7 +774,10 @@ pub(crate) fn collect_room_structural_triggers(
 
 /// 改名房间名下的全部 PANE（子 + 孙两层，与房间归属计算的层级覆盖同口径：
 /// `FRMW → CWALL/CFLOOR → PANE`）。
-async fn panels_under_rooms(rooms: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+async fn panels_under_rooms(
+    db: &Surreal<Any>,
+    rooms: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
     use crate::data_interface::helper::pe_thing_to_refno;
     use surrealdb::sql::Thing;
 
@@ -779,7 +788,7 @@ async fn panels_under_rooms(rooms: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT VALUE id FROM pe WHERE noun = 'PANE' AND deleted != true \
                  AND (owner IN [{keys}] OR owner.owner IN [{keys}]);"
@@ -808,7 +817,10 @@ fn merge_structural_panel_enumeration(
 /// `project_hd` 的中间容器只接纳直接 PANE；不要把这条查询扩成递归遍历，
 /// 否则会和房间构建的固定两层拓扑产生两套语义。
 #[cfg(feature = "project_hd")]
-async fn panels_under_containers(containers: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+async fn panels_under_containers(
+    db: &Surreal<Any>,
+    containers: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
     use crate::data_interface::helper::pe_thing_to_refno;
     use surrealdb::sql::Thing;
 
@@ -819,7 +831,7 @@ async fn panels_under_containers(containers: &[RefnoEnum]) -> anyhow::Result<Vec
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT VALUE id FROM pe WHERE noun = 'PANE' AND deleted != true \
                  AND owner IN [{keys}];"
@@ -889,7 +901,16 @@ fn build_cata_cascade_plan(
 
 /// Prepare model work before PE persistence, while the pre-update owner graph
 /// and reverse-reference index are still available.
+///
+/// `db` / `db_option` / `data_face` 由调用方传入：这条规划链上的每一处读（子树、基线存活、
+/// 面板枚举、房间关键字）都读**调用方那个库**，函数内部不再取全局 `SUL_DB` /
+/// `get_db_option()` / `options::data_face()`。生产包装层在 `window_root_plan` 那边传全局。
+///
+/// `data_face` 是那个库的形态：形态决定它维不维护 `ref_rev`（ADR-063 D3），反查闭包要靠它。
 pub(crate) async fn build_model_update_plan(
+    db: &Surreal<Any>,
+    db_option: &DbOption,
+    data_face: crate::options::DataFace,
     dbnum: u32,
     end_sesno: i32,
     db_type: &str,
@@ -906,7 +927,7 @@ pub(crate) async fn build_model_update_plan(
 
     let mut details = merge_net_change_details(range_eles);
     let mut baseline_warnings = Vec::new();
-    match baseline_existing_cancelled(&details).await {
+    match baseline_existing_cancelled(db, &details).await {
         Ok(existing) => restore_baseline_deletes(&mut details, &existing),
         Err(error) => {
             let cancelled = details
@@ -941,7 +962,7 @@ pub(crate) async fn build_model_update_plan(
     // 整根重生成——便宜路径结构上算不出管段。必须排在 `mask_details_to_regen` 之前，
     // 否则改判过去的目标会被掩成非 model_affecting，rollup 看不到它，既不重生成也不再
     // 有 Transform 工作项，这一次移动就凭空消失了。
-    let reroute = reroute_derived_geometry_units(&mut partition).await;
+    let reroute = reroute_derived_geometry_units(db, &mut partition).await;
     let post_regen_aabb_refnos = durable_post_regen_aabb_refnos(&reroute.rerouted_refnos);
     baseline_warnings.extend(reroute.warnings);
     let OperationImpactPartition {
@@ -967,7 +988,15 @@ pub(crate) async fn build_model_update_plan(
         .chain(deleted_refnos.iter())
         .copied()
         .collect();
-    let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details, &gate_candidates).await?;
+    let rollup = resolve_unit_rollup_on(
+        db,
+        data_face,
+        dbnum,
+        range_eles,
+        &regen_details,
+        &gate_candidates,
+    )
+    .await?;
     let (transform_refnos, deleted_refnos) = if crate::options::model_xgeometry_gate() {
         let gated = &rollup.xgeometry_gated;
         if !gated.is_empty() {
@@ -1041,10 +1070,8 @@ pub(crate) async fn build_model_update_plan(
     // 重算；PANE 搬迁 → 自身入队（新旧属主对应的房间都经它的整间分支收敛）。
     // 面板枚举失败降级为告警，并在尾事务持久标记全量重建要求。不能只打一行 warning：
     // 水位推进后必须留下与它共命运的恢复信号（ADR-040）。
-    let room_triggers = collect_room_structural_triggers(
-        range_eles,
-        &aios_core::get_db_option().get_room_key_word(),
-    );
+    let room_triggers =
+        collect_room_structural_triggers(range_eles, &db_option.get_room_key_word());
     let mut room_rebuild_reasons = Vec::new();
     if !room_triggers.is_empty() {
         let mut panel_targets: std::collections::BTreeSet<String> = room_triggers
@@ -1054,7 +1081,7 @@ pub(crate) async fn build_model_update_plan(
             .collect();
         if !room_triggers.renamed_rooms.is_empty() {
             merge_structural_panel_enumeration(
-                panels_under_rooms(&room_triggers.renamed_rooms).await,
+                panels_under_rooms(db, &room_triggers.renamed_rooms).await,
                 &format!("dbnum={dbnum}: 房间改名的面板枚举失败"),
                 &mut panel_targets,
                 &mut room_rebuild_reasons,
@@ -1063,7 +1090,7 @@ pub(crate) async fn build_model_update_plan(
         #[cfg(feature = "project_hd")]
         if !room_triggers.moved_panel_containers.is_empty() {
             merge_structural_panel_enumeration(
-                panels_under_containers(&room_triggers.moved_panel_containers).await,
+                panels_under_containers(db, &room_triggers.moved_panel_containers).await,
                 &format!("dbnum={dbnum}: CWALL/CFLOOR 搬迁的 PANE 枚举失败"),
                 &mut panel_targets,
                 &mut room_rebuild_reasons,
@@ -1120,6 +1147,8 @@ pub(crate) async fn build_model_update_plan(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    use aios_core::SUL_DB;
 
     use super::*;
 
@@ -1409,7 +1438,7 @@ mod tests {
             .find("partition_operation_impacts(range_eles, &details)")
             .expect("先分区");
         let reroute_at = body
-            .find("reroute_derived_geometry_units(&mut partition)")
+            .find("reroute_derived_geometry_units(db, &mut partition)")
             .expect("再按生成根改判");
         let mask_at = body
             .find("mask_details_to_regen(&details, &regen_refnos)")
@@ -1449,7 +1478,7 @@ mod tests {
             .0;
 
         assert!(
-            body.contains("derived_geometry_units_under(&targets)"),
+            body.contains("derived_geometry_units_under(db, &targets)"),
             "子树扫描必须吃改判前的整份目标: {body}"
         );
     }
@@ -2073,6 +2102,9 @@ mod tests {
         let box_ = RefnoEnum::from("24384/24777");
 
         let direct = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             8000,
             42,
             "DESI",
@@ -2093,6 +2125,9 @@ mod tests {
             .expect("regenerate EQUI for BOX.XLEN");
 
         let transform = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             8000,
             42,
             "DESI",
@@ -2114,6 +2149,9 @@ mod tests {
             .expect("refresh BOX.POS transform");
 
         let data_only = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             8000,
             42,
             "DESI",
@@ -2147,6 +2185,9 @@ mod tests {
         let cap = RefnoEnum::from("24383/66460");
 
         let plan = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             7999,
             42,
             "DESI",
@@ -2192,6 +2233,9 @@ mod tests {
 
         let plan_for = async |target: RefnoEnum, owner: RefnoEnum, noun: &str| {
             build_model_update_plan(
+                &SUL_DB,
+                aios_core::get_db_option(),
+                crate::options::data_face(),
                 7999,
                 42,
                 "DESI",
@@ -2334,9 +2378,17 @@ mod tests {
             selected.push(operation.clone());
         }
 
-        let plan = build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)]))
-            .await
-            .expect("build nested-created model plan");
+        let plan = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
+            8000,
+            21,
+            "DESI",
+            &BTreeMap::from([(21, selected)]),
+        )
+        .await
+        .expect("build nested-created model plan");
         let roots = plan
             .work_items
             .iter()
@@ -2397,6 +2449,9 @@ mod tests {
         let parent_box = RefnoEnum::from("24381/100679");
         let equi = "24381/100677";
         let plan = build_model_update_plan(
+            &SUL_DB,
+            aios_core::get_db_option(),
+            crate::options::data_face(),
             7997,
             84,
             "DESI",
@@ -2450,7 +2505,16 @@ mod tests {
             ],
         )]);
 
-        let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
+        let plan =
+            build_model_update_plan(
+                &SUL_DB,
+                &DbOption::default(),
+                crate::options::data_face(),
+                1,
+                42,
+                "CATA",
+                &range_eles,
+            )
             .await
             .expect("build CATA cascade plan");
         assert_eq!(plan.work_items.len(), 3, "{:?}", plan.work_items);
@@ -2499,7 +2563,16 @@ mod tests {
             ),
         ]);
 
-        let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
+        let plan =
+            build_model_update_plan(
+                &SUL_DB,
+                &DbOption::default(),
+                crate::options::data_face(),
+                1,
+                42,
+                "CATA",
+                &range_eles,
+            )
             .await
             .expect("build neutral CATA plan");
         assert_eq!(plan.work_items.len(), 1, "{:?}", plan.work_items);
@@ -2519,10 +2592,120 @@ mod tests {
             )],
         )]);
 
-        let plan = build_model_update_plan(1, 42, "SYST", &range_eles)
+        let plan =
+            build_model_update_plan(
+                &SUL_DB,
+                &DbOption::default(),
+                crate::options::data_face(),
+                1,
+                42,
+                "SYST",
+                &range_eles,
+            )
             .await
             .expect("build SYST plan");
         assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
+    }
+
+    /// 收 `db` 的行为证据：同一个窗口、两台 `mem://` 库，基线里有没有那一行决定计划不同。
+    ///
+    /// 窗口是「先建后删」（净 `Cancelled`）。规划器在排任何模型工作之前先问基线：
+    /// `Cancelled` 的元素若库里本来就有，就得还原成 `Deleted` 并排 `DeleteCleanup`；
+    /// 库里没有才是真的净零。这一问过去打在全局 `SUL_DB` 上——那样两台库会算出同一份
+    /// 计划（都是空计划），这条测试就红。
+    ///
+    /// 后半段走 [`build_model_update_plan`] 本体。DESI 链上的每一处读（基线存活、位姿改判的
+    /// owner 图、`ref_rev` 反查闭包、属主图）现在都读传入的 `db`，所以这条测试要求成功：
+    /// 有行那台必须排得出 `DeleteCleanup`。任何读全局的残留都会在这里红，而不是被兜底放过。
+    #[tokio::test]
+    async fn the_plan_reads_the_passed_db_not_the_global_one() {
+        use surrealdb::engine::any::connect;
+
+        let target = RefnoEnum::from(aios_core::RefU64::from_two_nums(4_000_000_001, 987_654_321));
+        let key = target.to_pe_key();
+
+        let with_row = connect("mem://").await.expect("有行那台 mem 库");
+        with_row
+            .use_ns("model_update_plan")
+            .use_db("with_row")
+            .await
+            .expect("with_row ns/db");
+        // `name` 必须给值：PE/OWNER 图的行解码要求它是字符串（`BaselineNodeRow::name` 的
+        // `#[serde(default)]` 只在字段缺席时生效，显式 NONE 会解码失败）。真实 `pe` 行总有名字。
+        with_row
+            .query(format!(
+                "CREATE {key} SET noun = 'BOX', name = '', deleted = false;"
+            ))
+            .await
+            .expect("create baseline row")
+            .check()
+            .expect("valid baseline row");
+
+        let without_row = connect("mem://").await.expect("空那台 mem 库");
+        without_row
+            .use_ns("model_update_plan")
+            .use_db("without_row")
+            .await
+            .expect("without_row ns/db");
+
+        // 同一份窗口：先建后删，净 Cancelled。
+        let window = || {
+            BTreeMap::from([(
+                42u32,
+                vec![
+                    EleOperationData::new(
+                        target.refno(),
+                        42,
+                        EleOperationDetail::Add(Default::default()),
+                    ),
+                    EleOperationData::new(target.refno(), 42, EleOperationDetail::Deleted),
+                ],
+            )])
+        };
+
+        let details = vec![NetChangeDetail {
+            refno: target,
+            net: NetOp::Cancelled,
+            model_affecting: false,
+        }];
+        assert!(
+            baseline_existing_cancelled(&with_row, &details)
+                .await
+                .expect("有行那台的基线存活查询")
+                .contains(&target),
+            "基线存在性必须读传入的那台库"
+        );
+        assert!(
+            baseline_existing_cancelled(&without_row, &details)
+                .await
+                .expect("空那台的基线存活查询")
+                .is_empty(),
+            "另一台库里没有这一行，就不该报存在"
+        );
+
+        let option = DbOption::default();
+        let face = crate::options::data_face();
+        let without_plan =
+            build_model_update_plan(&without_row, &option, face, 1, 42, "DESI", &window())
+                .await
+                .expect("空库窗口应当成计划");
+        assert!(
+            without_plan.work_items.is_empty(),
+            "库里没有这一行 → 先建后删是净零，不该排任何工作: {:?}",
+            without_plan.work_items
+        );
+
+        let plan = build_model_update_plan(&with_row, &option, face, 1, 42, "DESI", &window())
+            .await
+            .expect("有行那台的计划必须成功：DESI 链上的读全走传入库");
+        assert!(
+            plan.work_items.iter().any(|item| {
+                item.action == ModelWorkAction::DeleteCleanup
+                    && item.target_refno == target.to_pdms_str()
+            }),
+            "基线里本来就有这一行 → 先建后删要还原成删除并排清理: {:?}",
+            plan.work_items
+        );
     }
 
     #[test]

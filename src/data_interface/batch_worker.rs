@@ -1042,9 +1042,9 @@ fn data_end_is_injected(spec: &str, dbnum: u32, end_sesno: i32) -> bool {
 /// 生产保护与 `AIOS_TEST_FAIL_DATA_ENDS` 同一道闸（`model_refresh::test_hook_var`）；L2 拉起的服务进程里 `cfg(test)`
 /// 是关的，所以走环境变量。毫秒或右端解析失败、毫秒为 0 都直接返回。
 async fn delay_before_registry_finish(dbnum: u32, end_sesno: i32) {
-    let Some(spec) =
-        crate::data_interface::model_refresh::test_hook_var("AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH")
-    else {
+    let Some(spec) = crate::data_interface::model_refresh::test_hook_var(
+        "AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH",
+    ) else {
         return;
     };
     let Some((target, millis)) = spec.rsplit_once(':') else {
@@ -1117,9 +1117,7 @@ async fn run_one_batch(
     // 算出来立刻回写，否则面板显示的区间比实际应用的窄，紧接着排在后面那条的
     // 左端（running_end + 1）也建在一个过时的数上。
     let mut observed_end_sesno = job.end_sesno;
-    let result = if let Some(reason) =
-        injected_data_batch_failure(job.dbnum, observed_end_sesno)
-    {
+    let result = if let Some(reason) = injected_data_batch_failure(job.dbnum, observed_end_sesno) {
         // 解析前失败：`batch` 留空，后面按「没跑到数据步」记进连败账，水位不推。
         DataBatchTaskResult {
             project: job.project.clone(),
@@ -1810,7 +1808,7 @@ async fn execute_frozen_batch(
     if result.units.iter().any(|unit| unit.rooms_before.is_some()) {
         registry.set_stage(&job.task_id, "rooms_after");
     }
-    snapshot_rooms_after(&mut result.units).await;
+    snapshot_rooms_after(env, &mut result.units).await;
 
     // 设备派生量（`cal_equi` 的 world transform、`nearest_relate` 的最近楼板）跟房间「后」同一个理由放在
     // 栅栏之后：子件 aabb 随模型行由 write-behind 刷盘，`run_unit_worklist` 收尾那一刻库上还是旧值。按全部
@@ -1957,9 +1955,7 @@ fn generated_roots(units: &[ModelUnitResult]) -> Vec<e3d_io::refno::RefNo> {
     units
         .iter()
         .filter(|unit| unit.status == UnitGenStatus::Generated)
-        .filter_map(|unit| {
-            crate::fast_model::e3d_model_service::parse_refno(&unit.root_refno).ok()
-        })
+        .filter_map(|unit| crate::fast_model::e3d_model_service::parse_refno(&unit.root_refno).ok())
         .collect()
 }
 
@@ -2000,7 +1996,7 @@ async fn await_units_durable(
 /// 刷盘时重算落库（`[model-write-behind] … room_recomputed`），整根重算的边也随模型行在刷盘那一笔里落；收尾那一刻
 /// 库上还是旧边——L2 回放链 `ams8000-equi-room-cross` 732 窗的回执把 R224 → R124 的跨房位移报成「房间没变」，
 /// 734 窗的 `rooms_before` 才看到换房。
-async fn snapshot_rooms_after(units: &mut [ModelUnitResult]) {
+async fn snapshot_rooms_after(env: TaskEnv<'_>, units: &mut [ModelUnitResult]) {
     let roots: Vec<String> = units
         .iter()
         .filter(|unit| unit.rooms_before.is_some())
@@ -2010,7 +2006,24 @@ async fn snapshot_rooms_after(units: &mut [ModelUnitResult]) {
         return;
     }
     let started = Instant::now();
-    let rooms_after = crate::data_interface::unit_room_snapshot::snapshot(&roots).await;
+    // 门与「前」快照同一套判据（同一批任务必须用同一份形态）：空表 / 根数上限 / 房间归属开关 /
+    // 读透形态。读失败回空表、不拦批次，与判定的口径一致。
+    let gated = crate::data_interface::unit_room_snapshot::gate_skips(
+        &roots,
+        crate::options::room_membership(),
+        env.data_face,
+    );
+    let rooms_after = if gated {
+        std::collections::HashMap::new()
+    } else {
+        match crate::data_interface::unit_room_snapshot::snapshot_on(env.db, &roots).await {
+            Ok(map) => map,
+            Err(error) => {
+                log::warn!("单元房间快照读失败，回执里不带房间前后: {error:#}");
+                std::collections::HashMap::new()
+            }
+        }
+    };
     let mut missing = 0usize;
     for unit in units.iter_mut().filter(|unit| unit.rooms_before.is_some()) {
         unit.rooms_after = rooms_after.get(&unit.root_refno).cloned();
@@ -2098,7 +2111,11 @@ async fn refresh_equip_derived(
             println!(
                 "[设备派生量] 根={} 口径={} 重算 {} 台 / 重连 {} 台 / 挂楼板 {} / 阀门 {}（挂 {}）/ 楼板牵连 边 {} 空间 {}{} / 失败 {} / 到期未算 {}{} {elapsed_ms}ms",
                 roots.len(),
-                if scope.library_scale { "整库" } else { "逐根" },
+                if scope.library_scale {
+                    "整库"
+                } else {
+                    "逐根"
+                },
                 outcome.refreshed,
                 outcome.relinked,
                 outcome.floors_linked,
@@ -2171,7 +2188,9 @@ async fn delay_before_equip_derived(dbnum: u32) {
     };
     let which = which.trim();
     if (which == "*" || which.parse::<u32>().ok() == Some(dbnum)) && millis > 0 {
-        println!("[测试钩] dbnum {dbnum} 设备派生量前按 AIOS_TEST_DELAY_EQUIP_DERIVED 等 {millis} ms");
+        println!(
+            "[测试钩] dbnum {dbnum} 设备派生量前按 AIOS_TEST_DELAY_EQUIP_DERIVED 等 {millis} ms"
+        );
         tokio::time::sleep(Duration::from_millis(millis)).await;
     }
 }
@@ -2389,11 +2408,8 @@ async fn library_generation_roots(
     dbnum: u32,
     target_sesno: i32,
 ) -> anyhow::Result<Vec<e3d_io::refno::RefNo>> {
-    crate::data_interface::window_root_plan::library_target_roots(
-        dbnum,
-        target_sesno.max(0) as u32,
-    )
-    .await
+    crate::data_interface::window_root_plan::library_target_roots(dbnum, target_sesno.max(0) as u32)
+        .await
 }
 
 /// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：冻一台计算器，先枚举本库 `DbSet@T`
@@ -4552,14 +4568,14 @@ async fn run_unit_publish_units(
         }
         let units: Vec<crate::fast_model::e3d_model_service::UnitPublishUnit> = group
             .iter()
-            .map(|task| crate::fast_model::e3d_model_service::UnitPublishUnit {
-                root_refno: task.root_refno.clone(),
-                source_start_sesno: base_sesno,
-                // D10：规划器点名「只被 no_model 候选碰到」的根，空子计划许只推回执。
-                no_model_only: task
-                    .unit_publish
-                    .is_some_and(|hint| hint.no_model_only),
-            })
+            .map(
+                |task| crate::fast_model::e3d_model_service::UnitPublishUnit {
+                    root_refno: task.root_refno.clone(),
+                    source_start_sesno: base_sesno,
+                    // D10：规划器点名「只被 no_model 候选碰到」的根，空子计划许只推回执。
+                    no_model_only: task.unit_publish.is_some_and(|hint| hint.no_model_only),
+                },
+            )
             .collect();
         let started = std::time::Instant::now();
         let (completed, replayed, mut fallbacks, receipt_only): (
@@ -4790,7 +4806,9 @@ async fn run_unit_worklist(
     let (deferred, worklist) = split_backing_off_units(worklist, Instant::now());
     if let (Some(dbnum), Some((_, soonest))) = (
         dbnum,
-        deferred.iter().min_by_key(|(_, deferral)| deferral.remaining),
+        deferred
+            .iter()
+            .min_by_key(|(_, deferral)| deferral.remaining),
     ) {
         println!(
             "模型根退避 dbnum={dbnum} 本轮不重算 {} 根（最快 {}s 后到期；失败根逐次翻倍退避，30 s 起、10 min 封顶）",
@@ -4838,11 +4856,36 @@ async fn run_unit_worklist(
         .map(|task| task.root_refno.clone())
         .collect();
     let snapshot_started = Instant::now();
-    let rooms_before = crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
+    // 门（空表 / 根数上限 / 房间归属开关 / 读透形态）是 `unit_room_snapshot::gate_skips` 的判据，
+    // 与「后」快照同一套；走 `_on` 版不再经过包装层，判定由这里显式调。
+    let snapshot_gated = crate::data_interface::unit_room_snapshot::gate_skips(
+        &snapshot_roots,
+        crate::options::room_membership(),
+        env.data_face,
+    );
+    let rooms_before = if snapshot_gated {
+        std::collections::HashMap::new()
+    } else {
+        match crate::data_interface::unit_room_snapshot::snapshot_on(env.db, &snapshot_roots).await
+        {
+            Ok(map) => map,
+            Err(error) => {
+                log::warn!("单元房间快照读失败，回执里不带房间前后: {error:#}");
+                std::collections::HashMap::new()
+            }
+        }
+    };
     let rooms_before_ms = snapshot_started.elapsed().as_millis();
     // 几何的「前」同一处拍（计划 2026-10-24 W4）：整根重算先删行再写行，过了这一行就问不到了。
-    let geometry_before =
-        crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
+    let geometry_gated = crate::data_interface::unit_geometry_snapshot::gate_skips(
+        &snapshot_roots,
+        env.data_face,
+    );
+    let geometry_before = if geometry_gated {
+        std::collections::HashMap::new()
+    } else {
+        crate::data_interface::unit_geometry_snapshot::snapshot_on(env.db, &snapshot_roots).await
+    };
     // 两次快照的账要自己出声（#66：第一版按构件扫 `room_relate` 整表，60 根一窗前后共 29 分钟藏在「数据应用+模型生成」里）。
     println!(
         "[单元快照] 开工前 根={} 房间 {}ms（拍到 {} 根） 几何 {}ms（拍到 {} 根）",
@@ -5110,10 +5153,12 @@ async fn run_unit_worklist(
         }
     }
     // 几何的「后」照旧在这里拍：`unit_geometry_snapshot` 先问投影，投影里就是这进程刚算好的「后」。
+    // 门不必重判：能走到这里说明「前」拍到了，同一个 `snapshot_roots` 已经过门。
     let after_started = Instant::now();
     if !geometry_before.is_empty() {
         let geometry_after =
-            crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
+            crate::data_interface::unit_geometry_snapshot::snapshot_on(env.db, &snapshot_roots)
+                .await;
         for result in &mut results {
             let before = geometry_before.get(&result.root_refno);
             let after = geometry_after.get(&result.root_refno);
@@ -5989,8 +6034,7 @@ mod tests {
     /// 增量路计划 D3：判死的根记进 `dead_roots`、对应单元记 Failed 带 `durable flush:`，收尾那一笔
     /// 不盖 `model_sesno` 但照收标记；预算用尽的同样放弃、同样不盖，但不算死。全 ACK 才盖。
     #[test]
-    fn an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished()
-    {
+    fn an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished() {
         use crate::data_interface::task_end::{
             RoomGenerationStamp, TaskEnd, TaskModelOutcome, render_task_end_tail,
         };
@@ -6511,7 +6555,10 @@ mod tests {
             unit_publish: None,
         };
         let (newer, _) = split_backing_off_units(vec![task("24384/7", 727)], Instant::now());
-        assert!(newer.is_empty(), "窗口右端前进 = 数据又变了，退避中也立刻重算");
+        assert!(
+            newer.is_empty(),
+            "窗口右端前进 = 数据又变了，退避中也立刻重算"
+        );
         let (deferred, due) = split_backing_off_units(
             vec![task("24384/7", 726), task("24384/8", 726)],
             Instant::now(),
@@ -6519,7 +6566,9 @@ mod tests {
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].0.root_refno, "24384/7");
         assert_eq!(
-            due.iter().map(|task| task.root_refno.as_str()).collect::<Vec<_>>(),
+            due.iter()
+                .map(|task| task.root_refno.as_str())
+                .collect::<Vec<_>>(),
             vec!["24384/8"]
         );
         let message = backoff_message(&deferred[0].1);
@@ -6542,7 +6591,7 @@ mod tests {
             .find("split_backing_off_units(worklist")
             .expect("退避挑拣");
         let snapshot = worklist
-            .find("unit_room_snapshot::snapshot(")
+            .find("unit_room_snapshot::snapshot_on(")
             .expect("房间「前」");
         assert!(split < snapshot, "退避的根不拍快照、不进生成器");
         assert!(
@@ -7149,10 +7198,7 @@ mod tests {
         assert!(ledger.parked_streak(7997, 1035).is_some());
 
         ledger.clear(7997);
-        assert!(
-            ledger.parked_streak(7997, 1035).is_none(),
-            "人工执行清零"
-        );
+        assert!(ledger.parked_streak(7997, 1035).is_none(), "人工执行清零");
     }
 
     /// 数据失败钩只命中点名的 `(dbnum, 右端)`。别的库即使会话号碰巧相同也不该被误伤。
@@ -7476,9 +7522,7 @@ mod tests {
         let unit = body
             .find("run_unit_publish_units(")
             .expect("unit-level publish stage");
-        let regen = body
-            .find("generate_roots_report(")
-            .expect("regen stage");
+        let regen = body.find("generate_roots_report(").expect("regen stage");
         assert!(
             transform < unit && unit < regen,
             "顺序必须是 transform → unit → regen（实施约束 7）"
@@ -7632,7 +7676,7 @@ mod tests {
             .expect("worklist end")
             .0;
         assert_eq!(
-            worklist.matches("unit_room_snapshot::snapshot(").count(),
+            worklist.matches("unit_room_snapshot::snapshot_on(").count(),
             1,
             "单元工作单里只拍房间的「前」"
         );
@@ -7649,7 +7693,7 @@ mod tests {
             .expect("栅栏");
         let recompute = body.find("run_room_recompute(").expect("房间重算");
         let after = body
-            .find("snapshot_rooms_after(&mut result.units)")
+            .find("snapshot_rooms_after(env, &mut result.units)")
             .expect("刷盘后拍「后」");
         let task_end = body.find("commit_task_end_on(").expect("收尾那一笔");
         assert!(
@@ -7691,7 +7735,7 @@ mod tests {
             .find("registry.set_stage(&job.task_id, \"rooms_after\")")
             .expect("拍「后」有自己的阶段名");
         let rooms_after = body
-            .find("snapshot_rooms_after(&mut result.units)")
+            .find("snapshot_rooms_after(env, &mut result.units)")
             .expect("拍「后」");
         let equip = body
             .find("refresh_equip_derived(registry, job, &mut result)")
