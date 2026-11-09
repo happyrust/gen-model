@@ -9,8 +9,20 @@
 //!
 //! 坐标：E3D 库文件里是 mm（源坐标系），契约以 `geometry_space = source_mm` +
 //! [`SOURCE_TO_DESIGN_MM_TO_M`]（列主序对角缩放）交给前端换成设计坐标米。
+//!
+//! 全标注类型（plant3d-web#103 M7）：[`object`] 按 `[mbd_type_rules]` 把被选中的元素判成九种标注类型之一、
+//! 取归属对象，再走 plant-mbd 统一入口；[`host`] 是各类型读取器共用的读法（属主链、可选属性、世界坐标、
+//! 目录参数、SPAMAP 空间候选）。各类型的读取器：设备 [`equipment_query`]（M3），找墙候选 [`civil_faces`]
+//! （设备先用，支架找墙与土建随后共用），土建 / 建筑 [`civil_query`]（M6）。
 
 pub mod branch_query;
+pub mod civil_faces;
+pub mod civil_query;
+pub mod equipment_query;
+pub mod host;
+pub mod object;
+pub mod support_geometry;
+pub mod support_query;
 
 use std::sync::Arc;
 
@@ -21,7 +33,15 @@ use plant_mbd::{
     layout_branch,
 };
 
+use branch_query::BranchReadVersion;
 pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
+pub use civil_faces::{CivilFaceError, civil_candidate, locate_candidates};
+pub use civil_query::{CivilMode, CivilQueryError, DoorRule, query_civil, query_civil_with};
+pub use equipment_query::{EquipmentQueryError, query_equipment};
+pub use object::{
+    Classified, MbdTypeRules, ObjectQueryError, SubjectKind, classify, classify_with,
+    equipment_view, layout_classified, layout_object_refno, support_parts,
+};
 
 /// `source_mm → design_m`：16 元素**列主序**（THREE `Matrix4.fromArray` 布局，平移在 12–14）。
 /// 对角矩阵转置不变，顺序约定由前端 `fixtures/mbd-v2/source-to-design-translation.json` 钉死。
@@ -53,8 +73,13 @@ pub fn layout_pipe(
     let request = LayoutRequest::new(input_refno, branch_refno, SOURCE_TO_DESIGN_MM_TO_M);
     let mut data = layout_branch(&source, &request)
         .map_err(|message| BranchQueryError::Solver { refno, message })?;
-    let version = queried.source_version;
-    data.meta.source_version = Some(MbdV2SourceVersion {
+    data.meta.source_version = Some(pipe_source_version(queried.source_version));
+    Ok(data)
+}
+
+/// 管道读取版本 → 契约的 `meta.source_version`（BRAN 所在库与读过的各库）。
+pub(crate) fn pipe_source_version(version: BranchReadVersion) -> MbdV2SourceVersion {
+    MbdV2SourceVersion {
         dbnum: version.dbnum,
         sesno: version.sesno,
         databases: version
@@ -66,6 +91,5 @@ pub fn layout_pipe(
                 db_type: database.db_type,
             })
             .collect(),
-    });
-    Ok(data)
+    }
 }

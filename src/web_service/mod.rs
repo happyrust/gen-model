@@ -769,6 +769,9 @@ async fn serve_with_ready(
         // MBD 管道尺寸标注：路径是 plant3d-web `mbdV2Api.ts` 写死的契约（不在 /api/v1 下），
         // 返回冻结的 V2 `MbdV2PipeData`；状态语义见 `web_service::mbd`。
         .route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))
+        // 全标注类型的统一端点（plant3d-web#103 M7）：任意元素按 `[mbd_type_rules]` 判型、取归属对象，
+        // 管道与 `/pipe` 同一份图元；同样不在 /api/v1 下。
+        .route("/api/mbd/v2/object/{refno}", get(mbd::mbd_v2_object))
         // 三维校审域：同样是 plant3d-web 写死的契约路径（reviewApi.ts），响应沿用旧端
         // `{success,…}` 信封而不是本服务的 ApiError；路由清单与鉴权在 `web_service::review` 内。
         // 必须在 `.layer(...)` 之前合入，CORS / trace 才会覆盖到它。
