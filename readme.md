@@ -25,6 +25,24 @@
 
 ---
 
+## 分组规则组（GPWL / GPSET / SCOSEL）
+
+GPSET 规则组的成员不是 GPITEM 槽，而是一段 `SCOSEL` 规则：后端求值后按解析视图返回成员行。三键形状区分成员类型——GPITEM 成员 `via: <refno>` + `secondary: true` + `rule: false`；规则组解析出的成员 `via: null` + `secondary: true` + `rule: true`；主链子节点三个键都不出现。
+
+开关 `group_scosel`（配置项，默认 `false`），环境变量 `AIOS_GROUP_SCOSEL` 可覆盖；关着时所有响应与改动前逐字相同，`rule` 键完全不出现。
+
+求值域是 MDB 声明范围（`element_databases()` 里 `path.is_some()` 的库），不是全库全扫。APS 实测：MDB 范围内 28 个 GPSET（27 条规则组 + `/ACCEPT-GROUP`），27 条中 24 条有命中、合计 57 个成员，3 条出 `scosel_no_match`，`/ACCEPT-GROUP` 出 `group_empty`。
+
+验证入口：
+
+- 单元/契约：`cargo test --lib`（判据是 **0 failed**，不是某个 passed 数）
+- 真库只读：`cargo test --lib live_rule_groups -- --ignored --nocapture --test-threads=1`
+- E3D 只读对照：`target\debug\l3_suite.exe --check-driver <宏>`，四个必知细节见下条专题文档
+
+完整记录：`docs/plans/2026-11-09-g3-group-rule-members-implementation.md`（8 个 commit 逐条说明、7 条关键设计决定、三键矩阵、实测数据、已知限制）；设计阶段见 `docs/plans/2026-11-08-gpwl-gpset-group-nodes.md` 与 `docs/plans/2026-11-08-gpwl-gpset-group-nodes-dev-plan.md`。
+
+---
+
 ## all_attr_info.json 字段手动修改说明
 
 1. PTCDI -> 更改为 PTCD
