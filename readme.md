@@ -39,6 +39,36 @@ GPSET 规则组的成员不是 GPITEM 槽，而是一段 `SCOSEL` 规则：后�
 - 真库只读：`cargo test --lib live_rule_groups -- --ignored --nocapture --test-threads=1`
 - E3D 只读对照：`target\debug\l3_suite.exe --check-driver <宏>`，四个必知细节见下条专题文档
 
+### 回执里的 `unresolved[]` 原因码明细
+
+`POST /api/v1/model/generate` 与 `POST /api/v1/model/records` 的分组回执现在也带 `unresolved[]`，每项 `{ via, target, reason }`，形状与 `/api/v1/tree/children?refno=<GPSET>&resolved=1` 的同名键**完全一致**（三个端点共用 `handlers.rs` 里同一个 `unresolved_slots_json` helper）：`via` / `target` 走 `RefnoEnum` 的下划线形（如 `"2_15"`），`reason` 走 `UnresolvedReason::as_str()`。表为空时该键**不出现**（不是 `[]`），沿用 `resolved_children_body` 的 `!is_empty()` 守卫；出现时恒有 `unresolved_count == unresolved.len()`。
+
+改动前，「分组真的空」与「规则一个也没命中」的 generate 回执**逐字段完全相同**——`status` / `generation_roots` / `generation_root_count` / `scope_refnos` / `unresolved_count` / `dbnum` / `routes` 全一样，用户无法区分两者。`unresolved[]` 就是为消掉这个歧义而加的。
+
+7 个原因码分两族：
+
+| 族 | 码 | 含义 |
+|---|---|---|
+| GPREF | `gpref_missing` | GPITEM 没写 GPREF |
+| GPREF | `db_not_in_mdb` | 目标库不在本 MDB |
+| GPREF | `target_missing` | 库在、元素不在 |
+| SCOSEL | `scosel_eval_failed` | `SCOSEL` 字节解不出来，整条规则没参与求值 |
+| SCOSEL | `scosel_unsupported` | 规则解出来了，但求值器有形状认不出（已算出的合法成员仍返回） |
+| SCOSEL | `scosel_no_match` | 规则完整解出、无认不出的形状，但一个成员都没命中 |
+| SCOSEL | `group_empty` | 分组既没成员也没规则 |
+
+真库实测（开关开，2026-11-09，generate 与 records 两端点一致）：
+
+| 分组 | refno | `unresolved[]` | 其余字段 |
+|---|---|---|---|
+| `/ACCEPT-GROUP` | `2013286764_3` | `[{via:"2013286764_3", target:null, reason:"group_empty"}]` | `unresolved_count=1`、`generation_root_count=0`、records `total=0` |
+| `/AREA01_HVAC` | `2013286748_7` | `[{via:"2013286748_7", target:null, reason:"scosel_no_match"}]` | `generation_root_count=0`、`total=0` |
+| `/AREA01_PIPE` | `2013286748_2` | **键不出现** | `unresolved_count=0`、`status=Generated`、`generation_root_count=98`、`total=727` |
+
+开关关时，3 个分组 × 2 个端点共 6 份回执全部没有 `unresolved` 键，`unresolved_count=0`。
+
+口径：规则族坏槽（`scosel_no_match` / `scosel_unsupported` / `scosel_eval_failed`）与 `group_empty` 的 `via` 填的是**分组自己的 refno**——`UnresolvedSlot.via` 是必填 `RefU64`，而这类槽并没有经由的 GPITEM。所以客户端**只应读 `reason` 做文案分流，不要把 `via` 当「成员经由的 GPITEM」去做成员级渲染**，否则会渲染出「成员经由分组自己」的误导文案。
+
 完整记录：`docs/plans/2026-11-09-g3-group-rule-members-implementation.md`（8 个 commit 逐条说明、7 条关键设计决定、三键矩阵、实测数据、已知限制）；设计阶段见 `docs/plans/2026-11-08-gpwl-gpset-group-nodes.md` 与 `docs/plans/2026-11-08-gpwl-gpset-group-nodes-dev-plan.md`。
 
 ---
