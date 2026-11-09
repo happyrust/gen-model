@@ -593,6 +593,23 @@ pub(crate) fn generate_ours(
     fused: Option<&FusedCompare>,
     element_cache_limit: usize,
 ) -> Result<(), String> {
+    generate_ours_scoped(spec, node, task_dir, fused, element_cache_limit, None)
+}
+
+/// 带 `--scope` 的 [`generate_ours`]：`scope` 非空时 DFS 起点换成选中节点，
+/// 并把比对范围一起塞进 [`RvmExportOptions::compare_scope`]。
+///
+/// **产物目录与基准文件仍按根算**：`task_dir` 由调用方给（`batch.rs` 的 `job.dir`），
+/// 与这里选的 DFS 起点无关；`RvmExportOptions.out` 是 `task_dir/ours`，也不看 `root`。
+/// 也就是说 `root` 只承担「从哪起 DFS」这一个职责，目录命名归 `RootJob`。
+pub(crate) fn generate_ours_scoped(
+    spec: &RunSpec,
+    node: &ResolvedNode,
+    task_dir: &Path,
+    fused: Option<&FusedCompare>,
+    element_cache_limit: usize,
+    scope: Option<&batch::ScopeArg>,
+) -> Result<(), String> {
     let template = DirectSchema::template_dir_from_env()
         .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
     let attlib = template.join("attlib.dat");
@@ -601,10 +618,12 @@ pub(crate) fn generate_ours(
     }
     let ours = task_dir.join("ours");
     std::fs::create_dir_all(&ours).map_err(|error| format!("建输出目录失败：{error}"))?;
-    let root = e3d_model::rvm_export::parse_refno(&spec.refno)
+    // DFS 起点：`--scope` 给了就是选中节点，否则还是根。
+    let start_refno = scope.map_or(spec.refno.as_str(), |scope| scope.refno());
+    let root = e3d_model::rvm_export::parse_refno(start_refno)
         .map_err(|error| format!("refno 无法解析：{error:#}"))?;
     let project_dir = session_project_dir(spec, node);
-    let opts = RvmExportOptions {
+    let mut opts = RvmExportOptions {
         attlib,
         db_file: node.db_file.clone(),
         template: template.to_path_buf(),
@@ -621,6 +640,25 @@ pub(crate) fn generate_ours(
         element_cache_limit,
         ..RvmExportOptions::default()
     };
+    if let Some(scope) = scope {
+        let (compare_scope, anchor) = scope_compare_scope(&opts, scope)?;
+        println!(
+            "比对范围 {}：选中 ={}，名字路径 {:?}（noun {} / 属主 {:?} / 序号 {}）",
+            match scope {
+                batch::ScopeArg::Node(_) => "node",
+                batch::ScopeArg::Subtree(_) => "subtree",
+            },
+            scope.refno(),
+            anchor.name_path,
+            anchor.noun,
+            anchor.owner,
+            anchor.ordinal
+        );
+        opts.compare_scope = compare_scope;
+        // 落盘给父进程：比对在父进程里跑，而它手里只有 `DirectTreeService`，
+        // 没有 `DbSet` / `UdetCatalog`，算不出 E3D 显示名路径。
+        write_scope_file(task_dir, scope, &anchor)?;
+    }
     let deadline = Deadline(Instant::now() + spec.tools.timeout);
     // 库句柄、元素缓存都是 export_rvm 自己的局部量，返回时随之释放；跨 SITE 只留进程级的
     // 基本体网格缓存（按形状键，不按实例）。
@@ -677,6 +715,104 @@ pub(crate) fn generate_ours(
         .map_err(|error| format!("判定结果无法序列化：{error}"))?;
     }
     Ok(())
+}
+
+/// `--scope` → vendor 的 [`e3d_model::rvm_compare::CompareScope`]。
+///
+/// 名字路径由 [`e3d_model::rvm_export::scope_anchor`] 在 vendor 侧算（它握着 `DbSet` 与
+/// `UdetCatalog`，能复现 `owner_display_desc` 那套 E3D 显示名）。算出的路径**如实**交给
+/// 基准侧定位，不做大小写折叠、不做模糊匹配——对不上就让基准装载报「定位不到」，
+/// 由实测暴露口径问题（`owner_display_desc` 上溯无名 SITE 时只数本库成员）。
+fn scope_compare_scope(
+    opts: &RvmExportOptions,
+    scope: &batch::ScopeArg,
+) -> Result<
+    (
+        e3d_model::rvm_compare::CompareScope,
+        e3d_model::rvm_export::ScopeAnchor,
+    ),
+    String,
+> {
+    let refno = e3d_model::rvm_export::parse_refno(scope.refno())
+        .map_err(|error| format!("refno 无法解析：{error:#}"))?;
+    let anchor = e3d_model::rvm_export::scope_anchor(opts, refno)
+        .map_err(|error| format!("算选中节点的名字路径失败：{error:#}"))?;
+    let mut target = e3d_model::rvm_compare::ScopeTarget::path(anchor.name_path.clone());
+    // 退化三元组与 `rvm_compare` 建表同口径：无名节点在主定位落空时按
+    // (noun, 属主显示名, 序号) 再认一次。
+    if let Some(owner) = &anchor.owner {
+        target = target.with_fallback(anchor.noun.clone(), owner.clone(), anchor.ordinal);
+    }
+    let compare_scope = match scope {
+        batch::ScopeArg::Node(_) => e3d_model::rvm_compare::CompareScope::Node { target },
+        batch::ScopeArg::Subtree(_) => e3d_model::rvm_compare::CompareScope::Subtree { target },
+    };
+    Ok((compare_scope, anchor))
+}
+
+/// 落盘的比对范围：父进程读它重建 [`e3d_model::rvm_compare::CompareScope`]。
+///
+/// 名字路径只能在生成侧算（要 `DbSet` + `UdetCatalog` 复现 E3D 显示名）。父进程里
+/// `--in-process` 与子进程两种模式都能读到这一份，比对口径因此只有一处来源。
+const SCOPE_FILE: &str = "scope.json";
+
+fn write_scope_file(
+    task_dir: &Path,
+    scope: &batch::ScopeArg,
+    anchor: &e3d_model::rvm_export::ScopeAnchor,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "kind": match scope {
+            batch::ScopeArg::Node(_) => "node",
+            batch::ScopeArg::Subtree(_) => "subtree",
+        },
+        "refno": scope.refno(),
+        "name_path": anchor.name_path,
+        "noun": anchor.noun,
+        "owner": anchor.owner,
+        "ordinal": anchor.ordinal,
+    });
+    let path = task_dir.join(SCOPE_FILE);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&body)
+            .map_err(|error| format!("scope.json 无法序列化：{error}"))?,
+    )
+    .map_err(|error| format!("写 {} 失败：{error}", path.display()))
+}
+
+/// 从 `scope.json` 读回比对范围；文件不在时返回 `All`（老产物目录、没给 `--scope`）。
+pub(crate) fn read_scope_file(
+    task_dir: &Path,
+) -> Result<e3d_model::rvm_compare::CompareScope, String> {
+    let path = task_dir.join(SCOPE_FILE);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(e3d_model::rvm_compare::CompareScope::All);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("解析 {} 失败：{error}", path.display()))?;
+    let kind = value
+        .get("kind")
+        .and_then(|kind| kind.as_str())
+        .unwrap_or_default();
+    let name_path = value
+        .get("name_path")
+        .and_then(|path| path.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut target = e3d_model::rvm_compare::ScopeTarget::path(name_path);
+    if let (Some(noun), Some(owner), Some(ordinal)) = (
+        value.get("noun").and_then(|noun| noun.as_str()),
+        value.get("owner").and_then(|owner| owner.as_str()),
+        value.get("ordinal").and_then(|ordinal| ordinal.as_u64()),
+    ) {
+        target = target.with_fallback(noun.to_string(), owner.to_string(), ordinal as usize);
+    }
+    Ok(match kind {
+        "node" => e3d_model::rvm_compare::CompareScope::Node { target },
+        "subtree" => e3d_model::rvm_compare::CompareScope::Subtree { target },
+        _ => e3d_model::rvm_compare::CompareScope::All,
+    })
 }
 
 pub(crate) fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
@@ -763,11 +899,19 @@ fn session_note(evidence: &E3dProcessEvidence) -> String {
 }
 
 pub(crate) fn compare_rvms(task_dir: &Path) -> Result<Judgement, String> {
+    compare_rvms_scoped(task_dir, &e3d_model::rvm_compare::CompareScope::All)
+}
+
+/// 带比对范围的 [`compare_rvms`]：`All` 时走 `compare_rvm_files` 同一条老路径。
+pub(crate) fn compare_rvms_scoped(
+    task_dir: &Path,
+    scope: &e3d_model::rvm_compare::CompareScope,
+) -> Result<Judgement, String> {
     let baseline = task_dir.join("e3d.rvm");
     let generated = task_dir.join("ours").join("generated.rvm");
     let out = task_dir.join("compare.json");
     let report = match catch_unwind(AssertUnwindSafe(|| {
-        e3d_model::rvm_compare::compare_rvm_files(&baseline, &generated)
+        e3d_model::rvm_compare::compare_rvm_files_scoped(&baseline, &generated, scope)
     })) {
         Ok(Ok(report)) => report,
         Ok(Err(error)) => return Err(format!("比对没有跑完：{error:#}")),
@@ -1181,5 +1325,49 @@ mod tests {
         assert!(!task_id_ok("../etc"));
         assert!(!task_id_ok(""));
         assert!(artifact_path(Path::new("output"), "rvm-check-1", "../e3d.log").is_none());
+    }
+
+    /// `--scope` 的落盘与读回：父进程靠这一份重建比对范围（名字路径只能在生成侧算）。
+    /// 没有 `scope.json` 的老产物目录必须落回 `All`，与加这个参数之前同一条路。
+    #[test]
+    fn scope_json_round_trips_and_falls_back_to_all() {
+        let dir = std::env::temp_dir().join(format!("rvm-check-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 没给 --scope：读回 All。
+        assert!(read_scope_file(&dir).unwrap().is_all());
+
+        let anchor = e3d_model::rvm_export::ScopeAnchor {
+            name_path: "/SITE-1/EQUIPMENT-A".to_string(),
+            noun: "EQUI".to_string(),
+            owner: Some("SITE /SITE-1".to_string()),
+            ordinal: 3,
+        };
+        write_scope_file(
+            &dir,
+            &batch::ScopeArg::Subtree("9304/2".to_string()),
+            &anchor,
+        )
+        .unwrap();
+        let scope = read_scope_file(&dir).unwrap();
+        match scope {
+            e3d_model::rvm_compare::CompareScope::Subtree { target } => {
+                assert_eq!(target.name_path, "/SITE-1/EQUIPMENT-A");
+                let fallback = target.fallback.expect("退化三元组要一起落盘");
+                assert_eq!(fallback.noun, "EQUI");
+                assert_eq!(fallback.owner, "SITE /SITE-1");
+                assert_eq!(fallback.ordinal, 3);
+            }
+            other => panic!("读回来的档位不对：{other:?}"),
+        }
+
+        write_scope_file(&dir, &batch::ScopeArg::Node("9304/2".to_string()), &anchor).unwrap();
+        assert!(matches!(
+            read_scope_file(&dir).unwrap(),
+            e3d_model::rvm_compare::CompareScope::Node { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

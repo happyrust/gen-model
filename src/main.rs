@@ -110,6 +110,12 @@ struct RvmCheckArgs {
     /// 只跑这些根（`=w0/w1`、`w0/w1` 或 `w0_w1`），可重复或逗号分隔。
     #[arg(long, value_delimiter = ',', value_name = "REF")]
     only: Vec<String>,
+    /// 比对范围：`node:<refno>` 只比这个节点自己（不下探）；`subtree:<refno>` 比它整棵子树；
+    /// 不给 = 整个根（现状）。选中的 refno 必须落在 `--only` 选出的根里，否则报错退出。
+    ///
+    /// 与 `--only` 分工不同：`--only` 选「哪些根进这批」，`--scope` 选「这些根里比哪一块」。
+    #[arg(long, value_name = "node:REF|subtree:REF")]
+    scope: Option<String>,
     /// 只取 SITE 类型的根（缺省 SITE + APPLDW，两类合起来才是整库）。
     #[arg(long)]
     site_only: bool,
@@ -318,6 +324,12 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             .join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string())
     });
 
+    let scope = args
+        .scope
+        .as_deref()
+        .map(batch::ScopeArg::parse)
+        .transpose()?;
+
     if args.child {
         anyhow::ensure!(args.dbnum.len() == 1, "--child 只接受一个 --dbnum");
         anyhow::ensure!(!args.only.is_empty(), "--child 需要 --only");
@@ -325,6 +337,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             connection,
             dbno: args.dbnum[0],
             refnos: args.only.clone(),
+            scope,
             out,
             gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
             compare_baseline: args.compare_baseline.clone(),
@@ -339,6 +352,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         dbnums: args.dbnum.clone(),
         all_desi: args.all_desi,
         only: args.only.clone(),
+        scope,
         site_only: args.site_only,
         out,
         resume: args.resume,
