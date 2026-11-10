@@ -284,6 +284,9 @@ pub mod status {
 pub struct StageRecord {
     /// 整数退出码，或 `commit-guard` / `timeout` / `reuse` / `batch` / `refno` / `name` 一类的说明。
     pub exit: serde_json::Value,
+    /// 这一段的耗时（秒）。一般记到 0.1 秒；生成段记到毫秒（[`Self::to_the_millisecond`]：一个 ZONE
+    /// 单元的生成只有半秒上下），批量导出会话摊给各单元的那一份也记到毫秒（[`session_shares`]）。
+    /// 汇总（`summary.json`、库里的 `rollup`）把各单元的秒数相加之后才取一位小数。
     pub seconds: f64,
     #[serde(default)]
     pub peak_private_mb: Option<u64>,
@@ -308,6 +311,13 @@ impl StageRecord {
             message: message.into(),
             finished: chrono::Local::now().to_rfc3339(),
         }
+    }
+
+    /// 把耗时改记到毫秒。生成段用：按 ZONE 跑时一个单元只有半秒上下，记到 0.1 秒分不出快慢，
+    /// 上千个单元相加也会偏。
+    fn to_the_millisecond(mut self, started: Instant) -> Self {
+        self.seconds = round3(started.elapsed().as_secs_f64());
+        self
     }
 }
 
@@ -553,6 +563,24 @@ fn round1(value: f64) -> f64 {
 
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+fn round3(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+/// 一次导出会话的耗时摊给它导出的每个单元：各记一份，精确到毫秒，**各份之和等于会话耗时**
+/// （除不尽的那几毫秒摊给排在前面的单元）。
+///
+/// 先前是均摊后四舍五入到 0.1 秒、各记各的：ams7333 的 1062 个单元共用一次 191.1 秒的会话，每份
+/// 0.18 秒记成了 0.2 秒，`summary.json` 与库里把它们加起来就成了 212.4 秒。
+fn session_shares(session: Duration, count: usize) -> Vec<f64> {
+    let total = u64::try_from(session.as_millis()).unwrap_or(u64::MAX);
+    let units = count.max(1) as u64;
+    let (base, extra) = (total / units, (total % units) as usize);
+    (0..count)
+        .map(|at| (base + u64::from(at < extra)) as f64 / 1000.0)
+        .collect()
 }
 
 /// `=w0/w1` / `w0/w1` / `w0_w1` → `w0/w1`。
@@ -1836,7 +1864,8 @@ fn export_all(
         let driver = driver_with_grace(&session_spec, done_grace);
         let label = format!("rvm-check-export-{tag}");
         let session = driver.run_source_evidence(out_root, &label, &body);
-        let session_seconds = started.elapsed().as_secs_f64();
+        let session_elapsed = started.elapsed();
+        let session_seconds = session_elapsed.as_secs_f64();
         let (log, note) = match &session {
             Ok(evidence) => (
                 evidence_text(evidence),
@@ -1869,8 +1898,9 @@ fn export_all(
             );
         }
         println!("E3D 导出 {tag}：会话 {:.1}s（{note}）", session_seconds);
-        let per_root_seconds = round1(session_seconds / indices.len() as f64);
-        for &index in &indices {
+        // 会话耗时摊给它导出的每个单元：各份之和就是会话耗时，汇总出来的导出秒数才与上面这一行对得上。
+        let shares = session_shares(session_elapsed, indices.len());
+        for (&index, per_root_seconds) in indices.iter().zip(shares) {
             let job = &jobs[index];
             let rvm = job.dir.join("e3d.rvm");
             let size = std::fs::metadata(&rvm).map(|meta| meta.len()).unwrap_or(0);
@@ -1892,7 +1922,7 @@ fn export_all(
                         retry_started,
                         "批量会话里没落出文件，单独补导成功",
                     );
-                    record.seconds = round1(record.seconds + per_root_seconds);
+                    record.seconds = round3(record.seconds + per_root_seconds);
                     ExportOutcome::Ready(record)
                 }
                 Err(message) => {
@@ -1901,7 +1931,7 @@ fn export_all(
                         retry_started,
                         redact(&message, &spec.password),
                     );
-                    record.seconds = round1(record.seconds + per_root_seconds);
+                    record.seconds = round3(record.seconds + per_root_seconds);
                     ExportOutcome::Missing(record)
                 }
             };
@@ -2218,6 +2248,7 @@ fn generate_in_process(
         Ok(()) => StageRecord::new(0, started, ""),
         Err(message) => StageRecord::new(1, started, message),
     }
+    .to_the_millisecond(started)
 }
 
 /// 比对段在产物目录里的阶段标记文件：子进程在 vendor 比对前后各写一个，
@@ -2226,6 +2257,7 @@ const PHASE_COMPARE_START: &str = "ours/phase.compare_start";
 const PHASE_COMPARE_END: &str = "ours/phase.compare_end";
 
 /// 生成段 / 收尾段的采样间隔。生成段是几分钟量级，密采样拿不到更多信息，只会白烧 CPU。
+/// 它只是采样的节拍：子进程退出不必等到下一拍才被发现（[`wait_for_exit`]）。
 const GEN_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 比对段的采样间隔。比对段实测只有 0.0–0.1 秒
@@ -2413,10 +2445,13 @@ fn generate_in_child(
         }
         // 间隔按阶段自适应：比对段几十毫秒量级必须密采样，生成段与收尾段 500ms 足够。
         // 顺带的效果是超时判定在比对段也更密，TIMEOUT 只会更及时，不会更松。
-        std::thread::sleep(phase.sample_interval());
+        // 这个间隔只管多久采一次样：等的是进程句柄，子进程先退出就立刻醒，不把剩下的间隔睡完。
+        if wait_for_exit(&mut child, phase.sample_interval()) {
+            break;
+        }
     }
     let exit = child.wait();
-    // 退出后再读一次峰值。循环里是「先看退没退、再读峰值、再睡一个间隔」：不足一个间隔就跑完的
+    // 退出后再读一次峰值。循环里是「先看退没退、再读峰值、再等到下一个采样点」：不足一个间隔就跑完的
     // 单元（release 构建下的小 ZONE 不到 0.5 秒）只在刚起进程时读到过一次，记下来的是 1 MB；
     // 跑得久的也漏掉最后一个间隔里涨的那一段。句柄在 `child` 释放前一直有效，内核累计峰值照样读得到。
     if let Some(bytes) = memory::process_peak_private_bytes(&child) {
@@ -2452,12 +2487,57 @@ fn generate_in_child(
             ),
             Err(error) => StageRecord::new(1, started, format!("等子进程失败：{error}")),
         },
-    };
+    }
+    // 生成段的耗时记到毫秒：子进程一退出就走到这里，记下来的就是它实际跑了多久。
+    .to_the_millisecond(started);
     record.peak_private_mb = (peak > 0).then_some(peak / (1024 * 1024));
     record.min_commit_free_gb = min_free.map(round2);
     // 比对段峰值：标记文件没落盘时 compare_peak 恒 0，这里给 None 而不是编一个数。
     let compare_peak_mb = (compare_peak > 0).then_some(compare_peak / (1024 * 1024));
     (record, compare_peak_mb)
+}
+
+/// 等子进程退出，最多等 `timeout`；在这段时间里退出了回 `true`，到点还没退回 `false`。
+///
+/// [`generate_in_child`] 的采样循环靠它等到下一个采样点。先前是定时睡一个间隔：子进程退出后父进程要
+/// 睡完剩下的那一截才发现，生成段间隔 0.5 秒，按 ZONE 跑时每个单元白等 0.4 秒上下（ams7333 的 1062 个
+/// 单元合计约 420 秒），记下来的生成秒数也只有 0.5 / 1.0 / 1.5 三档。
+#[cfg(windows)]
+fn wait_for_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    // `u32::MAX` 是 INFINITE：间隔再长也不传它。
+    let millis = u32::try_from(timeout.as_millis())
+        .unwrap_or(u32::MAX - 1)
+        .min(u32::MAX - 1);
+    // 安全性：句柄来自 std 的 Child，在 `child` 释放前一直有效；这里只等它，不改它。
+    match unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) } {
+        WAIT_OBJECT_0 => true,
+        WAIT_TIMEOUT => false,
+        // 等不了（句柄不让等一类）：退回定时睡，循环顶上的 `try_wait` 照样看得到退出。
+        _ => {
+            std::thread::sleep(timeout);
+            false
+        }
+    }
+}
+
+/// 非 Windows 没有「带超时等进程」的现成调用：切成 10 毫秒一片去看。
+#[cfg(not(windows))]
+fn wait_for_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
+    const SLICE: Duration = Duration::from_millis(10);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(SLICE.min(deadline - now));
+    }
 }
 
 /// 内存护栏要读的三个数：系统可提交内存余量、子进程峰值私有内存、子进程当前提交量。
@@ -2628,10 +2708,12 @@ impl Summary {
                     .max(compare.peak_private_mb.unwrap_or(0));
             }
         }
+        // 各单元记到毫秒，相加之后才取一位小数（与库里的汇总同一个算法）。
+        use super::store::total_seconds;
         for db in dbs.values_mut() {
-            db.gen_seconds = round1(db.gen_seconds);
-            db.export_seconds = round1(db.export_seconds);
-            db.compare_seconds = round1(db.compare_seconds);
+            db.gen_seconds = total_seconds(db.gen_seconds);
+            db.export_seconds = total_seconds(db.export_seconds);
+            db.compare_seconds = total_seconds(db.compare_seconds);
         }
         Self {
             generated_at: chrono::Local::now().to_rfc3339(),
@@ -2649,9 +2731,9 @@ impl Summary {
             clean: roots.iter().all(|record| status::is_clean(&record.status)),
             status_counts,
             totals,
-            gen_seconds: round1(gen_seconds),
-            export_seconds: round1(export_seconds),
-            compare_seconds: round1(compare_seconds),
+            gen_seconds: total_seconds(gen_seconds),
+            export_seconds: total_seconds(export_seconds),
+            compare_seconds: total_seconds(compare_seconds),
             dbs: dbs.into_values().collect(),
             roots,
         }
@@ -3144,6 +3226,191 @@ mod tests {
             peak >= 256 * 1024,
             "cmd 退出后的累计峰值只有 {peak} 字节，不像是整段的峰值"
         );
+    }
+
+    /// 采样循环等在进程句柄上：子进程一退出就回来，不把采样间隔剩下的那一截睡完；子进程还在时等到点
+    /// 才回来（采样的节拍不变）；被杀掉的也立刻看得到。等完之后句柄仍然读得到累计峰值。
+    #[cfg(windows)]
+    #[test]
+    fn waiting_on_the_child_returns_the_moment_it_exits() {
+        let spawn = |program: &str, args: &[&str]| {
+            std::process::Command::new(program)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap_or_else(|error| panic!("起 {program}：{error}"))
+        };
+
+        // 马上退出的子进程，间隔给一分钟：回来得远早于间隔。
+        let mut quick = spawn("cmd", &["/d", "/c", "exit 0"]);
+        let started = Instant::now();
+        assert!(wait_for_exit(&mut quick, Duration::from_secs(60)));
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_secs(20),
+            "子进程早退出了，却等了 {waited:?}"
+        );
+        assert!(quick.wait().expect("取退出码").success());
+        assert!(memory::process_peak_private_bytes(&quick).is_some_and(|peak| peak >= 256 * 1024));
+        // 已经退出的再等：立刻回来。
+        assert!(wait_for_exit(&mut quick, Duration::from_secs(60)));
+
+        // 还在跑的子进程：到点回 false，而且确实等到了点。
+        let mut slow = spawn("ping", &["-n", "60", "127.0.0.1"]);
+        let started = Instant::now();
+        assert!(!wait_for_exit(&mut slow, Duration::from_millis(300)));
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(250),
+            "子进程还在，只等了 {waited:?} 就回来了"
+        );
+        // 杀掉之后：不必等到下一个采样点。
+        slow.kill().expect("杀 ping");
+        let started = Instant::now();
+        assert!(wait_for_exit(&mut slow, Duration::from_secs(60)));
+        assert!(started.elapsed() < Duration::from_secs(20));
+        let _ = slow.wait();
+    }
+
+    /// 整段走一遍 [`generate_in_child`]：子进程一退出父进程就接着处理，记下来的生成秒数是它实际跑了
+    /// 多久，不再凑成采样间隔（0.5 秒）的整数倍；退出之后的累计峰值照样读得到。
+    ///
+    /// 这里的「子进程」是测试程序自己：它不认 `rvm-check --child …` 这些参数，报个错马上退出，正好是一个
+    /// 远不到 0.5 秒就结束的子进程。原先的循环发现它退出之前至少要睡满一个间隔，这个数不可能低于 0.5。
+    #[cfg(windows)]
+    #[test]
+    fn the_parent_moves_on_as_soon_as_the_generation_child_exits() {
+        let dir = std::env::temp_dir().join(format!("rvm-child-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let job = RootJob {
+            dir: dir.join("ams7999").join("1_2"),
+            ..root_job(7999, "1/2")
+        };
+        std::fs::create_dir_all(&job.dir).unwrap();
+        let (spec, opts) = (run_spec(), options());
+        // 机器正忙时起进程本身就可能慢：多试几次，取最快的一次。原先的循环一次也到不了 0.5 秒以下。
+        let mut records = Vec::new();
+        for _ in 0..5 {
+            let (record, compare_peak) = generate_in_child(&job, &spec, &dir, &opts, None);
+            assert_eq!(compare_peak, None, "没有阶段标记，比对段峰值留空");
+            let quick = record.seconds < 0.45;
+            records.push(record);
+            if quick {
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let record = records
+            .iter()
+            .min_by(|a, b| a.seconds.total_cmp(&b.seconds))
+            .unwrap();
+        assert!(
+            record.seconds < 0.45,
+            "子进程报错即退，父进程却过了 {:?} 秒才接着处理",
+            records.iter().map(|record| record.seconds).collect::<Vec<_>>()
+        );
+        assert_eq!(record.seconds, round3(record.seconds), "记到毫秒");
+        assert_ne!(
+            record.exit,
+            serde_json::Value::from(0),
+            "测试程序不认这些参数，应当是非零退出：{}",
+            record.message
+        );
+        assert!(
+            record.peak_private_mb.is_some(),
+            "子进程不到一个采样间隔就退出了，累计峰值要靠退出后那一次读"
+        );
+    }
+
+    /// 生成段的秒数记到毫秒，不四舍五入到 0.1 秒：半秒上下的 ZONE 单元才分得出快慢。
+    #[test]
+    fn generation_seconds_are_kept_to_the_millisecond() {
+        let Some(started) = Instant::now().checked_sub(Duration::from_millis(537)) else {
+            return; // 刚开机不到半秒的机器上起点减不出来，跳过。
+        };
+        let coarse = StageRecord::new(0, started, "");
+        assert_eq!(coarse.seconds, round1(coarse.seconds), "别的段照旧记到 0.1 秒");
+        let record = StageRecord::new(0, started, "x").to_the_millisecond(started);
+        // 四舍五入到 0.1 秒的话这里是 0.5。上限放宽：测试线程被别的活挤一下不该让它红。
+        assert!(
+            (0.537..5.0).contains(&record.seconds),
+            "537 毫秒前开始的一段记成了 {} 秒",
+            record.seconds
+        );
+        assert_eq!(record.seconds, round3(record.seconds), "只留三位小数");
+        assert_eq!((record.exit.clone(), record.message.as_str()), (0.into(), "x"), "别的格不动");
+    }
+
+    /// 一次导出会话的耗时摊给各单元：各份之和就是会话耗时，汇总出来的导出秒数与会话实测一致。
+    /// ams7333 那一次是 1062 个单元共用 191.1 秒的会话；先前每份四舍五入成 0.2 秒，合计成了 212.4 秒。
+    #[test]
+    fn export_seconds_add_up_to_the_session_they_were_shared_from() {
+        let millis = |shares: &[f64]| -> u64 {
+            shares
+                .iter()
+                .map(|share| (share * 1000.0).round() as u64)
+                .sum()
+        };
+        // 每个单元带着自己那一份走一遍汇总，交回汇总里的导出秒数（整批的、这个库的）。
+        let summed = |shares: &[f64]| {
+            let records: Vec<RootRecord> = shares
+                .iter()
+                .enumerate()
+                .map(|(at, share)| {
+                    let mut record =
+                        RootRecord::new(&zone_job(&format!("17496/{}", 9000 + at), "9304/2"));
+                    record.status = status::PASS.to_string();
+                    record.export = Some(StageRecord {
+                        exit: "batch".into(),
+                        seconds: *share,
+                        ..StageRecord::default()
+                    });
+                    record
+                })
+                .collect();
+            let summary = Summary::build(&options(), &run_spec(), &[1112], "test", "b/t", records);
+            assert_eq!(summary.dbs.len(), 1);
+            (summary.export_seconds, summary.dbs[0].export_seconds)
+        };
+
+        let shares = session_shares(Duration::from_millis(191_100), 1062);
+        assert_eq!(shares.len(), 1062);
+        assert!(
+            shares.iter().all(|share| *share == 0.179 || *share == 0.18),
+            "每份 179 或 180 毫秒：{:?}",
+            &shares[..3]
+        );
+        assert_eq!(millis(&shares), 191_100, "各份之和就是会话耗时");
+        assert_eq!(summed(&shares), (191.1, 191.1));
+        // 先前的算法：均摊后四舍五入到 0.1 秒，每个单元记 0.2 秒。
+        let old_share = (191.1_f64 / 1062.0 * 10.0).round() / 10.0;
+        assert_eq!(old_share, 0.2);
+        assert_eq!(summed(&vec![old_share; 1062]), (212.4, 212.4));
+
+        // 除不尽：多出来的毫秒给排在前面的单元；一个单元拿走整段；没有单元也不出事。
+        assert_eq!(session_shares(Duration::from_millis(7), 3), [0.003, 0.002, 0.002]);
+        assert_eq!(session_shares(Duration::from_millis(12_345), 1), [12.345]);
+        assert!(session_shares(Duration::from_secs(5), 0).is_empty());
+        // 会话比单元数还短（一毫秒都摊不到）：照样加得回来。
+        let tiny = session_shares(Duration::from_millis(5), 12);
+        assert_eq!(millis(&tiny), 5);
+
+        // 合计正好落在半档上（191.15 秒）：归到整毫秒再取一位小数，累加误差不左右进位。
+        let half = session_shares(Duration::from_millis(191_150), 1062);
+        assert_eq!(millis(&half), 191_150);
+        assert_eq!(summed(&half), (191.2, 191.2));
+        let mut reversed = half.clone();
+        reversed.reverse();
+        assert_eq!(summed(&reversed), (191.2, 191.2), "换个相加的次序也一样");
+        // 库里的汇总用的是同一个算法。
+        use super::super::store::total_seconds;
+        assert_eq!(total_seconds(half.iter().sum()), 191.2);
+        assert_eq!(total_seconds(191.149_999_999_999_98), 191.2);
+        assert_eq!(total_seconds(191.150_000_000_000_03), 191.2);
+        assert_eq!(total_seconds(191.149), 191.1);
+        assert_eq!(total_seconds(0.0), 0.0);
     }
 
     /// `--scope` 的解析：两种档、refno 三种写法归一，写错的形态必须报错而不是猜。

@@ -22,7 +22,7 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 |---|---|---|
 | 枚举根 | 该库 WORLD 的直接成员里 noun 为 `SITE` / `APPLDW` 的元素（`--site-only` 只取 SITE）。两类根件集合互不重叠，合起来才是整库 | `DirectTreeService::children(world)` |
 | 导基准 | **每库一次** `des.exe -tty` 会话，宏里逐根 `export`（`onerror continue`，每根一个哨兵）；哪个根没落出文件再单独按 refno / 名称补导一次 | `rvm_check::export_macro::export_batch_body` |
-| 生成 | 缺省每个根起一个 `aios-database rvm-check --child` 子进程，父进程每 0.5 s 看一次可提交内存余量与耗时，越线就杀：`commit-guard` / `timeout` 只记在那个根上 | `rvm_check::generate_ours`（`e3d_model::rvm_export`） |
+| 生成 | 缺省每个根起一个 `aios-database rvm-check --child` 子进程，父进程每 0.5 s 采一次样（可提交内存余量、耗时、子进程内存峰值），越线就杀：`commit-guard` / `timeout` 只记在那个根上。0.5 s 只是采样的节拍：子进程一退出，父进程立即接着处理，不等下一个采样点 | `rvm_check::generate_ours`（`e3d_model::rvm_export`） |
 | 比对 | 进程内 `compare_rvm_files`（只读映射 + 并行，几百 MB 以内）；判色与页面同一函数 | `rvm_check::compare_rvms` / `judge_report` |
 
 导出与生成是流水线：E3D 会话在自己的线程里逐库跑，生成工人不等它；一个根生成完、基准也到了
@@ -71,7 +71,7 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 
 | 表 | 一行是什么 | 关键字段 |
 |---|---|---|
-| `rvm_check_run` | 一次比对（一个根 / 单元） | `run_id`（页面是任务号；批量是 `<batch_id>/<tag>/<w0_w1>`，`batch_id` = 产物目录最后两级）、`source`（page / batch）、`refno` `dbnum` `noun` `name`、`unit`（`root` / `zone` / `fallback`）、`root_refno` `root_noun` `root_name`（所在的上级根：单元行是它的 SITE / APPLDW，根行是它自己）、`verdict`（pass / kind_differ / fail）、`status`（更细的终态）、`stage`（停在哪一步：`resolve` / `generate_ours` / `e3d_export` / `compare`，页面与批量同一套四个名字）、`message`、`counts`、`mismatch_total` `mismatch_by_kind` `mismatch_by_category`、`seconds` `gen_peak_private_mb`、`gen_ledger`（生成侧 `report.json` 的账本计数：skipped / evidence_pending / centreline_only / unknown_nouns …）、`artifact_dir` `files`、`finished_at` `finished_unix_ms` |
+| `rvm_check_run` | 一次比对（一个根 / 单元） | `run_id`（页面是任务号；批量是 `<batch_id>/<tag>/<w0_w1>`，`batch_id` = 产物目录最后两级）、`source`（page / batch）、`refno` `dbnum` `noun` `name`、`unit`（`root` / `zone` / `fallback`）、`root_refno` `root_noun` `root_name`（所在的上级根：单元行是它的 SITE / APPLDW，根行是它自己）、`verdict`（pass / kind_differ / fail）、`status`（更细的终态）、`stage`（停在哪一步：`resolve` / `generate_ours` / `e3d_export` / `compare`，页面与批量同一套四个名字）、`message`、`counts`、`mismatch_total` `mismatch_by_kind` `mismatch_by_category`、`seconds`（各段耗时，秒：`resolve` / `generate` / `e3d_export` / `compare`。批量的 `generate` 记到毫秒，就是生成子进程实际跑了多久；批量的 `e3d_export` 是那一次导出会话摊到这个单元的一份，也记到毫秒，各份之和等于会话耗时）、`gen_peak_private_mb`、`gen_ledger`（生成侧 `report.json` 的账本计数：skipped / evidence_pending / centreline_only / unknown_nouns …）、`artifact_dir` `files`、`finished_at` `finished_unix_ms` |
 | `rvm_check_mismatch` | 一条差异 | `run_id` `refno`（所在的根 / 单元）`root_refno` `dbnum` `seq`、`category`（off / kind_differ / only_baseline / only_generated / unkeyable_* / container_* / `stage_failure` / `centreline_only`）、**`reason_kind`**（原因种类）、**`reason`**（带数值的一句话）、`severity`（error / warning / info）、`name` `noun` `max_axis_delta_mm` `baseline_kinds` `generated_kinds` `baseline_aabb` `generated_aabb` |
 
 `unit` 与 `root_*` 是 2026-11-10 加的；页面单根，以及此前写进来的批量行没有这几格。按上级根查的时候，
@@ -166,7 +166,7 @@ refno 怎么来的：RVM 里没有 refno，比对按名称配对。生成侧每�
 
 | 查什么 | 命令行 | 服务端（GET） | 应答 |
 |---|---|---|---|
-| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
+| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`（各单元之和，相加之后取一位小数，与 `summary.json` 同一个算法）、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
 | 运行记录 | `rvm-check-query runs` | `/api/v1/rvm-check/history` | `{count, runs: [...]}`，一个根 / 单元一行，最新在前 |
 | 差异明细 | `rvm-check-query mismatches` | `/api/v1/rvm-check/mismatches` | `{count, rows: [...]}` |
 | 差异按原因计数 | `rvm-check-query reasons` | `/api/v1/rvm-check/reasons` | `{count, kinds: [{reason_kind, category, severity, n}]}`，多的在前 |

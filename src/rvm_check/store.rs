@@ -132,6 +132,15 @@ pub struct StageSeconds {
     pub compare: f64,
 }
 
+/// 各单元某一阶段的秒数相加后的合计，取一位小数。`summary.json`（[`super::batch`]）与库里的汇总
+/// （[`rollup_on`]）用同一个算法，两处的数才对得上。
+///
+/// 各单元记到毫秒，合计先归到整毫秒再取一位小数：浮点累加出来的 `191.14999999999998` 与
+/// `191.15000000000003` 是同一个合计，不该一个舍掉、一个进位。
+pub(super) fn total_seconds(sum: f64) -> f64 {
+    ((sum * 1000.0).round() / 100.0).round() / 10.0
+}
+
 /// `rvm_check_run` 的一行。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RunRow {
@@ -1950,7 +1959,7 @@ pub async fn rollup_on(db: &Surreal<Any>, filter: &RunFilter) -> Result<Value> {
     ordered.sort_by_key(|((batch_id, ..), _)| {
         std::cmp::Reverse(batch_latest.get(batch_id).copied().unwrap_or(i64::MIN))
     });
-    let round = |seconds: f64| (seconds * 10.0).round() / 10.0;
+    let round = total_seconds;
     let roots: Vec<Value> = ordered
         .into_iter()
         .map(|((batch_id, dbnum, root, mode), group)| {
@@ -2627,6 +2636,34 @@ mod tests {
         .unwrap();
         assert_eq!(runs["count"], 4);
         assert_eq!(runs["runs"].as_array().unwrap().len(), 4);
+    }
+
+    /// 各单元的秒数记到毫秒，汇总相加之后才取一位小数。一次导出会话摊给各单元的那几份加起来就是会话
+    /// 耗时：10 秒的会话摊给三个单元是 3.334 / 3.333 / 3.333，汇总得 10.0。先前每份先四舍五入到 0.1 秒
+    /// （各记 3.3），汇总成了 9.9。
+    #[tokio::test]
+    async fn rollup_adds_the_seconds_up_before_rounding_them() {
+        let db = database("rollup-seconds").await;
+        for (unit, export_share) in [("5/1", 3.334), ("5/2", 3.333), ("5/3", 3.333)] {
+            let mut run = zone_facts("b-x", unit, "1/2", "pass", Vec::new());
+            run.seconds = StageSeconds {
+                generate: 0.537,
+                e3d_export: export_share,
+                ..StageSeconds::default()
+            };
+            put(&db, &run).await;
+        }
+        let all = rollup_on(&db, &RunFilter::default()).await.unwrap();
+        assert_eq!(all["roots"].as_array().unwrap().len(), 1, "{all}");
+        let root = &all["roots"][0];
+        assert_eq!(root["runs"], 3);
+        assert_eq!(root["seconds"]["e3d_export"], 10.0);
+        assert_eq!(root["seconds"]["generate"], 1.6, "0.537 × 3 = 1.611");
+
+        assert_eq!(total_seconds(3.334 + 3.333 + 3.333), 10.0);
+        assert_eq!(total_seconds(191.149_999_999_999_98), 191.2);
+        assert_eq!(total_seconds(191.150_000_000_000_03), 191.2);
+        assert_eq!(total_seconds(212.400_000_000_000_03), 212.4);
     }
 
     /// 入库线程的主体：送来几份落几份，送完即止；落进去的 `run_id` 按批读得回来（续跑靠它判断补不补）。
