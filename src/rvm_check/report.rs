@@ -4,7 +4,7 @@
 //! 差异只在 JSON 里。口径与 `scripts/Compare-SlykRvmStrict.ps1` 相同：
 //! 没有缺件、没有 off、种类也一致是绿；只是种类不一致是黄；其余是红。
 
-use e3d_model::rvm_compare::CompareReport;
+use e3d_model::rvm_compare::{CompareReport, ContainerTubePair, Pair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -48,6 +48,28 @@ pub struct RvmCounts {
     pub centreline_only_baseline: u64,
     pub unkeyable_baseline: u64,
     pub unkeyable_generated: u64,
+}
+
+impl RvmCounts {
+    /// 逐格累加：批量汇总与库里的按根汇总都按这一处算。
+    pub fn add(&mut self, from: &Self) {
+        self.both += from.both;
+        self.exact += from.exact;
+        self.chord += from.chord;
+        self.reference_artifact += from.reference_artifact;
+        self.film += from.film;
+        self.off += from.off;
+        self.only_baseline += from.only_baseline;
+        self.only_generated += from.only_generated;
+        self.kind_match += from.kind_match;
+        self.kind_differ += from.kind_differ;
+        self.container_off += from.container_off;
+        self.container_only_baseline += from.container_only_baseline;
+        self.container_only_generated += from.container_only_generated;
+        self.centreline_only_baseline += from.centreline_only_baseline;
+        self.unkeyable_baseline += from.unkeyable_baseline;
+        self.unkeyable_generated += from.unkeyable_generated;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -123,6 +145,8 @@ pub mod reason {
     pub const CONTAINER_TUBE_EXTRA: &str = "container_tube_extra_in_generated";
     /// 基准成员只有中心线（E3D 画线、我们不画），不进判据，只记账。
     pub const CENTRELINE_ONLY: &str = "centreline_only";
+    /// [`CENTRELINE_ONLY`] 那一类的说明：差异行与构件行写同一句。
+    pub const CENTRELINE_ONLY_TEXT: &str = "E3D 只画了中心线、没画实体，不进判据（我们不画线）";
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -239,6 +263,55 @@ fn is_problem_row(verdict: &str) -> bool {
     matches!(verdict, "off" | "only_baseline" | "only_generated")
 }
 
+impl PairFacts {
+    /// 一对配上的件要判的事实。有问题的件进 [`JudgeFacts::problem_pairs`]；没有问题的件也摊得出来——
+    /// 构件级结果（[`super::element`]）每一件都要过同一套归因。
+    fn of(pair: &Pair) -> Self {
+        let container_rows: Vec<(Option<String>, String, Option<f64>)> = pair
+            .container_tubes
+            .as_ref()
+            .map(|tubes| {
+                tubes
+                    .rows
+                    .iter()
+                    .filter(|row| is_problem_row(row.verdict))
+                    .map(|row| {
+                        (
+                            row.generated.clone(),
+                            row.verdict.to_string(),
+                            row.max_axis_delta_mm,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            name: pair.key.clone(),
+            noun: pair.noun.clone(),
+            verdict: pair.verdict.to_string(),
+            kinds_differ: pair.kind_match == Some(false),
+            max_axis_delta_mm: Some(pair.max_axis_delta_mm),
+            significant_max_axis_delta_mm: pair.significant_max_axis_delta_mm,
+            comparison_frame: Some(pair.comparison_frame.to_string()),
+            baseline_kinds: pair.baseline_kinds.clone(),
+            generated_kinds: pair.generated_kinds.clone(),
+            baseline_aabb: Some(pair.baseline_aabb),
+            generated_aabb: Some(pair.generated_aabb),
+            container_rows,
+        }
+    }
+
+    /// 这一对有没有问题：`off`、种类不一致，或容器组内逐根账里有 off / only_*。
+    fn is_problem(pair: &Pair) -> bool {
+        pair.verdict == "off"
+            || pair.kind_match == Some(false)
+            || pair
+                .container_tubes
+                .as_ref()
+                .is_some_and(|tubes| tubes.rows.iter().any(|row| is_problem_row(row.verdict)))
+    }
+}
+
 impl JudgeFacts {
     fn from_value(value: &Value) -> Self {
         let mut counts = RvmCounts::default();
@@ -353,44 +426,8 @@ impl JudgeFacts {
         let problem_pairs = report
             .pairs
             .iter()
-            .filter_map(|pair| {
-                let kinds_differ = pair.kind_match == Some(false);
-                let container_rows: Vec<(Option<String>, String, Option<f64>)> = pair
-                    .container_tubes
-                    .as_ref()
-                    .map(|tubes| {
-                        tubes
-                            .rows
-                            .iter()
-                            .filter(|row| is_problem_row(row.verdict))
-                            .map(|row| {
-                                (
-                                    row.generated.clone(),
-                                    row.verdict.to_string(),
-                                    row.max_axis_delta_mm,
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if pair.verdict != "off" && !kinds_differ && container_rows.is_empty() {
-                    return None;
-                }
-                Some(PairFacts {
-                    name: pair.key.clone(),
-                    noun: pair.noun.clone(),
-                    verdict: pair.verdict.to_string(),
-                    kinds_differ,
-                    max_axis_delta_mm: Some(pair.max_axis_delta_mm),
-                    significant_max_axis_delta_mm: pair.significant_max_axis_delta_mm,
-                    comparison_frame: Some(pair.comparison_frame.to_string()),
-                    baseline_kinds: pair.baseline_kinds.clone(),
-                    generated_kinds: pair.generated_kinds.clone(),
-                    baseline_aabb: Some(pair.baseline_aabb),
-                    generated_aabb: Some(pair.generated_aabb),
-                    container_rows,
-                })
-            })
+            .filter(|pair| PairFacts::is_problem(pair))
+            .map(PairFacts::of)
             .collect();
         Self {
             counts,
@@ -485,29 +522,13 @@ fn judge(facts: JudgeFacts) -> Judgement {
 
     let mut mismatches = Vec::new();
     for pair in &problem_pairs {
-        if pair.verdict == "off" {
-            mismatches.push(pair_mismatch(pair, "off"));
-        } else if pair.kinds_differ {
-            mismatches.push(pair_mismatch(pair, "kind_differ"));
-        }
+        mismatches.extend(pair_verdict_mismatch(pair));
         for (generated, row_verdict, max_axis_delta_mm) in &pair.container_rows {
-            let (reason_kind, reason) =
-                classify_container_row(row_verdict, generated.as_deref(), *max_axis_delta_mm);
-            mismatches.push(RvmMismatch {
-                category: format!("container_{row_verdict}"),
-                name: generated
-                    .clone()
-                    .unwrap_or_else(|| "(容器管身)".to_string()),
-                noun: "TUBI".to_string(),
-                max_axis_delta_mm: *max_axis_delta_mm,
-                baseline_kinds: Vec::new(),
-                generated_kinds: Vec::new(),
-                baseline_aabb: None,
-                generated_aabb: None,
-                reason_kind: reason_kind.to_string(),
-                reason,
-                severity: reason::ERROR.to_string(),
-            });
+            mismatches.push(container_row_mismatch(
+                generated.as_deref(),
+                row_verdict,
+                *max_axis_delta_mm,
+            ));
         }
     }
     for name in &only_baseline {
@@ -885,6 +906,58 @@ fn pair_mismatch(pair: &PairFacts, category: &str) -> RvmMismatch {
         }
         .to_string(),
     }
+}
+
+/// 一对配上的件自己那一行差异：`off` 一行，否则种类不一致一行，都不是就没有。
+fn pair_verdict_mismatch(pair: &PairFacts) -> Option<RvmMismatch> {
+    if pair.verdict == "off" {
+        Some(pair_mismatch(pair, "off"))
+    } else if pair.kinds_differ {
+        Some(pair_mismatch(pair, "kind_differ"))
+    } else {
+        None
+    }
+}
+
+/// 容器组内逐根账里有问题的一行落成的差异行。
+fn container_row_mismatch(
+    generated: Option<&str>,
+    row_verdict: &str,
+    max_axis_delta_mm: Option<f64>,
+) -> RvmMismatch {
+    let (reason_kind, reason) = classify_container_row(row_verdict, generated, max_axis_delta_mm);
+    RvmMismatch {
+        category: format!("container_{row_verdict}"),
+        name: generated
+            .map(str::to_string)
+            .unwrap_or_else(|| "(容器管身)".to_string()),
+        noun: "TUBI".to_string(),
+        max_axis_delta_mm,
+        baseline_kinds: Vec::new(),
+        generated_kinds: Vec::new(),
+        baseline_aabb: None,
+        generated_aabb: None,
+        reason_kind: reason_kind.to_string(),
+        reason,
+        severity: reason::ERROR.to_string(),
+    }
+}
+
+/// 构件级结果用：一对配上的件按 [`judge`] 同一套规则得出的那行差异；没有问题为 `None`。
+pub(super) fn pair_problem(pair: &Pair) -> Option<RvmMismatch> {
+    pair_verdict_mismatch(&PairFacts::of(pair))
+}
+
+/// 构件级结果用：容器组内逐根账的一行按 [`judge`] 同一套规则得出的差异；配上且在容差内为 `None`。
+pub(super) fn container_row_problem(row: &ContainerTubePair) -> Option<RvmMismatch> {
+    is_problem_row(row.verdict).then(|| {
+        container_row_mismatch(row.generated.as_deref(), row.verdict, row.max_axis_delta_mm)
+    })
+}
+
+/// 构件级结果用：单侧件 / 发不出主键的件按 [`judge`] 同一套规则得出的差异。`name` 是比对报告里的原串。
+pub(super) fn single_problem(category: &str, name: &str) -> RvmMismatch {
+    named(category, name)
 }
 
 fn named(category: &str, name: &str) -> RvmMismatch {

@@ -185,9 +185,18 @@ pub async fn start_run(
 async fn store_run(facts: crate::rvm_check::store::RunFacts) {
     let run_id = facts.run_id.clone();
     match crate::rvm_check::store::persist_facts(&facts).await {
-        Ok((mismatches, rows)) => log::info!(
-            "[rvm-check.store] {run_id} 已入库：verdict={} 差异 {mismatches} 行（含记账共 {rows} 行）",
-            facts.verdict
+        Ok(stored) => log::info!(
+            "[rvm-check.store] {run_id} 已入库：verdict={} 差异 {} 行（含记账共 {} 行），构件 {} 行（清掉陈旧 {} 行{}）",
+            facts.verdict,
+            stored.mismatch_total,
+            stored.rows,
+            stored.elements,
+            stored.stale_elements,
+            if stored.elements_superseded {
+                "；库里已有更晚的一次核对，构件行没有动"
+            } else {
+                ""
+            }
         ),
         Err(error) => log::warn!("[rvm-check.store] {run_id} 没有入库：{error:#}"),
     }
@@ -202,38 +211,49 @@ async fn store_failed_run(
     started_at: String,
 ) {
     let report = failed_report("resolve", &spec.refno, message, Default::default());
-    let outcome = crate::rvm_check::ExecuteOutcome {
-        report,
-        mismatches: Vec::new(),
-        task_dir: spec.tools.work_dir.join(task_id),
-    };
+    let outcome =
+        crate::rvm_check::ExecuteOutcome::failed(report, spec.tools.work_dir.join(task_id));
     store_run(outcome.run_facts(task_id, project, spec, Some(started_at))).await;
 }
 
-/// `GET /api/v1/rvm-check/history?refno=&dbnum=&verdict=&status=&source=&batch_id=&before=&limit=`：
-/// 库里的历次比对，最新在前。
+/// 四个查询接口共用：应答体由 [`crate::rvm_check::store::answer_on`] 定，命令行 `rvm-check-query`
+/// 给的是同一份形状。
+async fn answer(query: crate::rvm_check::store::Query) -> Result<Json<Value>, ApiError> {
+    crate::rvm_check::store::answer(&query)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_domain)
+}
+
+/// `GET /api/v1/rvm-check/history?refno=&root_refno=&unit=&dbnum=&verdict=&status=&source=&batch_id=&before=&limit=`：
+/// 库里的历次比对（一个根 / 单元一行），最新在前。`root_refno` 给上级 SITE / APPLDW，
+/// 取它自己那一行加它下面的全部单元。
 pub async fn history(
     State(state): State<AppState>,
     axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::RunFilter>,
 ) -> Result<Json<Value>, ApiError> {
     let _ = &state;
-    let runs = crate::rvm_check::store::list_runs(&filter)
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "count": runs.len(), "runs": runs })))
+    answer(crate::rvm_check::store::Query::Runs(filter)).await
 }
 
-/// `GET /api/v1/rvm-check/mismatches?run_id=&refno=&dbnum=&batch_id=&category=&reason_kind=&noun=&severity=&limit=&offset=`：
+/// `GET /api/v1/rvm-check/rollup?batch_id=&dbnum=&root_refno=&…`（条件同 `history`）：
+/// 批量结果按上级根汇总，每批每个根一行：单元数、各终态个数、计数合计、没过的单元。
+pub async fn rollup(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::RunFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    answer(crate::rvm_check::store::Query::Rollup(filter)).await
+}
+
+/// `GET /api/v1/rvm-check/mismatches?run_id=&refno=&root_refno=&dbnum=&batch_id=&category=&reason_kind=&noun=&severity=&limit=&offset=`：
 /// 差异明细（每条带 `category` / `reason_kind` / `reason`）。
 pub async fn mismatches(
     State(state): State<AppState>,
     axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::MismatchFilter>,
 ) -> Result<Json<Value>, ApiError> {
     let _ = &state;
-    let rows = crate::rvm_check::store::list_mismatches(&filter)
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "count": rows.len(), "rows": rows })))
+    answer(crate::rvm_check::store::Query::Mismatches(filter)).await
 }
 
 /// `GET /api/v1/rvm-check/reasons?…`（条件同 `mismatches`）：按原因种类汇总的计数，多的在前。
@@ -242,10 +262,28 @@ pub async fn reasons(
     axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::MismatchFilter>,
 ) -> Result<Json<Value>, ApiError> {
     let _ = &state;
-    let kinds = crate::rvm_check::store::reason_summary(&filter)
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "count": kinds.len(), "kinds": kinds })))
+    answer(crate::rvm_check::store::Query::Reasons(filter)).await
+}
+
+/// `GET /api/v1/rvm-check/elements?refno=&unit_refno=&root_refno=&dbnum=&batch_id=&run_id=&source=&noun=&grade=&severity=&passed=&kind_match=&derived=&refno_resolved=&limit=&offset=`：
+/// 构件级结果（`rvm_check_element`）：一个带几何的构件一行，通过的也有。`refno` 给构件自己的 refno，
+/// 取它那一行加记在它名下的派生件（隐式管身）。应答 `{count, more, rows}`，按记录 id 的顺序翻页。
+pub async fn elements(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::ElementFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    answer(crate::rvm_check::store::Query::Elements(filter)).await
+}
+
+/// `GET /api/v1/rvm-check/element-grades?…`（条件同 `elements`）：构件行按判档计数，按运行与单元分组；
+/// 每组的 `counts` 与 `rvm_check_run.counts` 同一个形状，可以直接对账。
+pub async fn element_grades(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::ElementFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = &state;
+    answer(crate::rvm_check::store::Query::ElementGrades(filter)).await
 }
 
 pub async fn get_run(

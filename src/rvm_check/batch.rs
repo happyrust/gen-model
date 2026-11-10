@@ -4,6 +4,9 @@
 //!
 //! 1. 根 = 该库 WORLD 的直接成员里 noun 为 `SITE` / `APPLDW` 的元素（`--site-only` 只取 SITE）；
 //!    两类根的件集合互不重叠、合起来才是整库（`.kiro/specs/site-split-rvm-compare`）。
+//!    `--unit zone` 时再往下划成比对单元（[`collect_units`]）：每个 ZONE 一个单元，APPLDW 下经
+//!    APPLDA、APPDAR 两层才到 ZONE；不在任何 ZONE 里的子节点各成一个兜底单元。单元就是作业，
+//!    各自导基准、各自生成即比对。
 //! 2. 基准：每个库一次 E3D TTY 会话，把该库全部根逐个 `export`（[`super::export_macro::export_batch_body`]）；
 //!    哪个根没落出文件就再单独按 refno / 名称补导一次（页面同一条退路）。`--baseline-dir` 给了
 //!    就不碰 E3D，直接取目录里的 `<tag>_<w0>_<w1>.rvm`。
@@ -13,8 +16,9 @@
 //! 4. 比对：进程内 [`super::compare_rvms`]（只读映射 + 并行，几百 MB 以内），判色与页面同一口径。
 //!
 //! 导出与生成是流水线：E3D 会话在自己的线程里逐库跑，生成工人（`--jobs`）不等它；一个根生成完、
-//! 它的基准也到了才比对。产物按 `<out>/<tag>/<w0>_<w1>/` 落，每根一份 `run.json`，整批一份
-//! `summary.json`；`--resume` 跳过已比对完的根。密码只进 E3D 登录串，不进任何落盘文件。
+//! 它的基准也到了才比对。生成即比对（`--fused-compare`，`--unit zone` 固定打开）反过来：
+//! 先等这个根的基准就位，再边生成边比。产物按 `<out>/<tag>/<w0>_<w1>/` 落，每根一份 `run.json`，
+//! 整批一份 `summary.json`；`--resume` 跳过已比对完的根。密码只进 E3D 登录串，不进任何落盘文件。
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -59,6 +63,37 @@ impl Stage {
     fn compares(self) -> bool {
         matches!(self, Self::Full | Self::Compare)
     }
+}
+
+/// 比对单元（`--unit`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Unit {
+    /// WORLD 下的 SITE / APPLDW（现状）。
+    Root,
+    /// 这些根下的每个 ZONE 各成一个单元（[`collect_units`]）。
+    Zone,
+}
+
+impl Unit {
+    fn is_root(&self) -> bool {
+        *self == Self::Root
+    }
+
+    /// 控制台与报错里怎么称呼一个作业。
+    fn word(self) -> &'static str {
+        match self {
+            Self::Root => "根",
+            Self::Zone => "单元",
+        }
+    }
+}
+
+/// 命令行的 `--unit` / `--fused-compare` / `--emit-rvm` 收成实际的 `(fused_compare, emit_rvm)`：
+/// `--unit zone` 固定生成即比对；`--emit-rvm` 不给时，融合就不写 `generated.rvm`，不融合照写。
+pub fn fused_and_emit(unit: Unit, fused_compare: bool, emit_rvm: Option<bool>) -> (bool, bool) {
+    let fused = fused_compare || unit == Unit::Zone;
+    (fused, emit_rvm.unwrap_or(!fused))
 }
 
 /// `--scope` 的取值：在所选根里只比哪一块。
@@ -116,6 +151,10 @@ pub struct BatchOptions {
     /// `--scope`：只比所选根里的一块。`None` = 整个根（现状，零介入）。
     pub scope: Option<ScopeArg>,
     pub site_only: bool,
+    /// 比对单元：`Root` 是现状；`Zone` 要求 `fused_compare` 打开（见 [`fused_and_emit`]）。
+    pub unit: Unit,
+    /// 只列出比对单元（写 `<out>/units.json`），不碰 E3D、不生成。
+    pub list_units: bool,
     pub out: PathBuf,
     pub resume: bool,
     pub force: bool,
@@ -127,14 +166,15 @@ pub struct BatchOptions {
     pub gen_timeout: Duration,
     pub e3d_timeout: Duration,
     /// 生成即比对：子进程把成员流直喂 `StreamingCompare`，compare 不再等
-    /// `generated.rvm` 落盘。只在 `--baseline-dir` 模式成立——基准在生成前就要在盘上，
-    /// E3D 导出模式的基准与生成并行到达，融合无从谈起。
+    /// `generated.rvm` 落盘。基准要先于生成在盘上，所以每个根先等交接板上它那一格
+    /// （`--baseline-dir` 放好，或 E3D 导出完）再开工；缺基准就不生成。只在 `--stage full` 成立。
     pub fused_compare: bool,
     /// 子进程还写不写 `generated.rvm`。false 时产物只有 compare/judgement，
     /// 仅在 `fused_compare` 下成立（没有对拍就没有证据链）。
     pub emit_rvm: bool,
-    /// 跑完把每根的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`（[`super::store`]）。
-    /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，自动跳过。
+    /// 每个作业跑完就把它的结果与差异写进 `rvm_check_run` / `rvm_check_mismatch`
+    /// （[`super::store::StoreWorker`]），不等整批结束；续跑时补上次没落进去的。
+    /// 连的是 `DbOption.toml` 指的那台库；`store_mode` 是 mem 时没有可写的持久库，告警后照跑。
     pub store: bool,
     /// 比对内存预算（MB），按根算：只管比对，不含生成占的内存。0 = 不设预算。
     /// 现状：只映射到 vendor 的核对窗口（`FusedCompare.window_bytes`），也就是待判成员
@@ -312,6 +352,12 @@ pub struct RootRecord {
     pub refno: String,
     pub noun: String,
     pub name: String,
+    /// 单元种类。`root`（现状）不落进 `run.json`。
+    #[serde(default, skip_serializing_if = "UnitKind::is_root")]
+    pub unit: UnitKind,
+    /// `--unit zone` 时单元所在的上级根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRoot>,
     pub dir: String,
     pub status: String,
     pub message: String,
@@ -341,9 +387,57 @@ pub struct RootRecord {
     /// 只画中心线的基准成员名，同样只给入库用。
     #[serde(skip)]
     pub centreline_names: Vec<String>,
+    /// 这次只核对了作业里的一块时，`--scope` 的原样写法（`node:w0/w1` / `subtree:w0/w1`）。
+    /// 构件行按它决定重新核对后清哪一片陈旧行；续跑补入库也要它，所以进 `run.json`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// 构件级结果的条数（作业目录里 `element-checks.json` 那一份）；没有比对出结果时没有这一格。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_checks: Option<usize>,
+    /// 构件级结果，只给入库用（落 `rvm_check_element`）；交给入库线程之后就放掉，不进 `run.json`。
+    #[serde(skip)]
+    pub elements: Option<Vec<super::element::ElementCheck>>,
 }
 
-/// 枚举出来的一个根。
+/// 一个作业是哪种比对单元。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnitKind {
+    /// WORLD 下的 SITE / APPLDW（`--unit root`）。
+    #[default]
+    Root,
+    /// `--unit zone` 下的一个 ZONE。
+    Zone,
+    /// `--unit zone` 下不在任何 ZONE 里的子节点，各成一个兜底单元。
+    Fallback,
+}
+
+impl UnitKind {
+    fn is_root(&self) -> bool {
+        *self == Self::Root
+    }
+
+    /// 库里 `rvm_check_run.unit` 的取值，与 `run.json` 里的写法相同。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Zone => "zone",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// 单元所在的上级根（WORLD 下的 SITE / APPLDW）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ParentRoot {
+    /// `=w0/w1`。
+    #[serde(rename = "ref")]
+    pub refno: String,
+    pub noun: String,
+    pub name: String,
+}
+
+/// 枚举出来的一个作业：`--unit root` 时是根，`--unit zone` 时是单元。
 #[derive(Clone)]
 struct RootJob {
     dbno: u32,
@@ -353,6 +447,9 @@ struct RootJob {
     noun: String,
     name: String,
     dir: PathBuf,
+    unit_kind: UnitKind,
+    /// `--unit zone` 时的上级根；根作业为 `None`。
+    parent: Option<ParentRoot>,
 }
 
 impl RootJob {
@@ -458,7 +555,7 @@ fn root_dir(out: &Path, tag: &str, refno: &str) -> PathBuf {
     out.join(tag).join(refno.replace('/', "_"))
 }
 
-fn ensure_db_option_present() -> Result<()> {
+pub(crate) fn ensure_db_option_present() -> Result<()> {
     let cwd = std::env::current_dir().context("取当前目录")?;
     let name = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
     let candidates = [cwd.join(format!("{name}.toml")), cwd.join(&name)];
@@ -509,9 +606,164 @@ fn enumerate_roots(
             refno,
             noun,
             name: node.name.trim().to_string(),
+            unit_kind: UnitKind::Root,
+            parent: None,
         });
     }
     Ok(roots)
+}
+
+/// 划分比对单元时继续往下钻的纯容器：上级根本身（SITE / APPLDW），以及 APPLDW 到 ZONE 之间的两层。
+/// 页面单根把构件行归到单元名下时也按它认单元（`super::locate_unit`）。
+pub(super) const UNIT_CONTAINER_NOUNS: &[&str] = &["SITE", "APPLDW", "APPLDA", "APPDAR"];
+
+/// 容器最多嵌几层。实际最深是 APPLDW → APPLDA → APPDAR 两层，再深就是数据不对。
+const UNIT_CONTAINER_DEPTH: usize = 8;
+
+/// 划分单元只要的三样：refno、大写名词、名字。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TreeEntry {
+    refno: RefU64,
+    noun: String,
+    name: String,
+}
+
+/// 从上级根往下划分比对单元：纯容器（[`UNIT_CONTAINER_NOUNS`]）继续下钻，其余每个子节点
+/// 成一个单元——常态是 ZONE，别的名词各成一个兜底单元。按成员表原序深度优先，所以
+/// 上级根下的每个非容器节点恰好落进一个单元。`children` 给出一个容器的直接成员。
+fn collect_units(
+    parent: RefU64,
+    children: &mut impl FnMut(RefU64) -> Result<Vec<TreeEntry>>,
+) -> Result<Vec<TreeEntry>> {
+    fn walk(
+        container: RefU64,
+        depth: usize,
+        children: &mut impl FnMut(RefU64) -> Result<Vec<TreeEntry>>,
+        units: &mut Vec<TreeEntry>,
+    ) -> Result<()> {
+        ensure!(
+            depth < UNIT_CONTAINER_DEPTH,
+            "={container} 下的容器嵌套超过 {UNIT_CONTAINER_DEPTH} 层"
+        );
+        for entry in children(container)? {
+            if UNIT_CONTAINER_NOUNS.contains(&entry.noun.as_str()) {
+                walk(entry.refno, depth + 1, children, units)?;
+            } else {
+                units.push(entry);
+            }
+        }
+        Ok(())
+    }
+    let mut units = Vec::new();
+    walk(parent, 0, children, &mut units)?;
+    Ok(units)
+}
+
+/// `--unit zone` 的作业：把每个上级根（[`enumerate_roots`] 的结果）按 [`collect_units`] 划成单元。
+/// 单元的产物目录与基准文件按单元自己的 refno 走（[`root_dir`]），与根作业同一套命名。
+fn units_of(tree: &DirectTreeService, roots: &[RootJob], out: &Path) -> Result<Vec<RootJob>> {
+    let mut units = Vec::new();
+    for root in roots {
+        let start = RefU64::from_str(&root.refno)
+            .map_err(|error| anyhow::anyhow!("refno 无法解析：{}（{error}）", root.refno))?;
+        let parent = ParentRoot {
+            refno: root.display_ref(),
+            noun: root.noun.clone(),
+            name: root.name.clone(),
+        };
+        let mut children = |container: RefU64| -> Result<Vec<TreeEntry>> {
+            Ok(tree
+                .children(container)?
+                .into_iter()
+                .map(|node| TreeEntry {
+                    refno: node.refno.refno(),
+                    noun: node.noun.trim().to_ascii_uppercase(),
+                    name: node.name.trim().to_string(),
+                })
+                .collect())
+        };
+        for entry in collect_units(start, &mut children)? {
+            let refno = format!("{}/{}", entry.refno.get_0(), entry.refno.get_1());
+            units.push(RootJob {
+                dbno: root.dbno,
+                tag: root.tag.clone(),
+                dir: root_dir(out, &root.tag, &refno),
+                refno,
+                unit_kind: if entry.noun == "ZONE" {
+                    UnitKind::Zone
+                } else {
+                    UnitKind::Fallback
+                },
+                noun: entry.noun,
+                name: entry.name,
+                parent: Some(parent.clone()),
+            });
+        }
+    }
+    Ok(units)
+}
+
+/// `--only` 选中了这个作业：点名的是它自己，或（`--unit zone` 时）点名的是它的上级根。
+/// `wanted` 已归一成 `w0/w1`。
+fn only_keeps(job: &RootJob, wanted: &[String]) -> bool {
+    wanted.iter().any(|refno| {
+        *refno == job.refno
+            || job
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.refno.trim_start_matches('=') == refno)
+    })
+}
+
+/// 参数组合的硬约束，在碰库与 E3D 之前查完。
+fn check_modes(opts: &BatchOptions) -> Result<()> {
+    if opts.unit == Unit::Zone {
+        ensure!(
+            opts.fused_compare,
+            "--unit zone 固定走生成即比对，调用方要打开 fused_compare（见 fused_and_emit）"
+        );
+        ensure!(
+            matches!(opts.stage, Stage::Full | Stage::Export),
+            "--unit zone 只支持 --stage full（导出 + 生成即比对）或 --stage export（只导基准）"
+        );
+    } else if opts.fused_compare {
+        ensure!(
+            opts.stage.generates() && opts.stage.compares(),
+            "--fused-compare 只在 生成+比对 同跑的阶段成立"
+        );
+    }
+    ensure!(
+        opts.emit_rvm || opts.fused_compare,
+        "--emit-rvm=false 需要 --fused-compare（没有对拍就没有证据链）"
+    );
+    Ok(())
+}
+
+/// 生成即比对的基准：交接板上这一格是 `Ready` 且文件在盘上才开工。拿不到就返回缺基准的原因，
+/// 调用方记 `no-baseline`、不生成——不退回「先写 generated.rvm、再按文件比」。
+fn fused_from(
+    outcome: &ExportOutcome,
+    job: &RootJob,
+    opts: &BatchOptions,
+) -> std::result::Result<FusedCompare, String> {
+    match outcome {
+        ExportOutcome::Missing(export) if export.message.is_empty() => {
+            Err("没有基准，生成即比对不开工".to_string())
+        }
+        ExportOutcome::Missing(export) => Err(export.message.clone()),
+        ExportOutcome::Ready(_) => {
+            let baseline = job.dir.join("e3d.rvm");
+            if !baseline.is_file() {
+                return Err(format!("基准记为就位，但盘上没有 {}", baseline.display()));
+            }
+            Ok(FusedCompare {
+                baseline,
+                emit_rvm: opts.emit_rvm,
+                window_bytes: opts.compare_memory_mb * 1024 * 1024,
+                emit_compare: opts.emit_compare,
+            })
+        }
+    }
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -528,6 +780,46 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 fn read_record(path: &Path) -> Option<RootRecord> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// 续跑跳过的作业补入库用的事实。`run.json` 里的差异清单最多 400 条，只画中心线的成员只记了个数；
+/// 入库要全量，从作业目录里那份完整的判定取（[`full_judgement`]），取不到才退回 `run.json` 里的。
+///
+/// 构件级结果同样从作业目录取（`element-checks.json`）。加那份文件之前跑的老产物目录里没有它，这种
+/// 作业补的只有运行行与差异行，构件行补不了（要重跑）。
+fn resumed_facts(record: &RootRecord, batch_id: &str, spec: &RunSpec) -> super::store::RunFacts {
+    let mut record = record.clone();
+    if let Some(judgement) = full_judgement(&record) {
+        record.mismatches_all = judgement.mismatches;
+        record.centreline_names = judgement.centreline_only_baseline;
+    }
+    record.elements = match super::element::read_checks(Path::new(&record.dir)) {
+        Ok(checks) => checks,
+        Err(message) => {
+            eprintln!(
+                "警告：{} {} 的构件级结果读不回来，这次不补构件行：{message}",
+                record.tag, record.refno
+            );
+            None
+        }
+    };
+    record.take_run_facts(batch_id, spec)
+}
+
+/// 作业目录里不截断的那份判定。生成即比对留了 `judgement.json`，直接读；读文件比对的作业只有
+/// `compare.json`，`run.json` 里的清单不全（截断过，或有只记了个数的中心线成员）时才重判一遍——
+/// 大根的 `compare.json` 上百 MB，清单本来就全的不去读它。
+fn full_judgement(record: &RootRecord) -> Option<super::report::Judgement> {
+    let dir = Path::new(&record.dir);
+    if let Ok(bytes) = std::fs::read(dir.join("judgement.json")) {
+        return serde_json::from_slice(&bytes).ok();
+    }
+    if !record.mismatches_truncated && record.centreline_only_baseline == 0 {
+        return None;
+    }
+    let bytes = std::fs::read(dir.join("compare.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(super::report::judge_compare_full(&value))
 }
 
 fn dir_has_entries(path: &Path) -> bool {
@@ -621,7 +913,8 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         opts.min_commit_free_gb > 0.0,
         "--min-commit-free-gb 要大于 0"
     );
-    let need_e3d = opts.stage.exports() && opts.baseline_dir.is_none();
+    check_modes(opts)?;
+    let need_e3d = !opts.list_units && opts.stage.exports() && opts.baseline_dir.is_none();
     let spec = prepare_connection(&opts.connection, need_e3d).map_err(anyhow::Error::msg)?;
     if need_e3d {
         ensure!(
@@ -638,20 +931,6 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
     if let Some(dir) = &opts.baseline_dir {
         ensure!(dir.is_dir(), "基准目录不存在：{}", dir.display());
     }
-    if opts.fused_compare {
-        ensure!(
-            opts.baseline_dir.is_some(),
-            "--fused-compare 需要 --baseline-dir（基准必须先于生成在盘上）"
-        );
-        ensure!(
-            opts.stage.generates() && opts.stage.compares(),
-            "--fused-compare 只在 生成+比对 同跑的阶段成立"
-        );
-    }
-    ensure!(
-        opts.emit_rvm || opts.fused_compare,
-        "--emit-rvm=false 需要 --fused-compare（没有对拍就没有证据链）"
-    );
 
     let tree = DirectTreeService::open(&spec.project_name, &spec.e3d_mdb)
         .with_context(|| format!("打开 MDB {} 的模型树", spec.e3d_mdb))?;
@@ -673,9 +952,9 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
 
     // 产物目录一律绝对路径：E3D 宏里的 `export file` 与子进程都按它找文件。
     let out_root = absolute_dir(&opts.out);
-    let mut jobs = Vec::new();
+    let mut roots = Vec::new();
     for &dbno in &dbnums {
-        jobs.extend(enumerate_roots(
+        roots.extend(enumerate_roots(
             &tree,
             dbno,
             opts.site_only,
@@ -683,8 +962,12 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
             &out_root,
         )?);
     }
+    let mut jobs = match opts.unit {
+        Unit::Root => roots.clone(),
+        Unit::Zone => units_of(&tree, &roots, &out_root)?,
+    };
+    let mut wanted = Vec::new();
     if !opts.only.is_empty() {
-        let mut wanted = Vec::new();
         for raw in &opts.only {
             wanted.push(
                 normalize_ref(raw).with_context(|| format!("--only 里的 refno 无法解析：{raw}"))?,
@@ -692,22 +975,42 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         }
         let missing: Vec<&String> = wanted
             .iter()
-            .filter(|refno| !jobs.iter().any(|job| &job.refno == *refno))
+            .filter(|refno| {
+                !jobs
+                    .iter()
+                    .any(|job| only_keeps(job, std::slice::from_ref(*refno)))
+            })
             .collect();
         if !missing.is_empty() {
             eprintln!(
-                "警告：--only 里的 {} 不是所选库 WORLD 下的 SITE / APPLDW，忽略",
+                "警告：--only 里的 {} 不是{}，忽略",
                 missing
                     .iter()
                     .map(|refno| format!("={refno}"))
                     .collect::<Vec<_>>()
-                    .join("、")
+                    .join("、"),
+                match opts.unit {
+                    Unit::Root => "所选库 WORLD 下的 SITE / APPLDW",
+                    Unit::Zone =>
+                        "所选库的比对单元（ZONE / 兜底单元），也不是它们的上级 SITE / APPLDW",
+                }
             );
         }
-        jobs.retain(|job| wanted.contains(&job.refno));
+        jobs.retain(|job| only_keeps(job, &wanted));
     }
-    ensure!(!jobs.is_empty(), "所选库的 WORLD 下没有 SITE / APPLDW 根");
+    if opts.list_units {
+        return list_units(&tree, opts, &dbnums, &roots, &jobs, &wanted, &out_root);
+    }
+    ensure!(
+        !jobs.is_empty(),
+        "{}",
+        match opts.unit {
+            Unit::Root => "所选库的 WORLD 下没有 SITE / APPLDW 根",
+            Unit::Zone => "所选库下没有比对单元（SITE / APPLDW 下没有 ZONE，也没有兜底单元）",
+        }
+    );
 
+    let word = opts.unit.word();
     // `--scope` 与 `--only` 的冲突：范围指的节点必须落在本批已选的根里。
     // 不静默忽略、不自动把它的根加回作业列表（那会悄悄多跑一个根）。
     if let Some(scope) = &opts.scope {
@@ -729,10 +1032,14 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                 })
                 .unwrap_or_else(|error| format!("（读不到：{error}）"));
             bail!(
-                "--scope 与 --only 冲突：选中节点 ={} 不属于本批的任何根。\n\
+                "--scope 与 --only 冲突：选中节点 ={} 不属于本批的任何{word}。\n\
                  --scope 的 OWNER 链（自身 → 属主）：{chain}\n\
-                 本批的根（--only 只认 WORLD 下的 SITE / APPLDW）：{}",
+                 本批的{word}（{}）：{}",
                 scope.refno(),
+                match opts.unit {
+                    Unit::Root => "--only 只认 WORLD 下的 SITE / APPLDW",
+                    Unit::Zone => "--unit zone：ZONE / 兜底单元",
+                },
                 if root_list.is_empty() {
                     "（空）".to_string()
                 } else {
@@ -745,7 +1052,7 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
             // 全记成 `only_baseline` 混进同一份汇总。这里直接拒，让调用方用 --only 收窄。
             let root = &jobs[index];
             bail!(
-                "--scope {} 属于根 {} {}，但本批有 {} 个根：加 --only {} 收窄到这一个根",
+                "--scope {} 属于{word} {} {}，但本批有 {} 个{word}：加 --only {} 收窄到这一个{word}",
                 scope.to_arg(),
                 root.display_ref(),
                 root.noun,
@@ -793,7 +1100,7 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
         None => "产物目录里已有的 e3d.rvm".to_string(),
     };
     println!(
-        "rvm-check：{} 个库、{} 个根（{} 个续跑跳过），阶段 {:?}，生成 {}（jobs {}），基准 {}，产物 {}",
+        "rvm-check：{} 个库、{} 个{word}（{} 个续跑跳过），阶段 {:?}，生成 {}（jobs {}），基准 {}，产物 {}",
         dbnums.len(),
         jobs.len(),
         resumed.iter().filter(|record| record.is_some()).count(),
@@ -824,13 +1131,47 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
     }
     for job in &jobs {
         println!(
-            "  {} {} {} {}",
+            "  {} {} {} {}{}",
             job.tag,
             job.display_ref(),
             job.noun,
-            job.name
+            job.name,
+            job.parent
+                .as_ref()
+                .map(|parent| format!("  ← {} {}", parent.refno, parent.noun))
+                .unwrap_or_default()
         );
     }
+
+    let batch_id = batch_id_for(&out_root);
+    // 入库线程：一个作业跑完就落一个，不等整批结束。连不上只告警——产物目录里的 JSON 仍是完整的一份。
+    let store = opts.store.then(|| {
+        let (worker, stored) = super::store::StoreWorker::start(&batch_id);
+        match stored {
+            Ok(stored) => {
+                // 续跑跳过的作业：上次没落进库的（中途断了、当时库连不上）在这里补上，已经在库里的不动。
+                let missing: Vec<&RootRecord> = resumed
+                    .iter()
+                    .flatten()
+                    .filter(|record| !stored.contains(&record.run_id(&batch_id)))
+                    .collect();
+                if !missing.is_empty() {
+                    println!(
+                        "入库：续跑跳过的{word}里有 {} 个库里还没有，补进去",
+                        missing.len()
+                    );
+                }
+                for record in missing {
+                    worker.submit(resumed_facts(record, &batch_id, &spec));
+                }
+            }
+            Err(error) => eprintln!(
+                "警告：结果入不了库（{error}）。这一批照跑，产物目录里的 JSON 仍完整；\
+                 库通了以后加 --resume 重跑一遍即可补进去，或加 --no-store 关掉这一步"
+            ),
+        }
+        worker
+    });
 
     let board = ExportBoard::new(jobs.len());
     let results: Mutex<Vec<Option<RootRecord>>> = Mutex::new(resumed.clone());
@@ -898,6 +1239,8 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
             let next = &next;
             let pending = &pending;
             let in_process_gate = &in_process_gate;
+            let store = store.as_ref();
+            let batch_id = &batch_id;
             scope.spawn(move || {
                 loop {
                     let slot = next.fetch_add(1, Ordering::SeqCst);
@@ -929,6 +1272,15 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                         eprintln!("写 {} 失败：{error:#}", job.dir.join("run.json").display());
                     }
                     println!("{}", record.console_line());
+                    if let Some(store) = store {
+                        // 构件级结果整份搬给入库线程（不复制）。
+                        store.submit(record.take_run_facts(batch_id, spec));
+                    }
+                    // 不截断的清单与构件级结果只为入库留着，交出去就放掉：按 ZONE 跑一批上千个单元，
+                    // 不攒到整批结束（`--no-store` 时同样不留）。
+                    record.mismatches_all = Vec::new();
+                    record.centreline_names = Vec::new();
+                    record.elements = None;
                     results
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())[index] = Some(record);
@@ -947,12 +1299,14 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                 let mut record = RootRecord::new(&jobs[index]);
                 record.status = status::COMPARE_FAILED.to_string();
                 record.message = "没有跑到这个根".to_string();
+                if let Some(store) = &store {
+                    store.submit(record.run_facts(&batch_id, &spec));
+                }
                 record
             })
         })
         .collect();
 
-    let batch_id = batch_id_for(&out_root);
     let summary = Summary::build(
         opts,
         &spec,
@@ -968,35 +1322,199 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
     println!("\n{table}");
     println!("summary.json: {}", summary_path.display());
 
-    // 入库：续跑跳过的根上次已经写过（且手里只剩截断的清单），不重写。
-    let stored = if opts.store {
-        let facts: Vec<super::store::RunFacts> = records
-            .iter()
-            .filter(|record| !record.resumed)
-            .map(|record| record.run_facts(&batch_id, &spec))
-            .collect();
-        let outcome =
-            super::store::persist_batch_blocking(&facts).map_err(|error| format!("{error:#}"));
+    // 入库线程收尾：等已经交出去的都写完，再报这一批的账。
+    let stored = store.map(|worker| {
+        let draining = Instant::now();
+        let finished = worker.finish();
+        let (elements, stale_elements) = (finished.elements, finished.stale_elements);
+        if finished.elements_superseded > 0 {
+            println!(
+                "入库：{} 个{word}在库里已经有更晚的一次核对，这次只补了运行行与差异行，构件行没有动",
+                finished.elements_superseded
+            );
+        }
+        if finished.runs > 0 {
+            // 入库线程与生成并行：写库合计不是整批多出来的墙钟，收尾等的那一段才是。
+            println!(
+                "入库用时：写库合计 {:.1} 秒（其中构件行 {:.1} 秒，{elements} 行）；全部{word}跑完之后又等了 {:.1} 秒写完",
+                finished.millis as f64 / 1000.0,
+                finished.element_millis as f64 / 1000.0,
+                draining.elapsed().as_secs_f64()
+            );
+        }
+        let outcome = finished.into_result();
         match &outcome {
+            Ok((0, _)) => println!("入库：batch_id {batch_id} 这次没有新结果要写，库里已经是全的"),
             Ok((runs, rows)) => println!(
-                "结果已入库 {}：batch_id {batch_id}，{runs} 个根、{rows} 行 → rvm_check_run / rvm_check_mismatch\
-                 （查询：GET /api/v1/rvm-check/history?batch_id=…、/mismatches、/reasons）",
+                "结果已入库 {}：batch_id {batch_id}，{runs} 个{word}、{rows} 行差异、{elements} 行构件\
+                 （另清掉 {stale_elements} 行陈旧的构件行） → rvm_check_run / rvm_check_mismatch / rvm_check_element\
+                 （查询：aios-database rvm-check-query rollup --batch-id {batch_id}；构件级：\
+                 rvm-check-query elements --refno <构件 refno>、element-grades --batch-id {batch_id}；服务开着时还有 \
+                 GET /api/v1/rvm-check/rollup?batch_id=…、/history、/mismatches、/reasons、/elements、/element-grades）",
                 aios_core::get_db_option().get_version_db_conn_str()
             ),
             Err(error) => eprintln!(
-                "结果没有入库（产物目录里的 JSON 仍完整；加 --no-store 可关掉这一步）：{error}"
+                "结果没有全部入库（产物目录里的 JSON 仍完整；库通了以后加 --resume 重跑一遍可补进去，\
+                 加 --no-store 可关掉这一步）：{error}"
             ),
         }
-        Some(outcome)
-    } else {
-        None
-    };
+        outcome
+    });
     Ok(BatchOutcome {
         summary_path,
         clean: summary.clean,
         records,
         batch_id,
         stored,
+    })
+}
+
+/// `<out>/units.json`：`--list-units` 的普查结果。
+#[derive(Serialize)]
+struct UnitsListing {
+    generated_at: String,
+    unit: Unit,
+    dbnums: Vec<u32>,
+    parents: Vec<ParentListing>,
+    units: Vec<UnitListing>,
+}
+
+/// 一个上级根下划出了多少单元。
+#[derive(Serialize)]
+struct ParentListing {
+    dbno: u32,
+    tag: String,
+    #[serde(rename = "ref")]
+    refno: String,
+    noun: String,
+    name: String,
+    /// 上级根自己有没有名字：无名 SITE 的显示名要按整个 MDB 数序号。
+    named: bool,
+    units: usize,
+    zones: usize,
+    fallback: usize,
+    /// 兜底单元按名词计数。
+    fallback_nouns: BTreeMap<String, usize>,
+}
+
+#[derive(Serialize)]
+struct UnitListing {
+    dbno: u32,
+    tag: String,
+    #[serde(rename = "ref")]
+    refno: String,
+    noun: String,
+    name: String,
+    unit: UnitKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
+}
+
+/// `--list-units`：写 `<out>/units.json`，打印每个上级根划出多少单元后返回，不碰 E3D、不生成。
+/// 给了 `--only` 时只列选中的作业，以及被点名、但一个单元也没划出来的上级根。
+fn list_units(
+    tree: &DirectTreeService,
+    opts: &BatchOptions,
+    dbnums: &[u32],
+    roots: &[RootJob],
+    jobs: &[RootJob],
+    wanted: &[String],
+    out_root: &Path,
+) -> Result<BatchOutcome> {
+    let mut parents = Vec::new();
+    for root in roots {
+        let parent_ref = root.display_ref();
+        let mine: Vec<&RootJob> = jobs
+            .iter()
+            .filter(|job| match &job.parent {
+                Some(parent) => parent.refno == parent_ref,
+                None => job.refno == root.refno,
+            })
+            .collect();
+        if !wanted.is_empty() && mine.is_empty() && !wanted.contains(&root.refno) {
+            continue;
+        }
+        let mut fallback_nouns: BTreeMap<String, usize> = BTreeMap::new();
+        for job in &mine {
+            if job.unit_kind == UnitKind::Fallback {
+                *fallback_nouns.entry(job.noun.clone()).or_default() += 1;
+            }
+        }
+        let count = |kind: UnitKind| mine.iter().filter(|job| job.unit_kind == kind).count();
+        parents.push(ParentListing {
+            dbno: root.dbno,
+            tag: root.tag.clone(),
+            refno: parent_ref,
+            noun: root.noun.clone(),
+            name: root.name.clone(),
+            named: RefU64::from_str(&root.refno)
+                .ok()
+                .and_then(|refno| tree.name_of(refno))
+                .is_some(),
+            units: mine.len(),
+            zones: count(UnitKind::Zone),
+            fallback: count(UnitKind::Fallback),
+            fallback_nouns,
+        });
+    }
+    let listing = UnitsListing {
+        generated_at: chrono::Local::now().to_rfc3339(),
+        unit: opts.unit,
+        dbnums: dbnums.to_vec(),
+        parents,
+        units: jobs
+            .iter()
+            .map(|job| UnitListing {
+                dbno: job.dbno,
+                tag: job.tag.clone(),
+                refno: job.display_ref(),
+                noun: job.noun.clone(),
+                name: job.name.clone(),
+                unit: job.unit_kind,
+                parent: job.parent.as_ref().map(|parent| parent.refno.clone()),
+            })
+            .collect(),
+    };
+    let path = out_root.join("units.json");
+    write_json(&path, &listing)?;
+    for parent in &listing.parents {
+        println!(
+            "{} {} {} {}{}：{} 个单元（ZONE {}，兜底 {}{}）",
+            parent.tag,
+            parent.refno,
+            parent.noun,
+            parent.name,
+            if parent.named { "" } else { "（无名）" },
+            parent.units,
+            parent.zones,
+            parent.fallback,
+            if parent.fallback_nouns.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "：{}",
+                    parent
+                        .fallback_nouns
+                        .iter()
+                        .map(|(noun, count)| format!("{noun} {count}"))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            }
+        );
+    }
+    println!(
+        "合计 {} 个上级根、{} 个单元 → {}",
+        listing.parents.len(),
+        listing.units.len(),
+        path.display()
+    );
+    Ok(BatchOutcome {
+        summary_path: path,
+        clean: true,
+        records: Vec::new(),
+        batch_id: batch_id_for(out_root),
+        stored: None,
     })
 }
 
@@ -1008,6 +1526,8 @@ impl RootRecord {
             refno: job.display_ref(),
             noun: job.noun.clone(),
             name: job.name.clone(),
+            unit: job.unit_kind,
+            parent: job.parent.clone(),
             dir: job.dir.display().to_string(),
             status: String::new(),
             message: String::new(),
@@ -1022,14 +1542,66 @@ impl RootRecord {
             memory: None,
             mismatches_all: Vec::new(),
             centreline_names: Vec::new(),
+            scope: None,
+            element_checks: None,
+            elements: None,
         }
     }
 
-    /// 入库用的事实。`run_id = <batch_id>/<tag>/<w0_w1>`；续跑拿到的记录只剩截断过的清单，
-    /// 调用方不会拿它来覆盖库里完整的那一份。
+    /// 把构件级结果交出去（连同它们记在哪个单元名下），自己不再留：整根 8 万条不在汇总里多攒一份。
+    /// 单元是这个作业自己（按 ZONE 跑是 ZONE / 兜底单元，整根跑是根）；`--scope` 选的就是整个作业时
+    /// 按整个单元算。
+    fn take_element_facts(&mut self) -> Option<super::store::ElementFacts> {
+        let checks = self.elements.take()?;
+        let unit_refno = self.refno.trim_start_matches('=').to_string();
+        let root_refno = match &self.parent {
+            Some(parent) => parent.refno.trim_start_matches('=').to_string(),
+            None => unit_refno.clone(),
+        };
+        let scope = self
+            .scope
+            .as_deref()
+            .and_then(|raw| ScopeArg::parse(raw).ok())
+            .filter(|scope| !matches!(scope, ScopeArg::Subtree(refno) if *refno == unit_refno))
+            .map(|scope| super::store::ElementScope {
+                kind: match scope {
+                    ScopeArg::Node(_) => "node",
+                    ScopeArg::Subtree(_) => "subtree",
+                }
+                .to_string(),
+                refno: scope.refno().to_string(),
+            });
+        Some(super::store::ElementFacts {
+            checks,
+            unit_refno,
+            unit_kind: self.unit.as_str().to_string(),
+            root_refno: Some(root_refno),
+            scope,
+        })
+    }
+
+    /// 库里这一行的主键：`<batch_id>/<tag>/<w0_w1>`。同一批重跑同一个作业覆盖同一行。
+    fn run_id(&self, batch_id: &str) -> String {
+        format!(
+            "{batch_id}/{}/{}",
+            self.tag,
+            self.refno.trim_start_matches('=').replace('/', "_")
+        )
+    }
+
+    /// 入库用的事实。`run_id` 见 [`Self::run_id`]；上级根对单元是它的 SITE / APPLDW，对根是它自己。
+    /// 续跑从 `run.json` 读回来的记录只剩截断过的差异清单，走 [`resumed_facts`]，而且只补库里没有的。
     pub(crate) fn run_facts(&self, batch_id: &str, spec: &RunSpec) -> super::store::RunFacts {
         use super::store::{RunFacts, SOURCE_BATCH, StageSeconds};
         let refno = self.refno.trim_start_matches('=').to_string();
+        let (root_refno, root_noun, root_name) = match &self.parent {
+            Some(parent) => (
+                parent.refno.trim_start_matches('=').to_string(),
+                parent.noun.clone(),
+                parent.name.clone(),
+            ),
+            None => (refno.clone(), self.noun.clone(), self.name.clone()),
+        };
         let verdict = match self.status.as_str() {
             status::PASS | status::EMPTY | status::EXPORTED | status::GENERATED => {
                 super::report::VERDICT_PASS
@@ -1080,7 +1652,7 @@ impl RootRecord {
             self.message.clone()
         };
         RunFacts {
-            run_id: format!("{batch_id}/{}/{}", self.tag, refno.replace('/', "_")),
+            run_id: self.run_id(batch_id),
             source: SOURCE_BATCH,
             batch_id: Some(batch_id.to_string()),
             project: spec.project_name.clone(),
@@ -1092,6 +1664,10 @@ impl RootRecord {
             sesno: None,
             noun: Some(self.noun.clone()),
             name: (!self.name.is_empty()).then(|| self.name.clone()),
+            unit: Some(self.unit.as_str().to_string()),
+            root_refno: Some(root_refno),
+            root_noun: Some(root_noun),
+            root_name: (!root_name.is_empty()).then_some(root_name),
             verdict: verdict.to_string(),
             status: self.status.clone(),
             stage: stage.to_string(),
@@ -1118,7 +1694,16 @@ impl RootRecord {
             files,
             started_at: None,
             finished_at,
+            // 构件级结果不在这里抄一份：调用方用 [`Self::take_element_facts`] 整份搬过去。
+            elements: None,
         }
+    }
+
+    /// [`Self::run_facts`] 加上构件级结果（搬走，不复制）：交给入库线程的那一份。
+    fn take_run_facts(&mut self, batch_id: &str, spec: &RunSpec) -> super::store::RunFacts {
+        let mut facts = self.run_facts(batch_id, spec);
+        facts.elements = self.take_element_facts();
+        facts
     }
 
     fn console_line(&self) -> String {
@@ -1219,6 +1804,11 @@ fn export_all(
     for dbno in order {
         let indices = by_db.remove(&dbno).unwrap_or_default();
         let tag = jobs[indices[0]].tag.clone();
+        let word = if jobs[indices[0]].unit_kind == UnitKind::Root {
+            "根"
+        } else {
+            "单元"
+        };
         let started = Instant::now();
         let mut items = Vec::with_capacity(indices.len());
         for &index in &indices {
@@ -1228,7 +1818,7 @@ fn export_all(
             let _ = std::fs::remove_file(&rvm);
             items.push((job.refno.clone(), rvm));
         }
-        println!("E3D 导出 {tag}：{} 个根，一次会话 …", indices.len());
+        println!("E3D 导出 {tag}：{} 个{word}，一次会话 …", indices.len());
         let body = export_macro::export_batch_body(&items)?;
         // 导出文件在 L3-DONE 之前就写完了，QUIT 后只等 E3D 收尾 15 秒（环境变量仍可压过）。
         let done_grace = if std::env::var_os("E3D_MCP_DONE_GRACE_SECS").is_some() {
@@ -1264,7 +1854,7 @@ fn export_all(
         {
             let _ = writeln!(
                 file,
-                "=== {} {tag} {} 个根 {:.1}s {note}\n{}",
+                "=== {} {tag} {} 个{word} {:.1}s {note}\n{}",
                 chrono::Local::now().to_rfc3339(),
                 indices.len(),
                 session_seconds,
@@ -1336,6 +1926,7 @@ fn process_root(
     in_process_gate: &Mutex<()>,
 ) -> RootRecord {
     let mut record = RootRecord::new(job);
+    record.scope = opts.scope.as_ref().map(ScopeArg::to_arg);
     // 比对段峰值（MB）：只有融合对拍且阶段标记落盘时才有值，后面写 compare 段记录时用。
     let mut compare_peak_mb: Option<u64> = None;
     if let Err(error) = std::fs::create_dir_all(&job.dir) {
@@ -1344,29 +1935,43 @@ fn process_root(
         return record;
     }
 
+    // 生成即比对在生成前就领了交接板上这一格，后面不再等第二次。
+    let mut export_seen = false;
     if opts.stage.generates() {
         let generated = job.dir.join("ours").join("generated.rvm");
         let _ = std::fs::remove_file(&generated);
         // 融合对拍的产物一并清掉：不然上一轮的 compare/judgement 会被当成这一轮的结果。
         let _ = std::fs::remove_file(job.dir.join("compare.json"));
         let _ = std::fs::remove_file(job.dir.join("judgement.json"));
+        // 构件级结果与成员出处同理：这一轮没比对出结果时，不能把上一轮的构件行再写一遍。
+        let _ = std::fs::remove_file(job.dir.join(super::element::ELEMENTS_FILE));
+        let _ = std::fs::remove_file(
+            job.dir
+                .join("ours")
+                .join(super::element::SOURCES_FILE),
+        );
         // 阶段标记也要清：上一轮留下的 compare_start 会让这一轮的采样一开始就归到比对段。
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_START));
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_END));
         // `--scope` 落的名字路径同理：不清就会拿上一轮的选中节点去裁这一轮的基准。
         let _ = std::fs::remove_file(job.dir.join("scope.json"));
-        // `--baseline-dir` 模式下基准在 worker 启动前已同步放好（`place_baseline_from_dir`）；
-        // 在盘上就喂给子进程做生成即比对。没放好（缺失）就不融合，走原路。
-        let fused = opts
-            .fused_compare
-            .then(|| job.dir.join("e3d.rvm"))
-            .filter(|path| path.is_file())
-            .map(|baseline| FusedCompare {
-                baseline,
-                emit_rvm: opts.emit_rvm,
-                window_bytes: opts.compare_memory_mb * 1024 * 1024,
-                emit_compare: opts.emit_compare,
-            });
+        // 生成即比对：先等交接板上这一格——`--baseline-dir` 在工人开工前已同步放好，E3D 模式等导出
+        // 线程填。基准在盘上才开工；缺基准记 `no-baseline` 收工，不退回「先写 generated.rvm」的老路。
+        let fused = if opts.fused_compare {
+            let outcome = board.wait(index);
+            record.export = Some(outcome.record().clone());
+            export_seen = true;
+            match fused_from(&outcome, job, opts) {
+                Ok(fused) => Some(fused),
+                Err(message) => {
+                    record.status = status::NO_BASELINE.to_string();
+                    record.message = message;
+                    return record;
+                }
+            }
+        } else {
+            None
+        };
         let (generation, measured) = if opts.in_process {
             let _serial = in_process_gate
                 .lock()
@@ -1418,7 +2023,7 @@ fn process_root(
         record.generate = Some(generation);
     }
 
-    if opts.stage != Stage::Generate {
+    if opts.stage != Stage::Generate && !export_seen {
         let outcome = board.wait(index);
         record.export = Some(outcome.record().clone());
         if let ExportOutcome::Missing(export) = &outcome
@@ -1454,12 +2059,25 @@ fn process_root(
     let started = Instant::now();
     // 子进程已做完生成即比对（judgement.json 在盘上）时直接读判定：
     // `judge_report_full` 在子进程内跑过，compare.json 也是它落的，判色口径一致。
+    // 第二项是构件级结果：生成即比对由子进程落在 `element-checks.json`，读文件比对在这里当场摊出来
+    // 并落同一个文件（续跑补入库读它）。拿不到时为 `None`，这次就不动 `rvm_check_element`。
     let judgement = if judgement_path.is_file() {
         std::fs::read(&judgement_path)
             .map_err(|error| format!("读 judgement.json 失败：{error}"))
             .and_then(|bytes| {
                 serde_json::from_slice::<super::report::Judgement>(&bytes)
                     .map_err(|error| format!("解析 judgement.json 失败：{error}"))
+            })
+            .map(|judgement| {
+                let elements = super::element::read_checks(&job.dir).unwrap_or_else(|message| {
+                    eprintln!(
+                        "警告：{} {} 的构件级结果读不回来，这次不写构件行：{message}",
+                        job.tag,
+                        job.display_ref()
+                    );
+                    None
+                });
+                (judgement, elements)
             })
     } else {
         // 比对范围从生成侧落的 `scope.json` 读回：名字路径只能在生成侧算（要 `DbSet` +
@@ -1474,13 +2092,15 @@ fn process_root(
             ))
         } else {
             match super::read_scope_file(&job.dir) {
-                Ok(scope) => super::compare_rvms_scoped(&job.dir, &scope),
+                Ok(scope) => compare_files(job, spec, tree, &scope),
                 Err(message) => Err(message),
             }
         }
     };
     match judgement {
-        Ok(judgement) => {
+        Ok((judgement, elements)) => {
+            record.element_checks = elements.as_ref().map(Vec::len);
+            record.elements = elements;
             let verdict = judgement.verdict;
             record.message = verdict_message(verdict, &judgement.counts);
             record.status = match verdict {
@@ -1528,6 +2148,46 @@ fn process_root(
         }
     }
     record
+}
+
+/// 读文件比对（不走生成即比对的那条路）：判色之外把构件级结果也摊出来，落进作业目录。
+///
+/// 构件级结果要把基准侧的单侧件按名字解回 refno，那一步得知道这个作业的库文件与会话
+/// （[`resolve_node`]）。节点解不出来时比对照做，只是这次没有构件级结果。
+fn compare_files(
+    job: &RootJob,
+    spec: &RunSpec,
+    tree: &DirectTreeService,
+    scope: &e3d_model::rvm_compare::CompareScope,
+) -> std::result::Result<
+    (
+        super::report::Judgement,
+        Option<Vec<super::element::ElementCheck>>,
+    ),
+    String,
+> {
+    let mut spec = spec.clone();
+    spec.refno = job.refno.clone();
+    let node = match resolve_node(tree, &spec) {
+        Ok(node) => node,
+        Err(message) => {
+            eprintln!(
+                "警告：{} {} 解不出库文件与会话，这次不出构件级结果：{message}",
+                job.tag,
+                job.display_ref()
+            );
+            return super::compare_rvms_scoped(&job.dir, scope).map(|judgement| (judgement, None));
+        }
+    };
+    let (judgement, checks) = super::compare_rvms_with_elements(&job.dir, scope, &spec, &node)?;
+    if let Err(message) = super::element::write_checks(&job.dir, &checks) {
+        eprintln!(
+            "警告：{} {} 的构件级结果没有落盘（续跑补入库时补不了构件行）：{message}",
+            job.tag,
+            job.display_ref()
+        );
+    }
+    Ok((judgement, Some(checks)))
 }
 
 fn generate_in_process(
@@ -1749,6 +2409,12 @@ fn generate_in_child(
         std::thread::sleep(phase.sample_interval());
     }
     let exit = child.wait();
+    // 退出后再读一次峰值。循环里是「先看退没退、再读峰值、再睡一个间隔」：不足一个间隔就跑完的
+    // 单元（release 构建下的小 ZONE 不到 0.5 秒）只在刚起进程时读到过一次，记下来的是 1 MB；
+    // 跑得久的也漏掉最后一个间隔里涨的那一段。句柄在 `child` 释放前一直有效，内核累计峰值照样读得到。
+    if let Some(bytes) = memory::process_peak_private_bytes(&child) {
+        peak = peak.max(bytes);
+    }
     let stderr_tail = std::fs::read_to_string(job.dir.join("gen.stderr.log"))
         .map(|text| tail(&text, 600))
         .unwrap_or_default();
@@ -1881,6 +2547,9 @@ struct Summary {
     out: String,
     dbnums: Vec<u32>,
     site_only: bool,
+    /// 比对单元；`root`（现状）不落进 summary.json。
+    #[serde(skip_serializing_if = "Unit::is_root")]
+    unit: Unit,
     jobs: usize,
     in_process: bool,
     baseline: String,
@@ -1894,25 +2563,6 @@ struct Summary {
     compare_seconds: f64,
     dbs: Vec<DbSummary>,
     roots: Vec<RootRecord>,
-}
-
-fn add_counts(into: &mut RvmCounts, from: &RvmCounts) {
-    into.both += from.both;
-    into.exact += from.exact;
-    into.chord += from.chord;
-    into.reference_artifact += from.reference_artifact;
-    into.film += from.film;
-    into.off += from.off;
-    into.only_baseline += from.only_baseline;
-    into.only_generated += from.only_generated;
-    into.kind_match += from.kind_match;
-    into.kind_differ += from.kind_differ;
-    into.container_off += from.container_off;
-    into.container_only_baseline += from.container_only_baseline;
-    into.container_only_generated += from.container_only_generated;
-    into.centreline_only_baseline += from.centreline_only_baseline;
-    into.unkeyable_baseline += from.unkeyable_baseline;
-    into.unkeyable_generated += from.unkeyable_generated;
 }
 
 impl Summary {
@@ -1949,8 +2599,8 @@ impl Summary {
             }
             *db.status_counts.entry(record.status.clone()).or_default() += 1;
             if let Some(counts) = &record.counts {
-                add_counts(&mut totals, counts);
-                add_counts(&mut db.counts, counts);
+                totals.add(counts);
+                db.counts.add(counts);
             }
             if let Some(generation) = &record.generate {
                 gen_seconds += generation.seconds;
@@ -1983,6 +2633,7 @@ impl Summary {
             out: opts.out.display().to_string(),
             dbnums: dbnums.to_vec(),
             site_only: opts.site_only,
+            unit: opts.unit,
             jobs: opts.jobs,
             in_process: opts.in_process,
             baseline: baseline.to_string(),
@@ -2075,8 +2726,9 @@ impl Summary {
             ));
         }
         out.push_str(&format!(
-            "\n合计 {} 个根：{}；both {} exact {} chord {} reference_artifact {} film {} off {} only_baseline {} only_generated {} unkeyable {}/{} kind_differ {}；生成 {:.1}s 导出 {:.1}s 比对 {:.1}s → {}\n",
+            "\n合计 {} 个{}：{}；both {} exact {} chord {} reference_artifact {} film {} off {} only_baseline {} only_generated {} unkeyable {}/{} kind_differ {}；生成 {:.1}s 导出 {:.1}s 比对 {:.1}s → {}\n",
             self.roots.len(),
+            self.unit.word(),
             self.status_counts
                 .iter()
                 .map(|(status, count)| format!("{status} {count}"))
@@ -2160,16 +2812,90 @@ mod tests {
         assert!(!status::is_compared(status::GEN_FAILED));
     }
 
-    #[test]
-    fn summary_sums_counts_and_decides_clean_per_root_status() {
-        let job = |dbno: u32, refno: &str| RootJob {
+    fn root_job(dbno: u32, refno: &str) -> RootJob {
+        RootJob {
             dbno,
             tag: tag_of("AMS", dbno),
             refno: refno.to_string(),
             noun: "SITE".to_string(),
             name: String::new(),
             dir: root_dir(Path::new("out"), &tag_of("AMS", dbno), refno),
-        };
+            unit_kind: UnitKind::Root,
+            parent: None,
+        }
+    }
+
+    fn zone_job(refno: &str, parent: &str) -> RootJob {
+        RootJob {
+            noun: "ZONE".to_string(),
+            unit_kind: UnitKind::Zone,
+            parent: Some(ParentRoot {
+                refno: format!("={parent}"),
+                noun: "SITE".to_string(),
+                name: "/S".to_string(),
+            }),
+            ..root_job(1112, refno)
+        }
+    }
+
+    fn options() -> BatchOptions {
+        BatchOptions {
+            connection: RunInput {
+                install_dir: String::new(),
+                projects_dir: String::new(),
+                project_name: String::new(),
+                e3d_project: String::new(),
+                username: String::new(),
+                password: String::new(),
+                e3d_mdb: String::new(),
+                refno: String::new(),
+            },
+            dbnums: vec![7999],
+            all_desi: false,
+            only: Vec::new(),
+            scope: None,
+            site_only: false,
+            unit: Unit::Root,
+            list_units: false,
+            out: PathBuf::from("out"),
+            resume: false,
+            force: false,
+            baseline_dir: None,
+            stage: Stage::Full,
+            in_process: false,
+            jobs: 1,
+            min_commit_free_gb: 1.5,
+            gen_timeout: Duration::from_secs(1),
+            e3d_timeout: Duration::from_secs(1),
+            fused_compare: false,
+            emit_rvm: true,
+            store: false,
+            compare_memory_mb: 0,
+            element_cache: 0,
+            emit_compare: false,
+            threads: 0,
+        }
+    }
+
+    fn run_spec() -> RunSpec {
+        RunSpec {
+            install_dir: PathBuf::new(),
+            projects_dir: PathBuf::new(),
+            project_name: "AvevaMarineSample".to_string(),
+            project_dir: PathBuf::new(),
+            project_evar: PathBuf::new(),
+            e3d_project: "AMS".to_string(),
+            username: String::new(),
+            password: String::new(),
+            e3d_mdb: "/ALL".to_string(),
+            refno: String::new(),
+            tools: super::super::resolve_tools(),
+        }
+    }
+
+    #[test]
+    fn summary_sums_counts_and_decides_clean_per_root_status() {
+        let job = root_job;
         let mut pass = RootRecord::new(&job(7999, "1/2"));
         pass.status = status::PASS.to_string();
         pass.counts = Some(RvmCounts {
@@ -2193,53 +2919,8 @@ mod tests {
             kind_match: 4,
             ..RvmCounts::default()
         });
-        let opts = BatchOptions {
-            connection: RunInput {
-                install_dir: String::new(),
-                projects_dir: String::new(),
-                project_name: String::new(),
-                e3d_project: String::new(),
-                username: String::new(),
-                password: String::new(),
-                e3d_mdb: String::new(),
-                refno: String::new(),
-            },
-            dbnums: vec![7999],
-            all_desi: false,
-            only: Vec::new(),
-            scope: None,
-            site_only: false,
-            out: PathBuf::from("out"),
-            resume: false,
-            force: false,
-            baseline_dir: None,
-            stage: Stage::Full,
-            in_process: false,
-            jobs: 1,
-            min_commit_free_gb: 1.5,
-            gen_timeout: Duration::from_secs(1),
-            e3d_timeout: Duration::from_secs(1),
-            fused_compare: false,
-            emit_rvm: true,
-            store: false,
-            compare_memory_mb: 0,
-            element_cache: 0,
-            emit_compare: false,
-            threads: 0,
-        };
-        let spec = RunSpec {
-            install_dir: PathBuf::new(),
-            projects_dir: PathBuf::new(),
-            project_name: "AvevaMarineSample".to_string(),
-            project_dir: PathBuf::new(),
-            project_evar: PathBuf::new(),
-            e3d_project: "AMS".to_string(),
-            username: String::new(),
-            password: String::new(),
-            e3d_mdb: "/ALL".to_string(),
-            refno: String::new(),
-            tools: super::super::resolve_tools(),
-        };
+        let opts = options();
+        let spec = run_spec();
         let summary = Summary::build(
             &opts,
             &spec,
@@ -2316,6 +2997,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 子进程退出之后还读得到它的累计峰值：`generate_in_child` 靠这一点在退出后补读一次，
+    /// 不足一个采样间隔就跑完的单元才不会只留下刚起进程时读到的 1 MB。
+    #[cfg(windows)]
+    #[test]
+    fn peak_private_bytes_are_still_readable_after_the_child_exits() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("起 cmd");
+        child.wait().expect("等 cmd 退出");
+        let peak = memory::process_peak_private_bytes(&child).expect("退出后读峰值");
+        assert!(
+            peak >= 256 * 1024,
+            "cmd 退出后的累计峰值只有 {peak} 字节，不像是整段的峰值"
+        );
+    }
+
     /// `--scope` 的解析：两种档、refno 三种写法归一，写错的形态必须报错而不是猜。
     #[test]
     fn scope_arg_parses_both_kinds_and_normalizes_refno() {
@@ -2336,5 +3037,468 @@ mod tests {
         assert!(ScopeArg::parse("leaf:9304/2").is_err());
         assert!(ScopeArg::parse("node:").is_err());
         assert_eq!(ScopeArg::Node("1/2".to_string()).refno(), "1/2");
+    }
+
+    fn r(text: &str) -> RefU64 {
+        RefU64::from_str(text).unwrap()
+    }
+
+    /// 单元划分：SITE 下按成员原序一个 ZONE 一个单元，ZONE 下不再往下拆；APPLDW 经 APPLDA、
+    /// APPDAR 两层才到 ZONE；容器下的非 ZONE 子节点各成一个兜底单元。
+    #[test]
+    fn units_split_at_zones_and_descend_through_application_containers() {
+        let entry = |refno: &str, noun: &str, name: &str| TreeEntry {
+            refno: r(refno),
+            noun: noun.to_string(),
+            name: name.to_string(),
+        };
+        let tree: std::collections::HashMap<RefU64, Vec<TreeEntry>> =
+            std::collections::HashMap::from([
+                (
+                    r("1/1"),
+                    vec![
+                        entry("1/2", "ZONE", "/Z1"),
+                        entry("1/3", "STRU", "/LOOSE"),
+                        entry("1/4", "ZONE", "/Z2"),
+                    ],
+                ),
+                (r("1/2"), vec![entry("1/20", "PIPE", "/P")]),
+                (r("2/1"), vec![entry("2/2", "APPLDA", "/A")]),
+                (r("2/2"), vec![entry("2/3", "APPDAR", "/D")]),
+                (r("2/3"), vec![entry("2/4", "ZONE", "/Z3")]),
+            ]);
+        let mut children = |refno: RefU64| -> Result<Vec<TreeEntry>> {
+            Ok(tree.get(&refno).cloned().unwrap_or_default())
+        };
+        let site = collect_units(r("1/1"), &mut children).unwrap();
+        assert_eq!(
+            site.iter()
+                .map(|unit| (unit.noun.as_str(), unit.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ZONE", "/Z1"), ("STRU", "/LOOSE"), ("ZONE", "/Z2")]
+        );
+        assert_eq!(
+            collect_units(r("2/1"), &mut children).unwrap(),
+            vec![entry("2/4", "ZONE", "/Z3")]
+        );
+        assert!(collect_units(r("3/1"), &mut children).unwrap().is_empty());
+
+        // 容器套自己：报错，不死循环。
+        let mut looped =
+            |_: RefU64| -> Result<Vec<TreeEntry>> { Ok(vec![entry("9/1", "APPLDA", "")]) };
+        assert!(collect_units(r("9/1"), &mut looped).is_err());
+    }
+
+    /// `--only`：根作业只认自己的 refno；单元作业还认它的上级根（点名 SITE 就是它下面的全部单元）。
+    #[test]
+    fn only_picks_units_by_their_own_or_their_parent_refno() {
+        let zone = zone_job("17496/8518", "9304/2");
+        assert!(only_keeps(&zone, &["17496/8518".to_string()]));
+        assert!(only_keeps(&zone, &["9304/2".to_string()]));
+        assert!(!only_keeps(&zone, &["9304/3".to_string()]));
+        let root = root_job(1112, "9304/2");
+        assert!(only_keeps(&root, &["9304/2".to_string()]));
+        assert!(!only_keeps(&root, &["17496/8518".to_string()]));
+    }
+
+    /// `--unit zone` 固定生成即比对；`--emit-rvm` 不给时融合不写 generated.rvm、不融合照写；
+    /// 显式给了就照办。
+    #[test]
+    fn zone_mode_forces_fused_and_fused_drops_the_rvm_by_default() {
+        assert_eq!(fused_and_emit(Unit::Root, false, None), (false, true));
+        assert_eq!(fused_and_emit(Unit::Root, true, None), (true, false));
+        assert_eq!(fused_and_emit(Unit::Root, true, Some(true)), (true, true));
+        assert_eq!(fused_and_emit(Unit::Zone, false, None), (true, false));
+        assert_eq!(fused_and_emit(Unit::Zone, false, Some(true)), (true, true));
+    }
+
+    /// 参数组合：ZONE 模式只有 full / export 两档且必须融合；融合不再要求 `--baseline-dir`；
+    /// 不融合时不能关掉 generated.rvm。
+    #[test]
+    fn mode_checks_reject_only_the_combinations_that_cannot_work() {
+        let with = |edit: fn(&mut BatchOptions)| {
+            let mut opts = options();
+            edit(&mut opts);
+            check_modes(&opts)
+        };
+        assert!(with(|_| {}).is_ok());
+        assert!(with(|opts| opts.fused_compare = true).is_ok());
+        assert!(
+            with(|opts| {
+                opts.fused_compare = true;
+                opts.stage = Stage::Generate;
+            })
+            .is_err()
+        );
+        assert!(with(|opts| opts.emit_rvm = false).is_err());
+        assert!(
+            with(|opts| {
+                opts.unit = Unit::Zone;
+                opts.fused_compare = true;
+                opts.emit_rvm = false;
+            })
+            .is_ok()
+        );
+        assert!(
+            with(|opts| {
+                opts.unit = Unit::Zone;
+                opts.fused_compare = true;
+                opts.stage = Stage::Export;
+            })
+            .is_ok()
+        );
+        assert!(
+            with(|opts| {
+                opts.unit = Unit::Zone;
+                opts.fused_compare = true;
+                opts.stage = Stage::Compare;
+            })
+            .is_err()
+        );
+        assert!(with(|opts| opts.unit = Unit::Zone).is_err());
+    }
+
+    /// 生成即比对先领基准：缺基准、或记为就位但盘上没有，都不开工；在盘上才组装融合参数。
+    #[test]
+    fn fused_generation_starts_only_with_a_baseline_on_disk() {
+        let dir = std::env::temp_dir().join(format!("rvm-fused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let job = RootJob {
+            dir: dir.clone(),
+            ..zone_job("17496/8518", "9304/2")
+        };
+        let mut opts = options();
+        opts.unit = Unit::Zone;
+        opts.fused_compare = true;
+        opts.emit_rvm = false;
+        opts.compare_memory_mb = 64;
+
+        let missing = ExportOutcome::Missing(StageRecord::new(
+            "missing",
+            Instant::now(),
+            "基准目录里没有 x",
+        ));
+        assert_eq!(
+            fused_from(&missing, &job, &opts).err().as_deref(),
+            Some("基准目录里没有 x")
+        );
+        let ready = ExportOutcome::Ready(StageRecord::new("batch", Instant::now(), ""));
+        assert!(fused_from(&ready, &job, &opts).is_err());
+
+        std::fs::write(dir.join("e3d.rvm"), b"baseline").unwrap();
+        let fused = fused_from(&ready, &job, &opts).unwrap();
+        assert_eq!(fused.baseline, dir.join("e3d.rvm"));
+        assert!(!fused.emit_rvm);
+        assert_eq!(fused.window_bytes, 64 * 1024 * 1024);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `run.json`：根作业不多出单元字段（老产物不变），单元作业带上种类与上级根；
+    /// 没有这两个字段的老 `run.json` 照样读得回（续跑）。
+    #[test]
+    fn run_json_carries_unit_fields_only_for_units_and_reads_old_records() {
+        let root = serde_json::to_value(RootRecord::new(&root_job(7999, "1/2"))).unwrap();
+        assert!(root.get("unit").is_none());
+        assert!(root.get("parent").is_none());
+
+        let mut zone =
+            serde_json::to_value(RootRecord::new(&zone_job("17496/8518", "9304/2"))).unwrap();
+        assert_eq!(zone["unit"], "zone");
+        assert_eq!(zone["parent"]["ref"], "=9304/2");
+
+        let object = zone.as_object_mut().unwrap();
+        object.remove("unit");
+        object.remove("parent");
+        let old: RootRecord = serde_json::from_value(zone).unwrap();
+        assert_eq!(old.unit, UnitKind::Root);
+        assert!(old.parent.is_none());
+    }
+
+    fn off(name: &str) -> RvmMismatch {
+        RvmMismatch {
+            category: "off".to_string(),
+            name: name.to_string(),
+            noun: "PIPE".to_string(),
+            max_axis_delta_mm: Some(3.0),
+            baseline_kinds: Vec::new(),
+            generated_kinds: Vec::new(),
+            baseline_aabb: None,
+            generated_aabb: None,
+            reason_kind: String::new(),
+            reason: String::new(),
+            severity: String::new(),
+        }
+    }
+
+    /// 入库事实带单元种类与上级根：根作业的上级根是它自己，单元作业是它的 SITE / APPLDW；
+    /// 差异行跟着带上级根，按 SITE 查差异不必先查运行行。
+    #[test]
+    fn stored_facts_name_the_unit_kind_and_its_root() {
+        let spec = run_spec();
+        let root = RootRecord::new(&RootJob {
+            name: "/1RS-CIVI".to_string(),
+            ..root_job(1112, "9304/2")
+        });
+        let facts = root.run_facts("b", &spec);
+        assert_eq!(facts.unit.as_deref(), Some("root"));
+        assert_eq!(facts.root_refno.as_deref(), Some("9304/2"));
+        assert_eq!(facts.root_noun.as_deref(), Some("SITE"));
+        assert_eq!(facts.root_name.as_deref(), Some("/1RS-CIVI"));
+
+        let mut zone = RootRecord::new(&zone_job("17496/8518", "9304/2"));
+        zone.status = status::FAIL.to_string();
+        zone.mismatches_all = vec![off("/P1")];
+        let facts = zone.run_facts("b", &spec);
+        assert_eq!(facts.run_id, "b/ams1112/17496_8518");
+        assert_eq!(facts.refno, "17496/8518");
+        assert_eq!(facts.unit.as_deref(), Some("zone"));
+        assert_eq!(facts.root_refno.as_deref(), Some("9304/2"));
+        assert_eq!(facts.root_noun.as_deref(), Some("SITE"));
+        assert_eq!(facts.root_name.as_deref(), Some("/S"));
+        let (row, rows) = super::super::store::build_rows(&facts);
+        assert_eq!(row.unit.as_deref(), Some("zone"));
+        assert_eq!(row.root_refno.as_deref(), Some("9304/2"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].refno, "17496/8518");
+        assert_eq!(rows[0].root_refno.as_deref(), Some("9304/2"));
+    }
+
+    /// 续跑补入库要全量的差异清单：`run.json` 里那份截断过时，读文件比对的作业从 `compare.json` 重判，
+    /// 生成即比对的作业读它留下的 `judgement.json`（两个都在时用后者）；清单本来就全的不去读大文件。
+    #[test]
+    fn resumed_facts_take_the_full_list_from_the_job_directory() {
+        let dir = std::env::temp_dir().join(format!("rvm-resumed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut record = RootRecord::new(&RootJob {
+            dir: dir.clone(),
+            ..zone_job("17496/8518", "9304/2")
+        });
+        record.status = status::FAIL.to_string();
+        record.mismatches = vec![off("/A")];
+        let spec = run_spec();
+        assert_eq!(resumed_facts(&record, "b", &spec).mismatches.len(), 1);
+
+        // 读文件比对：只有 compare.json。清单没截断时不重判，截断过才从它拿全量。
+        std::fs::write(
+            dir.join("compare.json"),
+            serde_json::json!({
+                "baseline_members": 4,
+                "by_noun": { "PIPE": { "both": 1, "exact": 1, "kind_match": 1, "only_baseline": 3 } },
+                "pairs": [],
+                "only_baseline": ["/A", "/B", "/C"],
+                "only_generated": [],
+                "centreline_only_baseline": ["SNOD 1 of SCTN /S", "SNOD 2 of SCTN /S"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(resumed_facts(&record, "b", &spec).mismatches.len(), 1);
+        record.mismatches_truncated = true;
+        let facts = resumed_facts(&record, "b", &spec);
+        assert_eq!(facts.mismatches.len(), 3);
+        assert_eq!(facts.centreline_only_baseline.len(), 2);
+
+        let judgement = super::super::report::Judgement {
+            verdict: RvmVerdict::Fail,
+            counts: RvmCounts::default(),
+            mismatches: vec![off("/A"), off("/B")],
+            centreline_only_baseline: vec!["SNOD 1 of SCTN /S".to_string()],
+        };
+        std::fs::write(
+            dir.join("judgement.json"),
+            serde_json::to_vec(&judgement).unwrap(),
+        )
+        .unwrap();
+        let facts = resumed_facts(&record, "b", &spec);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(facts.run_id, record.run_id("b"));
+        assert_eq!(facts.mismatches.len(), 2);
+        assert_eq!(facts.centreline_only_baseline.len(), 1);
+    }
+
+    fn element_check(refno: &str) -> super::super::element::ElementCheck {
+        serde_json::from_value(serde_json::json!({
+            "refno": refno, "noun": "ELBO", "name": "/A", "grade": "exact", "severity": "ok"
+        }))
+        .unwrap()
+    }
+
+    /// 构件级结果记在作业自己这个单元名下（按 ZONE 跑是那个 ZONE，上级根是它的 SITE；整根跑单元就是根）；
+    /// `--scope` 只比了一块时带上范围，选中的就是整个作业时按整个单元算。交给入库线程是整份搬走，
+    /// 记录里不再留；`run.json` 只记范围与条数。
+    #[test]
+    fn element_facts_are_filed_under_the_job_and_handed_over_whole() {
+        let spec = run_spec();
+        let mut zone = RootRecord::new(&zone_job("17496/8518", "9304/2"));
+        zone.status = status::PASS.to_string();
+        zone.elements = Some(vec![element_check("1/1"), element_check("1/2")]);
+        zone.element_checks = Some(2);
+        assert!(
+            zone.run_facts("b", &spec).elements.is_none(),
+            "不带构件级结果的那一份不复制它们"
+        );
+        let elements = zone
+            .take_run_facts("b", &spec)
+            .elements
+            .expect("比对出了结果就有构件级结果");
+        assert_eq!(elements.checks.len(), 2);
+        assert_eq!(elements.unit_refno, "17496/8518");
+        assert_eq!(elements.unit_kind, "zone");
+        assert_eq!(elements.root_refno.as_deref(), Some("9304/2"));
+        assert_eq!(elements.scope, None);
+        assert!(zone.elements.is_none(), "交出去就不留");
+        assert!(zone.take_run_facts("b", &spec).elements.is_none());
+        let json = serde_json::to_value(&zone).unwrap();
+        assert_eq!(json["element_checks"], 2);
+        assert!(json.get("elements").is_none() && json.get("scope").is_none());
+
+        let scoped = |scope: &str| {
+            let mut root = RootRecord::new(&root_job(1112, "9304/2"));
+            root.elements = Some(vec![element_check("1/1")]);
+            root.scope = Some(scope.to_string());
+            let json = serde_json::to_value(&root).unwrap();
+            assert_eq!(json["scope"], scope);
+            // 续跑读回来的记录照样带着范围。
+            let mut back: RootRecord = serde_json::from_value(json).unwrap();
+            back.elements = root.elements.take();
+            back.take_run_facts("b", &spec).elements.unwrap()
+        };
+        let elements = scoped("subtree:17496/9000");
+        assert_eq!(elements.unit_refno, "9304/2");
+        assert_eq!(elements.unit_kind, "root");
+        assert_eq!(elements.root_refno.as_deref(), Some("9304/2"), "根的上级根是它自己");
+        assert_eq!(
+            elements.scope,
+            Some(super::super::store::ElementScope {
+                kind: "subtree".to_string(),
+                refno: "17496/9000".to_string()
+            })
+        );
+        assert_eq!(scoped("node:17496/9000").scope.unwrap().kind, "node");
+        assert_eq!(scoped("subtree:9304/2").scope, None, "选的就是整个作业");
+        assert!(
+            scoped("node:9304/2").scope.is_some(),
+            "只比根节点自己不等于整个根"
+        );
+    }
+
+    /// 续跑补入库：构件级结果从作业目录的 `element-checks.json` 取；没有那份文件的老产物目录补不了构件行。
+    #[test]
+    fn resumed_facts_take_element_checks_from_the_job_directory() {
+        let dir = std::env::temp_dir().join(format!("rvm-resumed-elements-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut record = RootRecord::new(&RootJob {
+            dir: dir.clone(),
+            ..zone_job("17496/8518", "9304/2")
+        });
+        record.status = status::PASS.to_string();
+        let spec = run_spec();
+        assert!(
+            resumed_facts(&record, "b", &spec).elements.is_none(),
+            "老产物目录：没有构件级结果"
+        );
+
+        let checks = vec![element_check("1/1"), element_check("1/2"), element_check("1/3")];
+        super::super::element::write_checks(&dir, &checks).unwrap();
+        let facts = resumed_facts(&record, "b", &spec);
+        let _ = std::fs::remove_dir_all(&dir);
+        let elements = facts.elements.expect("从作业目录读回来");
+        assert_eq!(elements.checks, checks);
+        assert_eq!(elements.unit_refno, "17496/8518");
+        assert_eq!(elements.root_refno.as_deref(), Some("9304/2"));
+    }
+
+    /// 真库上对一遍：页面单根把构件行记到哪个单元名下（`page_element_facts`），与这里划分出来的单元是不是
+    /// 同一个答案。属主链的读法（节点自身在前、链头是 WORLD、名词的写法）只有真树验得了。
+    /// 每个上级根查它自己、它下面的容器层，再取头、中、尾三个单元，各自往下钻到叶子。
+    #[test]
+    #[ignore = "requires local AMS source files"]
+    fn ams_page_nodes_are_filed_under_the_units_enumerated_here() {
+        let tree = DirectTreeService::open("AvevaMarineSample", "ALL").unwrap();
+        let out = Path::new("unused");
+        let filed = |refno: &str| {
+            let facts = super::super::page_element_facts(&tree, refno, Vec::new());
+            (
+                facts.unit_refno,
+                facts.unit_kind,
+                facts.root_refno,
+                facts.scope.map(|scope| (scope.kind, scope.refno)),
+            )
+        };
+        let expect = |unit: &str, kind: &str, root: &str, scope: Option<&str>| {
+            (
+                unit.to_string(),
+                kind.to_string(),
+                Some(root.to_string()),
+                scope.map(|refno| ("subtree".to_string(), refno.to_string())),
+            )
+        };
+        let slash = |refno: RefU64| format!("{}/{}", refno.get_0(), refno.get_1());
+        let (mut roots_seen, mut containers_seen, mut units_seen, mut below_seen) = (0, 0, 0, 0);
+        for dbno in [1112u32, 7333, 7999, 8000] {
+            let roots = enumerate_roots(&tree, dbno, false, "AMS", out).unwrap();
+            assert!(!roots.is_empty(), "库 {dbno} 没有根");
+            for root in &roots {
+                assert_eq!(
+                    filed(&root.refno),
+                    expect(&root.refno, "root", &root.refno, None),
+                    "根 ={}",
+                    root.refno
+                );
+                roots_seen += 1;
+                // 根与单元之间的容器层（APPLDW 下的 APPLDA）：记在根名下，只算核对了一块。
+                let start = RefU64::from_str(&root.refno).unwrap();
+                for child in tree.children(start).unwrap() {
+                    let noun = child.noun.trim().to_ascii_uppercase();
+                    if UNIT_CONTAINER_NOUNS.contains(&noun.as_str()) {
+                        let refno = slash(child.refno.refno());
+                        assert_eq!(
+                            filed(&refno),
+                            expect(&root.refno, "root", &root.refno, Some(&refno)),
+                            "{noun} ={refno}"
+                        );
+                        containers_seen += 1;
+                    }
+                }
+                let units = units_of(&tree, std::slice::from_ref(root), out).unwrap();
+                let picks = [0, units.len() / 2, units.len().saturating_sub(1)];
+                for (at, unit) in units.iter().enumerate() {
+                    if !picks.contains(&at) {
+                        continue;
+                    }
+                    let kind = unit.unit_kind.as_str();
+                    assert_eq!(
+                        filed(&unit.refno),
+                        expect(&unit.refno, kind, &root.refno, None),
+                        "单元 ={}",
+                        unit.refno
+                    );
+                    units_seen += 1;
+                    let mut cursor = RefU64::from_str(&unit.refno).unwrap();
+                    for _ in 0..8 {
+                        let Some(child) = tree.children(cursor).unwrap().into_iter().next() else {
+                            break;
+                        };
+                        cursor = child.refno.refno();
+                        let refno = slash(cursor);
+                        assert_eq!(
+                            filed(&refno),
+                            expect(&unit.refno, kind, &root.refno, Some(&refno)),
+                            "{} ={refno}，单元 ={}",
+                            child.noun,
+                            unit.refno
+                        );
+                        below_seen += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "根 {roots_seen}，根下的容器层 {containers_seen}，单元 {units_seen}，单元之下的节点 {below_seen}"
+        );
+        assert!(containers_seen > 0 && units_seen > 0 && below_seen > 0);
     }
 }

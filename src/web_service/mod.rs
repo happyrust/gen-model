@@ -588,8 +588,15 @@ async fn serve_with_ready(
         )
         // 库里的比对结果（`rvm_check_run` / `rvm_check_mismatch`，页面与批量命令都写）。
         .route("/api/v1/rvm-check/history", get(rvm_check::history))
+        .route("/api/v1/rvm-check/rollup", get(rvm_check::rollup))
         .route("/api/v1/rvm-check/mismatches", get(rvm_check::mismatches))
         .route("/api/v1/rvm-check/reasons", get(rvm_check::reasons))
+        // 构件级结果（`rvm_check_element`）：一个带几何的构件一行，记录 id 由 refno 得出。
+        .route("/api/v1/rvm-check/elements", get(rvm_check::elements))
+        .route(
+            "/api/v1/rvm-check/element-grades",
+            get(rvm_check::element_grades),
+        )
         .route(
             "/api/v1/tasks/{id}/changes",
             get(handlers::task_changes),

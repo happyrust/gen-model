@@ -24,6 +24,7 @@ use crate::e3d_query::{
 
 pub mod batch;
 mod config;
+pub mod element;
 #[path = "macro.rs"]
 mod export_macro;
 pub mod report;
@@ -272,20 +273,24 @@ fn try_login_now(spec: &RunSpec, notes: &mut Vec<String>) -> bool {
     }
 }
 
-/// [`execute`] 的结果：页面报告（差异清单截到页面上限），加上**不截断**的差异清单给入库用
+/// [`execute`] 的结果：页面报告（差异清单截到页面上限），加上**不截断**的差异清单与构件级结果给入库用
 /// （[`store`]）。
 pub struct ExecuteOutcome {
     pub report: RvmCheckReport,
     pub mismatches: Vec<RvmMismatch>,
     pub task_dir: PathBuf,
+    /// 构件级结果（落 `rvm_check_element`）；比对没出结果时为 `None`。
+    pub elements: Option<store::ElementFacts>,
 }
 
 impl ExecuteOutcome {
-    fn failed(report: RvmCheckReport, task_dir: PathBuf) -> Self {
+    /// 某一步没跑完：只有一份失败的报告，没有差异清单与构件级结果。
+    pub fn failed(report: RvmCheckReport, task_dir: PathBuf) -> Self {
         Self {
             report,
             mismatches: Vec::new(),
             task_dir,
+            elements: None,
         }
     }
 
@@ -311,6 +316,11 @@ impl ExecuteOutcome {
             sesno: report.sesno,
             noun: report.noun.clone(),
             name: report.name.clone(),
+            // 页面单根比的是任选的一个节点，没有比对单元与上级根的概念。
+            unit: None,
+            root_refno: None,
+            root_noun: None,
+            root_name: None,
             verdict: report.verdict.clone(),
             status: report.verdict.clone(),
             stage: report.stage.clone(),
@@ -330,7 +340,78 @@ impl ExecuteOutcome {
             files: report.files.clone(),
             started_at,
             finished_at: chrono::Local::now(),
+            elements: self.elements.clone(),
         }
+    }
+}
+
+/// 页面上比的那个节点在「上级根 → 核对单元」里落在哪：构件行按它记，与批量命令按 ZONE / 整根写下的行
+/// 同一套归属，谁重新核对都清得到对方留下的陈旧行。
+///
+/// 从 WORLD 下的根（SITE / APPLDW）沿属主链往下，第一个不是纯容器的节点就是单元（ZONE 或兜底单元，
+/// 与 [`batch`] 划分单元同一条规则）。节点就是单元或就是根：整个单元核对过；节点在单元之下、或夹在根与
+/// 单元之间的容器层上：只核对了一块（`subtree`）。属主链到不了 WORLD 时单元记节点自己（`node`）。
+fn page_element_facts(
+    tree: &DirectTreeService,
+    refno: &str,
+    checks: Vec<element::ElementCheck>,
+) -> store::ElementFacts {
+    let lineage = RefU64::from_str_refno(refno)
+        .ok()
+        .and_then(|start| tree.ancestors(start).ok())
+        .map(|chain| {
+            chain
+                .into_iter()
+                .map(|node| {
+                    let refno = node.refno();
+                    let noun = tree
+                        .noun_of(refno)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_uppercase();
+                    (format!("{}/{}", refno.get_0(), refno.get_1()), noun)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (unit_refno, unit_kind, root_refno, scoped) = locate_unit(refno, &lineage);
+    store::ElementFacts {
+        checks,
+        unit_refno,
+        unit_kind,
+        root_refno,
+        scope: scoped.then(|| store::ElementScope {
+            kind: "subtree".to_string(),
+            refno: refno.to_string(),
+        }),
+    }
+}
+
+/// [`page_element_facts`] 的判法。`lineage` 是节点自身 → 属主 → … 的 `(refno, 大写名词)`。
+/// 返回 `(单元 refno, 单元种类, 上级根, 是否只核对了单元里的一块)`。
+fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Option<String>, bool) {
+    // 属主链的头是 WORLD：它下面那一个就是上级根。
+    let Some(world_at) = lineage.iter().position(|(_, noun)| noun == "WORL") else {
+        return (refno.to_string(), "node".to_string(), None, false);
+    };
+    if world_at == 0 {
+        return (refno.to_string(), "node".to_string(), None, false);
+    }
+    let root = &lineage[world_at - 1].0;
+    // 从根往下（下标递减）找第一个不是纯容器的节点。
+    let unit = lineage[..world_at]
+        .iter()
+        .rev()
+        .find(|(_, noun)| !batch::UNIT_CONTAINER_NOUNS.contains(&noun.as_str()));
+    match unit {
+        Some((unit, noun)) => (
+            unit.clone(),
+            if noun == "ZONE" { "zone" } else { "fallback" }.to_string(),
+            Some(root.clone()),
+            unit != refno,
+        ),
+        // 节点自己就在容器层上（根，或根与 ZONE 之间）：单元记根。
+        None => (root.clone(), "root".to_string(), Some(root.clone()), root != refno),
     }
 }
 
@@ -421,8 +502,14 @@ pub fn execute(
     tasks.set_units_done(task_id, 4);
     let compare_started = Instant::now();
     let mut mismatches_all = Vec::new();
-    match compare_rvms(&task_dir) {
-        Ok(judgement) => {
+    let mut elements = None;
+    match compare_rvms_with_elements(
+        &task_dir,
+        &e3d_model::rvm_compare::CompareScope::All,
+        spec,
+        &resolved,
+    ) {
+        Ok((judgement, checks)) => {
             let (page_mismatches, truncated) = judgement.page_mismatches();
             report.verdict = judgement.verdict.as_str().to_string();
             report.message = verdict_message(judgement.verdict, &judgement.counts);
@@ -432,6 +519,7 @@ pub fn execute(
             report.mismatches_truncated = truncated;
             report.centreline_only_baseline = judgement.centreline_only_baseline;
             mismatches_all = judgement.mismatches;
+            elements = Some(page_element_facts(tree, &spec.refno, checks));
         }
         Err(message) => {
             report.stage = STAGE_COMPARE.to_string();
@@ -444,6 +532,7 @@ pub fn execute(
         report,
         mismatches: mismatches_all,
         task_dir,
+        elements,
     }
 }
 
@@ -490,9 +579,13 @@ pub(crate) struct ResolvedNode {
     sesno: u32,
     noun: String,
     name: String,
-    /// SITE 在 MDB 全部 SITE 根里的序号（1 起，[`DirectTreeService::roots`] 的顺序）。
-    /// 无名 SITE 的 E3D 显示名 `SITE n of WORLD /*` 按整个 MDB 数，单库数不出来。
+    /// 根所在 SITE（根自己，或根的 SITE 祖先）在 MDB 全部 SITE 根里的序号（1 起，
+    /// [`DirectTreeService::roots`] 的顺序）。无名 SITE 的 E3D 显示名 `SITE n of WORLD /*` 按整个
+    /// MDB 数，单库数不出来。SITE 有名、或属主链上没有 SITE（APPLDW 一类的根）时为 `None`。
     world_ordinal: Option<usize>,
+    /// [`Self::world_ordinal`] 数的那个无名 SITE 的 refno（`a/b`）：基准成员的显示名逆解回 refno 时，
+    /// `SITE n of WORLD /*` 只认它。
+    unnamed_site: Option<String>,
 }
 
 /// 生成时解库号的目录：E3D 会话主项目的 `<代号>000`。
@@ -539,17 +632,33 @@ pub(crate) fn resolve_node(
         .to_path_buf();
     let noun = tree.noun_of(refno).unwrap_or_default();
     let name = tree.name_of(refno).unwrap_or_default();
-    let world_ordinal = if noun.eq_ignore_ascii_case("SITE") {
-        let sites: Vec<RefU64> = tree
-            .roots()
-            .map_err(|error| format!("读 MDB 的 SITE 根表失败：{error:#}"))?
-            .into_iter()
-            .map(|site| site.refno.refno())
-            .collect();
-        world_ordinal(&sites, refno)
+    let site = if noun.eq_ignore_ascii_case("SITE") {
+        Some(refno)
     } else {
-        None
+        tree.ancestors(refno)
+            .map_err(|error| format!("上溯 {} 的属主链失败：{error:#}", spec.refno))?
+            .into_iter()
+            .map(|node| node.refno())
+            .find(|node| {
+                tree.noun_of(*node)
+                    .is_ok_and(|noun| noun.eq_ignore_ascii_case("SITE"))
+            })
     };
+    let world_ordinal = match site {
+        Some(site) if tree.name_of(site).is_none() => {
+            let sites: Vec<RefU64> = tree
+                .roots()
+                .map_err(|error| format!("读 MDB 的 SITE 根表失败：{error:#}"))?
+                .into_iter()
+                .map(|site| site.refno.refno())
+                .collect();
+            world_ordinal(&sites, site)
+        }
+        _ => None,
+    };
+    let unnamed_site = world_ordinal
+        .and(site)
+        .map(|site| format!("{}/{}", site.get_0(), site.get_1()));
     Ok(ResolvedNode {
         dbnum,
         db_type: metadata.db_type,
@@ -559,6 +668,7 @@ pub(crate) fn resolve_node(
         noun,
         name,
         world_ordinal,
+        unnamed_site,
     })
 }
 
@@ -588,6 +698,79 @@ pub(crate) struct FusedCompare {
     pub emit_compare: bool,
 }
 
+/// 开库那一套参数（库文件、会话、模板、项目目录、DFS 起点、无名 SITE 的序号）。生成与「基准成员的
+/// 显示名逆解回 refno」（[`baseline_member_sources`]）共用一份：两处读的是同一只库的同一个会话。
+/// 其余开关（写不写 RVM、流式对拍、缓存上限）由调用方在此之上填。
+fn open_options(
+    spec: &RunSpec,
+    node: &ResolvedNode,
+    start_refno: &str,
+    out: PathBuf,
+) -> Result<RvmExportOptions, String> {
+    let template = DirectSchema::template_dir_from_env()
+        .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
+    let attlib = template.join("attlib.dat");
+    if !attlib.is_file() {
+        return Err(format!("模板目录里没有 attlib.dat：{}", attlib.display()));
+    }
+    let root = e3d_model::rvm_export::parse_refno(start_refno)
+        .map_err(|error| format!("refno 无法解析：{error:#}"))?;
+    let project_dir = session_project_dir(spec, node);
+    Ok(RvmExportOptions {
+        attlib,
+        db_file: node.db_file.clone(),
+        template: template.to_path_buf(),
+        db_type: node.db_type.clone(),
+        sesno: (node.sesno > 0).then_some(node.sesno),
+        root: Some(root),
+        out,
+        project_dirs: vec![project_dir.clone()],
+        main_project_dir: Some(project_dir),
+        root_world_ordinal: node.world_ordinal,
+        ..RvmExportOptions::default()
+    })
+}
+
+/// 只在基准里有的那几件按显示名找回库里的元素（`e3d_model::rvm_export::resolve_member_names`）。
+/// 单开一只只读集合，只有对拍出了基准侧的单侧件才会调到；panic 收成 `Err`。
+pub(crate) fn baseline_member_sources(
+    spec: &RunSpec,
+    node: &ResolvedNode,
+    names: &[String],
+) -> Result<Vec<Option<e3d_model::rvm_export::MemberSource>>, String> {
+    let opts = open_options(spec, node, &spec.refno, PathBuf::new())?;
+    let unnamed_site = node
+        .unnamed_site
+        .as_deref()
+        .map(e3d_model::rvm_export::parse_refno)
+        .transpose()
+        .map_err(|error| format!("无名 SITE 的 refno 无法解析：{error:#}"))?;
+    match catch_unwind(AssertUnwindSafe(|| {
+        e3d_model::rvm_export::resolve_member_names(&opts, unnamed_site, names)
+    })) {
+        Ok(Ok(sources)) => Ok(sources),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(panic) => Err(format!("按名字解 refno 时 panic：{}", panic_text(&*panic))),
+    }
+}
+
+/// 把比对报告摊成构件级结果：生成侧按成员出处接 refno，基准侧按显示名解。解名字那一步失败只告警
+/// （标准错误），那几条照样留着、`refno` 空着。
+fn element_checks_of(
+    report: &e3d_model::rvm_compare::CompareReport,
+    sources: &[e3d_model::rvm_export::MemberSource],
+    spec: &RunSpec,
+    node: &ResolvedNode,
+) -> Vec<element::ElementCheck> {
+    let mut checks = element::element_checks(report, sources);
+    if let Err(message) = element::resolve_baseline_side(&mut checks, |names| {
+        baseline_member_sources(spec, node, names)
+    }) {
+        eprintln!("警告：={}：{}", spec.refno, redact(&message, &spec.password));
+    }
+    checks
+}
+
 /// `element_cache_limit`：池级元素缓存上限（条），0 = vendor 默认 200_000——内存/性能旋钮。
 pub(crate) fn generate_ours(
     spec: &RunSpec,
@@ -613,35 +796,16 @@ pub(crate) fn generate_ours_scoped(
     element_cache_limit: usize,
     scope: Option<&batch::ScopeArg>,
 ) -> Result<(), String> {
-    let template = DirectSchema::template_dir_from_env()
-        .map_err(|error| format!("打不开 schema 模板目录：{error:#}"))?;
-    let attlib = template.join("attlib.dat");
-    if !attlib.is_file() {
-        return Err(format!("模板目录里没有 attlib.dat：{}", attlib.display()));
-    }
     let ours = task_dir.join("ours");
     std::fs::create_dir_all(&ours).map_err(|error| format!("建输出目录失败：{error}"))?;
     // DFS 起点：`--scope` 给了就是选中节点，否则还是根。
     let start_refno = scope.map_or(spec.refno.as_str(), |scope| scope.refno());
-    let root = e3d_model::rvm_export::parse_refno(start_refno)
-        .map_err(|error| format!("refno 无法解析：{error:#}"))?;
-    let project_dir = session_project_dir(spec, node);
     let mut opts = RvmExportOptions {
-        attlib,
-        db_file: node.db_file.clone(),
-        template: template.to_path_buf(),
-        db_type: node.db_type.clone(),
-        sesno: (node.sesno > 0).then_some(node.sesno),
-        root: Some(root),
-        out: ours.clone(),
-        project_dirs: vec![project_dir.clone()],
-        main_project_dir: Some(project_dir),
-        root_world_ordinal: node.world_ordinal,
         rvm: fused.is_none_or(|fused| fused.emit_rvm),
         compare_baseline: fused.map(|fused| fused.baseline.clone()),
         compare_window_bytes: fused.map(|fused| fused.window_bytes).unwrap_or_default(),
         element_cache_limit,
-        ..RvmExportOptions::default()
+        ..open_options(spec, node, start_refno, ours.clone())?
     };
     if let Some(scope) = scope {
         let (compare_scope, anchor) = scope_compare_scope(&opts, scope)?;
@@ -709,6 +873,10 @@ pub(crate) fn generate_ours_scoped(
                     .map_err(|error| format!("写 compare.json 失败：{error}"))?;
             }
         }
+        // 构件级结果（每个带几何的构件一条，通过的也有）同样经文件交给父进程：`element-checks.json`。
+        // 先写它、再写 judgement.json——父进程拿后者当「比对出了结果」的物证。
+        let checks = element_checks_of(report, &outcome.member_sources, spec, node);
+        element::write_checks(task_dir, &checks)?;
         let judgement = judge_report_full(report);
         let judgement_out = task_dir.join("judgement.json");
         serde_json::to_writer_pretty(
@@ -719,6 +887,10 @@ pub(crate) fn generate_ours_scoped(
             &judgement,
         )
         .map_err(|error| format!("判定结果无法序列化：{error}"))?;
+    } else {
+        // 不走生成即比对：比对在生成之后按文件做，那时手里只有 generated.rvm（里面没有 refno）。
+        // 把每个成员的出处落在旁边，比对那一步按成员路径接回来。
+        element::write_sources(task_dir, &outcome.member_sources)?;
     }
     Ok(())
 }
@@ -913,6 +1085,32 @@ pub(crate) fn compare_rvms_scoped(
     task_dir: &Path,
     scope: &e3d_model::rvm_compare::CompareScope,
 ) -> Result<Judgement, String> {
+    compare_rvm_report(task_dir, scope).map(|report| judge_report_full(&report))
+}
+
+/// [`compare_rvms_scoped`] 加构件级结果：同一份报告既判色、也摊成每个构件一条。生成侧的 refno 从
+/// 生成时落下的 `ours/member-sources.json` 按成员路径接；那份文件不在（加它之前生成的产物目录）时
+/// 生成侧的构件都记成没解出 refno。
+pub(crate) fn compare_rvms_with_elements(
+    task_dir: &Path,
+    scope: &e3d_model::rvm_compare::CompareScope,
+    spec: &RunSpec,
+    node: &ResolvedNode,
+) -> Result<(Judgement, Vec<element::ElementCheck>), String> {
+    let report = compare_rvm_report(task_dir, scope)?;
+    let sources = element::read_sources(task_dir).unwrap_or_else(|message| {
+        eprintln!("警告：={}：{message}（生成侧的构件记成没解出 refno）", spec.refno);
+        Vec::new()
+    });
+    let checks = element_checks_of(&report, &sources, spec, node);
+    Ok((judge_report_full(&report), checks))
+}
+
+/// 按文件比对两份 RVM，落 `compare.json`，交回整份报告。
+fn compare_rvm_report(
+    task_dir: &Path,
+    scope: &e3d_model::rvm_compare::CompareScope,
+) -> Result<e3d_model::rvm_compare::CompareReport, String> {
     let baseline = task_dir.join("e3d.rvm");
     let generated = task_dir.join("ours").join("generated.rvm");
     let out = task_dir.join("compare.json");
@@ -936,7 +1134,7 @@ pub(crate) fn compare_rvms_scoped(
             .flush()
             .map_err(|error| format!("写 compare.json 失败：{error}"))?;
     }
-    Ok(judge_report_full(&report))
+    Ok(report)
 }
 
 pub(crate) fn driver_for(spec: &RunSpec) -> E3dDriver {
@@ -1323,6 +1521,68 @@ mod tests {
             assert_eq!(from_struct.3, from_json.3);
             assert_eq!(from_struct.4, from_json.4);
         }
+    }
+
+    /// 页面上比的节点归到哪个单元名下：与批量划分单元同一条规则（根往下第一个不是纯容器的节点）。
+    /// 节点就是单元或就是根算整个单元核对过；在单元之下、或夹在根与单元之间的容器层上算只核对了一块。
+    #[test]
+    fn a_page_node_is_filed_under_the_same_unit_the_batch_would_use() {
+        let chain = |nodes: &[(&str, &str)]| -> Vec<(String, String)> {
+            nodes
+                .iter()
+                .map(|(refno, noun)| (refno.to_string(), noun.to_string()))
+                .collect()
+        };
+        let site = [
+            ("1/40", "ELBO"),
+            ("1/30", "BRAN"),
+            ("1/20", "PIPE"),
+            ("1/10", "ZONE"),
+            ("1/2", "SITE"),
+            ("1/1", "WORL"),
+        ];
+        let located = |from: usize| {
+            let lineage = chain(&site[from..]);
+            locate_unit(&lineage[0].0.clone(), &lineage)
+        };
+        let unit = |unit: &str, kind: &str, root: &str, scoped: bool| {
+            (
+                unit.to_string(),
+                kind.to_string(),
+                Some(root.to_string()),
+                scoped,
+            )
+        };
+        assert_eq!(located(0), unit("1/10", "zone", "1/2", true), "ZONE 之下的构件");
+        assert_eq!(located(2), unit("1/10", "zone", "1/2", true), "ZONE 之下的 PIPE");
+        assert_eq!(located(3), unit("1/10", "zone", "1/2", false), "就是那个 ZONE");
+        assert_eq!(located(4), unit("1/2", "root", "1/2", false), "就是那个 SITE");
+
+        // APPLDW 下经 APPLDA、APPDAR 两层才到 ZONE；夹在中间的容器层记在根名下、只算一块。
+        let appl = chain(&[
+            ("2/5", "ZONE"),
+            ("2/4", "APPDAR"),
+            ("2/3", "APPLDA"),
+            ("2/2", "APPLDW"),
+            ("2/1", "WORL"),
+        ]);
+        assert_eq!(locate_unit("2/5", &appl), unit("2/5", "zone", "2/2", false));
+        assert_eq!(
+            locate_unit("2/3", &appl[2..]),
+            unit("2/2", "root", "2/2", true)
+        );
+        // 根下不在任何 ZONE 里的子节点是兜底单元。
+        let loose = chain(&[("3/9", "BOX"), ("3/3", "STRU"), ("3/2", "SITE"), ("3/1", "WORL")]);
+        assert_eq!(locate_unit("3/9", &loose), unit("3/3", "fallback", "3/2", true));
+        // 属主链到不了 WORLD：单元记节点自己。
+        assert_eq!(
+            locate_unit("9/9", &chain(&[("9/9", "EQUI")])),
+            ("9/9".to_string(), "node".to_string(), None, false)
+        );
+        assert_eq!(
+            locate_unit("9/9", &[]),
+            ("9/9".to_string(), "node".to_string(), None, false)
+        );
     }
 
     #[test]

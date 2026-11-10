@@ -80,11 +80,103 @@ enum Command {
     /// 不拿锁是关键：`run_app` 一上来就 `acquire_process_instance_lock`，若这个
     /// 子命令也走那条路，服务跑着时它根本执行不了——而那正是唯一想用它的时候。
     Trace(TraceArgs),
-    /// 批量 RVM 对拍：给库号与 E3D 连接信息，自动枚举 SITE / APPLDW 根，E3D TTY 导基准、
-    /// 生成、比对、汇总。与服务一样按工作目录读 `DbOption.toml`；不拿实例锁，服务跑着也能用。
+    /// 批量 RVM 对拍：给库号与 E3D 连接信息，自动枚举 SITE / APPLDW 根（`--unit zone` 时再按 ZONE
+    /// 划成比对单元），E3D TTY 导基准、生成、比对、汇总。与服务一样按工作目录读 `DbOption.toml`；
+    /// 不拿实例锁，服务跑着也能用。
     ///
     /// 全部根都是 pass / empty 时退出码 0，否则 1；明细在 `<out>/summary.json`。
     RvmCheck(RvmCheckArgs),
+    /// 查库里的 RVM 对拍结果（`rvm_check_run` / `rvm_check_mismatch` / `rvm_check_element`）。直接连
+    /// `DbOption.toml` 指的那台库，只读，服务不必开着；应答与 `GET /api/v1/rvm-check/…` 同一份 JSON。
+    RvmCheckQuery(RvmCheckQueryArgs),
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RvmCheckQueryKind {
+    /// 按上级根（SITE / APPLDW）汇总：每批每个根一行，带单元数、各终态个数、计数合计、没过的单元。
+    Rollup,
+    /// 运行记录：一个根 / 单元一行，最新在前。
+    Runs,
+    /// 差异明细：一条差异一行。
+    Mismatches,
+    /// 差异按原因种类计数，多的在前。
+    Reasons,
+    /// 构件级结果（`rvm_check_element`）：一个带几何的构件一行，通过的也有。`--refno` 给构件自己的
+    /// refno，取它那一行加记在它名下的派生件（隐式管身）。
+    Elements,
+    /// 构件级结果按判档计数，按运行与单元分组；每组的 counts 与运行记录里的 counts 同一个形状。
+    ElementGrades,
+}
+
+#[derive(clap::Args)]
+struct RvmCheckQueryArgs {
+    /// 查什么。
+    #[arg(value_enum)]
+    kind: RvmCheckQueryKind,
+    /// 批次编号：跑完时打印的 batch_id，即产物目录的最后两级。
+    #[arg(long, value_name = "ID")]
+    batch_id: Option<String>,
+    /// 上级根（SITE / APPLDW）的 refno：它自己那一行，加上它下面的全部单元。
+    #[arg(long, value_name = "REF")]
+    root: Option<String>,
+    /// 根 / 单元自己的 refno；elements、element-grades 时是构件自己的 refno。
+    #[arg(long, value_name = "REF")]
+    refno: Option<String>,
+    /// 构件所在的核对单元（ZONE / 兜底单元；整根跑的是 SITE / APPLDW）的 refno（elements、element-grades）。
+    #[arg(long, value_name = "REF")]
+    unit_refno: Option<String>,
+    /// 判档：exact / chord / reference_artifact / film / off / only_baseline / only_generated /
+    /// unkeyable_baseline / unkeyable_generated / centreline_only / container_*（elements、element-grades）。
+    #[arg(long)]
+    grade: Option<String>,
+    /// 只看通过的 / 没通过的（elements、element-grades）。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    passed: Option<bool>,
+    /// 只看图元种类一致的 / 不一致的（elements、element-grades）。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    kind_match: Option<bool>,
+    /// 只看派生件（没有自己 refno 的隐式管身一类）/ 只看有自己 refno 的（elements、element-grades）。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    derived: Option<bool>,
+    /// 只看 refno 解出来的 / 没解出来的（elements、element-grades）。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    refno_resolved: Option<bool>,
+    /// 库号。
+    #[arg(long, value_name = "N")]
+    dbnum: Option<u32>,
+    /// 单元种类：root / zone / fallback（rollup、runs）。
+    #[arg(long, value_name = "KIND")]
+    unit: Option<String>,
+    /// 终态：pass / empty / kind_differ / fail / no-baseline / gen-failed …（rollup、runs）。
+    #[arg(long)]
+    status: Option<String>,
+    /// 三色：pass / kind_differ / fail（rollup、runs）。
+    #[arg(long)]
+    verdict: Option<String>,
+    /// 某一次运行的 run_id（mismatches、reasons、elements、element-grades）。
+    #[arg(long, value_name = "ID")]
+    run_id: Option<String>,
+    /// 构件的 noun（mismatches、reasons、elements、element-grades）。
+    #[arg(long)]
+    noun: Option<String>,
+    /// 差异分类：off / kind_differ / only_baseline / only_generated …（mismatches、reasons）。
+    #[arg(long)]
+    category: Option<String>,
+    /// 原因种类：aabb_shifted / missing_implied_tube …（mismatches、reasons）。
+    #[arg(long, value_name = "KIND")]
+    reason_kind: Option<String>,
+    /// error / warning / info（mismatches、reasons）；elements、element-grades 另有 ok。
+    #[arg(long)]
+    severity: Option<String>,
+    /// 最多返回多少行：runs 缺省 50，mismatches、elements 缺省 500，上限 5000。
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+    /// 跳过前多少行（mismatches、elements）。
+    #[arg(long, value_name = "N")]
+    offset: Option<usize>,
+    /// 把 JSON 写进这个文件；不给就打到标准输出（标准输出只有这一份 JSON，可以直接接管道）。
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -97,6 +189,14 @@ enum RvmCheckStage {
     Generate,
     /// 只比对产物目录里已有的基准与生成物。
     Compare,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RvmCheckUnit {
+    /// WORLD 下的 SITE / APPLDW 各成一个比对单元（现状）。
+    Root,
+    /// 这些根下的每个 ZONE 各成一个比对单元：各自导基准、各自生成即比对。
+    Zone,
 }
 
 #[derive(clap::Args)]
@@ -119,6 +219,15 @@ struct RvmCheckArgs {
     /// 只取 SITE 类型的根（缺省 SITE + APPLDW，两类合起来才是整库）。
     #[arg(long)]
     site_only: bool,
+    /// 比对单元。`zone`：SITE / APPLDW 下的每个 ZONE 各成一个单元（APPLDW 下经 APPLDA、APPDAR
+    /// 两层才到 ZONE；不在任何 ZONE 里的子节点各成一个兜底单元），每个单元单独用 E3D 导基准、
+    /// 单独生成即比对、不写 generated.rvm。只支持 --stage full / export。
+    /// `--only` 可以点名单元，也可以点名上级 SITE / APPLDW（选中它下面的全部单元）。
+    #[arg(long, value_enum, default_value_t = RvmCheckUnit::Root)]
+    unit: RvmCheckUnit,
+    /// 只列出比对单元（写 `<out>/units.json`，打印每个上级根划出多少单元），不碰 E3D、不生成。
+    #[arg(long)]
+    list_units: bool,
     /// 产物目录（缺省 `output/rvm-check-batch/<时间戳>`）。
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
@@ -175,12 +284,14 @@ struct RvmCheckArgs {
     #[arg(long)]
     no_store: bool,
     /// 生成即比对：成员流直喂流式对拍，`generated.rvm` 不必为对拍而写。
-    /// 只在 --baseline-dir 模式成立（基准先于生成在盘上）。
+    /// 每个根先等它的基准就位（--baseline-dir 放好，或 E3D 导出完）再生成，缺基准就不生成。
+    /// 只在 --stage full 成立；--unit zone 固定打开。
     #[arg(long)]
     fused_compare: bool,
-    /// 子进程是否写 `generated.rvm`（--emit-rvm=false 仅在 --fused-compare 下成立）。
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    emit_rvm: bool,
+    /// 子进程是否写 `generated.rvm`。不给：生成即比对时不写，其余照写。
+    /// --emit-rvm false 仅在生成即比对下成立。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    emit_rvm: Option<bool>,
     /// 比对内存预算（MB），按根算：只管比对，不含生成占的内存。0 = 不设预算。
     ///
     /// 现状：这个值目前**只映射到 vendor 的核对窗口**（`RvmExportOptions.compare_window_bytes`），
@@ -283,6 +394,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Version(args)) => return print_version(&args),
         Some(Command::Trace(args)) => return fetch_trace(&args),
         Some(Command::RvmCheck(args)) => return run_rvm_check(args),
+        Some(Command::RvmCheckQuery(args)) => return run_rvm_check_query(args),
         Some(Command::Serve(args)) => args,
         None => ServeArgs::default(),
     };
@@ -317,7 +429,7 @@ fn main() -> anyhow::Result<()> {
 /// 批量对拍。同步跑完整批（E3D、生成子进程、比对都是阻塞调用），不进 tokio、不拿实例锁。
 fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
     use aios_database::rvm_check::RunInput;
-    use aios_database::rvm_check::batch::{self, BatchOptions, ChildOptions, Stage};
+    use aios_database::rvm_check::batch::{self, BatchOptions, ChildOptions, Stage, Unit};
 
     let stage = match args.stage {
         RvmCheckStage::Full => Stage::Full,
@@ -325,6 +437,11 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         RvmCheckStage::Generate => Stage::Generate,
         RvmCheckStage::Compare => Stage::Compare,
     };
+    let unit = match args.unit {
+        RvmCheckUnit::Root => Unit::Root,
+        RvmCheckUnit::Zone => Unit::Zone,
+    };
+    let (fused_compare, emit_rvm) = batch::fused_and_emit(unit, args.fused_compare, args.emit_rvm);
     let password = args
         .password
         .clone()
@@ -367,7 +484,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
             out,
             gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
             compare_baseline: args.compare_baseline.clone(),
-            emit_rvm: args.emit_rvm,
+            emit_rvm: args.emit_rvm.unwrap_or(args.compare_baseline.is_none()),
             compare_memory_mb: args.compare_memory_mb,
             element_cache: args.element_cache,
             emit_compare: args.emit_compare,
@@ -382,6 +499,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         only: args.only.clone(),
         scope,
         site_only: args.site_only,
+        unit,
+        list_units: args.list_units,
         out,
         resume: args.resume,
         force: args.force,
@@ -392,8 +511,8 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         min_commit_free_gb: args.min_commit_free_gb,
         gen_timeout: std::time::Duration::from_secs(args.gen_timeout_secs),
         e3d_timeout: std::time::Duration::from_secs(args.e3d_timeout_secs),
-        fused_compare: args.fused_compare,
-        emit_rvm: args.emit_rvm,
+        fused_compare,
+        emit_rvm,
         compare_memory_mb: args.compare_memory_mb,
         element_cache: args.element_cache,
         emit_compare: args.emit_compare,
@@ -402,6 +521,75 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
     })?;
     if !outcome.clean {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// 查库里的对拍结果。同步跑完：自己连一次库、只读，不进 tokio、不拿实例锁。
+fn run_rvm_check_query(args: RvmCheckQueryArgs) -> anyhow::Result<()> {
+    use aios_database::rvm_check::store::{
+        ElementFilter, MismatchFilter, Query, RunFilter, query_blocking,
+    };
+
+    let runs = || RunFilter {
+        refno: args.refno.clone(),
+        root_refno: args.root.clone(),
+        unit: args.unit.clone(),
+        dbnum: args.dbnum,
+        verdict: args.verdict.clone(),
+        status: args.status.clone(),
+        batch_id: args.batch_id.clone(),
+        limit: args.limit,
+        ..RunFilter::default()
+    };
+    let mismatches = || MismatchFilter {
+        run_id: args.run_id.clone(),
+        refno: args.refno.clone(),
+        root_refno: args.root.clone(),
+        dbnum: args.dbnum,
+        batch_id: args.batch_id.clone(),
+        category: args.category.clone(),
+        reason_kind: args.reason_kind.clone(),
+        noun: args.noun.clone(),
+        severity: args.severity.clone(),
+        limit: args.limit,
+        offset: args.offset,
+        ..MismatchFilter::default()
+    };
+    let elements = || ElementFilter {
+        refno: args.refno.clone(),
+        unit_refno: args.unit_refno.clone(),
+        root_refno: args.root.clone(),
+        dbnum: args.dbnum,
+        batch_id: args.batch_id.clone(),
+        run_id: args.run_id.clone(),
+        noun: args.noun.clone(),
+        grade: args.grade.clone(),
+        severity: args.severity.clone(),
+        passed: args.passed,
+        kind_match: args.kind_match,
+        derived: args.derived,
+        refno_resolved: args.refno_resolved,
+        limit: args.limit,
+        offset: args.offset,
+        ..ElementFilter::default()
+    };
+    let query = match args.kind {
+        RvmCheckQueryKind::Rollup => Query::Rollup(runs()),
+        RvmCheckQueryKind::Runs => Query::Runs(runs()),
+        RvmCheckQueryKind::Mismatches => Query::Mismatches(mismatches()),
+        RvmCheckQueryKind::Reasons => Query::Reasons(mismatches()),
+        RvmCheckQueryKind::Elements => Query::Elements(elements()),
+        RvmCheckQueryKind::ElementGrades => Query::ElementGrades(elements()),
+    };
+    let answer = query_blocking(&query)?;
+    let text = serde_json::to_string_pretty(&answer)?;
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &text)?;
+            println!("{} 行 → {}", answer["count"], path.display());
+        }
+        None => println!("{text}"),
     }
     Ok(())
 }
