@@ -537,8 +537,8 @@ fn wnoevt_no_event_names() -> &'static HashSet<String> {
 ///
 /// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
 /// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
-/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `BRAD CMPR DIR ELDATA FILL GTYP HREF HSPE JFRE MINBEN NGMR OUTD
-/// PKEY PSPE TREF UKEY VXREF` 十七个（core 不重画、我们却真拿来生成的输入），其余 3924 个都放行。其中 11 个被
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `BRAD CMPR DIR ELDATA FILL GTYP HREF HSPE JFRE MINBEN NARE NGMR
+/// OUTD PKEY PSPE TREF UKEY VXREF` 十八个（core 不重画、我们却真拿来生成的输入），其余 3923 个都放行。其中 11 个被
 /// 手写表登记成几何 / 级联输入（`DKEY DDPR FSPREF SCREF STYP CURD PTYP` 与 `SIZE MAXA ORRF PTOF`）：
 /// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
 /// [`tests::the_two_votes_override_the_hand_tables_for_exactly_eleven_names`] 逐个点名钉住，名单变了就得重新问
@@ -2627,12 +2627,12 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十七个，全来自 e3d-model：`DIR` catalogue_point、
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十八个，全来自 e3d-model：`DIR` catalogue_point、
     /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
     /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN` 与连接弯半径 `BRAD`、GENPRI 归档里的 B-rep `ELDATA`、跨管分支点接管的
-    /// `HREF`/`TREF`（route）、吊架与竖井 spec 门 `HSPE`/`PSPE`（route / pipeline）——core 会话内不为它们
-    /// 重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
-    /// 不在（S6 「`NAME` 等仍放行」的前提）。
+    /// `HREF`/`TREF`（route）、吊架与竖井 spec 门 `HSPE`/`PSPE`（route / pipeline）、PJOI 现算标架找目录件
+    /// 中性轴线的 `NARE`（datum）——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；
+    /// 老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
         let mut zero: Vec<&str> = generation_read_set()
@@ -2645,7 +2645,7 @@ mod tests {
             zero,
             [
                 "BRAD", "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "HREF", "HSPE", "JFRE", "MINBEN",
-                "NGMR", "OUTD", "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
+                "NARE", "NGMR", "OUTD", "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
             ]
         );
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2705,7 +2705,10 @@ mod tests {
         // 2026-11-10：e3d-model 并入 `fix/aps-cable-rnode`（合并提交 `c9daddb`）。`aedf45f`（电缆几何转正）起 cable 读
         // 路由节点的 `RNTYPE`（只有 OFFS 型才算偏移）与所在 CWBRAN 的 `BRAD`（连接弯半径 = `BRAD + VWIDT / 2`）
         // （201）。`BRAD` 是字典 DCHC=0，上面那一列从 16 个变成 17 个；`RNTYPE` 是 DCHC=4。
-        assert_eq!(generation_read_set().len(), 201, "读取集合条数漂移");
+        // 2026-11-10：e3d-model `fix/pjoi-orientation`（PJOI 的朝向照 Core3D 的 `GJTORI` + `GNAORI` 现算，
+        // e3d-model #34）起 datum 读目录侧 p-line 集的 `NARE`（指自家中性轴线的引用，关节的滚转取那条线的 `PLAX`）
+        // （202）。`NARE` 是字典 DCHC=0，上面那一列从 17 个变成 18 个。
+        assert_eq!(generation_read_set().len(), 202, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2982,9 +2985,10 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十七个（第十一个是 GENPRI 归档的 `ELDATA`，
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十八个（第十一个是 GENPRI 归档的 `ELDATA`，
         // 第十二到十五个是 AMS 九库收口带进的 `HREF` / `HSPE` / `PSPE` / `TREF`，第十六个是
-        // 2026-11-06 `JFRE`，第十七个是 2026-11-10 电缆连接弯半径的 `BRAD`），其余全部放行。
+        // 2026-11-06 `JFRE`，第十七个是 2026-11-10 电缆连接弯半径的 `BRAD`，第十八个是同日 PJOI 现算标架
+        // 找中性轴线的 `NARE`），其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2997,7 +3001,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 17,
+            3941 - 18,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
