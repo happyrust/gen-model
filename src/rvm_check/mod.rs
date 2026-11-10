@@ -36,6 +36,10 @@ pub use report::{
     judge_compare, judge_report, judge_report_full, verdict_message,
 };
 
+// 一次比对停在哪一步。库里 `rvm_check_run.stage` 只有这四个取值，页面单根、批量命令
+// （[`batch::status::stage`]）与失败归类（[`store::classify_failure`]）共用这一份，前端的阶段标签
+// 认的也是这四个字面量。「这一步有没有跑完」不靠另起阶段名来说：批量看终态（`compare-failed` 一类），
+// 页面看三色。
 const STAGE_RESOLVE: &str = "resolve";
 const STAGE_OURS: &str = "generate_ours";
 const STAGE_E3D: &str = "e3d_export";

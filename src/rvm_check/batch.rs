@@ -264,6 +264,20 @@ pub mod status {
     pub fn is_compared(status: &str) -> bool {
         matches!(status, PASS | EMPTY | KIND_DIFFER | FAIL)
     }
+
+    /// 这个终态停在哪一步：库里 `rvm_check_run.stage` 的取值，与页面单根同一套四个名字。
+    ///
+    /// **比对失败也是 `compare`**，不另起阶段名：停在比对这一步的，跑没跑完由终态说（`compare-failed`
+    /// 是没跑完，`fail` 是跑完判红）。[`super::super::store::build_rows`] 据此给没跑完的写一行
+    /// `stage_failure`，[`super::super::store::classify_failure`] 按阶段名与报错文本分原因种类
+    /// ——两边认的都是这里交出去的名字。
+    pub fn stage(status: &str) -> &'static str {
+        match status {
+            NO_BASELINE | EXPORTED => super::super::STAGE_E3D,
+            GEN_FAILED | COMMIT_GUARD | TIMEOUT | GENERATED => super::super::STAGE_OURS,
+            _ => super::super::STAGE_COMPARE,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -1609,14 +1623,7 @@ impl RootRecord {
             status::KIND_DIFFER => super::report::VERDICT_KIND,
             _ => super::report::VERDICT_FAIL,
         };
-        let stage = match self.status.as_str() {
-            status::NO_BASELINE => "e3d_export",
-            status::GEN_FAILED | status::COMMIT_GUARD | status::TIMEOUT => "generate_ours",
-            status::COMPARE_FAILED => "compare_failed",
-            status::EXPORTED => "e3d_export",
-            status::GENERATED => "generate_ours",
-            _ => "compare",
-        };
+        let stage = status::stage(&self.status);
         let seconds = |stage: &Option<StageRecord>| stage.as_ref().map_or(0.0, |s| s.seconds);
         let finished_at = self
             .compare
@@ -2966,6 +2973,128 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].reason_kind, "generate_commit_guard");
         assert_eq!(row.mismatch_by_kind["generate_commit_guard"], 1);
+    }
+
+    /// 批量侧给每个终态写的阶段名，归类侧都认得。阶段名只有 `mod.rs` 那四个（页面单根、批量、归类
+    /// 共用同一份常量）；没跑完的终态落库后各有一行 `stage_failure`，原因种类不会掉进兜底的
+    /// `run_failed`；比对失败按报错文本分成五种。哪一侧再另起名字——当初批量写的是 `compare_failed`、
+    /// 归类认的是 `compare-failed`，比对失败于是全落进 `run_failed`——这里就红。
+    #[test]
+    fn every_stage_the_batch_writes_is_one_the_classifier_knows() {
+        use super::super::store::{CATEGORY_STAGE_FAILURE, build_rows};
+        use super::super::{STAGE_COMPARE, STAGE_E3D, STAGE_OURS, STAGE_RESOLVE};
+
+        let every_status = [
+            status::PASS,
+            status::EMPTY,
+            status::KIND_DIFFER,
+            status::FAIL,
+            status::NO_BASELINE,
+            status::GEN_FAILED,
+            status::COMPARE_FAILED,
+            status::COMMIT_GUARD,
+            status::TIMEOUT,
+            status::EXPORTED,
+            status::GENERATED,
+        ];
+        for name in every_status {
+            let stage = status::stage(name);
+            assert!(
+                [STAGE_RESOLVE, STAGE_OURS, STAGE_E3D, STAGE_COMPARE].contains(&stage),
+                "终态 {name} 的阶段名 {stage} 不在那四个里"
+            );
+        }
+        // 库里已有的行与前端的阶段标签认的是这几个字面量：改常量的值也要过这一关。
+        assert_eq!(status::stage(status::COMPARE_FAILED), "compare");
+        assert_eq!(status::stage(status::FAIL), "compare");
+        assert_eq!(status::stage(status::NO_BASELINE), "e3d_export");
+        assert_eq!(status::stage(status::GEN_FAILED), "generate_ours");
+
+        let spec = run_spec();
+        // 一条没跑完的记录走一遍入库的摊行：恰好一行 `stage_failure`，交回它的原因种类。
+        let failure_kind = |name: &str, message: &str| {
+            let mut record = RootRecord::new(&root_job(7999, "1/2"));
+            record.status = name.to_string();
+            record.message = message.to_string();
+            let facts = record.run_facts("b", &spec);
+            assert_eq!(facts.stage, status::stage(name));
+            assert_eq!(facts.status, name);
+            assert_eq!(facts.verdict, "fail");
+            let (row, rows) = build_rows(&facts);
+            assert_eq!(rows.len(), 1, "{name}：{message}");
+            assert_eq!(rows[0].category, CATEGORY_STAGE_FAILURE, "{name}：{message}");
+            assert_eq!(rows[0].reason, message);
+            assert_eq!(row.mismatch_total, 1);
+            rows[0].reason_kind.clone()
+        };
+
+        // 每个没跑完的终态：阶段认得出。这里只管认不认得出阶段，细到哪一种由报错文本定。
+        for (name, message) in [
+            (status::NO_BASELINE, "基准目录里没有 ams7999_1_2.rvm"),
+            (status::GEN_FAILED, "生成子进程退出码 1"),
+            (
+                status::COMMIT_GUARD,
+                "可提交内存余量低于 1.5 GB，已杀掉生成子进程",
+            ),
+            (status::TIMEOUT, "生成超过 1200 秒，已杀掉子进程"),
+            (status::COMPARE_FAILED, "没有跑到这个根"),
+        ] {
+            assert_ne!(
+                failure_kind(name, message),
+                "run_failed",
+                "终态 {name} 落库后阶段没被认出来"
+            );
+        }
+
+        // 比对失败的五种。报错文本是批量里实际会出现的那几句：比对器（vendor `rvm_compare`）报的三句
+        // 外面包着「比对没有跑完：」，panic 有两处来源，其余的归「其他比对失败」。
+        for (message, kind) in [
+            (
+                "比对时 panic：called `Option::unwrap()` on a `None` value",
+                "compare_panic",
+            ),
+            (
+                "处理根时 panic：index out of bounds: the len is 0 but the index is 0",
+                "compare_panic",
+            ),
+            (
+                "比对没有跑完：基准里主键重复：Name(\"/A\")——`n of owner` 序号不唯一，对拍口径不成立",
+                "compare_duplicate_key",
+            ),
+            (
+                "比对没有跑完：生成侧主键重复：Name(\"/A\")",
+                "compare_duplicate_key",
+            ),
+            (
+                "比对没有跑完：生成侧 E3D 名称重复：/A",
+                "compare_duplicate_name",
+            ),
+            (
+                "比对没有跑完：e3d.rvm 里有 3 条记录的 bbox 帧认不出来——先查 rvm_read，别拿它当判据",
+                "compare_unknown_bbox_frame",
+            ),
+            ("比对没有跑完：解析 RVM 失败: e3d.rvm", "compare_failed"),
+            (
+                "解析 judgement.json 失败：EOF while parsing a value at line 1 column 0",
+                "compare_failed",
+            ),
+            ("没有跑到这个根", "compare_failed"),
+        ] {
+            assert_eq!(
+                failure_kind(status::COMPARE_FAILED, message),
+                kind,
+                "{message}"
+            );
+        }
+
+        // 比对跑完、判红、一件都没配上：阶段同是 `compare`，终态是 `fail`，不算没跑完。
+        let mut unpaired = RootRecord::new(&root_job(7999, "1/3"));
+        unpaired.status = status::FAIL.to_string();
+        unpaired.counts = Some(RvmCounts::default());
+        unpaired.message = verdict_message(RvmVerdict::Fail, &RvmCounts::default());
+        let (_, rows) = build_rows(&unpaired.run_facts("b", &spec));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason_kind, "compare_nothing_paired");
     }
 
     #[test]

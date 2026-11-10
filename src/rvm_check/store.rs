@@ -351,11 +351,14 @@ pub const SOURCE_BATCH: &str = "batch";
 pub const CATEGORY_STAGE_FAILURE: &str = "stage_failure";
 
 /// 某一步没跑完时的原因种类：从阶段名与报错文本里认。
+///
+/// 阶段名是 `rvm_check_run.stage` 的那四个（`super::STAGE_*`），页面单根与批量命令
+/// （[`super::batch::status::stage`]）写的是同一套；认不出的阶段落到兜底的 `run_failed`。
 pub fn classify_failure(stage: &str, message: &str) -> &'static str {
     let text = message.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     match stage {
-        "resolve" => {
+        super::STAGE_RESOLVE => {
             if has(&["不在当前 mdb", "无法解析"]) {
                 "resolve_refno_invalid"
             } else if has(&["模型树"]) {
@@ -364,7 +367,7 @@ pub fn classify_failure(stage: &str, message: &str) -> &'static str {
                 "resolve_failed"
             }
         }
-        "generate_ours" | "generate" | "gen-failed" => {
+        super::STAGE_OURS | "generate" | "gen-failed" => {
             if has(&["超时", "timeout"]) {
                 "generate_timeout"
             } else if has(&["panic"]) {
@@ -384,7 +387,7 @@ pub fn classify_failure(stage: &str, message: &str) -> &'static str {
         "commit-guard" => "generate_commit_guard",
         "timeout" => "generate_timeout",
         "no-baseline" => "baseline_missing",
-        "e3d_export" | "export" => {
+        super::STAGE_E3D | "export" => {
             if has(&["启动脚本"]) {
                 "e3d_launcher_missing"
             } else if has(&["没有启动"]) {
@@ -397,7 +400,9 @@ pub fn classify_failure(stage: &str, message: &str) -> &'static str {
                 "e3d_export_failed"
             }
         }
-        "compare" | "compare-failed" => {
+        // 比对这一步没跑完：批量的 `compare-failed`（阶段名与跑完的比对同是 `compare`，见
+        // [`build_rows`]）。先认 panic，再认比对器自己报的三句话，剩下的都是「其他比对失败」。
+        super::STAGE_COMPARE => {
             if has(&["panic"]) {
                 "compare_panic"
             } else if has(&["bbox 帧认不出来"]) {
@@ -506,10 +511,13 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
     };
 
     // 某一步没跑完：一行 stage_failure。比对跑完但判红的不算（它的差异在清单里）。
+    // 停在比对这一步的两种情形阶段名相同，靠终态分：批量的 `compare-failed` 是比对没跑完，照样留一行，
+    // 原因种类按报错文本分（panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 其他）。
+    let compare_unfinished = facts.status == super::batch::status::COMPARE_FAILED;
     if facts.verdict != super::report::VERDICT_PASS
         && facts.verdict != super::report::VERDICT_KIND
         && facts.mismatches.is_empty()
-        && facts.stage != "compare"
+        && (facts.stage != super::STAGE_COMPARE || compare_unfinished)
         && !facts.message.is_empty()
     {
         let mut row = base(0);
@@ -527,7 +535,7 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
         // 比对跑完却一件都没配上：主键口径对不上，也要留一行能查到的原因。
         let mut row = base(0);
         row.category = CATEGORY_STAGE_FAILURE.to_string();
-        row.reason_kind = if facts.stage == "compare" {
+        row.reason_kind = if facts.stage == super::STAGE_COMPARE {
             "compare_nothing_paired"
         } else {
             classify_failure(&facts.stage, &facts.message)
@@ -2191,6 +2199,22 @@ mod tests {
             "compare_unknown_bbox_frame"
         );
         assert_eq!(
+            classify_failure("compare", "比对没有跑完：基准里主键重复：Name(\"/A\")"),
+            "compare_duplicate_key"
+        );
+        assert_eq!(
+            classify_failure("compare", "比对没有跑完：生成侧 E3D 名称重复：/A"),
+            "compare_duplicate_name"
+        );
+        assert_eq!(
+            classify_failure("compare", "解析 judgement.json 失败：EOF"),
+            "compare_failed"
+        );
+        // 比对这一步的阶段名只有 `compare` 一种写法：批量侧早先写的 `compare_failed`、这里早先认的
+        // `compare-failed`（那是终态，不是阶段）都不再是阶段名。
+        assert_eq!(classify_failure("compare_failed", "比对时 panic：x"), "run_failed");
+        assert_eq!(classify_failure("compare-failed", "比对时 panic：x"), "run_failed");
+        assert_eq!(
             classify_failure("no-baseline", "基准目录里没有 …"),
             "baseline_missing"
         );
@@ -2198,6 +2222,52 @@ mod tests {
             classify_failure("resolve", "节点 1/2 不在当前 MDB"),
             "resolve_refno_invalid"
         );
+    }
+
+    /// 停在比对这一步的两种情形阶段名都是 `compare`，靠终态分：批量的 `compare-failed` 是比对没跑完，
+    /// 留一行 `stage_failure`、原因种类按报错文本分；跑完却一件都没配上的仍是 `compare_nothing_paired`。
+    #[test]
+    fn a_compare_that_did_not_finish_is_told_apart_from_one_that_paired_nothing() {
+        let stopped = |message: &str| {
+            let mut run = facts("b-1/ams7999/1_4", "1/4", VERDICT_FAIL, Vec::new());
+            run.status = super::super::batch::status::COMPARE_FAILED.to_string();
+            run.message = message.to_string();
+            run.counts = RvmCounts::default();
+            run.centreline_only_baseline.clear();
+            let (row, rows) = build_rows(&run);
+            assert_eq!(row.stage, "compare");
+            assert_eq!(row.status, "compare-failed");
+            assert_eq!(rows.len(), 1, "{message}");
+            assert_eq!(rows[0].category, CATEGORY_STAGE_FAILURE);
+            assert_eq!(rows[0].reason, message);
+            assert_eq!(row.mismatch_by_kind[rows[0].reason_kind.as_str()], 1);
+            rows[0].reason_kind.clone()
+        };
+        assert_eq!(stopped("比对时 panic：index out of bounds"), "compare_panic");
+        assert_eq!(
+            stopped("比对没有跑完：生成侧主键重复：Name(\"/A\")"),
+            "compare_duplicate_key"
+        );
+        assert_eq!(stopped("没有跑到这个根"), "compare_failed");
+
+        // 比对跑完、判红、一件都没配上：终态是 `fail`，不是没跑完。
+        let mut unpaired = facts("b-1/ams7999/1_5", "1/5", VERDICT_FAIL, Vec::new());
+        unpaired.message = "没有配上任何构件".to_string();
+        unpaired.counts = RvmCounts::default();
+        unpaired.centreline_only_baseline.clear();
+        let (_, rows) = build_rows(&unpaired);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason_kind, "compare_nothing_paired");
+
+        // 比对跑完、判红、差异在清单里：不另留 stage_failure。
+        let red = facts(
+            "b-1/ams7999/1_6",
+            "1/6",
+            VERDICT_FAIL,
+            vec![mismatch("off", reason::AABB_SHIFTED, "SJOI 1 /S", "SJOI")],
+        );
+        let (_, rows) = build_rows(&red);
+        assert!(rows.iter().all(|row| row.category != CATEGORY_STAGE_FAILURE));
     }
 
     /// 写两次同一 `run_id` 不留两份；按 refno / 原因种类 / 运行号都查得到；汇总按种类计数。

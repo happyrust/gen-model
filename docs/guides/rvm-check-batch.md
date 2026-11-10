@@ -71,7 +71,7 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 
 | 表 | 一行是什么 | 关键字段 |
 |---|---|---|
-| `rvm_check_run` | 一次比对（一个根 / 单元） | `run_id`（页面是任务号；批量是 `<batch_id>/<tag>/<w0_w1>`，`batch_id` = 产物目录最后两级）、`source`（page / batch）、`refno` `dbnum` `noun` `name`、`unit`（`root` / `zone` / `fallback`）、`root_refno` `root_noun` `root_name`（所在的上级根：单元行是它的 SITE / APPLDW，根行是它自己）、`verdict`（pass / kind_differ / fail）、`status`（更细的终态）、`stage` `message`、`counts`、`mismatch_total` `mismatch_by_kind` `mismatch_by_category`、`seconds` `gen_peak_private_mb`、`gen_ledger`（生成侧 `report.json` 的账本计数：skipped / evidence_pending / centreline_only / unknown_nouns …）、`artifact_dir` `files`、`finished_at` `finished_unix_ms` |
+| `rvm_check_run` | 一次比对（一个根 / 单元） | `run_id`（页面是任务号；批量是 `<batch_id>/<tag>/<w0_w1>`，`batch_id` = 产物目录最后两级）、`source`（page / batch）、`refno` `dbnum` `noun` `name`、`unit`（`root` / `zone` / `fallback`）、`root_refno` `root_noun` `root_name`（所在的上级根：单元行是它的 SITE / APPLDW，根行是它自己）、`verdict`（pass / kind_differ / fail）、`status`（更细的终态）、`stage`（停在哪一步：`resolve` / `generate_ours` / `e3d_export` / `compare`，页面与批量同一套四个名字）、`message`、`counts`、`mismatch_total` `mismatch_by_kind` `mismatch_by_category`、`seconds` `gen_peak_private_mb`、`gen_ledger`（生成侧 `report.json` 的账本计数：skipped / evidence_pending / centreline_only / unknown_nouns …）、`artifact_dir` `files`、`finished_at` `finished_unix_ms` |
 | `rvm_check_mismatch` | 一条差异 | `run_id` `refno`（所在的根 / 单元）`root_refno` `dbnum` `seq`、`category`（off / kind_differ / only_baseline / only_generated / unkeyable_* / container_* / `stage_failure` / `centreline_only`）、**`reason_kind`**（原因种类）、**`reason`**（带数值的一句话）、`severity`（error / warning / info）、`name` `noun` `max_axis_delta_mm` `baseline_kinds` `generated_kinds` `baseline_aabb` `generated_aabb` |
 
 `unit` 与 `root_*` 是 2026-11-10 加的；页面单根，以及此前写进来的批量行没有这几格。按上级根查的时候，
@@ -93,7 +93,14 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | `unkeyable_baseline` / `unkeyable_generated` | 发不出主键（reason 抄的是比对器给的括号说明） |
 | `container_tube_off` / `container_tube_missing_in_generated` / `container_tube_extra_in_generated` | 容器组内逐根账 |
 | `centreline_only` | E3D 只画中心线（`info`，不进判据，只记账） |
-| `generate_timeout` / `generate_commit_guard` / `generate_panic` / `generate_unbalanced` / `e3d_export_no_file` / `e3d_launcher_missing` / `compare_panic` / `baseline_missing` … | 某一步没跑完（`category = stage_failure`，由阶段与报错文本认） |
+| `generate_timeout` / `generate_commit_guard` / `generate_panic` / `generate_unbalanced` / `e3d_export_no_file` / `e3d_launcher_missing` / `baseline_missing` … | 某一步没跑完（`category = stage_failure`，由阶段与报错文本认） |
+| `compare_panic` / `compare_duplicate_key` / `compare_duplicate_name` / `compare_unknown_bbox_frame` / `compare_failed` | 比对这一步没跑完（同是 `stage_failure`）：比对时 panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 其他。批量的终态是 `compare-failed` |
+| `compare_nothing_paired` | 比对跑完了、判红，却一件都没配上（两侧的主键口径对不上） |
+| `run_failed` | 兜底：阶段认不出来。正常不会出现 |
+
+比对这一步的阶段名只有 `compare` 一种写法。停在这一步的有两种情形，靠终态分：`fail` 是比对跑完判红，差异在
+清单里；`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分成上表那五种。
+（2026-11-10 之前批量侧把后一种的阶段写成 `compare_failed`，归类认不出，原因种类全落到 `run_failed`。）
 
 ### 构件级结果：`rvm_check_element`
 

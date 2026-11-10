@@ -1,7 +1,7 @@
 # 实施方案：rvm-check 按 ZONE 生成即比对（tty 逐 ZONE 导出基准，不写 generated.rvm）
 
 - 日期：2026-11-10
-- 状态：2026-11-10 用户确认方案与第 8 节缺省。阶段 1（任务 1–3）代码完成，E3D 当场导出的对账在 ams1112、ams7999、ams7352、ams7333（全部 1062 个 ZONE）上通过，检查点 1 只差和用户过一遍。应用户要求把任务 16（结果入库与查询）提前做完，ams7333 全量已入库并核对过；又加了构件级结果入库（新表 `rvm_check_element`，一个带几何的构件一行，记录 id 由 refno 得出），ams7333 全量 159,876 行对过账。阶段 2–4 未开工。见第 11 节。
+- 状态：2026-11-10 用户确认方案与第 8 节缺省。阶段 1（任务 1–3）代码完成，E3D 当场导出的对账在 ams1112、ams7999、ams7352、ams7333（全部 1062 个 ZONE）上通过，检查点 1 只差和用户过一遍。应用户要求把任务 16（结果入库与查询）提前做完，ams7333 全量已入库并核对过；又加了构件级结果入库（新表 `rvm_check_element`，一个带几何的构件一行，记录 id 由 refno 得出），ams7333 全量 159,876 行对过账。批量「比对失败」的原因种类（gen-model#123）已修。阶段 2–4 未开工。见第 11 节。
 - 代码基线：gen-model `0890e488d`；`../vendor/e3d-model` `db65e1c`。两边相关源码与 HEAD 一致。
 - 依据：2026-11-10 会话的五路只读审核（融合比对、ZONE 单元、tty 导出、`rvm_baseline`、内存预算）。
 - 任务清单写在本文第 6 节，不另建 `tasks/`。
@@ -824,3 +824,46 @@ aios-database rvm-check --dbnum 7333 --fused-compare --install-dir <E3D 安装�
 - 这次往库里写的验证批次留着没删，等用户决定：`element-20261110/` 下 9 个批次，运行行 2137 行，差异行 91 行。构件行现在挂在 `7333-zone-final`（159,876）、`fail-roots`（6288）、`1112-zone`（5135）、`file-compare-8000`（514）四个批次名下；另外五个批次（`7333-zone`、`7333-site`、三个范围批次）的构件行已被后来的运行覆盖，只剩运行行和差异行。
 
 **产物**（都在 `output/rvm-check-zone/element-20261110/` 下）：各批次的产物目录；`logs/`（测试与构建日志、各小批的控制台、对账与抽查结果、`scope-final-evidence.txt`、`scratch/` 草稿库各场景的控制台、8009 重启日志）；`logs-7333/`（每次运行的控制台、每秒采样、`measure.json`、对账与抽查）；脚本 `reconcile.ps1`（对账）、`spot-check.ps1`（refno 抽查）、`guarded-cargo.ps1`（带看门狗的 cargo）；`bin/aios-database.exe`（这次用的 release 二进制，可删）。草稿库、它的产物目录和 `--no-store` 那一遍的产物目录已删，日志留着。
+
+### 2026-11-10：批量「比对失败」的原因种类（gen-model#123）
+
+**现象。** 批量核对里比对这一步没跑完的记录（终态 `compare-failed`），入库后那一行 `stage_failure` 的原因种类一律是兜底的 `run_failed`，看不出是 panic、主键重复还是别的。
+
+**原因。** 同一个阶段有三种写法。批量侧（`batch.rs` 的 `run_facts`）给这类记录写的阶段名是 `compare_failed`；归类侧（`store.rs` 的 `classify_failure`）认的是 `compare` 和 `compare-failed`；页面单根、库里已有的行、前端的阶段标签用的都是 `compare`。
+
+**改法。** 阶段名只留 `compare` 一种。库里 `rvm_check_run.stage` 的取值仍是原来那四个：`resolve` / `generate_ours` / `e3d_export` / `compare`。
+
+- 选 `compare` 的理由：库里 3301 行运行行的阶段只有 `compare`（3299 行）和 `e3d_export`（2 行）；前端的阶段标签表只有这四个名字，运行详情里「停在」那一格直接显示得出；`compare-failed` 本来是终态的名字，不拿来兼作阶段。
+- 停在比对这一步的有两种情形，阶段名相同，靠终态分。`fail` 是比对跑完判红，差异在清单里。`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分五种：`compare_panic`、`compare_duplicate_key`、`compare_duplicate_name`、`compare_unknown_bbox_frame`、`compare_failed`。
+- 四个阶段名只有 `mod.rs` 里那一份常量。页面单根、批量的「终态 → 阶段」、归类侧三处都引用它，不再各写各的字面量。
+
+**改动（未提交）。**
+
+- `src/rvm_check/mod.rs`：四个 `STAGE_*` 常量加说明，值没变。
+- `src/rvm_check/batch.rs`：新增 `status::stage`（终态 → 阶段）；`RootRecord::run_facts` 改用它，`compare-failed` 的阶段从 `compare_failed` 变成 `compare`；新测试 `every_stage_the_batch_writes_is_one_the_classifier_knows`。
+- `src/rvm_check/store.rs`：`classify_failure` 的阶段名改引用常量，比对那一支不再认 `compare-failed`；`build_rows` 按终态认出「比对没跑完」；测试 `failure_kinds_follow_stage_and_message` 补了几条，新测试 `a_compare_that_did_not_finish_is_told_apart_from_one_that_paired_nothing`。
+- `docs/guides/rvm-check-batch.md`：运行行的 `stage` 列出取值；原因种类表补上比对失败的五种、`compare_nothing_paired`、`run_failed`。
+
+**测试。** `cargo test --lib rvm_check`：71 passed、1 ignored（原来 69）。新测试拦不拦得住，各试了一次：把批量侧的阶段名改回 `compare_failed`，红在「阶段名不在那四个里」；把归类侧那一支改成只认 `compare-failed`，红在「落库后阶段没被认出来」。两处都已改回。
+
+**实跑。** 批次 `element-20261110/compare-failed-123`，读文件比对，写进正式库。两个根各给一份故意弄坏的基准（放在产物目录的 `scratch-123/baselines-broken/`，原件没动）：
+
+| 根 | 基准怎么弄坏的 | 终态 / 阶段 | 原因种类 |
+|---|---|---|---|
+| ams8000 `=24384/24932` | 把一个构件改成与另一个同名 | `compare-failed` / `compare` | `compare_duplicate_key` |
+| ams8000 `=24384/46` | 截掉后一半 | `compare-failed` / `compare` | `compare_failed` |
+
+构件表没有动，前后都是 171,813 行。另外三种（panic、E3D 名称重复、bbox 帧认不出来）没有造出真实数据，只有单测。
+
+**库里的旧行。** 改之前查过，没有受影响的行：3301 行运行行里没有终态 `compare-failed` 的，阶段没有 `compare_failed`，差异行里没有 `run_failed`。
+
+**前端。** 不用跟着改。阶段标签、比对失败五个原因种类的标签、`run_failed` 的兜底标签都已经有。`rvmStoreFormat.ts` 里 `stageFailureClass` 的注释和 `rvmStoreFormat.test.ts` 里那条说明还写着「批量的 compare-failed 落库后原因种类是笼统的 run_failed」，已经过时；它「先看终态」的逻辑仍然对。
+
+**发现的同类问题（没改，等用户定）。** 四条都用一条临时测试当场取过证，测试已删，输出在 `logs/issue-123/probe-sibling-kinds.log`。
+
+1. 缺基准（终态 `no-baseline`）的原因种类是 `e3d_export_failed`，不是指南里列的 `baseline_missing`。库里有 2 行（11-08 的 `rvm-check-fused/all` 和 `oldpath-79`，同一个根 `=24384/26547`）。
+2. 批量的生成超时（终态 `timeout`）记成 `generate_failed`，不是 `generate_timeout`。库里没有这样的行。
+3. 页面单根的比对没跑完（例如比对时 panic）记成 `compare_nothing_paired`，与「跑完却一件都没配上」分不开。
+4. 生成即比对时，比对段的报错（基准装载失败、主键重复一类）出在生成子进程里，终态是 `gen-failed`，原因种类是 `generate_failed`。按 ZONE 跑走的就是这条路。
+
+前两条同一个原因：`classify_failure` 里按终态写的那几支（`no-baseline`、`timeout` 等）走不到，因为 `build_rows` 传进去的是阶段名，而批量超时的报错里没有「超时」两个字。让 `build_rows` 先按终态认、再按阶段认，两条一起好。第 3 条要页面侧把「比对没跑完」传给入库。第 4 条要么让归类侧在生成阶段也认比对器那三句话，要么让子进程告诉父进程败在哪一段。
