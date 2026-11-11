@@ -9,8 +9,10 @@
   pwsh -NoProfile -File New-StackRelease.ps1 -Spec <release-spec.json>
   pwsh -NoProfile -File New-StackRelease.ps1 -Spec <release-spec.json> -NoZip     只摆目录、写清单，不压缩
 
-包里的布局（解压出来就是运行目录，stack.toml 里的相对路径都按它写）：
-  stack.ps1  stack.cmd  stack.toml  stack.example.toml
+包里的布局（解压出来就是运行目录，配置里的相对路径都按它写）：
+  stack.ps1  stack.cmd  stack.default.toml  stack.example.toml
+      包里不带 stack.toml：那是用户自己的配置，第一次「开始」时入口照 stack.default.toml 生成；
+      这样换新一版、解压覆盖时不会把用户改过的配置盖掉。
   开始.cmd / start.cmd   停止.cmd / stop.cmd   状态.cmd / status.cmd
   安装和测试说明.md / README.txt   release.json
   bin\        surreal.exe  aios-database.exe  rs-server.exe  VC++ 运行时的 DLL   nginx\nginx.exe  nginx\conf\mime.types
@@ -133,16 +135,27 @@ $n = 0
 foreach ($file in @(Get-ChildItem -LiteralPath $surrealSource -Filter '*.surql' -File -ErrorAction SilentlyContinue)) { Copy-One $file.FullName "resource\surreal\$($file.Name)"; $n += 1 }
 if ($n -eq 0) { Fail "sources.backend_resource 下面没有 surreal\*.surql：$surrealSource" }
 Step "  resource\surreal\：$n 个文件"
-$n = Copy-Tree (Get-Source 'e3d_schema') 'schema'
+# 库结构定义：缺省整个带；说明文件里的 e3d_schema_exclude 可以点名不带的（比如里面的 README.md）。
+$n = Copy-Tree (Get-Source 'e3d_schema') 'schema' @(Opt $s 'e3d_schema_exclude' @())
 Step "  schema\：$n 个文件"
-# plant-ui 网页版。两样不带：config.json（后端读盘优先，一份静态文件会盖掉它按现场配置现算的那份；
-# 入口需要时自己生成）；assets\config\ 下的工程配置（开发机上的本地文件，后端也不从这里发它）。
-$n = Copy-Tree (Get-Source 'plant_ui_web') 'web' @('config.json', 'assets\config\*')
+# plant-ui 网页版。三样不带：config.json（后端读盘优先，一份静态文件会盖掉它按现场配置现算的那份；
+# 入口需要时自己生成）；assets\config\ 下的工程配置（开发机上的本地文件，后端也不从这里发它）；
+# config.example.json（示例配置，里面写着示例的账号口令，运行时用不到）。
+$n = Copy-Tree (Get-Source 'plant_ui_web') 'web' @('config.json', 'assets\config\*', 'config.example.json')
 Step "  web\：$n 个文件"
 
 # ───────────── plant3d-web 的构建产物 ─────────────
-$n = Copy-Tree (Get-Source 'frontend_dist') 'www'
-Step "  www\：$n 个文件"
+# 前端产物里有几样不该给用户的：调试 / 演示页，和一份带开发机路径的演示数据（都是前端仓库 public\ 里现有的东西）。
+# 缺省不带；要换名单，在说明文件里写 frontend_exclude（写成空数组 = 全带）。
+$frontendExclude = @(Opt $s 'frontend_exclude' @('incremental-demo\*', 'dimension-kernel-demo.html', 'dimension-perf.html', 'pms-review-simulator.html', 'test-parquet-7997.html'))
+$frontendSource = Get-Source 'frontend_dist'
+$frontendSkipped = @()
+foreach ($file in @(Get-ChildItem -LiteralPath $frontendSource -Recurse -File -Force)) {
+    $relative = $file.FullName.Substring($frontendSource.TrimEnd('\').Length + 1)
+    foreach ($pattern in $frontendExclude) { if ($relative -like $pattern) { $frontendSkipped += $relative.Replace('\', '/'); break } }
+}
+$n = Copy-Tree $frontendSource 'www' $frontendExclude
+Step "  www\：$n 个文件（没带的 $($frontendSkipped.Count) 个：$(($frontendSkipped | Select-Object -First 6) -join '、')$(if ($frontendSkipped.Count -gt 6) { ' …' })）"
 if (-not (Test-Path -LiteralPath (Join-Path $stage 'www\index.html'))) { Fail 'sources.frontend_dist 里没有 index.html，不像是前端的构建产物' }
 $fv = Opt $s 'frontend_version'
 if ($null -ne $fv) {
@@ -190,7 +203,8 @@ foreach ($pair in @(@('stack.cmd', 'stack.cmd'), @('stack-up.cmd', 'start.cmd'),
     if ($text -match '[^\x00-\x7F]') { Fail "$($pair[0]) 里有非 ASCII 字符。批处理文件要保持纯 ASCII（cmd 按本机代码页读它）" }
     Write-Text $pair[1] $text $ascii
 }
-Write-Text 'stack.toml' (Read-Text (Join-Path $here 'package\stack.toml')) $utf8Bom
+# 包里带的是缺省配置 stack.default.toml；stack.toml 是用户自己的那一份，不进包（见文件头的说明）。
+Write-Text 'stack.default.toml' (Read-Text (Join-Path $here 'package\stack.default.toml')) $utf8Bom
 Write-Text 'stack.example.toml' (Read-Text (Join-Path $here 'stack.example.toml')) $utf8Bom
 
 $created = Get-Date
@@ -228,6 +242,40 @@ if ($doc -match '\{\{[A-Z_]+\}\}') { Fail "说明文档里还有没填的占位�
 Write-Text '安装和测试说明.md' $doc $utf8Bom
 Write-Text 'README.txt' $doc $utf8Bom
 
+# ───────────── 抹掉文本里不该带出去的字样（可选） ─────────────
+# 有的东西编进了别的仓库的产物里（比如前端把更新日志全文打进了脚本，里面有一处线上环境的地址），这里改不了源头，
+# 就在摆包目录的副本上抹掉。说明文件里写 redactions，每条：
+#   { "files": "www/assets/index-*.js", "pattern": "<正则>", "replacement": "<换成什么>", "what": "<这是什么>" }
+# files 是包里的相对路径（正斜杠，可以带通配符）。只动摆包目录里的副本，不动来源。
+# 一处都没命中就报错（来源变了，或者规则写错了）；命中了几处、动了哪些文件，记进清单的 redactions。
+$redactionLog = @()
+foreach ($rule in @(Opt $s 'redactions' @())) {
+    if ($null -eq $rule) { continue }
+    $like = [string](Opt $rule 'files' '')
+    $pattern = [string](Opt $rule 'pattern' '')
+    $what = [string](Opt $rule 'what' $pattern)
+    if (-not $like -or -not $pattern) { Fail 'redactions 里每一条都要有 files 和 pattern' }
+    $total = 0
+    $touched = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force)) {
+        $relative = $file.FullName.Substring($stage.Length + 1).Replace('\', '/')
+        if ($relative -notlike $like) { continue }
+        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+        $hadBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        $count = [regex]::Matches($text, $pattern).Count
+        if ($count -eq 0) { continue }
+        $encoding = $utf8NoBom
+        if ($hadBom) { $encoding = $utf8Bom }
+        [System.IO.File]::WriteAllText($file.FullName, [regex]::Replace($text, $pattern, [string](Opt $rule 'replacement' '')), $encoding)
+        $total += $count
+        $touched += $relative
+    }
+    if ($total -eq 0) { Fail "redactions：「$what」一处都没命中（files = $like）。来源变了，或者规则写错了" }
+    $redactionLog += [ordered]@{ what = $what; files = $touched; hits = $total }
+    Step "  抹掉了「$what」：$total 处（$($touched -join '、')）"
+}
+
 # ───────────── 不该进包的东西：再查一遍名字 ─────────────
 $bad = @()
 foreach ($file in @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force)) {
@@ -236,8 +284,10 @@ foreach ($file in @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force)) {
     if ($file.Name -like 'DbOption*.toml' -and $relative -ne 'config\DbOption.factory.toml') { $bad += $relative }
     elseif ($file.Name -like '.env*' -or $file.Name -like '*.pem' -or $file.Name -like '*.pfx' -or $file.Name -like 'id_rsa*' -or $file.Name -like '*.key') { $bad += $relative }
     elseif ($relative -like 'web\config.json') { $bad += $relative }
+    # 用户自己的配置不进包：进了包，换新一版时解压就会把用户改过的那份盖掉。
+    elseif ($relative -eq 'stack.toml') { $bad += $relative }
 }
-if ($bad.Count -gt 0) { Fail "这些文件不该进包（带账号口令的配置、密钥一类）：$($bad -join '、')" }
+if ($bad.Count -gt 0) { Fail "这些文件不该进包（带账号口令的配置、密钥一类，或者用户自己的配置 stack.toml）：$($bad -join '、')" }
 
 # ───────────── 清单 ─────────────
 Step '算每个文件的校验值…'
@@ -268,7 +318,7 @@ $manifest = [ordered]@{
     version = [string](Opt $s 'version' '')
     channel = [string](Opt $s 'channel' '')
     created_at = $created.ToString('yyyy-MM-ddTHH:mm:sszzz')
-    entry = [ordered]@{ script = 'stack.ps1'; version = $entryVersion; config = 'stack.toml' }
+    entry = [ordered]@{ script = 'stack.ps1'; version = $entryVersion; config = 'stack.toml'; default_config = 'stack.default.toml'; config_note = '包里只带 stack.default.toml；stack.toml 在第一次「开始」时照它生成，是用户自己的，不在包里' }
     default_ports = Opt $s 'default_ports'
     components = $componentDocs
     vc_runtime = [ordered]@{ version = $vcVersion; app_local_dlls = $vcNames; installer = $(if ($vcInstaller) { 'redist/VC_redist.x64.exe' } else { '' }) }
@@ -278,6 +328,10 @@ $manifest = [ordered]@{
     not_included_fixes = $notIncluded
     not_included_note = [string](Opt $s 'not_included_note' '')
     checks = [ordered]@{ surql_libraries = $surqlCheck }
+    # 来源里有、这个包里故意没带的文件（前端的调试 / 演示页和演示数据）。
+    excluded = [ordered]@{ frontend = $frontendSkipped }
+    # 在包里的副本上抹掉的字样（来源没动）。
+    redactions = $redactionLog
     known_issues = $knownIssues
     notes = @(Opt $s 'notes' @())
     totals = [ordered]@{ files = $files.Count + 1; bytes_without_manifest = $totalBytes }

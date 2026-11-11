@@ -10,7 +10,10 @@
 
     几条写死的纪律（改之前先想清楚）：
       * 停进程只按进程号，而且先核对「进程号 + 启动时间 + 程序路径（开发档的前端是命令行里的标记）」；
-        从不按进程名停。状态文件里没有记的进程一律当别人的，不认领。
+        从不按进程名停。连带收子进程时只认「创建时间不早于父进程」的（进程号会重用，光看父进程号会认错），
+        占着受保护端口的进程一律不动。
+      * 状态文件里没有记的进程当别人的——只有一种例外会被认领回来：它的程序就是运行目录里的那一个、
+        又占着本套配置的端口（后端在向导页里自己重启、或者 up 跑到一半被关掉，就会出现这种进程）。
       * 数据库账号口令只在真正起数据库的那一小段里从后端配置读出来、经环境变量递下去；
         不打印、不上命令行、不进状态文件和日志。
       * 每个服务的环境变量由这里明确给出，不继承调用方的环境。
@@ -33,7 +36,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:StackVersion = '0.2.1'
+$script:StackVersion = '0.3.0'
 $script:LogFile = $null
 $script:ExitCode = 0
 $script:ListenCache = $null
@@ -280,6 +283,8 @@ function ConvertTo-IntArray($Value, [string]$What) {
 function ConvertTo-EnvTable($Table, [string]$TableName) {
     $out = [ordered]@{}
     if ($null -eq $Table) { return $out }
+    # 写成了「env = "…"」这样的一个值：不能悄悄当成没写。
+    if (-not ($Table -is [System.Collections.IDictionary])) { Stop-Stack "配置里 $TableName 应当是单独的一节（[$TableName]，里面一行一个「变量名 = `"值`"」），不是一个值" 2 }
     foreach ($key in $Table.Keys) {
         if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Stop-Stack "配置 [$TableName] 里的环境变量名「$key」不合法" 2 }
         if ($key -match '(?i)PASS|PWD|TOKEN|SECRET|_KEY$') { Stop-Stack "配置 [$TableName] 里不要放口令类的环境变量（$key）。数据库口令只从后端配置里读" 2 }
@@ -384,7 +389,11 @@ function Get-StackConfig([string]$Path) {
 
     $timeouts = Get-Opt $raw 'timeouts'
     Assert-KnownKeys $timeouts 'timeouts' @('database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec')
-    foreach ($k in 'database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec') { Assert-Type $timeouts 'timeouts' $k 'int' }
+    foreach ($k in 'database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec') {
+        Assert-Type $timeouts 'timeouts' $k 'int'
+        $seconds = Get-Opt $timeouts $k
+        if ($null -ne $seconds -and $seconds -lt 1) { Stop-Stack "配置$(Get-LineText 'timeouts' $k)[timeouts] $k 要写成不小于 1 的整数（单位是秒），现在是「$seconds」" 2 }
+    }
 
     $backendWork = Resolve-StackPath ([string](Get-Opt $backend 'work_dir' 'work/backend')) $root
     $frontendWork = Join-Path $root 'work\frontend'
@@ -595,8 +604,33 @@ function Get-ProcInfo([int]$ProcessId) {
     return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
 }
 
-function Get-ChildProcs([int]$ProcessId) {
-    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)
+# 从一批「父进程号 = 某个进程」的进程里，挑出真是它生的那些。
+# Windows 不会在父进程退出之后改子进程记着的父进程号，而进程号是会重用的：一个早就在跑的、不相干的进程，
+# 只要它那个已经退出的父进程的进程号后来恰好分给了本套的某个服务，光看父进程号，它就成了这个服务的「孩子」。
+# 孩子不可能比父亲更早创建——所以只认创建时间不早于父进程的；创建时间读不到的也不认。
+# 这个函数不碰系统（测试直接喂假数据）：$Candidates 里每个元素要有 ProcessId、ParentProcessId、CreationDate。
+# （返回的是一个个进程，不是包起来的数组：调用的地方用 @(…) 接，或者直接 foreach。下面几个新函数都是这个规矩。）
+function Select-TrueChildren($Candidates, [int]$ParentPid, [long]$ParentStartTicks) {
+    $out = @()
+    if ($ParentPid -le 0 -or $ParentStartTicks -le 0) { return $out }
+    foreach ($c in @($Candidates)) {
+        if ($null -eq $c) { continue }
+        if ([int]$c.ParentProcessId -ne $ParentPid) { continue }
+        if ([int]$c.ProcessId -eq $ParentPid) { continue }
+        if ($null -eq $c.CreationDate) { continue }
+        if (([datetime]$c.CreationDate).ToUniversalTime().Ticks -lt $ParentStartTicks) { continue }
+        $out += $c
+    }
+    return $out
+}
+
+# 一个进程名下真正的子进程。父进程已经不在、或者这个进程号已经换了主人（给了 $ParentTicks 而对不上），一个都不认。
+function Get-ChildProcs([int]$ProcessId, [string]$ParentTicks = '') {
+    $parent = Get-ProcInfo $ProcessId
+    if ($null -eq $parent -or $null -eq $parent.CreationDate) { return @() }
+    if ($ParentTicks -and -not (Test-SameStart $ParentTicks $parent)) { return @() }
+    $candidates = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)
+    return (Select-TrueChildren $candidates $ProcessId (([datetime]$parent.CreationDate).ToUniversalTime().Ticks))
 }
 
 # 启动时间存成 UTC 的 ticks（字符串）。不存成日期文本：PowerShell 7 读 JSON 时会把像日期的字符串
@@ -621,8 +655,10 @@ function Test-SameStart([string]$RecordedTicks, $Proc) {
 
 # 本机所有在听的 TCP 端口 → 进程号。先用系统自带的命令；那个模块在少数机器上没有，就退到 netstat。
 # 结果留不到一秒：等端口变化的循环里反复问，不必每次都重新取。
-function Get-ListenTable([switch]$Fresh) {
-    if (-not $Fresh -and $null -ne $script:ListenCache -and ((Get-Date) - $script:ListenCacheAt).TotalMilliseconds -lt 800) { return $script:ListenCache }
+# 取一次要大半秒（Get-NetTCPConnection 慢）。一口气要问好几个端口的地方（预检、认领、down 收尾）：
+# 先 -Fresh 取一次，后面带 -MaxAgeMs 用同一份，不必每个端口都重新取。
+function Get-ListenTable([switch]$Fresh, [int]$MaxAgeMs = 800) {
+    if (-not $Fresh -and $null -ne $script:ListenCache -and ((Get-Date) - $script:ListenCacheAt).TotalMilliseconds -lt $MaxAgeMs) { return $script:ListenCache }
     $table = @{}
     $ok = $false
     try {
@@ -652,10 +688,21 @@ function Get-ListenTable([switch]$Fresh) {
     return $table
 }
 
-function Get-PortOwners([int]$Port, [switch]$Fresh) {
-    $table = Get-ListenTable -Fresh:$Fresh
+function Get-PortOwners([int]$Port, [switch]$Fresh, [int]$MaxAgeMs = 800) {
+    $table = Get-ListenTable -Fresh:$Fresh -MaxAgeMs $MaxAgeMs
     if ($table.ContainsKey($Port)) { return ,@($table[$Port]) }
     return ,@()
+}
+
+# 这个进程是不是占着某个受保护的端口（[guard] protect_ports）。是就返回那个端口号，不是返回 0。
+# 占着受保护端口的进程，入口既不认作本套的，也绝不去停它——不管它是怎么出现在名单里的。
+function Get-ProtectedPortOf($Cfg, [int]$ProcessId, [switch]$Fresh, [int]$MaxAgeMs = 800) {
+    $first = [bool]$Fresh
+    foreach ($port in $Cfg.Guard.ProtectPorts) {
+        if ((Get-PortOwners $port -Fresh:$first -MaxAgeMs $MaxAgeMs) -contains $ProcessId) { return [int]$port }
+        $first = $false
+    }
+    return 0
 }
 
 function Format-ProcBrief([int]$ProcessId) {
@@ -768,6 +815,11 @@ function Read-StackState($Cfg) {
     $state = @{}
     if (-not (Test-Path -LiteralPath $Cfg.StateFile)) { return $state }
     $json = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($Cfg.StateFile, [System.Text.Encoding]::UTF8))
+    if ($null -eq $json) {
+        # 读不出来（多半是写到一半被打断）：不装作「什么都没起」，说一声；在跑的服务靠认领规则找回来。
+        Say "  注意：状态文件 $($Cfg.StateFile) 读不出来，按没有记录处理。在跑的服务会按「程序在运行目录里、又占着本套的端口」重新认领。" 'Yellow'
+        return $state
+    }
     $services = Get-Prop $json 'services'
     if ($null -eq $services) { return $state }
     foreach ($p in $services.PSObject.Properties) {
@@ -782,6 +834,8 @@ function Read-StackState($Cfg) {
             wrapperPid = [int](Get-Prop $v 'wrapperPid')
             wrapperTicks = [string](Get-Prop $v 'wrapperTicks')
             log = [string](Get-Prop $v 'log')
+            # 认领回来的进程才有这一格（认领的时刻）；入口自己起的是空的。
+            adopted = [string](Get-Prop $v 'adopted')
         }
     }
     return $state
@@ -802,8 +856,16 @@ function Save-StackState($Cfg, $State) {
     }
     $tmp = $Cfg.StateFile + '.tmp'
     [System.IO.File]::WriteAllText($tmp, ($doc | ConvertTo-Json -Depth 6), $script:Utf8NoBom)
-    if (Test-Path -LiteralPath $Cfg.StateFile) { Remove-Item -LiteralPath $Cfg.StateFile -Force }
-    Move-Item -LiteralPath $tmp -Destination $Cfg.StateFile
+    if (Test-Path -LiteralPath $Cfg.StateFile) {
+        # 一步换掉：不留「旧的删了、新的还没改名」的空档（那一刻被打断，记录就没了）。
+        try { [System.IO.File]::Replace($tmp, $Cfg.StateFile, [NullString]::Value) }
+        catch {
+            Remove-Item -LiteralPath $Cfg.StateFile -Force
+            Move-Item -LiteralPath $tmp -Destination $Cfg.StateFile
+        }
+    } else {
+        Move-Item -LiteralPath $tmp -Destination $Cfg.StateFile
+    }
 }
 
 # 这条记录里的进程还在不在、是不是本套自己起的那一个。返回 @{ Alive; Ours; Unreadable; Why; Proc }
@@ -842,14 +904,144 @@ function Test-RecordedProcess($Cfg, [string]$Name, $Record) {
             return $out
         }
     }
-    foreach ($port in $Cfg.Guard.ProtectPorts) {
-        if ((Get-PortOwners $port) -contains [int]$Record.pid) {
-            $out.Why = "进程 $($Record.pid) 占着受保护的端口 $port，不认它是本套的"
-            return $out
-        }
+    # 「谁在听哪个端口」取一次要大半秒；这里几秒之内的都算数（真要动手停进程的地方会重新取）。
+    $guarded = Get-ProtectedPortOf $Cfg ([int]$Record.pid) -MaxAgeMs 3000
+    if ($guarded -gt 0) {
+        $out.Why = "进程 $($Record.pid) 占着受保护的端口 $guarded，不认它是本套的"
+        return $out
     }
     $out.Ours = $true
     return $out
+}
+
+# ─────────────────────────── 认领：在跑、却没记在状态文件里的本套进程 ───────────────────────────
+# 两种情况会出现这种进程：
+#   · 在后端的配置向导页里点了「重启」——后端拉起一个新进程再自己退出，进程号变了；
+#   · stack up 跑到一半窗口被关——服务进程已经起了，还没来得及记。
+# 认领的条件（都要满足）：
+#   1. 它的程序路径就是配置里这个服务的程序，而且这个程序在运行目录（[stack] root）里面——
+#      安装文件夹里的那一份程序只有本套会去运行。程序放在运行目录之外的不认领。
+#      开发档的前端（node）改看命令行里有没有本套的标记（包装配置的路径，它在运行目录里）。
+#   2. 它（或它真正的子进程）占着配置里这个服务的端口。
+#   3. 它没有占着受保护的端口。
+# 读不到程序路径的进程（多半是权限更高的窗口起的）不认领。
+
+# 一个进程是不是「这个服务的程序」：'yes' / 'no' / 'unreadable'（读不到路径或命令行，判断不了）。
+function Test-ServiceProgram($Cfg, $Spec, $Proc) {
+    if ($null -eq $Proc) { return 'no' }
+    if ($Spec.Marker) {
+        if (-not $Proc.CommandLine) { return 'unreadable' }
+        if ("$($Proc.CommandLine)".IndexOf($Spec.Marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return 'yes' }
+        return 'no'
+    }
+    if (-not $Proc.ExecutablePath) { return 'unreadable' }
+    if (-not $Spec.Exe -or $Proc.ExecutablePath -ine $Spec.Exe) { return 'no' }
+    if (-not (Test-UnderPath $Spec.Exe $Cfg.Root)) { return 'no' }
+    return 'yes'
+}
+
+# 运行着的、程序就是这个服务的程序的进程（不管占没占端口）。比对用完整路径；名字只用来缩小查询范围。
+function Get-ServiceProgramProcs($Cfg, [string]$Name) {
+    $found = @()
+    $spec = Get-ServiceSpec $Cfg $Name
+    if (-not $spec.Exe) { return $found }
+    $leaf = Split-Path -Leaf $spec.Exe
+    if (-not $leaf -or $leaf -match "['\\]") { return $found }
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='$leaf'" -ErrorAction SilentlyContinue)) {
+        if ((Test-ServiceProgram $Cfg $spec $p) -eq 'yes') { $found += $p }
+    }
+    return $found
+}
+
+# 找一个可以认领的进程：@{ Proc = 进程或 $null; UnreadablePid = 占着端口、但读不到路径的进程号（0 = 没有） }
+# 「谁在听哪个端口」用调用方刚取的那一份（几秒之内的都算数），不为每个服务重新取一遍。
+function Find-AdoptableProcess($Cfg, [string]$Name) {
+    $out = @{ Proc = $null; UnreadablePid = 0 }
+    $spec = Get-ServiceSpec $Cfg $Name
+    $port = Get-ServicePort $Cfg $Name
+    foreach ($owner in (Get-PortOwners $port -MaxAgeMs 6000)) {
+        $proc = Get-ProcInfo ([int]$owner)
+        $kind = Test-ServiceProgram $Cfg $spec $proc
+        if ($kind -eq 'unreadable') { $out.UnreadablePid = [int]$owner; continue }
+        if ($kind -ne 'yes') { continue }
+        # 监听挂在子进程名下的服务（nginx 的工作进程）：往上找到同一个程序的主进程，认领主进程。
+        for ($i = 0; $i -lt 4; $i++) {
+            $parent = Get-ProcInfo ([int]$proc.ParentProcessId)
+            if ($null -eq $parent -or $null -eq $parent.CreationDate -or $null -eq $proc.CreationDate) { break }
+            if ((Test-ServiceProgram $Cfg $spec $parent) -ne 'yes') { break }
+            # 「父进程」比它还晚创建：那个进程号已经被重用，不是真的父进程。
+            if (([datetime]$parent.CreationDate) -gt ([datetime]$proc.CreationDate)) { break }
+            $proc = $parent
+        }
+        if ((Get-ProtectedPortOf $Cfg ([int]$proc.ProcessId) -MaxAgeMs 6000) -gt 0) { continue }
+        $out.Proc = $proc
+        return $out
+    }
+    return $out
+}
+
+# 对点到名的服务（缺省是配置里启用的全部）：记录缺了，或者记录里的进程已经不在、不是原来那个，
+# 就看有没有可以认领的进程，有就记回来。记录还有效、或者只是读不到路径（权限）的，不动。
+# $Persist：写回状态文件——只有占着运行目录锁的命令（up、down）才写；别的命令只在这一次运行里当它是本套的。
+# 返回认领了的服务名。
+function Invoke-Adopt($Cfg, $State, [bool]$Persist, [string[]]$Names = @(), [bool]$Quiet = $false) {
+    $adopted = @()
+    # 这一趟里「没有有效记录、也没认领到」的服务名：调用方要不要再等一等（程序在跑、只是还没占上端口），看它。
+    $script:AdoptMissing = @()
+    $tableFresh = $false
+    if (@($Names).Count -eq 0) { $Names = Get-ServiceNames $Cfg }
+    foreach ($name in $Names) {
+        $old = $null
+        if ($State.ContainsKey($name)) {
+            $old = $State[$name]
+            $check = Test-RecordedProcess $Cfg $name $old
+            if ($check.Ours -or $check.Unreadable) { continue }
+        }
+        if (-not $tableFresh) { [void](Get-ListenTable -Fresh); $tableFresh = $true }
+        $found = Find-AdoptableProcess $Cfg $name
+        if ($null -eq $found.Proc) { $script:AdoptMissing += $name; continue }
+        $spec = Get-ServiceSpec $Cfg $name
+        # 日志：后端自己重启时，新进程接着往原来那个文件里写；没有旧记录就取这个服务最新的那个日志文件。
+        $log = ''
+        if ($null -ne $old -and $old.log) { $log = $old.log }
+        if (-not $log) {
+            $latest = Get-ChildItem -LiteralPath (Join-Path $Cfg.LogsDir $name) -Filter "$name-*.log" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+            if ($latest) { $log = $latest.FullName }
+        }
+        $State[$name] = @{
+            pid = [int]$found.Proc.ProcessId
+            startTicks = (Get-ProcTicks $found.Proc)
+            startedAt = (Format-ProcClock $found.Proc)
+            exe = [string]$found.Proc.ExecutablePath
+            marker = $spec.Marker
+            port = $spec.Port
+            wrapperPid = 0
+            wrapperTicks = ''
+            log = $log
+            adopted = (Get-Date).ToString('MM-dd HH:mm:ss')
+        }
+        $adopted += $name
+        if ($Quiet) { continue }
+        $why = '状态文件里没有它的记录（上一次 stack up 没跑完就会这样）'
+        if ($null -ne $old) { $why = "状态文件里记的是进程 $($old.pid)，它已经不在了（在后端的向导页里点过「重启」就会这样）" }
+        $tail = '这一次按本套的服务看待；下次运行 stack up 或 stack down 时会记进状态文件'
+        if ($Persist) { $tail = '已经记回状态文件' }
+        Say "  认领了$(Get-ServiceTitle $name)的进程 $($found.Proc.ProcessId)（$($found.Proc.Name)，起于 $(Format-ProcClock $found.Proc)）：它的程序就是运行目录里的那一个，又占着本套的端口 $($spec.Port)。$why。$tail。" 'Yellow'
+    }
+    if ($Persist -and $adopted.Count -gt 0) { Save-StackState $Cfg $State }
+    return $adopted
+}
+
+# 端口空着、但运行目录里这个服务的程序已经有进程在跑：多半是刚被重启（或刚起）、还没占上端口。
+# 等它一会儿：占上端口就认领，返回 'adopted'；它自己退了，返回 'gone'；到点了还在、还没占端口，返回 'stuck'。
+function Wait-StrayService($Cfg, $State, [string]$Name, [bool]$Persist, [int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ($true) {
+        if (@(Invoke-Adopt $Cfg $State $Persist @($Name)).Count -gt 0) { return 'adopted' }
+        if (@(Get-ServiceProgramProcs $Cfg $Name).Count -eq 0) { return 'gone' }
+        if ((Get-Date) -ge $deadline) { return 'stuck' }
+        Start-Sleep -Milliseconds 700
+    }
 }
 
 # ─────────────────────────── 后端配置：从模板生成，只改指定的键 ───────────────────────────
@@ -1086,6 +1278,30 @@ function Initialize-BackendFiles($Cfg) {
             Say "    （没有这一节，就在文件末尾加两行：[rvm_check] 和 work_dir = $(Format-TomlPath $Cfg.Backend.RvmCheckDir)）；原来那个目录里已有的产物要留的话，把里面的子文件夹挪到新目录下；再 stack up。" 'Yellow'
         }
     }
+    # 这份配置只生成一次，新一版模板里新加的键到不了它。把缺的键名说出来（只说名字，不碰值），抄不抄由人定。
+    $have = @(Get-TomlKeyNames $configFile)
+    $missing = @(Get-TomlKeyNames $Cfg.Backend.ConfigTemplate | Where-Object { $have -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        $shown = (@($missing | Select-Object -First 12) -join '、')
+        if ($missing.Count -gt 12) { $shown += ' …' }
+        Say "  注意：后端配置模板（现在这一版的）里有 $($missing.Count) 个键，现有的后端配置里没有：$shown。" 'Yellow'
+        Say "    后端配置只在第一次生成，新模板里新加的键到不了它；这些键现在按后端自己的缺省值走。要照模板来：从 $($Cfg.Backend.ConfigTemplate) 里把这几行抄进 $configFile ，再 stack down、stack up。" 'Yellow'
+    }
+}
+
+# 一份 TOML 里所有的键名：顶层的就是键名，某一节里的写成「[节] 键」。只取名字，不取值。
+function Get-TomlKeyNames([string]$Path) {
+    $names = @()
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $names }
+    $table = ''
+    foreach ($line in [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)) {
+        $m = [regex]::Match($line, '^\s*\[\s*([A-Za-z0-9_\-\.]+)\s*\]')
+        if ($m.Success) { $table = $m.Groups[1].Value; continue }
+        $m = [regex]::Match($line, '^\s*([A-Za-z0-9_\-]+)\s*=')
+        if (-not $m.Success) { continue }
+        if ($table) { $names += "[$table] $($m.Groups[1].Value)" } else { $names += $m.Groups[1].Value }
+    }
+    return $names
 }
 
 # 后端配置里没写 [rvm_check] work_dir 时，后端自己把「核对」的产物放哪（照它的规矩算出来，只用来给人看）：
@@ -1282,10 +1498,17 @@ http {
         }
 
         # 文件名带哈希的静态资源可以长期缓存
-        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|wasm|json)$ {
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|wasm)$ {
             try_files $uri =404;
             expires 1y;
             add_header Cache-Control "public, immutable" always;
+        }
+
+        # JSON（配置、清单一类）文件名不带哈希：每次都重新取，换新一版之后浏览器不会接着用旧的。
+        # 找不到就是 404，不落到首页上。
+        location ~* \.json$ {
+            try_files $uri =404;
+            add_header Cache-Control "no-store, no-cache, must-revalidate" always;
         }
 
         location = /version.json {
@@ -1300,7 +1523,9 @@ http {
             add_header Cache-Control "no-store" always;
         }
 
-        location /api {
+        # ^~ ：地址以 /api 开头就归这一条，不再去比上面那些按扩展名匹配的规则。
+        # 少了它，/api/…/compare.json 这类以 .json、.png 结尾的接口地址会被当成静态文件，回 404。
+        location ^~ /api {
             proxy_pass http://stack_backend;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
@@ -1550,7 +1775,7 @@ function Set-StartInfoEnv($StartInfo, $EnvTable) {
 
 # 跑一个很快就结束的程序（问版本用），拿回它的输出。同样给明确的环境变量和工作目录。
 function Invoke-Capture($Cfg, [string]$Exe, [string]$ArgLine, [string]$Cwd, [int]$TimeoutSec = 20) {
-    $out = @{ Ok = $false; Text = '' }
+    $out = @{ Ok = $false; Text = ''; TimedOut = $false }
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $Exe
@@ -1565,8 +1790,10 @@ function Invoke-Capture($Cfg, [string]$Exe, [string]$ArgLine, [string]$Cwd, [int
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSec * 1000)) {
+            # 这个进程是这里刚起的（手里拿着它的进程对象），不是按进程号或名字找来的。
             try { $process.Kill() } catch { }
             $out.Text = "等了 $TimeoutSec 秒没有结束"
+            $out.TimedOut = $true
             return $out
         }
         $text = "$($stdout.Result)".Trim()
@@ -1727,35 +1954,161 @@ function Test-ServiceHealth($Cfg, [string]$Name) {
     return $out
 }
 
-# 后端健康检查里的库版本那一格：@{ Known; CaughtUp; Text }。后端没应答时 Known = $false。
-function Get-StorageVersionState($Cfg) {
-    $out = @{ Known = $false; CaughtUp = $false; Text = '后端没有应答' }
-    $r = Invoke-StackHttp 'GET' ((Get-BackendUrl $Cfg) + '/api/v1/health') '' 8
-    $j = ConvertFrom-JsonSafe $r.Body
-    if ($null -eq $j) { return $out }
-    if ([string](Get-Prop $j 'mode') -eq 'setup') { $out.Text = '后端在设置模式（配置还没填完）'; return $out }
-    $sv = Get-Prop $j 'storage_version'
+# 把后端健康检查里和库版本有关的几格归成一种情况。这个函数不碰系统（测试直接喂假数据）。
+# $Health 是 /api/v1/health 解析出来的对象（$null = 后端没有应答）。Kind：
+#   ok             库里的版本记录和程序要的一致
+#   starting       还没有版本记录，后端还在做启动（initialization.status = discovering）——全新的库，
+#                  缺省配置下后端做完启动时自己会写上（样例工程十来秒）
+#   awaiting-model 还没有版本记录，后端的启动做完了，但它管的库的模型面还没就绪（initialization.model_ready 不是 true）：
+#                  要么有库正在初始化（做完会写），要么在等库被初始化——配了 watch_dbnums 的新库就停在这里，
+#                  第一次初始化完成才写版本记录
+#   no-record      没有版本记录，而模型面已经就绪——它不会自己补写了（库里已经有数据、却没有记录）
+#   old / newer    有版本记录，比程序要的旧 / 新
+#   upgrading      后端正在做库的升级
+#   upgrade-failed 上一次升级没有全部成功
+#   setup          后端在设置模式（配置还没填完）
+#   unknown        后端没有应答，或者它还没核对过库版本
+# 等得到的只有：starting、upgrading、unknown，和 awaiting-model 里「后端还在忙」的那一半。别的等多久都不会变。
+# 这些是 2026-11-12 在沙箱里对着后端 0.1.44（r4、r5 两个构建）一种一种看出来的，见 output\stack-fix-20261112。
+function Get-StorageVersionKind($Health) {
+    $out = @{ Kind = 'unknown'; Known = $false; CaughtUp = $false; Text = '后端没有应答'; Stored = $null; Expected = $null; ModelReady = $false; InitStatus = ''; Watch = @(); Idle = $false; UpgradeDone = 0; UpgradeTotal = 0 }
+    if ($null -eq $Health) { return $out }
+    if ([string](Get-Prop $Health 'mode') -eq 'setup') { $out.Kind = 'setup'; $out.Text = '后端在设置模式（配置还没填完）'; return $out }
+    $sv = Get-Prop $Health 'storage_version'
     if ($null -eq $sv) { $out.Text = '后端还没核对过库版本'; return $out }
     $out.Known = $true
     $out.CaughtUp = ((Get-Prop $sv 'caught_up') -eq $true)
-    $stored = Get-Prop $sv 'stored'
-    if ($null -eq $stored) { $stored = '还没有' }
-    $out.Text = "库里的版本记录：$stored；程序要的：$(Get-Prop $sv 'expected')"
+    $out.Stored = Get-Prop $sv 'stored'
+    $out.Expected = Get-Prop $sv 'expected'
+    $init = Get-Prop $Health 'initialization'
+    $out.ModelReady = ((Get-Prop $init 'model_ready') -eq $true)
+    $out.InitStatus = [string](Get-Prop $init 'status')
+    $out.Watch = @(Get-Prop $Health 'watch_dbnums' | Where-Object { $null -ne $_ })
+    $shown = $out.Stored
+    if ($null -eq $shown) { $shown = '还没有' }
+    $out.Text = "库里的版本记录：$shown；程序要的：$($out.Expected)"
+    $upgrade = Get-Prop $sv 'upgrade'
+    $upgradeState = [string](Get-Prop $upgrade 'state')
+    $out.UpgradeDone = [int](Get-Prop $upgrade 'done')
+    $out.UpgradeTotal = @(Get-Prop $upgrade 'requested' | Where-Object { $null -ne $_ }).Count
+    if ($out.CaughtUp) { $out.Kind = 'ok' }
+    elseif ($upgradeState -eq 'running') { $out.Kind = 'upgrading' }
+    elseif ($upgradeState -eq 'failed') { $out.Kind = 'upgrade-failed' }
+    elseif ($null -eq $out.Stored) {
+        if ($out.ModelReady) { $out.Kind = 'no-record' }
+        elseif ($out.InitStatus -eq '' -or $out.InitStatus -eq 'discovering') { $out.Kind = 'starting' }
+        else { $out.Kind = 'awaiting-model' }
+    }
+    elseif ([long]$out.Stored -lt [long]$out.Expected) { $out.Kind = 'old' }
+    else { $out.Kind = 'newer' }
     return $out
 }
 
-# 这些占着端口的进程里，有没有本套记下的那个进程或它的子进程（nginx 的监听可能挂在子进程名下）。
-function Test-PortOwnedBy($Owners, [int]$ProcessId) {
+# 问一次后端的健康检查，返回上面那个归类。
+function Get-StorageVersionState($Cfg) {
+    $r = Invoke-StackHttp 'GET' ((Get-BackendUrl $Cfg) + '/api/v1/health') '' 8
+    return (Get-StorageVersionKind (ConvertFrom-JsonSafe $r.Body))
+}
+
+# 库版本没对上的时候，一句话的「下一步」（状态表里用）。
+function Get-StorageVersionHint($Sv) {
+    if ($Sv.Kind -eq 'starting') { return '库是新的，后端做完启动时自己会写版本记录：过一会儿再运行 stack up，它只把 rs-server 补起来' }
+    if ($Sv.Kind -eq 'awaiting-model') { return '库里还没有版本记录，后端要等第一次初始化完成才写：先初始化要用的库（stack init <库号>），做完再运行 stack up' }
+    if ($Sv.Kind -eq 'upgrading') { return '后端正在做库的升级：等它做完再运行 stack up' }
+    if ($Sv.Kind -eq 'setup') { return '先在后端的向导页里把配置填完，再运行 stack up' }
+    if ($Sv.Kind -eq 'unknown') { return '运行 stack status 看后端是不是正常' }
+    return '后端不会自己把它对上，再等也没有用：照下面的说明选一种办法'
+}
+
+# 库版本没对上、所以先不起 rs-server 的时候，把话说具体：是哪种情况、等不等得到、在哪做什么、做了会怎样。
+function Show-StorageVersionAdvice($Cfg, $Sv) {
+    $ops = (Get-BackendUrl $Cfg) + '/ops.html'
+    $c = 'Yellow'
+    if ($Sv.Kind -eq 'setup') {
+        Say '  这是哪种情况：后端在设置模式（它的配置还不完整），这时候没有库版本可核对。' $c
+        Say "  下一步：浏览器打开 $(Get-BackendUrl $Cfg)/ ，按向导把配置填完；然后再运行 stack up，它会把 rs-server 补起来。" $c
+        return
+    }
+    if ($Sv.Kind -eq 'unknown') {
+        Say "  这是哪种情况：$($Sv.Text)。" $c
+        Say '  下一步：运行 stack status 看后端是不是正常；正常之后再运行 stack up。' $c
+        return
+    }
+    if ($Sv.Kind -eq 'starting') {
+        Say '  这是哪种情况：库是新的，还没有版本记录；后端的启动还没做完——做完的时候它自己会写上（样例工程十来秒，大的工程要久一些）。' $c
+        Say '  下一步：过一会儿再运行 stack up（双击「开始」），它只把 rs-server 补起来，别的服务不动。' $c
+        Say '          每次都等不到：在 stack.toml 里加一节 [timeouts]，写 storage_version_sec = 600，让它多等一会儿。' $c
+        return
+    }
+    $watch = @($Sv.Watch | Where-Object { $null -ne $_ })
+    if ($Sv.Kind -eq 'awaiting-model') {
+        if (-not $Sv.Idle) {
+            Say '  这是哪种情况：库里还没有版本记录；后端的启动做完了，现在还在忙（有库在初始化或生成模型），做完的时候会写上。' $c
+            Say "  下一步：等它做完（进度看运维页 $ops ）再运行 stack up，它只把 rs-server 补起来。" $c
+            return
+        }
+        Say '  这是哪种情况：库里还没有版本记录。后端的启动已经做完、现在闲着，但它管的库的模型面还没有就绪——' $c
+        Say '          版本记录要等第一次初始化完成的时候才写，光等不会有（所以没有等满）。' $c
+        $example = '<库号>'
+        if ($watch.Count -gt 0) {
+            Say "          配置里写了只让后端管库 $($watch -join '、')（watch_dbnums）：这种配置下，这几个库初始化完之前都是这样。" $c
+            $example = (@($watch | Select-Object -First 6) -join ' ')
+        }
+        Say "  下一步：先初始化要用的库——stack init $example（或者在 plant3d-web 里初始化）；做完再运行 stack up，它会把 rs-server 补起来。" $c
+        Say '          初始化完如果还是对不上（这份数据目录是别的版本的后端用过的，就会这样），入口会再说明怎么办。' $c
+        Say '          用不着 rs-server（元数据网页、提资这些接口）：在 stack.toml 的 [rs_server] 一节里写 enabled = false。' $c
+        return
+    }
+    if ($Sv.Kind -eq 'upgrading') {
+        Say "  这是哪种情况：后端正在做库的升级（逐个库清空、重新解析、重新生成模型；已完成 $($Sv.UpgradeDone) / $($Sv.UpgradeTotal) 个库）。" $c
+        Say "  下一步：等它做完再运行 stack up。进度看运维页 $ops 。" $c
+        return
+    }
+    if ($Sv.Kind -eq 'upgrade-failed') {
+        Say '  这是哪种情况：上一次库升级没有全部成功，版本记录因此没有写上。' $c
+        Say "  下一步：打开运维页 $ops 看是哪几个库、为什么没成；处理之后在那里重新点「升级数据库」。也可以照下面第 2 条另起一个新库。" $c
+    } elseif ($Sv.Kind -eq 'no-record') {
+        Say '  这是哪种情况：库里已经有数据，却没有版本记录，而后端的启动已经做完——它不会自己补写，再等也没有用。' $c
+        Say '          这样的库多半是别的版本的后端用过的数据目录（比如换新一版时接过来的旧 data\surreal），' $c
+        Say '          或者版本记录还没写上的时候初始化失败过。' $c
+    } elseif ($Sv.Kind -eq 'old') {
+        Say "  这是哪种情况：库里的版本记录（$($Sv.Stored)）比程序要的（$($Sv.Expected)）旧——这份数据是老一版的后端建的，现在的后端读不懂里面的模型。它不会自己变，再等也没有用。" $c
+    } else {
+        Say "  这是哪种情况：库里的版本记录（$($Sv.Stored)）比程序要的（$($Sv.Expected)）新——这份数据是更新的后端建的，这一版读不了它。" $c
+        Say '  下一步：换回建这份数据的那一版（或更新的）安装包；或者照下面第 2 条另起一个新库。' $c
+    }
+    Say '  怎么办（选一种）：' $c
+    Say '    1. 用不着 rs-server（元数据网页、提资这些接口）：什么都不用做，plant3d-web、后端、plant-ui 网页版照常能用。' $c
+    Say '       不想每次「开始」都看到这段话：在 stack.toml 的 [rs_server] 一节里写 enabled = false。' $c
+    Say "    2. 库里的东西可以重来（初始化过的库可以再初始化）：stack down → 把文件夹 $($Cfg.Database.DataDir) 改个名留作备份 → stack up。" $c
+    Say '       全新的库后端自己会写版本记录；然后再初始化要的库。备份确认用不着了再删。' $c
+    if ($Sv.Kind -ne 'newer') {
+        if ($watch.Count -gt 0) {
+            # 在沙箱里试过：只管几个库时做升级，升级本身成功，但版本记录不写，rs-server 还是起不来。
+            Say "    3. 在后端做「升级」这条路眼下走不通：配置里写了只让后端管库 $($watch -join '、')（watch_dbnums），" $c
+            Say '       而后端要把这个 MDB 的全部设计库都升级过才写版本记录。要走这条路，先把 watch_dbnums 去掉' $c
+            Say '       （stack.toml 的 [backend] 一节和 work\backend\DbOption.toml 里各有一处），stack down、stack up，再照下面做：' $c
+            Say "       浏览器打开运维页 $ops ，点页面顶上数据库架构版本提示里的「升级数据库」——它会把全部设计库逐个清空、重新解析、重新生成模型。" $c
+        } else {
+            Say "    3. 要留着这个库：在后端做「升级」——浏览器打开运维页 $ops ，页面顶上有一条数据库架构版本的提示，点里面的「升级数据库」。" $c
+            Say '       它会把这个 MDB 里的全部设计库（不只是初始化过的那几个）逐个清空、重新解析、重新生成模型；库多、库大的工程要很久、很吃内存。' $c
+            Say '       全部做完后端才写版本记录；做完再运行 stack up，它会把 rs-server 补起来。' $c
+        }
+    }
+}
+
+# 这些占着端口的进程里，有没有本套记下的那个进程或它真正的子进程（nginx 的监听可能挂在子进程名下）。
+function Test-PortOwnedBy($Owners, [int]$ProcessId, [string]$Ticks = '') {
     if (@($Owners).Count -eq 0) { return $false }
     if (@($Owners) -contains $ProcessId) { return $true }
-    foreach ($kid in (Get-ChildProcs $ProcessId)) { if (@($Owners) -contains [int]$kid.ProcessId) { return $true } }
+    foreach ($kid in (Get-ChildProcs $ProcessId $Ticks)) { if (@($Owners) -contains [int]$kid.ProcessId) { return $true } }
     return $false
 }
 
 # 一个服务此刻的状态。State：ok 正常 / stopped 没起 / waiting 在等前面的条件 / bad 异常
 function Get-ServiceState($Cfg, $State, [string]$Name) {
     $port = Get-ServicePort $Cfg $Name
-    $info = @{ Name = $Name; Title = (Get-ServiceTitle $Name); State = 'stopped'; Reason = ''; Pid = 0; Port = $port; Version = ''; Start = ''; MemGb = 0; Log = ''; Detail = ''; Checked = ''; Next = ''; Ours = $false }
+    $info = @{ Name = $Name; Title = (Get-ServiceTitle $Name); State = 'stopped'; Reason = ''; Pid = 0; Port = $port; Version = ''; Start = ''; MemGb = 0; Log = ''; Detail = ''; Checked = ''; Next = ''; Ours = $false; Unreadable = $false; Sv = $null }
     $record = $null
     if ($State.ContainsKey($Name)) { $record = $State[$Name] }
     $owners = Get-PortOwners $port
@@ -1763,16 +2116,26 @@ function Get-ServiceState($Cfg, $State, [string]$Name) {
         if ($owners.Count -gt 0) {
             $info.State = 'bad'
             $info.Checked = "本套有没有起它的记录；端口 $port 上有没有进程在听"
-            $info.Reason = "本套没起它，但端口 $port 被别的进程占着：$(Format-ProcBrief $owners[0])"
-            $info.Next = "那个进程不是本套起的，入口不会动它。停掉它，或把配置里这个服务的 port 换一个，再运行 stack up"
+            $ownerProc = Get-ProcInfo ([int]$owners[0])
+            if ($null -ne $ownerProc -and -not $ownerProc.ExecutablePath) {
+                # 读不到占用者的程序路径：不能一口咬定它是别人的——用管理员窗口起的本套服务，从普通窗口看就是这样。
+                $info.Reason = "本套没有起它的记录，而端口 $port 被进程 $($owners[0])（$($ownerProc.Name)）占着；这个窗口读不到它的程序路径，判断不了它是不是本套的"
+                $info.Next = '如果它是本套的（比如当时是用「以管理员身份运行」起的），请用同样的方式打开窗口再运行；不是的话，停掉它，或把配置里这个服务的 port 换一个，再运行 stack up'
+            } else {
+                $info.Reason = "本套没起它，但端口 $port 被别的进程占着：$(Format-ProcBrief $owners[0])"
+                $info.Next = "那个进程不是本套起的，入口不会动它。停掉它，或把配置里这个服务的 port 换一个，再运行 stack up"
+            }
         } elseif ($Name -eq 'rs_server' -and $Cfg.RsServer.WaitStorageVersion -and $State.ContainsKey('backend')) {
-            # 后端在跑而 rs-server 没起：多半是在等库版本记录。
+            # 后端在跑而 rs-server 没起：多半是库版本还没对上。
             $sv = Get-StorageVersionState $Cfg
-            if ($sv.Known -and -not $sv.CaughtUp) {
+            # 「启动做完了、模型面没就绪」这一种：后端此刻闲不闲，决定了话怎么说（闲着 = 在等库被初始化；在忙 = 做完会写）。
+            if ($sv.Kind -eq 'awaiting-model') { $sv.Idle = [bool](Test-BackendIdle $Cfg) }
+            if ($sv.Kind -ne 'ok' -and $sv.Kind -ne 'unknown') {
                 $info.State = 'waiting'
                 $info.Checked = '后端健康检查里库版本是不是已经一致（一致之后才起 rs-server）'
-                $info.Reason = "在等库版本一致才起它（$($sv.Text)）"
-                $info.Next = '全新的库：后端启动做完之后自己会写版本记录，过一会儿再运行 stack up，它会把 rs-server 补起来。老库（版本落后）：要先在后端升级，见说明'
+                $info.Reason = "库版本还没对上，所以没起它（$($sv.Text)）"
+                $info.Next = Get-StorageVersionHint $sv
+                $info.Sv = $sv
             }
         }
         return $info
@@ -1786,10 +2149,18 @@ function Get-ServiceState($Cfg, $State, [string]$Name) {
         $info.Next = '运行 stack up：它会把这一个重新起起来，别的服务不动'
         if ($check.Unreadable) {
             $info.Pid = $record.pid
-            $info.Next = '用起它时同样的方式打开窗口（比如都用管理员、或都不用）再运行 stack status / stack down；如果它其实正在退出，过几秒再看'
-        } elseif ($owners.Count -gt 0 -and -not (Test-PortOwnedBy $owners $record.pid)) {
+            $info.Unreadable = $true
+            $info.Next = '用起它时同样的方式打开窗口（比如都用管理员、或都不用）再运行 stack status / stack up / stack down；如果它其实正在退出，过几秒再看'
+        } elseif ($owners.Count -gt 0 -and -not (Test-PortOwnedBy $owners $record.pid $record.startTicks)) {
             $info.Reason += "；端口 $port 现在被 $(Format-ProcBrief $owners[0]) 占着"
             $info.Next = "端口 $port 现在被别的进程占着，入口不会动它。先停掉那个进程（或换端口），再运行 stack up"
+        } elseif ($owners.Count -eq 0) {
+            # 记录里的进程不在了、端口也空着，但运行目录里这个程序另有进程在跑：多半是刚被重启、还没占上端口。
+            $strays = @(Get-ServiceProgramProcs $Cfg $Name)
+            if ($strays.Count -gt 0) {
+                $info.Reason += "；运行目录里这个程序另有进程在跑（进程 $(@($strays | ForEach-Object { $_.ProcessId }) -join '、')），只是还没占上本套的端口 $port"
+                $info.Next = '如果刚在后端的向导页里点过「重启」，过几秒再运行 stack status，入口会把它认领回来；它一直不占这个端口的话，运行 stack up，照它说的做'
+            }
         }
         return $info
     }
@@ -1896,36 +2267,56 @@ function Invoke-Preflight($Cfg, $State) {
     elseif ($Cfg.Frontend.Enabled) { $cmdTexts += @($Cfg.Frontend.Node, $Cfg.Frontend.Root) }
     foreach ($t in $cmdTexts) { if ($t -and -not (Test-CmdSafe $t)) { Add-Problem '路径里有入口处理不了的字符' '路径里有没有双引号或百分号' "有：$t" '换一个不带这两种字符的目录' } }
 
-    # 端口
+    # 端口（谁在听哪个端口：这里取一次，下面几个服务共用）
     $seen = @{}
+    [void](Get-ListenTable -Fresh)
     foreach ($name in $names) {
         $port = Get-ServicePort $Cfg $name
         $title = Get-ServiceTitle $name
         if ($port -lt 1 -or $port -gt 65535) { Add-Problem "$title 的端口不合法" "配置 [$name] port" "$port 不在 1–65535 之间" "改配置里 [$name] 的 port"; continue }
         if ($seen.ContainsKey($port)) { Add-Problem "$title 和 $($seen[$port]) 用了同一个端口" '各服务的端口有没有重复' "都是 $port" '给它们各配一个端口' } else { $seen[$port] = $title }
         if ($Cfg.Guard.ProtectPorts -contains $port) { Add-Problem "$title 的端口在受保护名单里" "配置 [$name] port 是不是在 [guard] protect_ports 里" "$port 在名单里，本套不许用" "给 [$name] 换一个端口"; continue }
-        $owners = Get-PortOwners $port -Fresh
+        $owners = Get-PortOwners $port -MaxAgeMs 6000
         if ($owners.Count -eq 0) { continue }
         $ours = $false
+        $unreadable = ''
         if ($State.ContainsKey($name)) {
             $check = Test-RecordedProcess $Cfg $name $State[$name]
-            if ($check.Ours -and (Test-PortOwnedBy $owners $State[$name].pid)) { $ours = $true }
+            if ($check.Ours -and (Test-PortOwnedBy $owners $State[$name].pid $State[$name].startTicks)) { $ours = $true }
+            elseif ($check.Unreadable) { $unreadable = $check.Why }
         }
-        if ($ours) { Add-Note "$title 已经在跑（进程 $($State[$name].pid)，端口 $port）" }
-        else { Add-Problem "$title 要用的端口 $port 被占着" "本机有没有别的进程在听 $port" "$(Format-ProcBrief $owners[0])在听。它不是本套起的，我没有动它" "停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up" }
+        if ($ours) { Add-Note "$title 已经在跑（进程 $($State[$name].pid)，端口 $port）"; continue }
+        # 读不到程序路径的两种情形，都不能说成「不是本套起的」：
+        #   · 本套记着这个进程，进程号和启动时间都对得上，只是这个窗口读不到它的路径（起它的窗口权限更高）；
+        #   · 没有记录，占着端口的那个进程也读不到路径——判断不了它是谁的。
+        if ($unreadable) {
+            Add-Problem "$title 在跑，但这个窗口核对不了它" "本套记下的进程（$($State[$name].pid)）的程序路径读不读得到" "$unreadable" '用起它时同样的方式打开窗口（都用「以管理员身份运行」，或都不用）再运行 stack up / stack status / stack down。记录没有丢，换回原来那种窗口照常能停'
+            continue
+        }
+        $ownerProc = Get-ProcInfo ([int]$owners[0])
+        if ($null -ne $ownerProc -and -not $ownerProc.ExecutablePath) {
+            Add-Problem "$title 要用的端口 $port 被占着，而且看不出是谁的" "本机有没有别的进程在听 $port；它的程序路径读不读得到" "进程 $($owners[0])（$($ownerProc.Name)，起于 $(Format-ProcClock $ownerProc)）在听；这个窗口读不到它的程序路径（它多半是权限更高的窗口起的），判断不了它是不是本套的。我没有动它" "如果它是本套的服务（比如当时用「以管理员身份运行」起的），用同样的方式打开窗口再运行；不是的话，停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up"
+            continue
+        }
+        Add-Problem "$title 要用的端口 $port 被占着" "本机有没有别的进程在听 $port" "$(Format-ProcBrief $owners[0])在听。它不是本套起的，我没有动它" "停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up"
     }
 
     # 程序版本。问版本要执行程序；后端一启动就会在当前目录下建 logs\，所以工作目录放到本套的 run\ 里。
     $probeDir = ''
     if (Test-Path -LiteralPath $Cfg.Root -PathType Container) { New-Dir $Cfg.RunDir; $probeDir = $Cfg.RunDir }
+    # 限时 60 秒：干净机器上第一次执行这两个程序，杀毒软件要先把它们扫一遍（后端两百多 MB），平时一两秒的事会变成几十秒。
+    # 超时和「跑不起来」分开说，免得把人带到「程序不对」那条路上去。
+    $slowNext = '第一次运行这个程序时，杀毒软件要先把它扫一遍，会慢：再运行一次 stack up（再双击一次「开始」）一般就过了。每次都这样，把安装文件夹加进杀毒软件的排除项'
     if ($probeDir -and (Test-Path -LiteralPath $Cfg.Database.Exe -PathType Leaf)) {
-        $v = Invoke-Capture $Cfg $Cfg.Database.Exe 'version' $probeDir
-        if ($v.Text -notmatch '(?<!\d)2\.1\.\d+') { Add-Problem '数据库程序的版本不对' "$($Cfg.Database.Exe) version 的输出里有没有 2.1.x" "输出是「$(Limit-Text $v.Text 100)」" '换成本系统自带的那一份（自家分支的 2.1.4）。装成 3.x 会要求做不可逆的数据迁移，不要照做' }
+        $v = Invoke-Capture $Cfg $Cfg.Database.Exe 'version' $probeDir 60
+        if ($v.TimedOut) { Add-Problem '数据库程序问版本没有答完' "$($Cfg.Database.Exe) version 能不能在 60 秒内结束" '等了 60 秒没有结束（这一次已经停掉）' $slowNext }
+        elseif ($v.Text -notmatch '(?<!\d)2\.1\.\d+') { Add-Problem '数据库程序的版本不对' "$($Cfg.Database.Exe) version 的输出里有没有 2.1.x" "输出是「$(Limit-Text $v.Text 100)」" '换成本系统自带的那一份（自家分支的 2.1.4）。装成 3.x 会要求做不可逆的数据迁移，不要照做' }
         else { Add-Note "数据库程序：$(Limit-Text $v.Text 100)" }
     }
     if ($probeDir -and (Test-Path -LiteralPath $Cfg.Backend.Exe -PathType Leaf)) {
-        $v = Invoke-Capture $Cfg $Cfg.Backend.Exe 'version' $probeDir
-        if (-not $v.Ok) { Add-Problem '后端程序跑不起来' "$($Cfg.Backend.Exe) version 能不能正常结束" "不能：$(Limit-Text $v.Text 160)" '确认这是 64 位 Windows 上能运行的那一份后端程序' }
+        $v = Invoke-Capture $Cfg $Cfg.Backend.Exe 'version' $probeDir 60
+        if ($v.TimedOut) { Add-Problem '后端程序问版本没有答完' "$($Cfg.Backend.Exe) version 能不能在 60 秒内结束" '等了 60 秒没有结束（这一次已经停掉）' $slowNext }
+        elseif (-not $v.Ok) { Add-Problem '后端程序跑不起来' "$($Cfg.Backend.Exe) version 能不能正常结束" "不能：$(Limit-Text $v.Text 160)" '确认这是 64 位 Windows 上能运行的那一份后端程序' }
         else { Add-Note "后端程序：$(Limit-Text $v.Text 140)" }
     }
 
@@ -2041,13 +2432,14 @@ function Start-StackService($Cfg, $State, [string]$Name, [int]$Index, [int]$Tota
     Start-Sleep -Milliseconds 200
     $spawn = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($resultFile, [System.Text.Encoding]::UTF8))
     $wrapperPid = [int](Get-Prop $spawn 'wrapperPid')
+    $wrapperTicks = [string](Get-Prop $spawn 'wrapperTicks')
     $log = [string](Get-Prop $spawn 'log')
 
-    # 在 cmd 那一层下面找到真正的服务进程
+    # 在 cmd 那一层下面找到真正的服务进程（只认 cmd 起来之后才创建的子进程）
     $found = $null
     $deadline = (Get-Date).AddSeconds(15)
     while ($null -eq $found -and (Get-Date) -lt $deadline) {
-        foreach ($kid in (Get-ChildProcs $wrapperPid)) {
+        foreach ($kid in (Get-ChildProcs $wrapperPid $wrapperTicks)) {
             if ($kid.Name -ieq 'conhost.exe') { continue }
             if ($spec.Marker) {
                 if ("$($kid.CommandLine)".IndexOf($spec.Marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $found = $kid }
@@ -2070,8 +2462,9 @@ function Start-StackService($Cfg, $State, [string]$Name, [int]$Index, [int]$Tota
         marker = $spec.Marker
         port = $spec.Port
         wrapperPid = $wrapperPid
-        wrapperTicks = [string](Get-Prop $spawn 'wrapperTicks')
+        wrapperTicks = $wrapperTicks
         log = $log
+        adopted = ''
     }
     Save-StackState $Cfg $State
     Say "  已起：进程 $($found.ProcessId)，输出写到 $log"
@@ -2160,24 +2553,27 @@ function Get-FailedInitTasks($Cfg, [int[]]$Dbnums, [datetime]$Since) {
     return $found
 }
 
-# 初始化没成的时候怎么说：后端给的原因原样带出来；认得出来的那一种（先按需生成、后初始化）再多说几句。
+# 初始化没成的时候怎么说：后端给的原因原样带出来；认得出来的那一种（库里留着以前按需生成的模型行）再多说几句。
+# 这里不写死哪一版后端有什么毛病，也不劝人删数据库目录：话要对任何一版后端都成立。
 function Show-InitFailure($Cfg, $Failures) {
     Say ''
-    $residue = $false
+    $residue = @()
     foreach ($f in @($Failures)) {
         $task = ''
         if ($f.TaskId) { $task = "（后端任务 $($f.TaskId)）" }
         Say "  ✗ 库 $($f.Dbnum) 没有初始化成$task。后端给的原因：$(Limit-Text $f.Message 400)" 'Red'
-        if ($f.Message -match '模型面残留') { $residue = $true }
+        if ($f.Message -match '模型面残留') { $residue += $f.Dbnum }
     }
-    if ($residue) {
-        Say '  这是后端现在这一版（0.1.44）的一个已知问题：' 'Yellow'
-        Say '    这个库还没初始化的时候，在它的节点上按需生成过模型（界面里在节点上生成，或 stack smoke -Node … -Force）。' 'Yellow'
-        Say '    生成的结果留在了数据库里，初始化因此被挡下；界面里的「清理模型」清不掉它，重启也不行。' 'Yellow'
-        Say "  眼下的办法（会丢掉数据库里已有的东西，别的已经初始化的库也要重新初始化）：" 'Yellow'
-        Say "    1. stack down" 'Yellow'
-        Say "    2. 删掉文件夹 $($Cfg.Database.DataDir)" 'Yellow'
-        Say "    3. stack up，然后先 stack init <库号>，初始化完了再到节点上生成" 'Yellow'
+    if ($residue.Count -gt 0) {
+        Say '  后端说的「模型面残留」是这么回事：这个库还没初始化的时候，在它的节点上按需生成过模型，生成的结果留在了数据库里；' 'Yellow'
+        Say '  初始化之前要先把它们清掉，这一次没清成。' 'Yellow'
+        Say '    · 2026-11-11 晚上之后构建的后端（带 gen-model #146 的修复，test3 起的安装包里就是）会在初始化前自己清；' 'Yellow'
+        Say '      在这样的后端上还看到这句话，说明这次清理本身出了问题。' 'Yellow'
+        Say '    · 更早的后端没有这个修复，也清不掉。先后要反过来：先初始化，再到节点上生成。' 'Yellow'
+        Say "  下一步（按这个顺序试，都不丢别的库的数据）：" 'Yellow'
+        Say "    1. 再运行一次 stack init $($residue -join ' ')。" 'Yellow'
+        Say "    2. 还不行：在 plant3d-web 里对这个库做一次整库的「清理模型」，再 stack init。" 'Yellow'
+        Say "    3. 还不行：换成带这个修复的安装包（原地覆盖，数据不用动，见说明「换新一版」）；或者把 logs\ 和 work\backend\logs\ 带给开发看。" 'Yellow'
     } else {
         Say "  下一步：看后端的日志（stack status 里有位置），或打开运维页 $(Get-BackendUrl $Cfg)/ops.html 看这个任务的详情。改好之后再运行 stack init。" 'Yellow'
     }
@@ -2293,6 +2689,9 @@ function Invoke-Up($Cfg) {
         Say "  让路文件消失了，等了 $([int]((Get-Date) - $waitStart).TotalSeconds) 秒"
     }
 
+    # 在跑、却没记在状态文件里的本套进程（后端在向导页里重启过，或者上一次 up 没跑完）：先认领回来，再预检。
+    [void](Invoke-Adopt $Cfg $state $true)
+
     Say '预检'
     $pre = Invoke-Preflight $Cfg $state
     if ($pre.Problems.Count -gt 0) {
@@ -2311,12 +2710,29 @@ function Invoke-Up($Cfg) {
         $port = Get-ServicePort $Cfg $name
         Say "[$index/$total] $title（端口 $port）"
         $info = Get-ServiceState $Cfg $state $name
+        # 进程正在退出的那一瞬间也读不到程序路径：等一等再下结论。
+        $tries = 0
+        while ($info.Unreadable -and $tries -lt 8) { Start-Sleep -Milliseconds 400; $tries += 1; $info = Get-ServiceState $Cfg $state $name }
         if ($info.State -eq 'ok') {
             Say "  已经在跑（进程 $($info.Pid)），不动它" 'Green'
             continue
         }
         if ($info.Ours) {
             Say "  进程 $($info.Pid) 在，但检查还没通过（$($info.Reason)）。等它…"
+            Wait-ServiceReady $Cfg $state $name $index $total
+            continue
+        }
+        if ($info.Unreadable) {
+            # 记录在、进程号和启动时间都对得上，只是这个窗口读不到它的程序路径：不丢记录、不重起，把话说对。
+            Say ''
+            Say "✗ $title 在跑，但这个窗口核对不了它。" 'Red'
+            Say "  查的是：$($info.Checked)"
+            Say "  结果：$($info.Reason)"
+            Say "  下一步：$($info.Next)" 'Yellow'
+            Stop-Stack "$title 的进程读不到程序路径" 4 -Quiet
+        }
+        # 没有记录，或者记录里的进程已经不在了：先看有没有可以认领的（程序在运行目录里、又占着本套的端口）。
+        if (@(Invoke-Adopt $Cfg $state $true @($name)).Count -gt 0) {
             Wait-ServiceReady $Cfg $state $name $index $total
             continue
         }
@@ -2327,8 +2743,35 @@ function Invoke-Up($Cfg) {
         }
         $owners = Get-PortOwners $port -Fresh
         if ($owners.Count -gt 0) {
-            Show-Failure $Cfg $name $index $total "端口 $port 被占着：$(Format-ProcBrief $owners[0])。它不是本套起的，我没有动它" '' "停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up"
+            $ownerProc = Get-ProcInfo ([int]$owners[0])
+            if ($null -ne $ownerProc -and -not $ownerProc.ExecutablePath) {
+                Show-Failure $Cfg $name $index $total "端口 $port 被进程 $($owners[0])（$($ownerProc.Name)）占着；这个窗口读不到它的程序路径，判断不了它是不是本套的。我没有动它" '' "如果它是本套的服务（比如当时用「以管理员身份运行」起的），用同样的方式打开窗口再运行；不是的话，停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up"
+            } else {
+                Show-Failure $Cfg $name $index $total "端口 $port 被占着：$(Format-ProcBrief $owners[0])。它不是本套起的，我没有动它" '' "停掉那个进程，或把配置里 [$name] 的 port 换一个，然后再运行 stack up"
+            }
             Stop-Stack "$title 的端口被占" 4
+        }
+        # 端口空着，但运行目录里这个服务的程序已经有进程在跑：多半是刚被重启、还没占上端口。等它一会儿，不起第二个。
+        $strays = @(Get-ServiceProgramProcs $Cfg $name)
+        if ($strays.Count -gt 0) {
+            $strayText = (@($strays | ForEach-Object { $_.ProcessId }) -join '、')
+            Say "  运行目录里的 $title 程序已经有进程在跑（进程 $strayText），只是还没占上端口 $port。先不起第二个，最多等它 30 秒…" 'Yellow'
+            $outcome = Wait-StrayService $Cfg $state $name $true 30
+            if ($outcome -eq 'adopted') {
+                Wait-ServiceReady $Cfg $state $name $index $total
+                continue
+            }
+            if ($outcome -eq 'stuck') {
+                $strays = @(Get-ServiceProgramProcs $Cfg $name)
+                $spec = Get-ServiceSpec $Cfg $name
+                Say ''
+                Say "✗ $title 没有起：运行目录里的程序已经有进程在跑，但它没占本套的端口。" 'Red'
+                Say "  查的是：有没有进程的程序路径就是 $($spec.Exe)；端口 $port 上有没有进程在听"
+                Say "  结果：$(@($strays | ForEach-Object { Format-ProcBrief ([int]$_.ProcessId) }) -join '；')在跑；端口 $port 上没有进程在听。我没有起第二个，也没有动它"
+                Say "  下一步：如果刚在配置向导页里点过「重启」，过半分钟再运行 stack up；如果在向导页里改过监听端口，把 stack.toml 里 [$name] 的 port 改成一样的。它一直不占这个端口的话，到任务管理器里结束这个进程（先核对它的路径是上面那一个），再运行 stack up" 'Yellow'
+                Stop-Stack "$title 的程序已经有进程在跑，但没占本套的端口" 4 -Quiet
+            }
+            Say '  那个进程自己退了。照常起。'
         }
         if ($name -eq 'database') {
             Initialize-BackendFiles $Cfg
@@ -2347,9 +2790,14 @@ function Invoke-Up($Cfg) {
             if ($backendState.State -ne 'ok') { Stop-Stack "后端不是正常状态（$($backendState.Reason)），不起 rs-server" 4 }
             if ($Cfg.RsServer.WaitStorageVersion) {
                 $sv = Wait-StorageVersion $Cfg $state
-                if (-not $sv.CaughtUp) {
-                    Say "  先不起 rs-server：等了 $($Cfg.Timeouts.StorageVersionSec) 秒，后端的库版本还没对上（$($sv.Text)）。" 'Yellow'
-                    Say '  下一步：过一会儿再运行 stack up，它会把 rs-server 补起来，别的服务不动。如果这是一份老版本的库（不是新库），要先在后端做升级。' 'Yellow'
+                if ($sv.Kind -ne 'ok') {
+                    $waited = ''
+                    if ($sv.WaitedSec -ge 1) { $waited = "等了 $($sv.WaitedSec) 秒，" }
+                    Say "  先不起 rs-server：${waited}后端的库版本还没对上（$($sv.Text)）。plant3d-web、后端和 plant-ui 网页版不受影响，照常能用。" 'Yellow'
+                    Show-StorageVersionAdvice $Cfg $sv
+                    if (-not $NoInit -and $Cfg.Init.Dbnums.Count -gt 0 -and $sv.Kind -eq 'awaiting-model') {
+                        Say "  配置里 [init] dbnums 点了名（$($Cfg.Init.Dbnums -join '、')）：下面会先初始化；初始化完再看一次，库版本对上了就把 rs-server 补起来。" 'Yellow'
+                    }
                     $pending += $title
                     continue
                 }
@@ -2370,6 +2818,21 @@ function Invoke-Up($Cfg) {
         if ($Cfg.Init.Dbnums.Count -gt 0) { Say "按 -NoInit 不初始化（配置里点名的库 $($Cfg.Init.Dbnums -join '、') 这次不做）" }
     } elseif ($Cfg.Init.Dbnums.Count -gt 0) {
         Invoke-Init $Cfg $state $Cfg.Init.Dbnums
+        # rs-server 刚才因为库版本没对上而没起：点了名的库初始化完之后，版本记录可能已经写上了
+        # （配了 watch_dbnums 的新库就是这样）。再看一眼，对上了就把它补起来，省得再运行一次。
+        $rsTitle = Get-ServiceTitle 'rs_server'
+        if ($pending -contains $rsTitle -and -not $state.ContainsKey('rs_server')) {
+            $sv = Get-StorageVersionState $Cfg
+            $rsOwners = Get-PortOwners $Cfg.RsServer.Port -Fresh
+            if ($sv.Kind -eq 'ok' -and $rsOwners.Count -eq 0) {
+                $rsIndex = [array]::IndexOf($names, 'rs_server') + 1
+                Say "[$rsIndex/$total] rs-server（端口 $($Cfg.RsServer.Port)）：初始化之后库版本一致了（$($sv.Text)），现在把它补起来"
+                Initialize-RsServerFiles $Cfg
+                Start-StackService $Cfg $state 'rs_server' $rsIndex $total
+                Wait-ServiceReady $Cfg $state 'rs_server' $rsIndex $total
+                $pending = @($pending | Where-Object { $_ -ne $rsTitle })
+            }
+        }
     } else {
         Say '没有点名要初始化的库：不初始化、不生成模型。要初始化某个库，在界面里做，或运行 stack init <库号…>。'
     }
@@ -2381,7 +2844,8 @@ function Invoke-Up($Cfg) {
     Say ''
     Show-Urls $Cfg
     if ($pending.Count -gt 0) {
-        Say "还没起的：$($pending -join '、')（原因见上）。其余已经起好。再运行一次 stack up 会把它补起来。" 'Yellow'
+        Say "还没起的：$($pending -join '、')（原因和下一步见上面「先不起」那一段）。其余已经起好，可以照常用。" 'Yellow'
+        Say '（因为还有服务没起，这次的退出码是 4；双击「开始」的窗口最后一行会用英文说 not everything is running，指的就是这件事。）' 'Yellow'
         Stop-Stack "还有服务没起：$($pending -join '、')" 4 -Quiet
     }
     Say '全部起好。看状态：stack status；检查：stack smoke；停：stack down。' 'Green'
@@ -2394,13 +2858,36 @@ function Show-Urls($Cfg) {
     if (-not $Cfg.LoopbackOnly) { Say '  （以上是在这台机器上打开用的地址；从别的机器打开，把 127.0.0.1 换成这台机器的名字或地址）' }
 }
 
-# 等后端的库版本一致。全新的库：后端启动做完之后自己写版本记录，一般十来秒。
+# 等后端的库版本一致。返回 Get-StorageVersionState 的那个归类，另加 WaitedSec（等了几秒）。
+# 只在「等得到」的时候等：
+#   · 全新的库、后端还在做启动：缺省配置下后端做完启动时自己写，样例工程十来秒；
+#   · 后端的启动做完了、还在忙（有库在初始化）：做完会写；
+#   · 后端正在做库的升级。
+# 等不到的情形马上回去，不白等：
+#   · 后端在设置模式；版本记录比程序要的旧或新；上一次升级失败；
+#   · 没有版本记录而模型面已经就绪（连看到 5 次才算数——版本记录和「就绪」是前后脚写的，别抢在它中间下结论）；
+#   · 没有版本记录、后端的启动做完了、却闲着（连着 10 次都没有在排在跑的任务）：它在等库被初始化，光等不会有。
 function Wait-StorageVersion($Cfg, $State) {
-    $deadline = (Get-Date).AddSeconds($Cfg.Timeouts.StorageVersionSec)
+    $started = Get-Date
+    $deadline = $started.AddSeconds($Cfg.Timeouts.StorageVersionSec)
     $said = $false
+    $settled = 0
+    $lastKind = ''
     while ($true) {
         $sv = Get-StorageVersionState $Cfg
-        if ($sv.CaughtUp) { return $sv }
+        $sv.WaitedSec = [int]((Get-Date) - $started).TotalSeconds
+        if ($sv.Kind -eq 'ok') { return $sv }
+        if ($sv.Kind -eq 'setup' -or $sv.Kind -eq 'old' -or $sv.Kind -eq 'newer' -or $sv.Kind -eq 'upgrade-failed') { return $sv }
+        if ($sv.Kind -ne $lastKind) { $settled = 0; $lastKind = $sv.Kind }
+        if ($sv.Kind -eq 'no-record') {
+            $settled += 1
+            if ($settled -ge 5) { return $sv }
+        } elseif ($sv.Kind -eq 'awaiting-model') {
+            if (Test-BackendIdle $Cfg) { $settled += 1 } else { $settled = 0 }
+            if ($settled -ge 10) { $sv.Idle = $true; return $sv }
+        } else {
+            $settled = 0
+        }
         if ((Get-Date) -ge $deadline) { return $sv }
         if (-not $said) { Say "  等后端的库版本一致再起 rs-server（现在：$($sv.Text)；最多等 $($Cfg.Timeouts.StorageVersionSec) 秒）…"; $said = $true }
         $guard = Test-Guards $Cfg $State
@@ -2416,6 +2903,16 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
     $stopped = 0
     $failed = 0
     if ($OnlyTell) { Say "stack down -WhatIf —— 只说不做（$($Cfg.Name)）" } else { Say "stack down —— $($Cfg.Name)" }
+    # 在跑、却没记在状态文件里的本套进程（后端在向导页里重启过，或者上一次 up 没跑完）：先认领回来，下面照常停。
+    [void](Invoke-Adopt $Cfg $state (-not $OnlyTell))
+    if (-not $OnlyTell) {
+        # 程序在跑、只是还没占上端口的（刚在向导页里点了「重启」的后端就是这样）：等它几秒，占上了就认领、一起停。
+        foreach ($name in @($script:AdoptMissing)) {
+            if (@(Get-ServiceProgramProcs $Cfg $name).Count -eq 0) { continue }
+            Say "  $(Get-ServiceTitle $name)：运行目录里的程序有进程在跑，只是还没占上端口 $(Get-ServicePort $Cfg $name)。等它最多 15 秒…" 'Yellow'
+            [void](Wait-StrayService $Cfg $state $name $true 15)
+        }
+    }
     $order = @($script:AllServiceNames)
     [array]::Reverse($order)
     foreach ($name in $order) {
@@ -2426,6 +2923,8 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
             continue
         }
         $record = $state[$name]
+        # 要动手停进程了：配了受保护端口的话，先重新取一次「谁在听哪个端口」，不用几秒前的旧账。
+        if (-not $OnlyTell -and $Cfg.Guard.ProtectPorts.Count -gt 0) { [void](Get-ListenTable -Fresh) }
         $check = Test-RecordedProcess $Cfg $name $record
         if ($check.Unreadable) {
             # 进程号和启动时间都对得上，只是读不到它的程序路径：多半是这个窗口的权限比起它的那个低。
@@ -2444,26 +2943,34 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
         if ($OnlyTell) { Say "  会停 $what"; continue }
         # 有的服务带子进程（nginx 的工作进程、前端开发服务器的打包进程）；先记下来，
         # 主进程停了之后核对它们是否跟着退了，没退的按「进程号 + 启动时间」核对后收掉。
+        # 名单里只收真是它生的：创建时间不早于这个服务的（见 Select-TrueChildren 上面的说明）。
         $kids = @()
-        foreach ($kid in (Get-ChildProcs $record.pid)) { $kids += @{ pid = [int]$kid.ProcessId; ticks = (Get-ProcTicks $kid); name = $kid.Name } }
+        foreach ($kid in (Get-ChildProcs $record.pid $record.startTicks)) { $kids += @{ pid = [int]$kid.ProcessId; ticks = (Get-ProcTicks $kid); name = $kid.Name } }
         if (-not (Stop-VerifiedProcess $record.pid $record.startTicks)) {
             Say "  ✗ $title：进程 $($record.pid) 没有停下来" 'Red'
             $failed += 1
             continue
         }
+        # 下面要核对「占没占受保护端口」：先重新取一次谁在听哪个端口，这个服务的子进程和外层 cmd 共用这一份。
+        if ($Cfg.Guard.ProtectPorts.Count -gt 0 -and ($kids.Count -gt 0 -or $record.wrapperPid -gt 0)) { [void](Get-ListenTable -Fresh) }
         foreach ($kid in $kids) {
             if ($kid.name -ieq 'conhost.exe') { continue }
             Start-Sleep -Milliseconds 300
             $p = Get-ProcInfo $kid.pid
-            if ($null -ne $p -and (Test-SameStart $kid.ticks $p)) {
-                if (Stop-VerifiedProcess $kid.pid $kid.ticks) { Say "    连带停了它的子进程 $($kid.pid)（$($kid.name)）" }
+            if ($null -eq $p -or -not (Test-SameStart $kid.ticks $p)) { continue }
+            # 占着受保护端口的进程一律不动，不管它是怎么进到这份名单里的。
+            $guarded = Get-ProtectedPortOf $Cfg $kid.pid -MaxAgeMs 6000
+            if ($guarded -gt 0) {
+                Say "    没有动子进程 $($kid.pid)（$($kid.name)）：它占着受保护的端口 $guarded" 'Yellow'
+                continue
             }
+            if (Stop-VerifiedProcess $kid.pid $kid.ticks) { Say "    连带停了它的子进程 $($kid.pid)（$($kid.name)）" }
         }
         # 外面包的那层 cmd 会在服务退出后自己结束；没结束才按「进程号 + 启动时间」核对后收掉。
         if ($record.wrapperPid -gt 0) {
             Start-Sleep -Milliseconds 300
             $w = Get-ProcInfo $record.wrapperPid
-            if ($null -ne $w -and $w.Name -ieq 'cmd.exe') { Stop-VerifiedProcess $record.wrapperPid $record.wrapperTicks | Out-Null }
+            if ($null -ne $w -and $w.Name -ieq 'cmd.exe' -and (Get-ProtectedPortOf $Cfg $record.wrapperPid -MaxAgeMs 6000) -eq 0) { Stop-VerifiedProcess $record.wrapperPid $record.wrapperTicks | Out-Null }
         }
         Say "  已停 $what" 'Green'
         $stopped += 1
@@ -2481,12 +2988,23 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
         return 0
     }
     $left = @()
+    [void](Get-ListenTable -Fresh)
     foreach ($name in (Get-ServiceNames $Cfg)) {
         $port = Get-ServicePort $Cfg $name
-        $owners = Get-PortOwners $port -Fresh
+        $owners = Get-PortOwners $port -MaxAgeMs 6000
         if ($owners.Count -gt 0) { $left += "$port（$(Format-ProcBrief $owners[0])）" }
     }
     if ($left.Count -gt 0) { Say "  注意：这些端口上还有进程在听，不在本套的记录里，没有动：$($left -join '；')" 'Yellow' }
+    # 运行目录里的程序还有没有进程在跑（没占本套的端口，所以认领不了）。
+    $strays = @()
+    foreach ($name in (Get-ServiceNames $Cfg)) {
+        foreach ($p in @(Get-ServiceProgramProcs $Cfg $name)) { $strays += "$(Get-ServiceTitle $name)：$(Format-ProcBrief ([int]$p.ProcessId))" }
+    }
+    if ($strays.Count -gt 0) {
+        Say "  ✗ 运行目录里的程序还有进程在跑；它没占本套的端口，所以没有认领、也没有动它：$($strays -join '；')" 'Red'
+        Say '    下一步：如果刚在后端的向导页里点过「重启」，过半分钟再运行一次 stack down；否则到任务管理器里核对它的路径之后手工结束。' 'Yellow'
+        $failed += 1
+    }
     Say "停了 $stopped 个。"
     if ($failed -gt 0) { return 1 }
     return 0
@@ -2496,9 +3014,16 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
 
 function Invoke-Status($Cfg) {
     $state = Read-StackState $Cfg
+    Say "stack status —— $($Cfg.Name)（$((Get-Date).ToString('HH:mm:ss'))；可提交内存余量 $(Get-CommitFreeGb) GB）"
+    # status 不占运行目录的锁，所以认领只在这一次运行里算数，不写状态文件。
+    [void](Invoke-Adopt $Cfg $state $false)
+    # 程序在跑、只是还没占上端口的（刚在向导页里点了「重启」的后端）：等它几秒，占上了就认领，免得白报一次「不在了」。
+    foreach ($name in @($script:AdoptMissing)) {
+        if (@(Get-ServiceProgramProcs $Cfg $name).Count -eq 0) { continue }
+        [void](Wait-StrayService $Cfg $state $name $false 8)
+    }
     $rows = @()
     foreach ($name in (Get-ServiceNames $Cfg)) { $rows += (Get-ServiceState $Cfg $state $name) }
-    Say "stack status —— $($Cfg.Name)（$((Get-Date).ToString('HH:mm:ss'))；可提交内存余量 $(Get-CommitFreeGb) GB）"
     Show-StatusTable $rows
     $bad = @($rows | Where-Object { $_.State -ne 'ok' })
     # 不正常的逐个说清楚：是哪个、查的是什么、结果、它自己最后输出了什么、下一步。
@@ -2520,7 +3045,7 @@ function Invoke-Status($Cfg) {
         if ($row.State -ne 'waiting') { continue }
         Say ''
         Say "$($row.Title) 还没起：$($row.Reason)" 'Yellow'
-        Say "  下一步：$($row.Next)" 'Yellow'
+        if ($null -ne $row.Sv) { Show-StorageVersionAdvice $Cfg $row.Sv } else { Say "  下一步：$($row.Next)" 'Yellow' }
     }
     if ($bad.Count -gt 0) {
         if (@($rows | Where-Object { $_.State -ne 'stopped' }).Count -eq 0) {
@@ -2541,6 +3066,7 @@ function Invoke-Doctor($Cfg) {
     Say "  运行目录：$($Cfg.Root)"
     Say "  PowerShell $($PSVersionTable.PSVersion)"
     $state = Read-StackState $Cfg
+    [void](Invoke-Adopt $Cfg $state $false)
     $pre = Invoke-Preflight $Cfg $state
     Say ''
     if ($pre.Problems.Count -gt 0) { Say "✗ $($pre.Problems.Count) 处要处理。" 'Red'; return 4 }
@@ -2591,6 +3117,7 @@ function Invoke-Smoke($Cfg, [int]$MaxLevel, [string]$NodeRef, [bool]$ForceNode =
     function Add-Skip([int]$Lv, [string]$What, [string]$Detail) { [void]$results.Add(@{ Level = $Lv; What = $What; Ok = $true; Skip = $true; Detail = $Detail }) }
     Say "stack smoke —— $($Cfg.Name)（做到第 $MaxLevel 层）"
     if ($Cfg.Guard.ProtectPorts -contains $Cfg.Backend.Port) { Stop-Stack '后端端口在受保护名单里，不对它做冒烟' 2 }
+    [void](Invoke-Adopt $Cfg $state $false)
 
     # 第 0 层：各个服务在跑并通过检查
     $allUp = $true
@@ -2605,6 +3132,11 @@ function Invoke-Smoke($Cfg, [int]$MaxLevel, [string]$NodeRef, [bool]$ForceNode =
         if ($name -eq 'rs_server' -and $info.State -eq 'ok') { $rsUp = $true }
         $who = $info.Title
         if ($who -match '[A-Za-z0-9]$') { $who += ' ' }
+        if ($info.State -eq 'waiting') {
+            # rs-server 因为库版本没对上而没起：原因只记一次，记在下面「库版本一致」那一项上。
+            Add-Skip 0 "${who}在跑并通过检查" "还没起：$($info.Reason)。见下面「库版本一致」那一项"
+            continue
+        }
         Add-Result 0 "${who}在跑并通过检查" ($info.State -eq 'ok') $detail
     }
     $setupMode = $false
@@ -2626,8 +3158,24 @@ function Invoke-Smoke($Cfg, [int]$MaxLevel, [string]$NodeRef, [bool]$ForceNode =
             Add-Result 0 '后端自报健康' ($status -eq 'ok') "status=$status；降级项 [$(@(Get-Prop $j 'degraded_sections') -join ',')]；阻断项 [$(@(Get-Prop $j 'blocking_conditions') -join ',')]"
             $closure = [string](Get-Prop (Get-Prop $j 'mdb_closure') 'status')
             Add-Result 0 '后端读得到 E3D 工程目录' ($closure -eq 'ok') "工程目录检查（mdb_closure.status）=$closure；项目 $(Get-Prop $j 'project')，MDB $(Get-Prop $j 'mdb')"
-            $sv = Get-Prop $j 'storage_version'
-            Add-Result 0 '库版本一致' ((Get-Prop $sv 'caught_up') -eq $true) "库里的版本记录 $(Get-Prop $sv 'stored')，程序要的 $(Get-Prop $sv 'expected')"
+            # 库版本：对上了是 ✓；全新的库还没写（后端的启动没做完）或正在升级，是「–」——等得到，不算没过；
+            # 等不到的几种（有数据却没有记录、版本旧了或新了、升级失败）才是 ✗。
+            $svs = Get-StorageVersionKind $j
+            if ($svs.Kind -eq 'ok') {
+                Add-Result 0 '库版本一致' $true "库里的版本记录 $($svs.Stored)，程序要的 $($svs.Expected)"
+            } elseif ($svs.Kind -eq 'starting' -or $svs.Kind -eq 'unknown') {
+                Add-Skip 0 '库版本一致' "新库的版本记录还没写（$($svs.Text)）：后端做完启动时自己会写，样例工程十来秒。过一会儿再冒烟"
+            } elseif ($svs.Kind -eq 'awaiting-model') {
+                Add-Skip 0 '库版本一致' "还没有版本记录（$($svs.Text)）：后端要等第一次初始化完成才写。先初始化要用的库（stack init <库号>）再冒烟；rs-server 也要等它"
+            } elseif ($svs.Kind -eq 'upgrading') {
+                Add-Skip 0 '库版本一致' "后端正在做库的升级（已完成 $($svs.UpgradeDone) / $($svs.UpgradeTotal) 个库），做完才对得上"
+            } else {
+                $svWhy = '库里已经有数据、却没有版本记录，后端不会自己补写'
+                if ($svs.Kind -eq 'old') { $svWhy = '这份数据是老一版的后端建的' }
+                elseif ($svs.Kind -eq 'newer') { $svWhy = '这份数据是更新的后端建的' }
+                elseif ($svs.Kind -eq 'upgrade-failed') { $svWhy = '上一次库升级没有全部成功' }
+                Add-Result 0 '库版本一致' $false "$($svs.Text)。$svWhy；rs-server 因此不起。怎么办：运行 stack status，照它说的选一种办法"
+            }
             $auto = Get-Prop $j 'auto_initialize_new_dbnums'
             Add-Result 0 '启动时不自动初始化新库' ($auto -eq $Cfg.Init.AutoNew) "后端此刻的开关 auto_initialize_new_dbnums=$auto（配置 [init] auto_new=$($Cfg.Init.AutoNew)）"
             # 「核对」（RVM 比对）：产物目录是不是入口定的那个；E3D 启动脚本找不找得到。
@@ -2705,8 +3253,9 @@ function Invoke-Smoke($Cfg, [int]$MaxLevel, [string]$NodeRef, [bool]$ForceNode =
     if ($backendUp -and -not $setupMode -and $MaxLevel -ge 2) {
         if ($NodeRef) {
             # 给了节点号：在这个节点上按需生成一次，再取记录和网格。
-            # 先看这个节点在哪个库、那个库初始化过没有。没初始化的库缺省不做：后端（0.1.44 这一版）在没初始化的库上
-            # 按需生成之后，会把结果留在数据库里，而之后初始化这个库时又清不掉它，初始化就被挡下（「模型面残留」）。
+            # 先看这个节点在哪个库、那个库初始化过没有。没初始化的库缺省不做、要加 -Force：在没初始化的库上按需生成，
+            # 结果会留在数据库里。带 gen-model #146 修复的后端（2026-11-11 晚之后的构建）之后初始化这个库时会自己清掉；
+            # 更早的后端清不掉，初始化会被挡下（「模型面残留」）。入口从后端的版本号上分不出这两种，所以让人自己拿主意。
             $refno = $NodeRef.Trim().Replace('_', '/')
             $ownerDb = 0
             $ownerInitialized = $false
@@ -2724,14 +3273,14 @@ function Invoke-Smoke($Cfg, [int]$MaxLevel, [string]$NodeRef, [bool]$ForceNode =
             if (-not $allowed) {
                 $where = '没查到这个节点在哪个库（节点号要写成 23736/1 这样）'
                 if ($ownerDb -gt 0) { $where = "节点所在的库 $ownerDb 还没有初始化" }
-                Add-Result 2 "在节点 $refno 上按需生成" $false "没有做：$where。后端现在这一版，在没初始化的库上按需生成过之后，这个库就不能再初始化了（初始化会报「模型面残留」）。以后要初始化这个库：先 stack init $ownerDb，再冒烟。确实只想验证按需生成、不打算初始化这个库：加 -Force"
+                Add-Result 2 "在节点 $refno 上按需生成" $false "没有做：$where。在没初始化的库上按需生成，结果会留在数据库里：带 #146 修复的后端（test3 起的安装包里就是）以后初始化这个库时会自己清掉；更早的后端清不掉，那个库就初始化不了。要做就加 -Force；想稳妥，先 stack init $ownerDb 再冒烟"
             } else {
             $g = Invoke-StackHttp 'POST' ((Get-BackendUrl $Cfg) + '/api/v1/model/generate') ('{"refno":"' + $refno + '"}') 150
             $gj = ConvertFrom-JsonSafe $g.Body
             $gDetail = "POST /model/generate → HTTP $($g.Status)"
             if ($g.Ok) { $gDetail = "库 $ownerDb；状态 $(Get-Prop $gj 'status')；生成根 $(@(Get-Prop $gj 'generation_roots').Count) 个，其中失败 $([int](Get-Prop $gj 'failed_root_count')) 个；画得出来的实例 $(Get-Prop $gj 'model_instance_count') 个；取数源 $(Get-Prop $gj 'model_source')（落库 = $(Get-Prop $gj 'durable')）" }
             else { $gDetail += "：$(Limit-Text $g.Body 200)" }
-            if ($g.Ok -and -not $ownerInitialized) { $gDetail += "。注意：库 $ownerDb 没初始化，按 -Force 做了；这个库之后不能再初始化" }
+            if ($g.Ok -and -not $ownerInitialized) { $gDetail += "。库 $ownerDb 还没初始化，按 -Force 做了" }
             Add-Result 2 "在节点 $refno 上按需生成" $g.Ok $gDetail
             if ($g.Ok) {
                 $r = Invoke-StackHttp 'POST' ((Get-BackendUrl $Cfg) + '/api/v1/model/records') ('{"generation_root":"' + $refno + '","limit":500}') 120
@@ -2801,6 +3350,7 @@ function Invoke-Watch($Cfg, [int]$WatchSeconds) {
     $peak = 0
     while ($true) {
         $state = Read-StackState $Cfg
+        [void](Invoke-Adopt $Cfg $state $false @() $true)
         $parts = @()
         foreach ($name in (Get-ServiceNames $Cfg)) {
             $title = Get-ServiceTitle $name
@@ -2824,6 +3374,7 @@ function Invoke-Watch($Cfg, [int]$WatchSeconds) {
 function Invoke-InitCommand($Cfg, [int[]]$Dbnums) {
     Say "stack init —— $($Cfg.Name)：库 $(@($Dbnums) -join '、')"
     $state = Read-StackState $Cfg
+    [void](Invoke-Adopt $Cfg $state $false)
     foreach ($name in 'database', 'backend') {
         $info = Get-ServiceState $Cfg $state $name
         if ($info.State -ne 'ok') {
@@ -2836,6 +3387,12 @@ function Invoke-InitCommand($Cfg, [int[]]$Dbnums) {
     }
     Invoke-Init $Cfg $state $Dbnums
     Say '初始化做完了。在 plant3d-web 里刷新一下就能看到这些库的模型；stack smoke 可以再核一遍。' 'Green'
+    # rs-server 之前因为库版本没对上而没起的：初始化完可能已经对上了（配了 watch_dbnums 的新库就是这样）。提醒一句。
+    if ($Cfg.RsServer.Enabled -and $Cfg.RsServer.WaitStorageVersion -and -not $state.ContainsKey('rs_server')) {
+        $sv = Get-StorageVersionState $Cfg
+        if ($sv.Kind -eq 'ok') { Say "rs-server 还没起，而库版本现在一致了（$($sv.Text)）：运行 stack up（双击「开始」），它会把 rs-server 补起来。" 'Yellow' }
+        elseif ($sv.Kind -ne 'unknown') { Say "rs-server 还没起：库版本还没对上（$($sv.Text)）。运行 stack status 看是哪种情况、怎么办。" 'Yellow' }
+    }
     return 0
 }
 
@@ -2949,8 +3506,8 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
                        一个库都没初始化时这一层跳过。
               -Level n     只做到第 n 层（缺省 2）
               -Node 节点号 第 2 层改成：在这个节点上按需生成一次再取（像界面里在节点上点「生成」）。例：-Node 23736/1
-                           节点所在的库还没初始化时缺省不做：后端现在这一版，在没初始化的库上按需生成过之后，
-                           这个库就不能再初始化了。确实只想验证按需生成：再加 -Force
+                           节点所在的库还没初始化时缺省不做，要再加 -Force：在没初始化的库上按需生成，结果会留在
+                           数据库里；带 gen-model #146 修复的后端以后初始化这个库时会自己清掉，更早的后端清不掉。
   doctor    只检查、不起任何服务：路径、端口、程序版本、内存和磁盘余量
   watch     盯一段时间：每 5 秒报一次各服务的内存；越过配置的线就按配置处理
               -Seconds n   盯多久（缺省 120）
@@ -2960,8 +3517,10 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
   help      这一页
 
 配置
-  安装包里的 stack.toml 已经填好了包内的路径和端口，只要改 [project]（E3D 工程根目录、项目名、
-  项目编码、MDB、E3D 版本）。开发机上从 stack.example.toml 拷一份改。
+  安装包里带的是 stack.default.toml（缺省配置，包内的路径和端口都填好了）。第一次运行 stack up 时，
+  入口照它生成 stack.toml 然后停下，请你把 [project]（E3D 工程根目录、项目名、项目编码、MDB、E3D 版本）
+  改好再运行一次。stack.toml 是你自己的那一份，不在安装包里，换新一版时解压不会盖掉它。
+  开发机上从 stack.example.toml 拷一份改。
   配置里有不认识的写法或不认识的键，会报错并指出行号，不会悄悄忽略。
   相对路径：[stack] root 相对配置文件所在的目录；其余路径都相对 root。
 
@@ -2975,17 +3534,21 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
   · rs-server：后端健康、库版本一致之后才起；关掉它的自动升级；给它一个干净的运行目录；
     它的配置以后端那份为底生成，MySQL 和数据中心平台几项留空；
     再给 plant-ui 网页版写一份配置，让网页版找得到它。
+    库版本只在等得到的时候等（全新的库后端做完启动时自己写；或者后端正在升级）。等不到的——
+    库里有数据却没有版本记录、版本记录比程序旧——马上说出是哪种情况、在哪做什么，不白等。
   · 每个服务的环境变量由入口明确给出（stack config 能看到全部），不带调用方环境里的东西。
   · 数据库账号口令沿用后端配置模板里现有的那一对，经环境变量递给数据库；不打印、不上命令行、
     不写进状态文件和日志。
-  · 认进程靠「进程号 + 启动时间 + 程序路径」（开发档的前端靠命令行里的标记），从不按进程名；
-    状态文件里没有记的进程一律当别人的。所以各个程序要用放在运行目录里的那一份
-    （[guard] require_exe_under_root）。起和停要用同样权限的窗口。
+  · 认进程靠「进程号 + 启动时间 + 程序路径」（开发档的前端靠命令行里的标记），从不按进程名。
+    所以各个程序要用放在运行目录里的那一份（[guard] require_exe_under_root）。起和停要用同样权限的窗口。
+    状态文件里没有记的进程当别人的，只有一种会被认领回来：它的程序就是运行目录里的那一个、
+    又占着本套的端口——在后端的向导页里点了「重启」、或者 stack up 跑到一半窗口被关，就会有这种进程。
+    连带收子进程（nginx 的工作进程）时只认创建时间不早于它的；占着受保护端口的进程一律不动。
   · 缺省不改对谁开放：后端、rs-server、前端监听所有网卡。只想让本机访问，把 [listen] loopback_only 设成 true。
 
 文件都在哪（都在 [stack] root 下面）
   run\state.json        记着本套起了哪些进程（没有口令）
-  run\stack.lock        up / down 正在跑的时候占着它，防止两个同时跑
+  run\stack.lock        up / down / prepare 正在跑的时候占着它，防止两个同时跑
   logs\<服务>\          每个服务自己的输出，每起一次一个文件
   logs\stack\           入口自己打印过的内容，按天一个文件
   work\backend\         后端的工作目录：生成的 DbOption.toml、网格、日志、锁
@@ -3003,6 +3566,9 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
 }
 
 # ─────────────────────────── 主流程 ───────────────────────────
+
+# 测试用：点源本文件并带上 __lib（ . stack.ps1 __lib ），只把上面的函数定义进调用方，不执行任何命令。
+if ($Command -eq '__lib') { return }
 
 try {
     $commandName = $Command.ToLowerInvariant()
@@ -3034,6 +3600,25 @@ try {
     }
     $configFile = $Config
     if (-not $configFile) { $configFile = Join-Path (Get-Location).Path 'stack.toml' }
+    # 安装包里带的是 stack.default.toml（缺省配置）；stack.toml 是用户自己的那一份，包里没有——
+    # 这样换新一版时，解压覆盖不会把用户改过的配置盖掉。
+    # 第一次：stack.toml 不在、旁边有 stack.default.toml，就照它拷一份出来，然后停下，请人先把 [project] 改好。
+    $configFull = [System.IO.Path]::GetFullPath($configFile)
+    if (-not (Test-Path -LiteralPath $configFull -PathType Leaf) -and (Split-Path -Leaf $configFull) -ieq 'stack.toml') {
+        $defaultFile = Join-Path (Split-Path -Parent $configFull) 'stack.default.toml'
+        if (Test-Path -LiteralPath $defaultFile -PathType Leaf) {
+            if ('up', 'doctor', 'config', 'prepare' -contains $commandName) {
+                Copy-Item -LiteralPath $defaultFile -Destination $configFull
+                Write-Host "第一次运行：这里还没有 stack.toml，已经照 stack.default.toml 生成了一份：$configFull" -ForegroundColor Yellow
+                Write-Host '请先用记事本打开它，把最上面 [project] 一节改成你的工程（E3D 工程根目录、项目名、项目编码、E3D 版本、MDB），保存；' -ForegroundColor Yellow
+                Write-Host '然后再运行一次（双击「开始」）。这一次什么都没有起。' -ForegroundColor Yellow
+                Write-Host '这份 stack.toml 是你自己的，不在安装包里：以后换新一版，解压不会动它。' -ForegroundColor Yellow
+                exit 2
+            }
+            Write-Host "这里还没有 stack.toml（$configFull）。先运行 stack up（双击「开始」）：它会照 stack.default.toml 生成一份，请你改好 [project] 再运行。" -ForegroundColor Red
+            exit 2
+        }
+    }
     $cfg = Get-StackConfig $configFile
 
     if ($commandName -eq '__spawn') {

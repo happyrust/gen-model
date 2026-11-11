@@ -1,0 +1,98 @@
+{
+  "_comment": "这是一份样例，不是哪一次出包用的原件：照它的样子另写一份，把尖括号里的占位文字都换掉，再交给 New-StackRelease.ps1 -Spec。尖括号没换的路径，脚本会报「指的东西不存在」。真正出过包的说明文件留在各次的产出目录里（比如 output/release-test-20261111/release-spec-test2.json）。脚本不认识的键（比如这一条）会忽略。",
+  "package_name": "plant3d-web-offline-v<前端版本>-backend-v<后端版本>-<日期>-<序号>",
+  "version": "<日期>-<序号>",
+  "channel": "test",
+  "stage_dir": "<摆包用的目录：脚本会清空重建它，只动带着它自己标记的目录>",
+  "out_dir": "<zip 放哪个目录；已经有同名的 zip 时不覆盖，除非加 -Force>",
+  "default_ports": { "database": 8009, "backend": 8022, "rs_server": 9098, "frontend": 3100 },
+  "supersedes": ["<这一包取代的上一包的名字；可以不写>"],
+  "release_note": "<这一包是什么、和上一包差在哪。会放在说明的开头；可以不写>",
+  "upgrade_note": "<从上一包换过来要注意什么。会放在说明第 9 节的末尾；可以不写>",
+  "_comment_sources": "sources：各部件从哪拷。脚本只读这些位置，不改它们。rs_server_exe、rs_server_assets、vc_redist_installer 可以不写。",
+  "sources": {
+    "database_exe": "<surreal.exe 的位置>",
+    "backend_exe": "<后端程序的位置；拷进包里改名 bin/aios-database.exe>",
+    "rs_server_exe": "<rs-server.exe 的位置>",
+    "nginx_exe": "<nginx.exe 的位置>",
+    "nginx_mime_types": "<nginx 自带的 conf/mime.types 的位置>",
+    "frontend_dist": "<plant3d-web 构建产物的目录（里面有 index.html）>",
+    "plant_ui_web": "<plant-ui 网页版的目录（里面有 index.html 和 pkg/）>",
+    "backend_resource": "<后端的 resource 目录；只带里面的 surreal/*.surql>",
+    "e3d_schema": "<E3D 库结构定义的目录（里面是 e3d31/、e3d210/ 这样的子目录）>",
+    "backend_config_template": "<后端配置模板 DbOption.factory.toml 的位置；按字节原样拷，脚本不读里面的内容>",
+    "rs_server_resource": "<rs-server 的 resource 目录>",
+    "rs_server_assets": "<rs-server 的 assets 目录>",
+    "vc_redist_installer": "<VC_redist.x64.exe 的位置>"
+  },
+  "rs_server_resource_exclude": ["HOLE_RECORD\\*.json", "metadata_archive\\*", "threed_blueprint\\*"],
+  "frontend_exclude": ["incremental-demo\\*", "dimension-kernel-demo.html", "dimension-perf.html", "pms-review-simulator.html", "test-parquet-7997.html"],
+  "_comment_redactions": "redactions（可以整个不写）：别的仓库的产物里编进去了不该带出去的字样、这里又改不了源头时，在包里的副本上抹掉。files 是包里的相对路径（正斜杠，可带通配符）。一处都没命中脚本会报错。抹了什么会记进清单。",
+  "redactions": [
+    { "files": "<例如 www/assets/index-*.js>", "pattern": "<正则>", "replacement": "<换成什么>", "what": "<抹掉的是什么>" }
+  ],
+  "frontend_version": {
+    "version": "<前端版本，例如 0.2.10>",
+    "commit": "<前端构建用的提交号>",
+    "buildDate": "<构建时间，ISO 写法，例如 2026-11-11T09:47:22.000Z>"
+  },
+  "_comment_components": "components：每个部件一条，照实写版本、来源、带不带没提交的改动。脚本只替 path 指的那个文件补上大小和校验值，别的都不核对——写的是什么，清单里就是什么。下面只列了四条做样子，实际有几个部件写几条。",
+  "components": [
+    {
+      "id": "database",
+      "title": "数据库 SurrealDB（自家分支）",
+      "version": "<数据库程序自报的版本>",
+      "path": "bin/surreal.exe",
+      "source": "<这份程序是哪来的>",
+      "dirty": false
+    },
+    {
+      "id": "backend",
+      "title": "后端 aios-database",
+      "version": "<后端版本>",
+      "path": "bin/aios-database.exe",
+      "built_at": "<构建时间>",
+      "repo": "gen-model",
+      "branch": "<分支>",
+      "commit": "<提交号>",
+      "build_id": "<后端自报的构建号（aios-database.exe version 的输出里有）>",
+      "source": "<哪个分支、哪个提交编的>",
+      "dirty": true,
+      "dirty_note": "<带着哪些没提交的改动；没有就把 dirty 写成 false、去掉这一条>",
+      "includes_fixes": ["<这个程序带了哪些修复，一条一句；可以不写>"],
+      "note": "<别的要说明的>"
+    },
+    {
+      "id": "plant3d-web",
+      "title": "plant3d-web",
+      "version": "<前端版本>",
+      "path": "www/index.html",
+      "built_at": "<构建时间>",
+      "repo": "plant3d-web",
+      "branch": "<分支>",
+      "commit": "<提交号>",
+      "source": "<哪个分支、哪个提交构建的>",
+      "dirty": false
+    },
+    {
+      "id": "stack",
+      "title": "一键部署入口 stack",
+      "version": "<scripts/stack/stack.ps1 里的版本号>",
+      "path": "stack.ps1",
+      "repo": "gen-model",
+      "branch": "<分支>",
+      "commit": "<提交号>",
+      "source": "gen-model/scripts/stack",
+      "dirty": false
+    }
+  ],
+  "included_note": "<这一版带上了哪些修复。会放在说明第 11 节；可以不写>",
+  "not_included_note": "<下面这张「没带上的修复」名单的说明；可以不写>",
+  "not_included_fixes": [
+    { "issue": "#<票号>", "title": "<一句话>" }
+  ],
+  "known_issues": [
+    "<已知问题，一条一段。会编上号放在说明第 8 节>"
+  ],
+  "notes": []
+}

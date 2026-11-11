@@ -1,5 +1,6 @@
 # stack 的配置模板。拷一份改名 stack.toml，放在 stack.cmd 旁边（或用 -Config 指明），再运行 stack doctor。
-# （离线安装包里已经带了一份填好的 stack.toml，只要改 [project]；这份模板是给开发机、或想自己摆目录的人用的。）
+# （离线安装包里带的是一份填好的 stack.default.toml：第一次「开始」时入口照它生成 stack.toml，只要改 [project]。
+#   这份模板是给开发机、或想自己摆目录的人用的。）
 #
 # 怎么读这份文件
 #   【必填】 的项一定要按这台机器改；其余的项不写就用注释里说的缺省值。
@@ -79,7 +80,7 @@ plant_ui_web_root = "web"                      # 后端自带界面（plant-ui�
 [frontend]
 enabled = true
 kind = "vite-dev"
-root = "D:/work/plant3d-web"   # 【前端启用时必填】见上
+root = "D:/path/to/plant3d-web"   # 【前端启用时必填】见上
 port = 3101                    # 【前端启用时必填】
 # node = "node"                # vite-dev：缺省从 PATH 里找 node；也可以写 node.exe 的完整路径
 # exe = "bin/nginx/nginx.exe"  # nginx：【必填】nginx.exe 的位置
@@ -112,7 +113,8 @@ dbnums = []             # 想让 stack up 起完服务顺手初始化几个库�
 # protect_ports = []            # 这些端口本套不许用，占着它们的进程本套也绝不会停。
 #                               #   同一台机器上还跑着另一套时，把那一套的端口写在这里
 # require_exe_under_root = true # 各个程序必须在 root 下面。入口靠程序路径认进程，
-#                               #   和别的实例共用同一个程序文件的话，down 时分不清谁是谁
+#                               #   和别的实例共用同一个程序文件的话，down 时分不清谁是谁。
+#                               #   放开之后，root 之外的程序起的进程不会被「认领」（状态文件里没记的就当别人的）
 # wait_lock_file = ""           # 这个文件存在时，up 先等它消失再起（给别的工作让路）
 # wait_lock_timeout_sec = 600
 
@@ -120,7 +122,8 @@ dbnums = []             # 想让 stack up 起完服务顺手初始化几个库�
 [timeouts]
 # database_sec = 30
 # backend_sec = 180
-# storage_version_sec = 180     # 起 rs-server 之前，等库版本记录一致最多等多久
+# storage_version_sec = 180     # 起 rs-server 之前，等库版本记录一致最多等多久。只在等得到的时候等
+#                               #   （全新的库、后端正在升级）；等不到的情形入口马上说明，不等满
 # rs_server_sec = 120
 # frontend_sec = 90
 # init_sec = 600                # 初始化一个库最多等多久
