@@ -1,0 +1,70 @@
+# 一键部署的配置（离线安装包用）。
+#
+# 只要改下面 [project] 这一节的几项；别的都已经按安装包里的东西填好了，一般不用动。
+# 改完保存，双击「开始.cmd」（或 start.cmd）。想先检查一遍不起服务：在这个目录开命令行，运行  stack doctor
+#
+# 写法：路径用正斜杠（D:/a/b），或者用单引号包反斜杠（'D:\a\b'）。# 后面是注释。
+# 写了入口不认识的东西，它会报错并指出行号，不会悄悄忽略。全部可写的项见 stack.example.toml。
+
+# ───────────── 【要改】工程 ─────────────
+[project]
+e3d_root = "D:/AVEVA/Projects/E3D3.1"   # E3D 工程根目录：它下面是各个项目的文件夹
+name = "AvevaMarineSample"              # 项目名 = 工程根目录下那个文件夹的名字
+code = 1516                             # 项目编码（整数）；同时用作数据库里的命名空间
+e3d_version = "e3d31"                   # E3D 版本：e3d31 或 e3d210
+mdb = "ALL"                             # 用哪个 MDB；"ALL" = 全部
+
+# ───────────── 端口（和这台机器上别的程序冲突时才改） ─────────────
+[database]
+exe = "bin/surreal.exe"
+port = 8009                   # 数据库。只给本机的后端和 rs-server 用，别的机器连不到
+
+[backend]
+exe = "bin/aios-database.exe"
+port = 8022                   # 后端。它的根路径就是 plant-ui 网页版（含配置向导）
+config_template = "config/DbOption.factory.toml"
+resource_dir = "resource"
+schema_root = "schema"
+plant_ui_web_root = "web"
+# watch_dbnums = [7997, 8000] # 只让后端管这几个库。不写 = MDB 里的全部
+# rvm_check_dir = "data/rvm-check"   # 「核对」（RVM 比对）的产物放哪。缺省就是这个：安装文件夹下的 data\rvm-check
+
+# [backend.env]
+# AIOS_SPATIAL_COMPUTE = "0"  # 关掉房间 / 空间树这一整块。缺省是开着的：后端每次启动会在后台给全部设计库
+#                             # 预建一份房间参照模型（不是库的初始化，也不生成构件模型；样例工程约 8 秒）。
+#                             # 关掉之后房间树、按房间查询这些功能不可用。
+
+[rs_server]
+exe = "bin/rs-server.exe"
+port = 9098                   # rs-server（数据服务：元数据、提资、校审这些接口）
+template_dir = "rs-server"
+# public_url = ""             # plant-ui 网页版用哪个地址找 rs-server。缺省 http://<这台机器的名字>:9098 。
+#                             # 别的机器解析不了这台机器的名字时，改成 "http://<这台机器的 IP>:9098"
+# plant_ui_config = false     # 入口缺省会替 plant-ui 网页版写一份配置（web\config.json：rs-server 的地址，不带数据库账号口令）。
+#                             # 网页版因此连不上数据库时，去掉这一行开头的 #，恢复成后端现算的那份
+# enabled = false             # 不想起 rs-server 就去掉这一行开头的 #
+
+[frontend]
+kind = "nginx"
+exe = "bin/nginx/nginx.exe"
+root = "www"
+port = 3100                   # plant3d-web（浏览器里打开的就是这个端口）
+
+# ───────────── 对谁开放 ─────────────
+[listen]
+loopback_only = false   # false = 后端、rs-server、plant3d-web 监听所有网卡，同网段的机器都能访问（和现在的做法一样）。
+                        # true  = 都只听 127.0.0.1，只有这台机器自己能访问。
+
+# ───────────── 初始化：缺省什么都不初始化、不生成模型 ─────────────
+# 服务起来之后，模型树直接读 E3D 库文件就能看。要哪个库的模型：
+#   · 在 plant3d-web 里初始化、核对，或者在模型树的节点上手动生成；
+#   · 或者在这个目录开命令行：stack init 7997 8000   （库号用空格隔开）
+# 「初始化一个库」= 把这个库的全部元素解析进数据库，并生成这个库的模型。
+# 注意先后：打算初始化的库，先初始化，再到它的节点上生成；反过来这个库就初始化不了了（说明第 8 节第 1 条）。
+[init]
+dbnums = []             # 想让「开始」起完服务顺手初始化几个库，就在这里点名，例如 [7997]。空 = 不初始化
+auto_new = false        # 不要改成 true：改了以后后端一启动就把所有没初始化过的库全部初始化，大项目会跑很久、很吃内存
+
+[stack]
+name = "plant-stack"
+root = "."              # 状态、日志、数据库数据都放在这个目录下面（run\、logs\、data\、work\、tmp\）

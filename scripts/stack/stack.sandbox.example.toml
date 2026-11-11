@@ -52,8 +52,7 @@ port = 13101
 loopback_only = true           # 沙箱只给本机用。（模板的缺省是 false = 维持现状）
 
 [init]
-dbnums = [7352]
-mode = "data+model"
+dbnums = [7352]                # 沙箱验收要看到模型，所以点名初始化这一个库。（模板的缺省是空 = 不初始化）
 auto_new = false
 
 [guard]

@@ -34,6 +34,7 @@ config_template = "D:/work/plant-code/old/gen-model/scripts/templates/DbOption.f
 resource_dir = "D:/work/plant-code/old/gen-model/resource"
 schema_root = "D:/work/plant-code/old/vendor/e3d-io/schema"
 plant_ui_web_root = "D:/work/plant-code/old/plant-ui/web/public"
+rvm_check_dir = ""              # 入口不管「核对」的产物目录：现有的配置和已有的产物在哪就在哪，不提醒、不检查
 
 # [backend.env]
 # 入口缺省把直读索引缓存指到 work_dir\direct-index。想继续用现在那一份（在本机临时目录下的

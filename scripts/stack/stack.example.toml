@@ -1,4 +1,5 @@
 # stack 的配置模板。拷一份改名 stack.toml，放在 stack.cmd 旁边（或用 -Config 指明），再运行 stack doctor。
+# （离线安装包里已经带了一份填好的 stack.toml，只要改 [project]；这份模板是给开发机、或想自己摆目录的人用的。）
 #
 # 怎么读这份文件
 #   【必填】 的项一定要按这台机器改；其余的项不写就用注释里说的缺省值。
@@ -9,7 +10,7 @@
 
 [stack]
 name = "plant-stack"          # 这一套的名字，只用来显示
-root = "."                    # 运行目录：状态、日志、数据库数据、后端的工作目录都建在它下面
+root = "."                    # 运行目录：状态、日志、数据库数据、各服务的工作目录都建在它下面
 # private_temp = true         # 缺省 true：给各服务的临时目录用 root\tmp，不和本机别的程序共用
 
 # ───────────── 工程（只在这里填一次，入口再写进后端的配置） ─────────────
@@ -24,7 +25,7 @@ e3d_version = "e3d31"                   # 【必填】E3D 版本：e3d31 或 e3d
 [database]
 exe = "bin/surreal.exe"       # 【必填】数据库程序。要放在 root 下面（见 [guard] require_exe_under_root）
 port = 8009                   # 【必填】
-# host = "127.0.0.1"          # 缺省 127.0.0.1：数据库只给本机的后端用
+# host = "127.0.0.1"          # 缺省 127.0.0.1：数据库只给本机的后端和 rs-server 用
 # data_dir = "data/surreal"   # 缺省 data/surreal：数据放哪
 
 # ───────────── 后端（aios-database） ─────────────
@@ -37,35 +38,67 @@ schema_root = "schema"                         # 【必填】E3D 库结构定义
 plant_ui_web_root = "web"                      # 后端自带界面（plant-ui，含配置向导）的网页目录。源码里在 plant-ui/web/public。
                                                #   不写的话后端按自己的缺省去找，可能给出一份旧界面
 # work_dir = "work/backend"                    # 缺省 work/backend：后端的工作目录。它的配置、网格、日志、锁都在这里
+# rvm_check_dir = "data/rvm-check"             # 缺省 data/rvm-check：「核对」（RVM 比对）的产物放哪。入口把它写进后端配置的
+                                               #   [rvm_check] work_dir。不写这一项的话，后端按自己程序所在的位置定目录，
+                                               #   换一版程序之后以前的产物在界面上就下载不到了。写成 "" = 入口不管这一项
 # watch_dbnums = [7997, 8000]                  # 只让后端管这几个库。不写 = 照模板（空 = MDB 里的全部）
 
 # [backend.env]                 # 要额外传给后端的环境变量（口令类的不许放这里）。例：
-# AIOS_SPATIAL_COMPUTE = "0"    #   关掉房间 / 空间树这一整块（只跑模型生成时用）
+# AIOS_SPATIAL_COMPUTE = "0"    #   关掉房间 / 空间树这一整块。缺省是开着的：后端每次启动会在后台给全部设计库
+#                               #   预建一份房间参照模型（不是库的初始化，也不生成构件模型；样例工程约 8 秒）。
+#                               #   关掉之后房间树、按房间查询这些功能不可用。
 
 # [backend.config_set]          # 要额外写进后端配置的键（账号口令类的不许放这里）。只在第一次生成时生效。例：
 # enable_log = true
 
-# ───────────── 前端 ─────────────
-# 目前只支持「前端开发服务器」这一种（要有前端源码和装好的依赖）。
-# 没有前端源码的机器：把 enabled 设成 false，直接用后端自带的界面（后端地址的根路径）。
+# ───────────── rs-server（数据服务：元数据、提资、校审这些接口）。整节不写 = 不带它 ─────────────
+# [rs_server]
+# exe = "bin/rs-server.exe"     # 【启用时必填】同样要放在 root 下面
+# port = 9098                   # 【启用时必填】
+# template_dir = "rs-server"    # 【启用时必填】它的运行文件：里面要有 resource\surreal\*.surql，还可以有 assets\metadata\（元数据网页）
+# enabled = true                # 有这一节就算启用；想留着配置但先不起，写 false
+# work_dir = "work/rs-server"   # 缺省 work/rs-server：它的运行目录。入口只往里放它要的东西（它会把运行目录下的 assets、target 对外提供）
+# wait_storage_version = true   # 缺省 true：等后端健康、数据库里的库版本记录和后端一致之后才起它。
+#                               #   它启动时会重写数据库里的共用函数；库版本对不上时它本来还会自己触发「清库重建」——
+#                               #   入口把这个自动升级关掉了（AIOS_STORAGE_VERSION_UPGRADE=off），这里再加一道先后顺序
+# public_url = ""               # plant-ui 网页版用哪个地址找它。缺省：只许本机访问时是 http://127.0.0.1:端口，
+#                               #   否则是 http://<这台机器的名字>:端口。别的机器解析不了机器名时，在这里写成 http://<这台机器的 IP>:端口
+# plant_ui_config = true        # 缺省 true：入口替 plant-ui 网页版写一份配置（网页目录下的 config.json），里面是 rs-server 的地址，
+#                               #   不带数据库账号口令（这份文件谁打开网页都拿得到）——网页版这时用它内置的缺省账号连库。
+#                               #   数据库口令改过、网页版因此连不上库时，改成 false：恢复成后端现算的那份（本机打开带账号），
+#                               #   rs-server 的地址改在网页版界面的设置里填
+# cors_origins = []             # 额外允许从哪些页面里调它（"http://主机:端口"）。缺省已经放行：回环、机器名、本机各个地址 × 后端和前端的端口
+#
+# [rs_server.env]               # 要额外传给 rs-server 的环境变量（口令、令牌类的不许放这里；那些写在它的配置文件里）
+
+# ───────────── 前端：两种形态，选一种 ─────────────
+# kind = "nginx"     包档：构建好的前端产物 + nginx。root = 产物目录（里面有 index.html），exe = nginx.exe
+#                    （它旁边要有 conf\mime.types）。接口走同源，由 nginx 转给本机的后端，所以换机器不用重新构建前端。
+# kind = "vite-dev"  开发档：前端开发服务器。root = 前端仓库目录（要有 vite.config.ts 和装好的 node_modules）。
+# 不想带前端：enabled = false，直接用后端自带的界面（后端地址的根路径）。
 [frontend]
 enabled = true
 kind = "vite-dev"
-root = "D:/work/plant3d-web"   # 【前端启用时必填】前端仓库目录（里面要有 vite.config.ts 和装好的 node_modules）
+root = "D:/work/plant3d-web"   # 【前端启用时必填】见上
 port = 3101                    # 【前端启用时必填】
-# node = "node"                # 缺省从 PATH 里找 node；也可以写 node.exe 的完整路径
+# node = "node"                # vite-dev：缺省从 PATH 里找 node；也可以写 node.exe 的完整路径
+# exe = "bin/nginx/nginx.exe"  # nginx：【必填】nginx.exe 的位置
+# conf_template = ""           # nginx：想换掉入口内置的 nginx 配置时，给一份自己的模板
+#                              #   （占位符 {{LISTEN}} {{WWW}} {{BACKEND_PORT}} {{MIME}}）
 
-# [frontend.env]               # 要额外传给前端开发服务器的环境变量
+# [frontend.env]               # 要额外传给前端进程的环境变量
 
 # ───────────── 对谁开放 ─────────────
 [listen]
-loopback_only = false   # false（缺省）= 维持现状：后端、前端监听所有网卡，同网段的机器都能访问。
-                        # true = 后端、前端都只听 127.0.0.1，只有本机能访问。
+loopback_only = false   # false（缺省）= 维持现状：后端、rs-server、前端监听所有网卡，同网段的机器都能访问。
+                        # true = 都只听 127.0.0.1，只有本机能访问。
 
-# ───────────── 起来之后初始化哪些库 ─────────────
+# ───────────── 初始化：缺省什么都不初始化 ─────────────
+# 「初始化一个库」= 把这个库的全部元素解析进数据库，并生成这个库的模型（后端里这是一件事，分不开）。
+# 缺省不做：服务起来之后，模型树直接读 E3D 库文件就能看；要哪个库的模型，在界面里初始化、或在节点上手动生成。
+# 想在命令行里做：stack init 7997 8000
 [init]
-dbnums = []             # 点名要初始化的库号，例如 [7997]。空 = 入口不替你初始化，起来之后到界面里选
-# mode = "data+model"   # 缺省 data+model：解析数据并生成模型；"data" = 只解析数据
+dbnums = []             # 想让 stack up 起完服务顺手初始化几个库，就点名，例如 [7997]。空 = 不初始化
 # auto_new = false      # 缺省 false：后端启动时不自动初始化「从没初始化过的库」。
                         # 改成 true 的话，范围内的新库一启动就全部自动初始化——大项目会跑很久、很吃内存
 
@@ -78,7 +111,7 @@ dbnums = []             # 点名要初始化的库号，例如 [7997]。空 = �
 # min_disk_free_gb = 2          # 运行目录所在的盘至少要剩这么多
 # protect_ports = []            # 这些端口本套不许用，占着它们的进程本套也绝不会停。
 #                               #   同一台机器上还跑着另一套时，把那一套的端口写在这里
-# require_exe_under_root = true # 数据库程序和后端程序必须在 root 下面。入口靠程序路径认进程，
+# require_exe_under_root = true # 各个程序必须在 root 下面。入口靠程序路径认进程，
 #                               #   和别的实例共用同一个程序文件的话，down 时分不清谁是谁
 # wait_lock_file = ""           # 这个文件存在时，up 先等它消失再起（给别的工作让路）
 # wait_lock_timeout_sec = 600
@@ -87,5 +120,7 @@ dbnums = []             # 点名要初始化的库号，例如 [7997]。空 = �
 [timeouts]
 # database_sec = 30
 # backend_sec = 180
+# storage_version_sec = 180     # 起 rs-server 之前，等库版本记录一致最多等多久
+# rs_server_sec = 120
 # frontend_sec = 90
-# init_sec = 600
+# init_sec = 600                # 初始化一个库最多等多久
