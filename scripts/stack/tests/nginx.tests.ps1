@@ -1,6 +1,6 @@
 ﻿# nginx 的配置：/api 一律转给后端（包括以 .json、.png 结尾的地址）；JSON 不长期缓存；带哈希的静态资源长期缓存。
 # 前两条只看生成出来的配置文本，哪台机器都能跑。
-# 后两条要真起 nginx：给了 -Nginx <nginx.exe> 才跑（它旁边要有 conf\mime.types）。端口现找两个空的，只听本机，用完就停；
+# 后三条要真起 nginx：给了 -Nginx <nginx.exe> 才跑（它旁边要有 conf\mime.types）。端口现找两个空的，只听本机，用完就停；
 # 只动这条测试自己起的进程（nginx 和一个假后端）。
 
 $script:NginxSaid = New-Object System.Collections.ArrayList
@@ -141,5 +141,63 @@ Test '真起 nginx：各种地址各自落到哪' {
             foreach ($kid in $kids) { [void](Stop-VerifiedProcess $kid.pid $kid.ticks) }
         }
         if ($null -ne $backend) { try { if (-not $backend.HasExited) { $backend.Kill() } } catch { } }
+    }
+}
+
+Test '真起 nginx：用 -s quit 请它自己退出——主进程、工作进程都退，端口放开' {
+    if (-not $script:TestNginx) { Skip-Test '没给 -Nginx <nginx.exe>' }
+    $frontPort = Get-FreeTestPort
+    $cfg = New-NginxCfg $script:TestNginx $frontPort (Get-FreeTestPort)
+    Initialize-NginxFiles $cfg
+    $nginx = $null
+    $kids = @()
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $script:TestNginx
+        $psi.Arguments = '-p "' + $cfg.Frontend.WorkDir.Replace('\', '/') + '/" -c conf/nginx.conf'
+        $psi.WorkingDirectory = $cfg.Frontend.WorkDir
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $nginx = [System.Diagnostics.Process]::Start($psi)
+        $ready = $false
+        $deadline = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $deadline) {
+            $a = Invoke-StackHttp 'GET' "http://127.0.0.1:$frontPort/" '' 2
+            if ($a.Ok -and $a.Body -match 'INDEX') { $ready = $true; break }
+            Start-Sleep -Milliseconds 300
+        }
+        Assert-True $ready 'nginx 起来了'
+        $info = Get-ProcInfo $nginx.Id
+        $kids = @(Get-ChildProcs $nginx.Id (Get-ProcTicks $info) | Where-Object { $_.Name -ieq 'nginx.exe' } | ForEach-Object { @{ pid = [int]$_.ProcessId; ticks = (Get-ProcTicks $_) } })
+        Assert-True ($kids.Count -ge 1) '它有工作进程'
+        $record = @{ pid = [int]$nginx.Id; startTicks = (Get-ProcTicks $info); exe = [string]$info.ExecutablePath; marker = ''; port = $frontPort; wrapperPid = 0; wrapperTicks = ''; log = ''; adopted = '' }
+
+        # 它自己记的进程号对不上时不走这条路（这里先把记录里的进程号写错试一次）
+        $wrong = @{ pid = [int]$nginx.Id + 1; startTicks = $record.startTicks; exe = $record.exe; wrapperPid = 0; wrapperTicks = '' }
+        $r = Request-GracefulStop $cfg 'frontend' $wrong $info
+        Assert-True (-not $r.Tried) '进程号对不上：没有发'
+        Assert-True (-not $nginx.HasExited) 'nginx 还在'
+
+        $r = Request-GracefulStop $cfg 'frontend' $record $info
+        Assert-True $r.Tried "发出去了（$($r.Why)）"
+        Assert-True $r.Exited "它自己退出了（$($r.Why)）"
+        Assert-Equal 'nginx -s quit' $r.How '用的是 nginx -s quit'
+        [void]$nginx.WaitForExit(5000)
+        Assert-True $nginx.HasExited '主进程退了'
+        $deadline = (Get-Date).AddSeconds(8)
+        $left = $kids
+        while ($left.Count -gt 0 -and (Get-Date) -lt $deadline) {
+            $left = @($kids | Where-Object { $p = Get-ProcInfo $_.pid; $null -ne $p -and (Test-SameStart $_.ticks $p) })
+            if ($left.Count -gt 0) { Start-Sleep -Milliseconds 200 }
+        }
+        Assert-Equal 0 $left.Count '工作进程也都退了'
+        $after = Invoke-StackHttp 'GET' "http://127.0.0.1:$frontPort/" '' 2
+        Assert-True (-not $after.Ok) '端口放开了'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $cfg.Frontend.WorkDir 'logs\nginx.pid'))) '它把自己记进程号的文件删了'
+    } finally {
+        if ($null -ne $nginx) {
+            try { if (-not $nginx.HasExited) { $nginx.Kill() } } catch { }
+            foreach ($kid in $kids) { [void](Stop-VerifiedProcess $kid.pid $kid.ticks) }
+        }
     }
 }

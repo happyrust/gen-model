@@ -15,6 +15,12 @@ function Reset-FakeWorld {
     $script:FakeKilled.Clear()
     $script:FakeSaid.Clear()
     $script:FakeOnSleep = $null
+    $script:FakeCtrlMode = 'exit'
+    $script:FakeQuitMode = 'exit'
+    if ($null -ne $script:FakeCtrlCalls) { $script:FakeCtrlCalls.Clear() }
+    if ($null -ne $script:FakeCaptureCalls) { $script:FakeCaptureCalls.Clear() }
+    $script:FakeBusy = @{ Known = $true; Busy = $false; Reasons = @() }
+    $script:FakeBusyAsked = 0
 }
 
 # 往假的进程表里加一个进程。$At 是它的创建时间（相对一个固定起点的秒数）；$Path 为空 = 读不到程序路径。
@@ -55,6 +61,45 @@ function Start-Sleep {
     if ($null -ne $script:FakeOnSleep) { & $script:FakeOnSleep }
 }
 function Say([string]$Text = '', [string]$Color = '') { [void]$script:FakeSaid.Add($Text) }
+
+# 「请它自己退出」的两条路也换成假的，记下每次是怎么调的：
+#   发 Ctrl+C 的小进程：$script:FakeCtrlMode = 'exit'（发出去了，那个进程和包着它的 cmd 随即退出）/
+#                       'hang'（发出去了，它就是不退）/ 'refuse'（它的控制台上还有别人，没发）
+#   nginx -s quit：     $script:FakeQuitMode = 'exit'（主进程、工作进程、外面那层 cmd 都退了）/ 'fail'（这条命令自己报错）
+$script:FakeCtrlMode = 'exit'
+$script:FakeQuitMode = 'exit'
+$script:FakeCtrlCalls = New-Object System.Collections.ArrayList
+$script:FakeCaptureCalls = New-Object System.Collections.ArrayList
+function Remove-FakeProc([int]$Id) {
+    $script:FakeProcs.Remove($Id)
+    foreach ($port in @($script:FakeListen.Keys)) { $script:FakeListen[$port] = @($script:FakeListen[$port] | Where-Object { $_ -ne $Id }) }
+}
+function Send-ConsoleCtrl($Cfg, [int]$ProcessId, [string]$Ticks, [int[]]$Allowed) {
+    [void]$script:FakeCtrlCalls.Add(@{ Pid = $ProcessId; Ticks = $Ticks; Allowed = @($Allowed) })
+    if ($script:FakeCtrlMode -eq 'refuse') { return @{ Sent = $false; Why = '它的控制台上还有别的进程（进程号 999），发了会连带打断它们' } }
+    if ($script:FakeCtrlMode -eq 'exit') {
+        $parent = 0
+        if ($script:FakeProcs.ContainsKey($ProcessId)) { $parent = [int]$script:FakeProcs[$ProcessId].ParentProcessId }
+        Remove-FakeProc $ProcessId
+        if ($parent -gt 1 -and $script:FakeProcs.ContainsKey($parent) -and $script:FakeProcs[$parent].Name -ieq 'cmd.exe') { Remove-FakeProc $parent }
+    }
+    return @{ Sent = $true; Why = '' }
+}
+function Invoke-Capture($Cfg, [string]$Exe, [string]$ArgLine, [string]$Cwd, [int]$TimeoutSec = 20) {
+    [void]$script:FakeCaptureCalls.Add(@{ Exe = $Exe; ArgLine = $ArgLine; Cwd = $Cwd })
+    if ($ArgLine -notmatch '-s quit$') { return @{ Ok = $false; Text = '（假的：这里不真跑程序）'; TimedOut = $false; ExitCode = 1 } }
+    if ($script:FakeQuitMode -eq 'fail') { return @{ Ok = $false; Text = 'nginx: [error] OpenEvent("Global\ngx_quit_100") failed'; TimedOut = $false; ExitCode = 1 } }
+    foreach ($p in @($script:FakeProcs.Values | Where-Object { $_.ExecutablePath -ieq $Exe })) {
+        $parent = [int]$p.ParentProcessId
+        Remove-FakeProc ([int]$p.ProcessId)
+        if ($parent -gt 1 -and $script:FakeProcs.ContainsKey($parent) -and $script:FakeProcs[$parent].Name -ieq 'cmd.exe') { Remove-FakeProc $parent }
+    }
+    return @{ Ok = $true; Text = ''; TimedOut = $false; ExitCode = 0 }
+}
+# 后端忙不忙：缺省「问得到、闲着」。要它忙就改 $script:FakeBusy；$script:FakeBusyAsked 数问了几次。
+$script:FakeBusy = @{ Known = $true; Busy = $false; Reasons = @() }
+$script:FakeBusyAsked = 0
+function Get-BackendBusy($Cfg) { $script:FakeBusyAsked += 1; return $script:FakeBusy }
 
 # ── 一份假的安装目录的配置（只解析，不要求文件存在）──
 $root = New-TestDir 'proc'
@@ -353,4 +398,228 @@ Test 'status：rs-server 因为库版本没起时，说的是哪种情况——�
     $info = Get-ServiceState $cfg $state 'rs_server'
     Assert-Equal 'waiting' $info.State '有数据没记录：也是「等待」，并且带着归类给后面说明用'
     Assert-Equal 'no-record' $info.Sv.Kind '归类带出来了'
+}
+
+# ───────────── 停止：先请它自己退出；后端在忙就不停 ─────────────
+
+Test 'down：数据库收到 Ctrl+C 自己退出——不直接结束；名单里是它自己和外面那层 cmd' {
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9                                   # 外面包的那层 cmd
+    Add-FakeProc 31 30 $exeDb 10 @(51009)                         # 数据库
+    Save-StackState $cfg @{ database = (New-FakeRecord 31 51009 30) }
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 0 $code '退出码 0'
+    Assert-Equal 0 $script:FakeKilled.Count '一个都没有直接结束'
+    Assert-Equal 1 $script:FakeCtrlCalls.Count '发了一次 Ctrl+C'
+    Assert-Equal 31 $script:FakeCtrlCalls[0].Pid '发给的是数据库'
+    Assert-Equal (Get-ProcTicks ([pscustomobject]@{ CreationDate = $script:FakeT0.AddSeconds(10) })) $script:FakeCtrlCalls[0].Ticks '带着它的启动时间（小进程动手前再核对一次）'
+    Assert-Equal @(30, 31) @($script:FakeCtrlCalls[0].Allowed | Sort-Object) '名单：数据库自己 + 外面那层 cmd'
+    Assert-Match (Get-Said) '已停 数据库：进程 31.*它自己退出的：Ctrl\+C' '说了是它自己退出的'
+    Assert-Equal 0 (Read-StackState $cfg).Count '记录清掉了'
+}
+
+Test 'down：数据库等了 stop_sec 还没退——改为直接结束，并说出来' {
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9
+    Add-FakeProc 31 30 $exeDb 10 @(51009)
+    Save-StackState $cfg @{ database = (New-FakeRecord 31 51009 30) }
+    $script:FakeCtrlMode = 'hang'
+    $before = $script:FakeNow
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 0 $code '退出码 0'
+    Assert-Equal @(30, 31) @($script:FakeKilled | Sort-Object) '直接结束了数据库，连带外面那层 cmd'
+    Assert-True ((($script:FakeNow - $before).TotalSeconds) -ge 30) '等够了 30 秒（假的钟）'
+    Assert-Match (Get-Said) '还在等（最多 30 秒）' '等的时候说了一声'
+    Assert-Match (Get-Said) '请它自己退出（Ctrl\+C）没有成——等了 30 秒它还没有退出。改为直接结束' '说了为什么改成直接结束'
+    Assert-Match (Get-Said) '已停 数据库：进程 31.*直接结束的：请它自己退出（Ctrl\+C）没有成' '收尾那一句也说清楚了'
+}
+
+Test 'down：数据库的控制台上还有别的进程——不发 Ctrl+C，只直接结束这一个' {
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9
+    Add-FakeProc 31 30 $exeDb 10 @(51009)
+    Save-StackState $cfg @{ database = (New-FakeRecord 31 51009 30) }
+    $script:FakeCtrlMode = 'refuse'
+    [void](Invoke-Down $cfg $false)
+    Assert-True (@($script:FakeKilled) -contains 31) '数据库是直接结束的'
+    Assert-Match (Get-Said) '它的控制台上还有别的进程' '说了为什么没发'
+}
+
+Test '包着服务的那层 cmd：记录里有的核对后才用；认领来的看父进程是不是那层 cmd' {
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9
+    Add-FakeProc 31 30 $exeDb 10 @(51009)
+    $record = New-FakeRecord 31 51009 30
+    Assert-Equal 30 (Get-WrapperProc $record (Get-ProcInfo 31)).ProcessId '记录里的那层 cmd'
+    $script:FakeProcs.Remove(30)
+    Add-FakeProc 30 1 $exeCmd 500                                 # 同一个进程号，后来分给了另一个 cmd
+    Assert-True ($null -eq (Get-WrapperProc $record (Get-ProcInfo 31))) '启动时间对不上：不认'
+
+    Reset-FakeWorld
+    Add-FakeProc 40 1 $exeCmd 9
+    $script:FakeProcs[40].CommandLine = 'C:\Windows\System32\cmd.exe /d /s /c ""' + $exeDb + '" "start" <NUL 1>>"db.log" 2>&1"'
+    Add-FakeProc 41 40 $exeDb 10 @(51009)
+    $adopted = New-FakeRecord 41 51009 0                           # 认领来的：记录里没有那层 cmd
+    Assert-Equal 40 (Get-WrapperProc $adopted (Get-ProcInfo 41)).ProcessId '父进程是 cmd、命令行里就是这个程序：认'
+    $script:FakeProcs[40].CommandLine = 'C:\Windows\System32\cmd.exe'
+    Assert-True ($null -eq (Get-WrapperProc $adopted (Get-ProcInfo 41))) '父进程是别人开的命令行窗口（命令行里没有这个程序）：不认'
+    $script:FakeProcs[40].CommandLine = 'cmd /c "' + $exeDb + '"'
+    $script:FakeProcs[40].CreationDate = $script:FakeT0.AddSeconds(900)
+    Assert-True ($null -eq (Get-WrapperProc $adopted (Get-ProcInfo 41))) '「父进程」比它还晚创建（进程号重用）：不认'
+    $script:FakeProcs.Remove(40)
+    Add-FakeProc 40 1 'C:\Windows\explorer.exe' 9
+    $script:FakeProcs[40].CommandLine = 'explorer "' + $exeDb + '"'
+    Assert-True ($null -eq (Get-WrapperProc $adopted (Get-ProcInfo 41))) '父进程不是 cmd：不认'
+
+    # 认领来的数据库：名单里带上认出来的那层 cmd
+    Reset-FakeWorld
+    Add-FakeProc 40 1 $exeCmd 9
+    $script:FakeProcs[40].CommandLine = 'cmd.exe /d /s /c ""' + $exeDb + '" "start""'
+    Add-FakeProc 41 40 $exeDb 10 @(51009)
+    Save-StackState $cfg @{ database = (New-FakeRecord 41 51009 0) }
+    [void](Invoke-Down $cfg $false)
+    Assert-Equal @(40, 41) @($script:FakeCtrlCalls[0].Allowed | Sort-Object) '认领来的数据库：名单里有认出来的那层 cmd'
+    Assert-Equal 0 $script:FakeKilled.Count '它自己退出了，没有直接结束谁'
+}
+
+Test 'down：nginx 用 -s quit 自己退出；它自己记的进程号对不上、或者那条命令报错，就直接结束' {
+    $pidFile = Join-Path $cfg.Frontend.WorkDir 'logs\nginx.pid'
+    try {
+        Reset-FakeWorld
+        Add-FakeProc 90 1 $exeCmd 99
+        Add-FakeProc 100 90 $exeNginx 100 @(51100)
+        Add-FakeProc 101 100 $exeNginx 101
+        Write-TestFile $pidFile "100`r`n"
+        Save-StackState $cfg @{ frontend = (New-FakeRecord 100 51100 90) }
+        $code = Invoke-Down $cfg $false
+        Assert-Equal 0 $code '退出码 0'
+        Assert-Equal 0 $script:FakeKilled.Count '一个都没有直接结束'
+        Assert-Equal 1 $script:FakeCaptureCalls.Count '跑了一次 nginx -s quit'
+        Assert-Equal $exeNginx $script:FakeCaptureCalls[0].Exe '跑的是记录里那个程序'
+        Assert-Match $script:FakeCaptureCalls[0].ArgLine ([regex]::Escape('"-p" "' + $cfg.Frontend.WorkDir.Replace('\', '/') + '/" "-c" "conf/nginx.conf" -s quit')) '参数：同一个运行目录、同一份配置，加 -s quit'
+        Assert-Match (Get-Said) '已停 前端：进程 100.*它自己退出的：nginx -s quit' '说了是它自己退出的'
+
+        Reset-FakeWorld
+        Add-FakeProc 90 1 $exeCmd 99
+        Add-FakeProc 100 90 $exeNginx 100 @(51100)
+        Add-FakeProc 101 100 $exeNginx 101
+        Write-TestFile $pidFile '555'                             # nginx 自己记的是另一个进程号
+        Save-StackState $cfg @{ frontend = (New-FakeRecord 100 51100 90) }
+        [void](Invoke-Down $cfg $false)
+        Assert-Equal 0 $script:FakeCaptureCalls.Count '没有跑 nginx -s quit'
+        Assert-Equal @(90, 100, 101) @($script:FakeKilled | Sort-Object) '直接结束：主进程、工作进程、外面那层 cmd'
+        Assert-Match (Get-Said) '它自己记的进程号.*不是本套记着的 100' '说了为什么'
+
+        Reset-FakeWorld
+        Add-FakeProc 90 1 $exeCmd 99
+        Add-FakeProc 100 90 $exeNginx 100 @(51100)
+        Write-TestFile $pidFile '100'
+        Save-StackState $cfg @{ frontend = (New-FakeRecord 100 51100 90) }
+        $script:FakeQuitMode = 'fail'
+        [void](Invoke-Down $cfg $false)
+        Assert-True (@($script:FakeKilled) -contains 100) '那条命令报错：直接结束'
+        Assert-Match (Get-Said) 'nginx -s quit 没有成功' '说了为什么'
+    } finally {
+        if (Test-Path -LiteralPath $pidFile) { Remove-Item -LiteralPath $pidFile -Force }
+    }
+}
+
+Test 'down：后端正在忙——什么都不停，退出码 6；-WhatIf 只提醒；-Force 照停' {
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9
+    Add-FakeProc 31 30 $exeDb 10 @(51009)
+    Add-FakeProc 400 1 $exeBackend 50 @(51022)
+    Save-StackState $cfg @{ database = (New-FakeRecord 31 51009 30); backend = (New-FakeRecord 400 51022) }
+    $script:FakeBusy = @{ Known = $true; Busy = $true; Reasons = @('队列里正在跑：库 7352（apply_window，parse）', '生成好的模型还有 12 个根没写进数据库（写后台没清空）') }
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 6 $code '退出码 6'
+    Assert-Equal 0 $script:FakeKilled.Count '一个都没停'
+    Assert-Equal 0 $script:FakeCtrlCalls.Count '也没有请数据库退出'
+    Assert-Equal 2 (Read-StackState $cfg).Count '记录都还在'
+    Assert-Match (Get-Said) '后端正在忙，这一次什么都没有停' '说了没停'
+    Assert-Match (Get-Said) '库 7352（apply_window，parse）' '说了它手上的活'
+    Assert-Match (Get-Said) '12 个根没写进数据库' '说了写后台'
+    Assert-Match (Get-Said) 'stack down -Force' '说了确实要停怎么办'
+
+    $script:FakeSaid.Clear()
+    $code = Invoke-Down $cfg $true
+    Assert-Equal 0 $code '-WhatIf 的退出码 0'
+    Assert-Equal 0 $script:FakeKilled.Count '-WhatIf 不停'
+    Assert-Match (Get-Said) '要加 -Force 才停' '-WhatIf 提醒了'
+    Assert-Match (Get-Said) '会停 后端：进程 400.*直接结束（这个程序没有自己退出的入口）' '-WhatIf 照样列出会停谁、怎么停'
+    Assert-Match (Get-Said) '会停 数据库：进程 31.*先发 Ctrl\+C 请它自己退出，最多等 30 秒' '-WhatIf 说了数据库怎么停'
+
+    $script:FakeSaid.Clear()
+    $code = Invoke-Down $cfg $false $true
+    Assert-Equal 0 $code '-Force 的退出码 0'
+    Assert-Equal @(400) @($script:FakeKilled) '-Force：后端直接结束，数据库是自己退出的'
+    Assert-Equal 1 $script:FakeCtrlCalls.Count '数据库照样先请它自己退出'
+    Assert-Match (Get-Said) '后端正在忙，按 -Force 照停' '说了是按 -Force 停的'
+    Assert-Equal 0 (Read-StackState $cfg).Count '记录清掉了'
+}
+
+Test 'down：问不到后端忙不忙——也不停，退出码 6；本套没有后端在跑时不问' {
+    Reset-FakeWorld
+    Add-FakeProc 400 1 $exeBackend 50 @(51022)
+    Save-StackState $cfg @{ backend = (New-FakeRecord 400 51022) }
+    $script:FakeBusy = @{ Known = $false; Busy = $false; Reasons = @() }
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 6 $code '退出码 6'
+    Assert-Equal 0 $script:FakeKilled.Count '一个都没停'
+    Assert-Match (Get-Said) '接口没有应答' '说了是问不到'
+    $code = Invoke-Down $cfg $false $true
+    Assert-Equal 0 $code '-Force：照停'
+    Assert-Equal @(400) @($script:FakeKilled) '停了后端'
+
+    Reset-FakeWorld
+    Add-FakeProc 30 1 $exeCmd 9
+    Add-FakeProc 31 30 $exeDb 10 @(51009)
+    Save-StackState $cfg @{ database = (New-FakeRecord 31 51009 30) }
+    $script:FakeBusy = @{ Known = $false; Busy = $false; Reasons = @() }
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 0 $code '只有数据库在跑：照常停'
+    Assert-Equal 0 $script:FakeBusyAsked '没有去问后端'
+}
+
+Test '护栏越线的自动收摊：后端在忙也收' {
+    Reset-FakeWorld
+    Add-FakeProc 400 1 $exeBackend 50 @(51022)
+    Save-StackState $cfg @{ backend = (New-FakeRecord 400 51022) }
+    $script:FakeBusy = @{ Known = $true; Busy = $true; Reasons = @('队列里正在跑：库 7352') }
+    $cfg.Guard.AutoDown = $true
+    try {
+        [void](Assert-StackError { Stop-OnGuard $cfg '测试：越线了' } 3 '' '越线之后以退出码 3 收场')
+        Assert-Equal @(400) @($script:FakeKilled) '后端收掉了'
+        Assert-Match (Get-Said) '后端手上有没有活都收' '说了为什么不看忙不忙'
+    } finally {
+        $cfg.Guard.AutoDown = $false
+        if ($null -ne $script:LockStream) { $script:LockStream.Dispose(); $script:LockStream = $null }
+    }
+}
+
+Test 'down：后端在忙、库里的版本记录又还没写上——拒绝时多说一段（这时强停，记录以后不会补写）' {
+    Reset-FakeWorld
+    Add-FakeProc 400 1 $exeBackend 50 @(51022)
+    Save-StackState $cfg @{ backend = (New-FakeRecord 400 51022) }
+    $script:FakeBusy = @{ Known = $true; Busy = $true; Reasons = @('队列里正在跑：库 8190（apply_window，meta）'); NoRecord = $true }
+    $code = Invoke-Down $cfg $false
+    Assert-Equal 6 $code '退出码 6'
+    Assert-Equal 0 $script:FakeKilled.Count '一个都没停'
+    Assert-Match (Get-Said) '库里的版本记录还没有写上' '说了版本记录还没写'
+    Assert-Match (Get-Said) 'rs-server 会一直起不来' '说了后果'
+    $script:FakeSaid.Clear()
+    $code = Invoke-Down $cfg $true
+    Assert-Match (Get-Said) '库里的版本记录还没有写上' '-WhatIf 也说'
+    $script:FakeSaid.Clear()
+    $code = Invoke-Down $cfg $false $true
+    Assert-Equal 0 $code '-Force 照停'
+    Assert-Match (Get-Said) '后端多半不会再补写它' '-Force 时提醒一句'
+
+    # 版本记录已经在的时候不说这一段
+    Reset-FakeWorld
+    Add-FakeProc 400 1 $exeBackend 50 @(51022)
+    Save-StackState $cfg @{ backend = (New-FakeRecord 400 51022) }
+    $script:FakeBusy = @{ Known = $true; Busy = $true; Reasons = @('队列里正在跑：库 7352'); NoRecord = $false }
+    [void](Invoke-Down $cfg $false)
+    Assert-NotMatch (Get-Said) '版本记录还没有写上' '记录在的时候不提'
 }
