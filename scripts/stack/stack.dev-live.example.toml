@@ -1,0 +1,59 @@
+# ⚠ 这是一份「样例」，写出来给人看、给人改的。2026-11-11 这一步没有运行过它，也不要直接运行。
+#
+# 它描述的是：让入口来管这台开发机上现在手工起的那三个服务（数据库 8009、后端 8022、前端 3101）。
+# 现在还不能直接用，原因有三：
+#   1. 入口这一版不认领已经在跑的进程——状态文件里没有记的一律当别人的。那三个正在跑时，
+#      对这份配置运行 up 只会报「端口被占」然后什么都不做。要切过来，得先由人把现在手工起的三个停掉。
+#   2. 下面标了「待核对」的几项，是按现有起库脚本的缺省值填的，没有去看正在跑的进程实际用的是什么
+#      （看它们的命令行可能看到口令，所以没看）。
+#   3. 入口停服务是直接结束进程。对正式在用的数据库和后端合不合适，要先有人拍板。
+
+[stack]
+name = "dev-live"
+root = "D:/work/plant-code/old/gen-model/.stack"   # 入口自己的状态、日志、前端依赖缓存放这里
+private_temp = false                               # 继续用本机的临时目录（后端在那里有现成的索引缓存）
+
+[project]
+e3d_root = "D:/AVEVA/Projects/E3D3.1"
+name = "AvevaMarineSample"
+code = 1516
+e3d_version = "e3d31"
+mdb = "ALL"
+
+[database]
+exe = "D:/work/plant-code/old/gen-model/bin/surreal.exe"
+host = "127.0.0.1"                                               # 待核对：要和现有 DbOption.toml 里的 v_ip 一字不差
+port = 8009
+data_dir = "D:/work/plant-code/old/gen-model/.surreal/ams-8009"  # 待核对：现有数据实际所在的目录
+
+[backend]
+exe = "D:/work/plant-code/old/gen-model/target/rvm-check-frontend-20261110/aios-database-release-r3.exe"
+port = 8022
+work_dir = "D:/work/plant-code/old/gen-model"   # 现有的 DbOption.toml、assets、logs 都在这里；配置已经在，入口不会重新生成
+config_template = "D:/work/plant-code/old/gen-model/scripts/templates/DbOption.factory.toml"
+resource_dir = "D:/work/plant-code/old/gen-model/resource"
+schema_root = "D:/work/plant-code/old/vendor/e3d-io/schema"
+plant_ui_web_root = "D:/work/plant-code/old/plant-ui/web/public"
+
+# [backend.env]
+# 入口缺省把直读索引缓存指到 work_dir\direct-index。想继续用现在那一份（在本机临时目录下的
+# aios-direct-index 里），在这里写上它的完整路径：
+# AIOS_DIRECT_INDEX_DIR = "<本机临时目录>/aios-direct-index"
+
+[frontend]
+enabled = true
+kind = "vite-dev"
+root = "D:/work/plant-code/old/plant3d-web"
+node = "E:/Program Files/nodejs/node.exe"
+port = 3101
+
+[listen]
+loopback_only = false          # 维持现状
+
+[init]
+dbnums = []                    # 现有的库都已经初始化过，入口不点名
+auto_new = false               # 和现有 DbOption.toml 一致
+
+[guard]
+require_exe_under_root = false # 这台机器上只有这一套时可以放开；同时还有沙箱在跑就不行
+min_commit_free_gb = 24

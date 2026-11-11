@@ -1,0 +1,91 @@
+# stack 的配置模板。拷一份改名 stack.toml，放在 stack.cmd 旁边（或用 -Config 指明），再运行 stack doctor。
+#
+# 怎么读这份文件
+#   【必填】 的项一定要按这台机器改；其余的项不写就用注释里说的缺省值。
+#   路径用正斜杠（D:/a/b），或者用单引号包反斜杠（'D:\a\b'）。
+#   相对路径：[stack] root 相对本文件所在的目录；其余路径都相对 root。
+#   只支持：注释、[节]、键 = 值；值是 "字符串"、整数、true / false、写在一行里的数组。
+#   写了入口不认识的东西，它会报错并指出行号，不会悄悄忽略。
+
+[stack]
+name = "plant-stack"          # 这一套的名字，只用来显示
+root = "."                    # 运行目录：状态、日志、数据库数据、后端的工作目录都建在它下面
+# private_temp = true         # 缺省 true：给各服务的临时目录用 root\tmp，不和本机别的程序共用
+
+# ───────────── 工程（只在这里填一次，入口再写进后端的配置） ─────────────
+[project]
+e3d_root = "D:/AVEVA/Projects/E3D3.1"   # 【必填】E3D 工程根目录：它下面是各个项目的文件夹
+name = "AvevaMarineSample"              # 【必填】项目名 = 工程根目录下那个文件夹的名字
+code = 1516                             # 【必填】项目编码（整数）；同时用作数据库里的命名空间
+e3d_version = "e3d31"                   # 【必填】E3D 版本：e3d31 或 e3d210
+# mdb = "ALL"                           # 缺省 "ALL"：用哪个 MDB
+
+# ───────────── 数据库（包里自带的 SurrealDB 2.1.4） ─────────────
+[database]
+exe = "bin/surreal.exe"       # 【必填】数据库程序。要放在 root 下面（见 [guard] require_exe_under_root）
+port = 8009                   # 【必填】
+# host = "127.0.0.1"          # 缺省 127.0.0.1：数据库只给本机的后端用
+# data_dir = "data/surreal"   # 缺省 data/surreal：数据放哪
+
+# ───────────── 后端（aios-database） ─────────────
+[backend]
+exe = "bin/aios-database.exe"                  # 【必填】后端程序。同样要放在 root 下面
+port = 8022                                    # 【必填】
+config_template = "config/DbOption.factory.toml"   # 【必填】后端配置的模板。源码里在 gen-model/scripts/templates/
+resource_dir = "resource"                      # 【必填】后端的 resource 目录（里面要有 surreal/*.surql）。源码里在 gen-model/resource
+schema_root = "schema"                         # 【必填】E3D 库结构定义（里面按版本分目录）。源码里在 vendor/e3d-io/schema
+plant_ui_web_root = "web"                      # 后端自带界面（plant-ui，含配置向导）的网页目录。源码里在 plant-ui/web/public。
+                                               #   不写的话后端按自己的缺省去找，可能给出一份旧界面
+# work_dir = "work/backend"                    # 缺省 work/backend：后端的工作目录。它的配置、网格、日志、锁都在这里
+# watch_dbnums = [7997, 8000]                  # 只让后端管这几个库。不写 = 照模板（空 = MDB 里的全部）
+
+# [backend.env]                 # 要额外传给后端的环境变量（口令类的不许放这里）。例：
+# AIOS_SPATIAL_COMPUTE = "0"    #   关掉房间 / 空间树这一整块（只跑模型生成时用）
+
+# [backend.config_set]          # 要额外写进后端配置的键（账号口令类的不许放这里）。只在第一次生成时生效。例：
+# enable_log = true
+
+# ───────────── 前端 ─────────────
+# 目前只支持「前端开发服务器」这一种（要有前端源码和装好的依赖）。
+# 没有前端源码的机器：把 enabled 设成 false，直接用后端自带的界面（后端地址的根路径）。
+[frontend]
+enabled = true
+kind = "vite-dev"
+root = "D:/work/plant3d-web"   # 【前端启用时必填】前端仓库目录（里面要有 vite.config.ts 和装好的 node_modules）
+port = 3101                    # 【前端启用时必填】
+# node = "node"                # 缺省从 PATH 里找 node；也可以写 node.exe 的完整路径
+
+# [frontend.env]               # 要额外传给前端开发服务器的环境变量
+
+# ───────────── 对谁开放 ─────────────
+[listen]
+loopback_only = false   # false（缺省）= 维持现状：后端、前端监听所有网卡，同网段的机器都能访问。
+                        # true = 后端、前端都只听 127.0.0.1，只有本机能访问。
+
+# ───────────── 起来之后初始化哪些库 ─────────────
+[init]
+dbnums = []             # 点名要初始化的库号，例如 [7997]。空 = 入口不替你初始化，起来之后到界面里选
+# mode = "data+model"   # 缺省 data+model：解析数据并生成模型；"data" = 只解析数据
+# auto_new = false      # 缺省 false：后端启动时不自动初始化「从没初始化过的库」。
+                        # 改成 true 的话，范围内的新库一启动就全部自动初始化——大项目会跑很久、很吃内存
+
+# ───────────── 护栏（都可以不写） ─────────────
+[guard]
+# min_commit_free_gb = 0        # 开工线：还有服务要起时，可提交内存余量低于它就不起。0 = 不查
+# abort_commit_free_gb = 0      # 收摊线：起服务、初始化、watch 的过程中，余量低于它就停下。0 = 不查
+# max_backend_gb = 0            # 后端占用内存超过它就停下。0 = 不查
+# auto_down = false             # 越过上面两条线时：true = 自动把本套的服务收掉；false = 只报错，服务留着
+# min_disk_free_gb = 2          # 运行目录所在的盘至少要剩这么多
+# protect_ports = []            # 这些端口本套不许用，占着它们的进程本套也绝不会停。
+#                               #   同一台机器上还跑着另一套时，把那一套的端口写在这里
+# require_exe_under_root = true # 数据库程序和后端程序必须在 root 下面。入口靠程序路径认进程，
+#                               #   和别的实例共用同一个程序文件的话，down 时分不清谁是谁
+# wait_lock_file = ""           # 这个文件存在时，up 先等它消失再起（给别的工作让路）
+# wait_lock_timeout_sec = 600
+
+# ───────────── 等多久算起不来（秒，都可以不写） ─────────────
+[timeouts]
+# database_sec = 30
+# backend_sec = 180
+# frontend_sec = 90
+# init_sec = 600

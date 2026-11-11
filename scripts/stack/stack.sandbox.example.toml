@@ -1,0 +1,72 @@
+# 沙箱实例：2026-11-11 第 1 步验收用的那一份。
+# 在同一台机器上、正式的三个服务（数据库 8009、后端 8022、前端 3101）旁边，另起一套互不相干的：
+#   另一组端口（18009 / 18022 / 13101）、另一个运行目录、数据库程序和后端程序用拷进来的副本。
+#
+# 用法：拷到沙箱目录里改名 stack.toml（root = "." 就是那个目录），把两个程序拷到它的 bin\ 下面：
+#   bin\surreal.exe        ← gen-model\bin\surreal.exe
+#   bin\aios-database.exe  ← 正在用的那个后端程序
+# 然后 stack doctor / up / status / smoke / down，都带 -Config <沙箱目录>\stack.toml。
+#
+# 路径是这台开发机上的，换机器要改。
+
+[stack]
+name = "sandbox"
+root = "."
+
+[project]
+e3d_root = "D:/AVEVA/Projects/E3D3.1"   # 和正式后端读同一份工程；后端对工程目录只读
+name = "AvevaMarineSample"
+code = 1516
+e3d_version = "e3d31"
+mdb = "ALL"
+
+[database]
+exe = "bin/surreal.exe"
+host = "127.0.0.1"
+port = 18009
+data_dir = "data/surreal"
+
+[backend]
+exe = "bin/aios-database.exe"
+port = 18022
+work_dir = "work/backend"
+config_template = "D:/work/plant-code/old/gen-model/scripts/templates/DbOption.factory.toml"
+resource_dir = "D:/work/plant-code/old/gen-model/resource"
+schema_root = "D:/work/plant-code/old/vendor/e3d-io/schema"
+plant_ui_web_root = "D:/work/plant-code/old/plant-ui/web/public"
+watch_dbnums = [7352]          # 只管一个最小的库（库文件 0.4 MB，32 个模型根）
+
+[backend.env]
+AIOS_SPATIAL_COMPUTE = "0"     # 关掉房间 / 空间树：否则后端一启动会去扫 MDB 里全部设计库
+# 机器级的「同一个库只许一个写者」锁，缺省放在 %LOCALAPPDATA% 下面；沙箱的放进沙箱目录
+AIOS_WRITER_LOCK_DIR = "D:/work/plant-code/old/gen-model/output/stack-step1-20261111/sandbox/run/writer-locks"
+
+[frontend]
+enabled = true
+kind = "vite-dev"
+root = "D:/work/plant-code/old/plant3d-web"
+node = "E:/Program Files/nodejs/node.exe"
+port = 13101
+
+[listen]
+loopback_only = true           # 沙箱只给本机用。（模板的缺省是 false = 维持现状）
+
+[init]
+dbnums = [7352]
+mode = "data+model"
+auto_new = false
+
+[guard]
+min_commit_free_gb = 24
+abort_commit_free_gb = 16
+max_backend_gb = 3
+auto_down = true
+protect_ports = [8009, 8022, 3101]
+require_exe_under_root = true
+wait_lock_file = "D:/work/plant-code/old/gen-model/output/ops/measure.lock"
+wait_lock_timeout_sec = 900
+
+[timeouts]
+backend_sec = 180
+frontend_sec = 120
+init_sec = 600

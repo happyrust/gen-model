@@ -1,0 +1,4 @@
+# 仓库缺省把文本文件一律存成 LF（根目录 .gitattributes：* text=auto eol=lf）。
+# 批处理文件例外：cmd.exe 遇到只有 LF 的 .cmd 在个别写法上会出毛病，这里钉成 CRLF，
+# 在哪种系统上检出、打包都一样。
+*.cmd text eol=crlf
