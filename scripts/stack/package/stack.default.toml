@@ -71,6 +71,11 @@ loopback_only = false   # false = 后端、rs-server、plant3d-web 监听所有�
 dbnums = []             # 想让「开始」起完服务顺手初始化几个库，就在这里点名，例如 [7997]。空 = 不初始化
 auto_new = false        # 不要改成 true：改了以后后端一启动就把所有没初始化过的库全部初始化，大项目会跑很久、很吃内存
 
+# ───────────── 等多久（秒；一般不用写，全部可写的项见 stack.example.toml） ─────────────
+# [timeouts]
+# stop_sec = 30         # 「停止」请数据库、nginx 自己退出之后最多等多久；等不到就直接结束
+# init_sec = 600        # 初始化一个库最多等多久（到点只是不再等，初始化还在后端里照常跑）
+
 [stack]
 name = "plant-stack"
 root = "."              # 状态、日志、数据库数据都放在这个目录下面（run\、logs\、data\、work\、tmp\）

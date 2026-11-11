@@ -127,3 +127,4 @@ dbnums = []             # 想让 stack up 起完服务顺手初始化几个库�
 # rs_server_sec = 120
 # frontend_sec = 90
 # init_sec = 600                # 初始化一个库最多等多久
+# stop_sec = 30                 # down 请数据库、nginx 自己退出之后最多等多久；等不到就直接结束

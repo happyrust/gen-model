@@ -3,7 +3,8 @@
 
 这个脚本只做「拷贝 + 清单 + 压缩」：不编译任何东西，不起任何服务，不改任何源目录。
 各部件在哪、是哪个提交编的，写在一份说明文件里（-Spec，JSON）；样子见 package\release-spec.example.json。
-口令类的东西它不读、不显示：后端的配置模板按字节原样拷贝。
+口令类的东西它不显示、不写进清单：后端的配置模板拷进包之后，点了名的账号口令键（缺省是 MySQL、普华库
+那两对）清成空串，别的行逐字节不动；清完再查一遍，名字像口令 / 令牌的键还带着值就不出包。全程只说键名。
 
 用法（要 PowerShell 7；Windows PowerShell 5.1 也能跑，只是清单的 JSON 排版难看些）：
   pwsh -NoProfile -File New-StackRelease.ps1 -Spec <release-spec.json>
@@ -129,6 +130,73 @@ if ($vcInstaller) { Copy-One $vcInstaller 'redist\VC_redist.x64.exe' }
 
 # ───────────── 后端要的文件 ─────────────
 Copy-One (Get-Source 'backend_config_template') 'config\DbOption.factory.toml'
+
+# 模板里点了名的账号口令键：清成空串。只动摆包目录里的副本，来源不动。
+#   · 行留着、只把值换成 ""：后端解析配置时这几个键不能缺（缺了整份配置读不进来）。行尾的注释一并去掉（里面可能重复着值）。
+#   · 只认顶层的键（第一个 [表头] 之前的）；别的行逐字节不动，换行符和 BOM 照旧。
+#   · 全程只说键名：值不显示、不进清单。
+# 缺省清的是 MySQL、普华库各自的「账号 + 口令」。依据：后端（gen-model）编出来的程序里没有 MySQL 这条路，这几个键
+# 它只是读进来、从不使用；rs-server 用得到，但入口给它生成配置时本来就把这几项写成空的。2026-11-12 在沙箱里清与不清
+# 各起过一遍，启动用时、日志、冒烟、按需生成、初始化都一样。
+# 数据库（SurrealDB）那一对 v_user / v_password 入口起数据库时要读，留着。
+$blankKeys = @(Opt $s 'backend_config_blank_keys' @('user', 'password', 'puhua_database_user', 'puhua_database_password'))
+$keepKeys = @(Opt $s 'backend_config_keep_keys' @('v_user', 'v_password'))
+foreach ($key in ($blankKeys + $keepKeys)) {
+    if ("$key" -notmatch '^[A-Za-z0-9_\-]+$') { Fail "backend_config_blank_keys / backend_config_keep_keys 里只能写键名（字母、数字、下划线、横线），现在有一个「$key」" }
+}
+foreach ($key in $blankKeys) { if ($keepKeys -contains $key) { Fail "「$key」同时写在了 backend_config_blank_keys 和 backend_config_keep_keys 里：要清空还是要留，只能选一样" } }
+$templatePath = Join-Path $stage 'config\DbOption.factory.toml'
+$templateBytes = [System.IO.File]::ReadAllBytes($templatePath)
+$templateHadBom = ($templateBytes.Length -ge 3 -and $templateBytes[0] -eq 0xEF -and $templateBytes[1] -eq 0xBB -and $templateBytes[2] -eq 0xBF)
+$templateText = [System.IO.File]::ReadAllText($templatePath, [System.Text.Encoding]::UTF8)
+$firstTable = [regex]::Match($templateText, '(?m)^[ \t]*\[')
+$templateTop = $templateText
+$templateRest = ''
+if ($firstTable.Success) { $templateTop = $templateText.Substring(0, $firstTable.Index); $templateRest = $templateText.Substring($firstTable.Index) }
+$emptyValue = '^(""|'''')[ \t]*(#.*)?$'
+$blankLog = @()
+foreach ($key in $blankKeys) {
+    $hits = [regex]::Matches($templateTop, '(?m)^([ \t]*)' + [regex]::Escape($key) + '([ \t]*=[ \t]*)([^\r\n]*)')
+    $hadValue = $false
+    for ($i = $hits.Count - 1; $i -ge 0; $i--) {
+        $m = $hits[$i]
+        $old = $m.Groups[3].Value.Trim()
+        if ($old.StartsWith('"""') -or $old.StartsWith("'''")) { Fail "后端配置模板里 $key 的值是多行字符串，这个脚本不会改这种写法。把它改成写在一行里的字符串再出包" }
+        if ($old -notmatch $emptyValue) { $hadValue = $true }
+        $templateTop = $templateTop.Substring(0, $m.Index) + $m.Groups[1].Value + $key + $m.Groups[2].Value + '""' + $templateTop.Substring($m.Index + $m.Length)
+    }
+    $blankLog += [ordered]@{ key = "$key"; lines = $hits.Count; had_value = $hadValue }
+}
+if ($blankKeys.Count -gt 0) {
+    $templateEncoding = $utf8NoBom
+    if ($templateHadBom) { $templateEncoding = $utf8Bom }
+    [System.IO.File]::WriteAllText($templatePath, $templateTop + $templateRest, $templateEncoding)
+}
+# 清完再查一遍整份模板：名字像口令 / 令牌的键（顶层的和各节里的）还带着字符串值、又不在「留着」的名单里，就不出包。
+$secretLike = '(?i)password|passwd|pwd|secret|token|ukey|api[_-]?key|private[_-]?key|credential'
+$leftKeys = @()
+$keptLog = @()
+$table = ''
+foreach ($line in (($templateTop + $templateRest) -split "`r?`n")) {
+    $m = [regex]::Match($line, '^[ \t]*\[[ \t]*([A-Za-z0-9_\-\.]+)[ \t]*\]')
+    if ($m.Success) { $table = $m.Groups[1].Value; continue }
+    $m = [regex]::Match($line, '^[ \t]*([A-Za-z0-9_\-]+)[ \t]*=[ \t]*(.*)$')
+    if (-not $m.Success) { continue }
+    $keyName = $m.Groups[1].Value
+    $value = $m.Groups[2].Value.Trim()
+    $isString = ($value.StartsWith('"') -or $value.StartsWith("'"))
+    $hasValue = ($isString -and $value -notmatch $emptyValue)
+    $shown = $keyName
+    if ($table) { $shown = "[$table] $keyName" }
+    if (-not $table -and $keepKeys -contains $keyName) { if ($hasValue) { $keptLog += $keyName }; continue }
+    if ($hasValue -and $keyName -match $secretLike) { $leftKeys += $shown }
+}
+if ($leftKeys.Count -gt 0) {
+    Fail "后端配置模板里这些口令 / 令牌类的键还带着值：$($leftKeys -join '、')。包里不该带口令：要出包时清空的，加进说明文件的 backend_config_blank_keys；确实要带着的，加进 backend_config_keep_keys。（这里只列键名，值没有显示。）"
+}
+$blankedNames = @($blankLog | Where-Object { $_.lines -gt 0 } | ForEach-Object { $_.key })
+$absentNames = @($blankLog | Where-Object { $_.lines -eq 0 } | ForEach-Object { $_.key })
+Step "  后端配置模板：清空了 $($blankedNames.Count) 个键的值（$($blankedNames -join '、')）$(if ($absentNames.Count -gt 0) { '；模板里没有的：' + ($absentNames -join '、') })；留着的账号口令键：$(if ($keptLog.Count -gt 0) { $keptLog -join '、' } else { '没有' })"
 # 后端的 resource 里只带数据库函数脚本（和以前的发布包一样）；入口起后端之前把它们拷进后端的工作目录。
 $surrealSource = Join-Path (Get-Source 'backend_resource') 'surreal'
 $n = 0
@@ -332,6 +400,8 @@ $manifest = [ordered]@{
     excluded = [ordered]@{ frontend = $frontendSkipped }
     # 在包里的副本上抹掉的字样（来源没动）。
     redactions = $redactionLog
+    # 后端配置模板：出包时清空了值的键（lines = 清了几行，had_value = 来源里原来带不带值）、留着值的账号口令键。只有键名。
+    backend_config_template = [ordered]@{ path = 'config/DbOption.factory.toml'; blanked = $blankLog; kept = $keptLog }
     known_issues = $knownIssues
     notes = @(Opt $s 'notes' @())
     totals = [ordered]@{ files = $files.Count + 1; bytes_without_manifest = $totalBytes }

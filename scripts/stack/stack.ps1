@@ -12,6 +12,10 @@
       * 停进程只按进程号，而且先核对「进程号 + 启动时间 + 程序路径（开发档的前端是命令行里的标记）」；
         从不按进程名停。连带收子进程时只认「创建时间不早于父进程」的（进程号会重用，光看父进程号会认错），
         占着受保护端口的进程一律不动。
+      * 停的时候先请进程自己退：数据库发 Ctrl+C，nginx 用它自己的 -s quit；请不动、等不到，才直接结束。
+        发 Ctrl+C 之前先看那个进程的控制台上都有谁——除了它自己和包着它的那层 cmd 还有别人，就不发。
+        后端和 rs-server 没有自己退出的入口，只能直接结束；所以后端正在忙（初始化、增量、模型还没写完）
+        或者问不到它忙不忙的时候，down 什么都不停，要 -Force 才停。
       * 状态文件里没有记的进程当别人的——只有一种例外会被认领回来：它的程序就是运行目录里的那一个、
         又占着本套配置的端口（后端在向导页里自己重启、或者 up 跑到一半被关掉，就会出现这种进程）。
       * 数据库账号口令只在真正起数据库的那一小段里从后端配置读出来、经环境变量递下去；
@@ -36,12 +40,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:StackVersion = '0.3.0'
+$script:StackVersion = '0.4.0'
 $script:LogFile = $null
 $script:ExitCode = 0
 $script:ListenCache = $null
 $script:ListenCacheAt = [datetime]::MinValue
 $script:LockStream = $null
+# 最近一次初始化请求里，后端没有入队的库号（见 Invoke-Init）。
+$script:InitSkipped = @()
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 
 # 输出被接到管道或文件时按 UTF-8 写；直接显示在窗口里时不动控制台的代码页
@@ -388,8 +394,8 @@ function Get-StackConfig([string]$Path) {
     Assert-Type $guard 'guard' 'wait_lock_file' 'string'
 
     $timeouts = Get-Opt $raw 'timeouts'
-    Assert-KnownKeys $timeouts 'timeouts' @('database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec')
-    foreach ($k in 'database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec') {
+    Assert-KnownKeys $timeouts 'timeouts' @('database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec', 'stop_sec')
+    foreach ($k in 'database_sec', 'backend_sec', 'rs_server_sec', 'storage_version_sec', 'frontend_sec', 'init_sec', 'stop_sec') {
         Assert-Type $timeouts 'timeouts' $k 'int'
         $seconds = Get-Opt $timeouts $k
         if ($null -ne $seconds -and $seconds -lt 1) { Stop-Stack "配置$(Get-LineText 'timeouts' $k)[timeouts] $k 要写成不小于 1 的整数（单位是秒），现在是「$seconds」" 2 }
@@ -509,6 +515,8 @@ function Get-StackConfig([string]$Path) {
             StorageVersionSec = [int](Get-Opt $timeouts 'storage_version_sec' 180)
             FrontendSec = [int](Get-Opt $timeouts 'frontend_sec' 90)
             InitSec = [int](Get-Opt $timeouts 'init_sec' 600)
+            # down 请一个服务自己退出之后，最多等它多久；等不到就直接结束。
+            StopSec = [int](Get-Opt $timeouts 'stop_sec' 30)
         }
     }
     return $cfg
@@ -735,6 +743,178 @@ function Stop-VerifiedProcess([int]$ProcessId, [string]$Ticks) {
     $deadline = (Get-Date).AddSeconds(20)
     while ($null -ne (Get-ProcInfo $ProcessId) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
     return ($null -eq (Get-ProcInfo $ProcessId))
+}
+
+# ─────────────────────────── 请进程自己退出 ───────────────────────────
+# 入口起的服务都没有窗口，各自待在外面那层 cmd 的（看不见的）控制台里。要请这样的进程自己退出，得另起一个
+# 小进程：离开自己的控制台 → 接到那个进程的控制台上 → 给这个控制台上的进程发一个 Ctrl+C。
+# 一个进程同一时刻只能接着一个控制台，所以这件事不能在入口自己的进程里做（做了，入口就没法往窗口里说话了）。
+# 这个信号是发给「那个控制台上的所有进程」的。所以发之前先看上面都有谁：除了点了名的进程和小进程自己，
+# 还有别人（比如有人在一个命令行窗口里手工起的服务，那个窗口里还跑着别的东西），就不发。
+$script:CtrlSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class StackConsoleCtrl {
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GenerateConsoleCtrlEvent(uint ctrlEvent, uint processGroupId);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetConsoleProcessList(uint[] list, uint count);
+    public static uint[] Others = new uint[0];
+    // 0 发出去了；1 接不上那个进程的控制台；2 那个控制台上还有名单之外的进程（没有发）；3 没发出去
+    public static int Send(uint targetPid, uint[] allowed) {
+        FreeConsole();
+        if (!AttachConsole(targetPid)) return 1;
+        try {
+            uint[] buffer = new uint[256];
+            uint count = GetConsoleProcessList(buffer, (uint)buffer.Length);
+            if (count == 0 || count > buffer.Length) return 3;
+            uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            List<uint> others = new List<uint>();
+            for (int i = 0; i < count; i++) {
+                if (buffer[i] == self) continue;
+                if (Array.IndexOf(allowed, buffer[i]) >= 0) continue;
+                others.Add(buffer[i]);
+            }
+            Others = others.ToArray();
+            if (others.Count > 0) return 2;
+            // 自己先设成不理 Ctrl+C，再发：发出去的这一下自己也会收到。
+            SetConsoleCtrlHandler(IntPtr.Zero, true);
+            if (!GenerateConsoleCtrlEvent(0, 0)) return 3;
+            Thread.Sleep(300);
+            return 0;
+        } finally { FreeConsole(); }
+    }
+}
+'@
+
+# 内部命令 __ctrl：stack.ps1 __ctrl <进程号> <启动时间> <名单：逗号隔开的进程号>。不读配置。
+# 用退出码说话：0 发出去了；21 这台机器编不了那一小段程序；22 进程已经不在或换了主人；23 接不上它的控制台；
+# 24 控制台上还有名单之外的进程（另输出一行，列出是哪些进程号）；25 没发出去；26 参数不对。
+function Invoke-CtrlCommand([string[]]$Values) {
+    $vals = @($Values | Where-Object { $null -ne $_ -and "$_" -ne '' })
+    if ($vals.Count -lt 3) { return 26 }
+    $targetPid = 0
+    if (-not [int]::TryParse("$($vals[0])", [ref]$targetPid) -or $targetPid -le 0) { return 26 }
+    $allowed = New-Object 'System.Collections.Generic.List[uint32]'
+    foreach ($piece in ("$($vals[2])" -split ',')) {
+        $n = [uint32]0
+        if ([uint32]::TryParse($piece.Trim(), [ref]$n)) { $allowed.Add($n) }
+    }
+    # 动手之前再核对一次：这个进程号上还是不是原来那个进程。
+    $proc = Get-ProcInfo $targetPid
+    if ($null -eq $proc -or -not (Test-SameStart "$($vals[1])" $proc)) { return 22 }
+    try { Add-Type -TypeDefinition $script:CtrlSource -ErrorAction Stop } catch { return 21 }
+    $code = [StackConsoleCtrl]::Send([uint32]$targetPid, $allowed.ToArray())
+    if ($code -eq 0) { return 0 }
+    if ($code -eq 1) { return 23 }
+    if ($code -eq 2) {
+        # 这时已经离开了那个控制台；标准输出是调用方接着的管道，照常能写。
+        try { [Console]::Out.WriteLine((@([StackConsoleCtrl]::Others) -join ',')) } catch { }
+        return 24
+    }
+    return 25
+}
+
+# 请一个没有窗口的进程自己退出：另起一个小进程（本脚本的 __ctrl）接到它的控制台上发 Ctrl+C。
+# $Allowed：那个控制台上允许出现的进程号（这个进程自己、包着它的那层 cmd、它的子进程）。
+# 返回 @{ Sent; Why }——只管发没发出去；退没退由调用方等。
+function Send-ConsoleCtrl($Cfg, [int]$ProcessId, [string]$Ticks, [int[]]$Allowed) {
+    $out = @{ Sent = $false; Why = '' }
+    $r = $null
+    try {
+        $hostExe = (Get-Process -Id $PID).Path
+        New-Dir $Cfg.RunDir
+        if ($Cfg.PrivateTemp) { New-Dir $Cfg.TmpDir }
+        $argLine = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" __ctrl ' + $ProcessId + ' ' + $Ticks + ' ' + (@($Allowed) -join ',')
+        $r = Invoke-Capture $Cfg $hostExe $argLine $Cfg.RunDir 40
+    } catch {
+        $out.Why = "发信号的小进程没能起来（$($_.Exception.Message)）"
+        return $out
+    }
+    if ($r.TimedOut) { $out.Why = '发信号的小进程 40 秒没有结束'; return $out }
+    $code = [int]$r.ExitCode
+    if ($code -eq 0) { $out.Sent = $true }
+    elseif ($code -eq 21) { $out.Why = '这台机器上编不了发信号用的那一小段程序（PowerShell 的 Add-Type 用不了）' }
+    elseif ($code -eq 22) { $out.Why = '进程已经不在了，或者这个进程号换了主人' }
+    elseif ($code -eq 23) { $out.Why = '接不上它的控制台（它不是入口起的那种没有窗口的进程，或者这个窗口的权限比起它的那个低）' }
+    elseif ($code -eq 24) { $out.Why = "它的控制台上还有别的进程（进程号 $($r.Text)），发了会连带打断它们" }
+    elseif ($code -eq 25) { $out.Why = '信号没能发出去' }
+    else { $out.Why = "发信号的小进程没有正常结束（退出码 $code：$(Limit-Text $r.Text 120)）" }
+    return $out
+}
+
+# 包着这个服务的那层 cmd（入口起服务时套的）。记录里有，就核对后用；记录里没有（认领来的进程），
+# 就看它的父进程——是 cmd.exe、不比它晚创建、命令行里就是这个服务的程序，才认。认不出来返回 $null。
+function Get-WrapperProc($Record, $Proc) {
+    if ($null -eq $Record) { return $null }
+    if ($Record.wrapperPid -gt 0) {
+        $w = Get-ProcInfo $Record.wrapperPid
+        if ($null -ne $w -and $w.Name -ieq 'cmd.exe' -and (Test-SameStart $Record.wrapperTicks $w)) { return $w }
+        return $null
+    }
+    if ($null -eq $Proc -or [int]$Proc.ParentProcessId -le 0 -or -not $Record.exe) { return $null }
+    $parent = Get-ProcInfo ([int]$Proc.ParentProcessId)
+    if ($null -eq $parent -or $parent.Name -ine 'cmd.exe' -or $null -eq $parent.CreationDate -or $null -eq $Proc.CreationDate) { return $null }
+    if (([datetime]$parent.CreationDate) -gt ([datetime]$Proc.CreationDate)) { return $null }
+    if ("$($parent.CommandLine)".IndexOf([string]$Record.exe, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+    return $parent
+}
+
+# 请一个服务自己退出。只有两种服务有这条路：
+#   数据库：发 Ctrl+C。它收到之后把手上的请求做完、把库关好再退出（它的日志里会写 CTRL-C received … Bye!）。
+#   nginx 形态的前端：用它自己的命令 nginx -s quit，处理完手上的请求再退，工作进程跟着退。
+# 后端和 rs-server 没有这样的入口（开发档的前端也没有），这里什么都不做，由调用方直接结束。
+# 发出去之后最多等 [timeouts] stop_sec 秒。返回 @{ How; Tried; Exited; Seconds; Why }：
+#   How 为空 = 这个服务没有这条路；Tried = 请求发出去了；Exited = 等到它自己退出了；Why = 没成的原因。
+function Request-GracefulStop($Cfg, [string]$Name, $Record, $Proc) {
+    $out = @{ How = ''; Tried = $false; Exited = $false; Seconds = 0; Why = '' }
+    if ($Name -eq 'database') {
+        $out.How = 'Ctrl+C'
+        $allowed = @([int]$Record.pid)
+        $wrapper = Get-WrapperProc $Record $Proc
+        if ($null -ne $wrapper) { $allowed += [int]$wrapper.ProcessId }
+        foreach ($kid in (Get-ChildProcs $Record.pid $Record.startTicks)) { $allowed += [int]$kid.ProcessId }
+        $sent = Send-ConsoleCtrl $Cfg ([int]$Record.pid) ([string]$Record.startTicks) $allowed
+        if (-not $sent.Sent) { $out.Why = $sent.Why; return $out }
+    } elseif ($Name -eq 'frontend' -and $Cfg.Frontend.Kind -eq 'nginx') {
+        $out.How = 'nginx -s quit'
+        # nginx 按它自己记的进程号（运行目录里的 logs\nginx.pid）找主进程：那里记的必须就是本套记着的这一个。
+        $pidFile = Join-Path $Cfg.Frontend.WorkDir 'logs\nginx.pid'
+        $recorded = ''
+        try { if (Test-Path -LiteralPath $pidFile -PathType Leaf) { $recorded = ([System.IO.File]::ReadAllText($pidFile)).Trim() } } catch { $recorded = '' }
+        if ($recorded -ne "$([int]$Record.pid)") { $out.Why = "它自己记的进程号（$pidFile）不是本套记着的 $($Record.pid)"; return $out }
+        $spec = Get-ServiceSpec $Cfg $Name
+        $parts = @()
+        foreach ($arg in $spec.Args) { $parts += (Format-CmdArg $arg) }
+        # 用的是正在跑的那一个程序（记录里的路径，前面核对过），不是配置里后来可能改过的。
+        $r = Invoke-Capture $Cfg ([string]$Record.exe) (($parts -join ' ') + ' -s quit') $spec.Cwd 15
+        if (-not $r.Ok) {
+            if ($r.TimedOut) { $out.Why = 'nginx -s quit 这条命令 15 秒没有结束' } else { $out.Why = "nginx -s quit 没有成功（$(Limit-Text $r.Text 160)）" }
+            return $out
+        }
+    } else {
+        return $out
+    }
+    $out.Tried = $true
+    $started = Get-Date
+    $deadline = $started.AddSeconds($Cfg.Timeouts.StopSec)
+    $said = $false
+    while ($true) {
+        $p = Get-ProcInfo $Record.pid
+        if ($null -eq $p -or -not (Test-SameStart $Record.startTicks $p)) { $out.Exited = $true; break }
+        if ((Get-Date) -ge $deadline) { break }
+        if (-not $said -and ((Get-Date) - $started).TotalSeconds -ge 3) {
+            Say "    $(Get-ServiceTitle $Name)：已经请它自己退出（$($out.How)），还在等（最多 $($Cfg.Timeouts.StopSec) 秒）…"
+            $said = $true
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $out.Seconds = [int][math]::Round(((Get-Date) - $started).TotalSeconds)
+    if (-not $out.Exited) { $out.Why = "等了 $($Cfg.Timeouts.StopSec) 秒它还没有退出" }
+    return $out
 }
 
 # ─────────────────────────── HTTP ───────────────────────────
@@ -1775,7 +1955,7 @@ function Set-StartInfoEnv($StartInfo, $EnvTable) {
 
 # 跑一个很快就结束的程序（问版本用），拿回它的输出。同样给明确的环境变量和工作目录。
 function Invoke-Capture($Cfg, [string]$Exe, [string]$ArgLine, [string]$Cwd, [int]$TimeoutSec = 20) {
-    $out = @{ Ok = $false; Text = ''; TimedOut = $false }
+    $out = @{ Ok = $false; Text = ''; TimedOut = $false; ExitCode = -1 }
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $Exe
@@ -1799,6 +1979,7 @@ function Invoke-Capture($Cfg, [string]$Exe, [string]$ArgLine, [string]$Cwd, [int
         $text = "$($stdout.Result)".Trim()
         if (-not $text) { $text = "$($stderr.Result)".Trim() }
         $out.Text = (($text -split "`r?`n") | Select-Object -First 1)
+        $out.ExitCode = [int]$process.ExitCode
         $out.Ok = ($process.ExitCode -eq 0)
     } catch {
         $out.Text = $_.Exception.Message
@@ -2070,7 +2251,8 @@ function Show-StorageVersionAdvice($Cfg, $Sv) {
     } elseif ($Sv.Kind -eq 'no-record') {
         Say '  这是哪种情况：库里已经有数据，却没有版本记录，而后端的启动已经做完——它不会自己补写，再等也没有用。' $c
         Say '          这样的库多半是别的版本的后端用过的数据目录（比如换新一版时接过来的旧 data\surreal），' $c
-        Say '          或者版本记录还没写上的时候初始化失败过。' $c
+        Say '          或者版本记录还没写上的时候，初始化失败过、被中途停掉过（配了 watch_dbnums 的新库，第一次初始化' $c
+        Say '          跑到一半后端被结束，就会这样）。' $c
     } elseif ($Sv.Kind -eq 'old') {
         Say "  这是哪种情况：库里的版本记录（$($Sv.Stored)）比程序要的（$($Sv.Expected)）旧——这份数据是老一版的后端建的，现在的后端读不懂里面的模型。它不会自己变，再等也没有用。" $c
     } else {
@@ -2372,8 +2554,8 @@ function Stop-OnGuard($Cfg, [string]$Why) {
         $canStop = $true
         if ($null -eq $script:LockStream) { try { Enter-StackLock $Cfg } catch { $canStop = $false } }
         if ($canStop) {
-            Say '  按配置（[guard] auto_down = true）把本套已经起来的服务收掉。' 'Yellow'
-            Invoke-Down $Cfg $false | Out-Null
+            Say '  按配置（[guard] auto_down = true）把本套已经起来的服务收掉（后端手上有没有活都收：这是为了保住这台机器）。' 'Yellow'
+            Invoke-Down $Cfg $false $true | Out-Null
         } else {
             Say '  另一个 stack 命令正在这个运行目录上跑，由它来处理；这里不动任何进程。' 'Yellow'
         }
@@ -2531,6 +2713,75 @@ function Test-BackendIdle($Cfg) {
     return $true
 }
 
+# 后端此刻是不是正在做「一打断就停在半截」的事。down 用它决定停不停（后端没有自己退出的入口，只能直接结束）。
+# 返回 @{ Known; Busy; Reasons; NoRecord }。Known = $false：后端没有应答（还在启动、卡住了），判断不了。
+# 算忙的四样：
+#   · 队列里有在跑的、在排的批次（初始化、增量都走它；held 的是积压，没人触发不会跑，不算）；
+#   · 有任务在跑（「核对」、整库重建这些不走队列的）；
+#   · 库的升级正在做；
+#   · 模型的写后台没清空（生成好的模型还有没写进数据库的）。
+# NoRecord：库里的版本记录还没写上。这时候把忙着的后端停掉特别伤：配了 watch_dbnums 的新库，版本记录要到第一次
+# 初始化完成才写；数据已经进了库、记录还没写的时候后端被结束，之后再初始化成功它也不补写（2026-11-12 在沙箱里
+# 重现过），rs-server 就一直起不来。调用方在这种时候多说一句。
+function Get-BackendBusy($Cfg) {
+    $out = @{ Known = $false; Busy = $false; Reasons = @(); NoRecord = $false }
+    $base = Get-BackendUrl $Cfg
+    $health = Invoke-StackHttp 'GET' ($base + '/api/v1/health') '' 8
+    if (-not $health.Ok) { return $out }
+    $h = ConvertFrom-JsonSafe $health.Body
+    if ($null -eq $h) { return $out }
+    # 设置模式：配置还没填完，后端只开着向导页，什么活都没在干。
+    if ([string](Get-Prop $h 'mode') -eq 'setup') { $out.Known = $true; return $out }
+    $queue = Invoke-StackHttp 'GET' ($base + '/api/v1/queue') '' 15
+    if (-not $queue.Ok) { return $out }
+    $running = @()
+    $queued = @()
+    $queueTaskIds = @()
+    foreach ($row in @(Get-Prop (ConvertFrom-JsonSafe $queue.Body) 'rows')) {
+        if ($null -eq $row) { continue }
+        $rowState = [string](Get-Prop $row 'state')
+        if ($rowState -eq 'held') { continue }
+        $text = "库 $(Get-Prop $row 'dbnum')"
+        $detail = @()
+        foreach ($k in 'intent', 'phase') { $v = [string](Get-Prop $row $k); if ($v) { $detail += $v } }
+        if ($detail.Count -gt 0) { $text += "（$($detail -join '，')）" }
+        if ($rowState -eq 'running') { $running += $text } else { $queued += $text }
+        $rowTask = [string](Get-Prop $row 'task_id')
+        if ($rowTask) { $queueTaskIds += $rowTask }
+    }
+    $tasks = Invoke-StackHttp 'GET' ($base + '/api/v1/tasks?state=running&limit=20') '' 15
+    if (-not $tasks.Ok) { return $out }
+    # 队列里的那一行在任务表里也有一条（同一个任务号），不重复报。
+    $others = @()
+    foreach ($task in @(Get-Prop (ConvertFrom-JsonSafe $tasks.Body) 'tasks')) {
+        if ($null -eq $task) { continue }
+        $taskId = [string](Get-Prop $task 'task_id')
+        if ($taskId -and $queueTaskIds -contains $taskId) { continue }
+        $kind = [string](Get-Prop $task 'kind')
+        $dbnum = Get-Prop $task 'dbnum'
+        $text = $kind
+        if (-not $text) { $text = '任务' }
+        if ($null -ne $dbnum) { $text += "（库 $dbnum）" }
+        $others += $text
+    }
+    $out.Known = $true
+    if ($running.Count -gt 0) { $out.Reasons += "队列里正在跑：$($running -join '、')" }
+    if ($queued.Count -gt 0) { $out.Reasons += "队列里排着、还没跑：$($queued -join '、')" }
+    if ($others.Count -gt 0) { $out.Reasons += "有任务正在跑：$($others -join '、')" }
+    $sv = Get-StorageVersionKind $h
+    if ($sv.Kind -eq 'upgrading') { $out.Reasons += "库的升级正在做（做完 $($sv.UpgradeDone) 个，共 $($sv.UpgradeTotal) 个）" }
+    $out.NoRecord = ($sv.Known -and $null -eq $sv.Stored)
+    $writeBehind = Get-Prop (Get-Prop $h 'model_cache') 'write_behind'
+    $pending = 0
+    foreach ($k in 'pending_unique_roots', 'in_flight_roots', 'retrying_roots') {
+        $v = Get-Prop $writeBehind $k
+        if ($null -ne $v) { $pending += [int]$v }
+    }
+    if ($pending -gt 0) { $out.Reasons += "生成好的模型还有 $pending 个根没写进数据库（写后台没清空）" }
+    $out.Busy = ($out.Reasons.Count -gt 0)
+    return $out
+}
+
 # 点名的库里，有没有「这次请求之后」以失败收场的数据批次。每个返回 @{ Dbnum; Message; TaskId }。
 function Get-FailedInitTasks($Cfg, [int[]]$Dbnums, [datetime]$Since) {
     $r = Invoke-StackHttp 'GET' ((Get-BackendUrl $Cfg) + '/api/v1/tasks?state=failed&limit=100') '' 15
@@ -2580,9 +2831,28 @@ function Show-InitFailure($Cfg, $Failures) {
     Say '  同一次点名的其余库（如果有）后端还在接着做，不受影响；stack status 看得到后端还在不在忙。' 'Yellow'
 }
 
+# 后端接了初始化请求、但点名的库里有的它没有入队时，是用一句提示说的（「dbnum=6003: …没有可入队的批次」
+# 「dbnum=…: …已拒绝」），应答里没有单独的一格。从提示里认出这些库号：它们这一次不会初始化，等多久都不会有。
+# 返回 @{ Dbnum; Reason } 的数组（只认点了名的库）。提示的写法变了认不出来时返回空，那就和以前一样等到超时。
+function Get-NotEnqueuedDbnums($Warnings, [int[]]$Requested) {
+    $out = @()
+    foreach ($w in @($Warnings)) {
+        if (-not $w) { continue }
+        $m = [regex]::Match([string]$w, '^\s*dbnum=(\d+)\s*[:：]\s*(.*)$')
+        if (-not $m.Success) { continue }
+        if ($m.Groups[2].Value -notmatch '没有可入队的批次|已拒绝') { continue }
+        $n = [int]$m.Groups[1].Value
+        if (@($Requested) -notcontains $n) { continue }
+        $out += @{ Dbnum = $n; Reason = $m.Groups[2].Value.Trim() }
+    }
+    return $out
+}
+
 # 初始化点名的库：解析这些库的全部元素进数据库，并生成它们的模型（后端里这是一件事，分不开）。
 # 系统库和字典库按后端的设计会一并处理。已经初始化过的库不重复做。
+# 后端没有入队的库（库文件不在、不在执行范围里）记在 $script:InitSkipped 里：不等它们，由调用方把退出码定成 4。
 function Invoke-Init($Cfg, $State, [int[]]$Dbnums) {
+    $script:InitSkipped = @()
     if (@($Dbnums).Count -eq 0) { return }
     if ($Cfg.Guard.ProtectPorts -contains $Cfg.Backend.Port) { Stop-Stack '后端端口在受保护名单里，不向它发初始化请求' 2 }
     $health = Test-ServiceHealth $Cfg 'backend'
@@ -2625,6 +2895,16 @@ function Invoke-Init($Cfg, $State, [int[]]$Dbnums) {
         }
         foreach ($w in @(Get-Prop $j 'warnings')) { if ($w) { Say "  后端提示：$(Limit-Text ([string]$w) 200)" 'Yellow' } }
         if ($blocked.Count -gt 0) { Stop-Stack "库 $($blocked -join '、') 被后端挡下，没有初始化（原因见上）" 4 }
+        # 后端没有入队的库：这一次不会初始化，不等它们（以前会一直等到超时，再说一句「初始化还在跑」）。
+        $script:InitSkipped = @(Get-NotEnqueuedDbnums @(Get-Prop $j 'warnings') $need | ForEach-Object { $_.Dbnum })
+        if ($script:InitSkipped.Count -gt 0) {
+            Say "  ✗ 库 $($script:InitSkipped -join '、') 后端没有入队，这一次不会初始化（原因见上面的「后端提示」）。" 'Red'
+            Say '    后端只给「库文件在本项目目录里」的库排初始化：库文件在别的项目目录里的（MDB 里引用的外部库）、库文件不在的、库号不对的，都会这样。' 'Yellow'
+            $Dbnums = @($Dbnums | Where-Object { $script:InitSkipped -notcontains $_ })
+            if ($Dbnums.Count -eq 0) { return }
+            $list = @($Dbnums) -join '、'
+            Say "  其余点名的库（$list）照常等它们做完。"
+        }
     }
     $started = Get-Date
     $deadline = $started.AddSeconds($Cfg.Timeouts.InitSec)
@@ -2848,6 +3128,12 @@ function Invoke-Up($Cfg) {
         Say '（因为还有服务没起，这次的退出码是 4；双击「开始」的窗口最后一行会用英文说 not everything is running，指的就是这件事。）' 'Yellow'
         Stop-Stack "还有服务没起：$($pending -join '、')" 4 -Quiet
     }
+    $skipped = @($script:InitSkipped | Where-Object { $null -ne $_ })
+    if ($skipped.Count -gt 0) {
+        Say "服务都起好了。但配置里 [init] dbnums 点名的库 $($skipped -join '、') 没有初始化：后端没有把它们入队（原因见上面的「后端提示」）。" 'Yellow'
+        Say '下一步：核对库号，或者把它们从 [init] dbnums 里去掉。（因为点名的库没有全部初始化，这次的退出码是 4。）' 'Yellow'
+        Stop-Stack "点名的库没有全部初始化：$($skipped -join '、')" 4 -Quiet
+    }
     Say '全部起好。看状态：stack status；检查：stack smoke；停：stack down。' 'Green'
 }
 
@@ -2898,7 +3184,9 @@ function Wait-StorageVersion($Cfg, $State) {
 
 # ─────────────────────────── 命令：down ───────────────────────────
 
-function Invoke-Down($Cfg, [bool]$OnlyTell) {
+# $ForceBusy：后端正在忙（或者问不到它忙不忙）也照停。命令行上是 -Force；护栏越线的自动收摊也带着它
+# （那是为了保住这台机器，不看后端手上有没有活）。
+function Invoke-Down($Cfg, [bool]$OnlyTell, [bool]$ForceBusy = $false) {
     $state = Read-StackState $Cfg
     $stopped = 0
     $failed = 0
@@ -2911,6 +3199,48 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
             if (@(Get-ServiceProgramProcs $Cfg $name).Count -eq 0) { continue }
             Say "  $(Get-ServiceTitle $name)：运行目录里的程序有进程在跑，只是还没占上端口 $(Get-ServicePort $Cfg $name)。等它最多 15 秒…" 'Yellow'
             [void](Wait-StrayService $Cfg $state $name $true 15)
+        }
+    }
+    # 后端没有「自己退出」的入口，停它只能直接结束进程。它手上有活的时候不停——在动任何一个服务之前就看。
+    if ($state.ContainsKey('backend') -and (Test-RecordedProcess $Cfg 'backend' $state['backend']).Ours) {
+        $busy = Get-BackendBusy $Cfg
+        $stopNow = 'stack down -Force'
+        if (-not $busy.Known) {
+            $what = '后端的进程在，但它的接口没有应答（可能还在启动，也可能卡住了），判断不了它是不是正在写东西'
+            if ($OnlyTell) { Say "  注意：$what。真运行 stack down 的时候会停在这一步，要加 -Force 才停。" 'Yellow' }
+            elseif ($ForceBusy) { Say "  注意：$what。按 -Force 照停。" 'Yellow' }
+            else {
+                Say "✗ $what。这一次什么都没有停。" 'Red'
+                Say "  下一步：过一会儿再运行 stack down（先用 stack status 看一眼）；确实要现在停：$stopNow" 'Yellow'
+                Say '          （双击「停止」的话，窗口最后会用英文问一句要不要照停，输入 Y 回车就是它。）' 'Yellow'
+                return 6
+            }
+        } elseif ($busy.Busy) {
+            # 库里的版本记录还没写上的时候强停，后果比「重做一遍」重（见 Get-BackendBusy 上面的说明）：多说几句。
+            $noRecord = @()
+            if ($busy.NoRecord) {
+                $noRecord += '  特别注意：库里的版本记录还没有写上（配了 watch_dbnums 的新库，要到第一次初始化完成才写）。这时候把后端停掉，'
+                $noRecord += '  之后就算再初始化成功，后端也不会补写这条记录——rs-server 会一直起不来，只能把数据库的数据目录改名、从头再来。'
+                $noRecord += '  所以这一次尤其要等它做完再停。'
+            }
+            if ($OnlyTell) {
+                Say '  注意：后端正在忙。真运行 stack down 的时候会停在这一步，要加 -Force 才停：' 'Yellow'
+                foreach ($reason in $busy.Reasons) { Say "    · $reason" 'Yellow' }
+                foreach ($line in $noRecord) { Say $line 'Yellow' }
+            } elseif ($ForceBusy) {
+                Say '  注意：后端正在忙，按 -Force 照停。被打断的：' 'Yellow'
+                foreach ($reason in $busy.Reasons) { Say "    · $reason" 'Yellow' }
+                if ($busy.NoRecord) { Say '  注意：库里的版本记录还没有写上。这样停掉之后后端多半不会再补写它（rs-server 会起不来）；到时候运行 stack status，照它给的办法处理。' 'Yellow' }
+            } else {
+                Say '✗ 后端正在忙，这一次什么都没有停。它手上的活：' 'Red'
+                foreach ($reason in $busy.Reasons) { Say "    · $reason" 'Red' }
+                Say '  为什么不停：后端没有「自己退出」的入口，停它只能直接结束进程。正在做的初始化、增量会停在半截，'
+                Say '  下次起来要重做；还没写进数据库的模型要重新生成。'
+                foreach ($line in $noRecord) { Say $line 'Yellow' }
+                Say "  下一步：等它做完再停（进度看运维页 $(Get-BackendUrl $Cfg)/ops.html ，或运行 stack status）；确实要现在停：$stopNow" 'Yellow'
+                Say '          （双击「停止」的话，窗口最后会用英文问一句要不要照停，输入 Y 回车就是它。）' 'Yellow'
+                return 6
+            }
         }
     }
     $order = @($script:AllServiceNames)
@@ -2940,16 +3270,33 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
         }
         $what = "$title：进程 $($record.pid)（$($check.Proc.Name)，起于 $(Format-ProcClock $check.Proc)，端口 $($record.port)"
         if ($record.marker) { $what += "，命令行带本套的标记 $($record.marker)）" } else { $what += "，程序 $($record.exe)）" }
-        if ($OnlyTell) { Say "  会停 $what"; continue }
+        if ($OnlyTell) {
+            $way = '直接结束（这个程序没有自己退出的入口）'
+            if ($name -eq 'database') { $way = "先发 Ctrl+C 请它自己退出，最多等 $($Cfg.Timeouts.StopSec) 秒，等不到再直接结束" }
+            elseif ($name -eq 'frontend' -and $Cfg.Frontend.Kind -eq 'nginx') { $way = "先用 nginx -s quit 请它自己退出，最多等 $($Cfg.Timeouts.StopSec) 秒，等不到再直接结束" }
+            Say "  会停 $what —— $way"
+            continue
+        }
         # 有的服务带子进程（nginx 的工作进程、前端开发服务器的打包进程）；先记下来，
         # 主进程停了之后核对它们是否跟着退了，没退的按「进程号 + 启动时间」核对后收掉。
         # 名单里只收真是它生的：创建时间不早于这个服务的（见 Select-TrueChildren 上面的说明）。
         $kids = @()
         foreach ($kid in (Get-ChildProcs $record.pid $record.startTicks)) { $kids += @{ pid = [int]$kid.ProcessId; ticks = (Get-ProcTicks $kid); name = $kid.Name } }
-        if (-not (Stop-VerifiedProcess $record.pid $record.startTicks)) {
-            Say "  ✗ $title：进程 $($record.pid) 没有停下来" 'Red'
-            $failed += 1
-            continue
+        # 先请它自己退出（只有数据库和 nginx 有这条路）；请不动、等不到，才直接结束。
+        $how = '直接结束的：这个程序没有自己退出的入口'
+        $graceful = Request-GracefulStop $Cfg $name $record $check.Proc
+        if ($graceful.Exited) {
+            $how = "它自己退出的：$($graceful.How)，$($graceful.Seconds) 秒"
+        } else {
+            if ($graceful.How) {
+                Say "    $title：请它自己退出（$($graceful.How)）没有成——$($graceful.Why)。改为直接结束。" 'Yellow'
+                $how = "直接结束的：请它自己退出（$($graceful.How)）没有成"
+            }
+            if (-not (Stop-VerifiedProcess $record.pid $record.startTicks)) {
+                Say "  ✗ $title：进程 $($record.pid) 没有停下来" 'Red'
+                $failed += 1
+                continue
+            }
         }
         # 下面要核对「占没占受保护端口」：先重新取一次谁在听哪个端口，这个服务的子进程和外层 cmd 共用这一份。
         if ($Cfg.Guard.ProtectPorts.Count -gt 0 -and ($kids.Count -gt 0 -or $record.wrapperPid -gt 0)) { [void](Get-ListenTable -Fresh) }
@@ -2972,7 +3319,7 @@ function Invoke-Down($Cfg, [bool]$OnlyTell) {
             $w = Get-ProcInfo $record.wrapperPid
             if ($null -ne $w -and $w.Name -ieq 'cmd.exe' -and (Get-ProtectedPortOf $Cfg $record.wrapperPid -MaxAgeMs 6000) -eq 0) { Stop-VerifiedProcess $record.wrapperPid $record.wrapperTicks | Out-Null }
         }
-        Say "  已停 $what" 'Green'
+        Say "  已停 $what —— $how" 'Green'
         $stopped += 1
         $state.Remove($name)
         Save-StackState $Cfg $state
@@ -3386,13 +3733,23 @@ function Invoke-InitCommand($Cfg, [int[]]$Dbnums) {
         }
     }
     Invoke-Init $Cfg $state $Dbnums
-    Say '初始化做完了。在 plant3d-web 里刷新一下就能看到这些库的模型；stack smoke 可以再核一遍。' 'Green'
+    $skipped = @($script:InitSkipped | Where-Object { $null -ne $_ })
+    if ($skipped.Count -eq 0) {
+        Say '初始化做完了。在 plant3d-web 里刷新一下就能看到这些库的模型；stack smoke 可以再核一遍。' 'Green'
+    } else {
+        $rest = @($Dbnums | Where-Object { $skipped -notcontains $_ })
+        $tail = ''
+        if ($rest.Count -gt 0) { $tail = "其余点名的库（$($rest -join '、')）做完了。" }
+        Say "✗ 库 $($skipped -join '、') 没有初始化：后端没有把它们入队（原因见上面的「后端提示」）。$tail" 'Red'
+        Say '  下一步：核对库号（界面的模型树上、stack smoke 的输出里都看得到）；库文件在别的项目目录里的库（MDB 里引用的外部库）这里初始化不了。' 'Yellow'
+    }
     # rs-server 之前因为库版本没对上而没起的：初始化完可能已经对上了（配了 watch_dbnums 的新库就是这样）。提醒一句。
     if ($Cfg.RsServer.Enabled -and $Cfg.RsServer.WaitStorageVersion -and -not $state.ContainsKey('rs_server')) {
         $sv = Get-StorageVersionState $Cfg
         if ($sv.Kind -eq 'ok') { Say "rs-server 还没起，而库版本现在一致了（$($sv.Text)）：运行 stack up（双击「开始」），它会把 rs-server 补起来。" 'Yellow' }
         elseif ($sv.Kind -ne 'unknown') { Say "rs-server 还没起：库版本还没对上（$($sv.Text)）。运行 stack status 看是哪种情况、怎么办。" 'Yellow' }
     }
+    if ($skipped.Count -gt 0) { return 4 }
     return 0
 }
 
@@ -3493,7 +3850,11 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
             缺省不初始化任何库、不生成模型；配置里 [init] dbnums 点了名才初始化那几个库。
               -NoInit      配置里点了名也不初始化，只起服务
   down      倒着停：前端、rs-server、后端、数据库。只停本套自己起的。
-              -WhatIf      只列出会停哪些进程，不真停（也可以写 -DryRun）
+            数据库和 nginx 先请它们自己退出（数据库发 Ctrl+C，nginx 用 -s quit），等不到再直接结束；
+            后端和 rs-server 没有自己退出的入口，是直接结束的。所以后端正在忙（有库在初始化、在做增量、
+            库在升级、生成好的模型还没写完）或者问不到它忙不忙的时候，down 什么都不停，说明原因后退出（退出码 6）。
+              -Force       后端正在忙也照停（它手上的活会停在半截，下次起来重做）
+              -WhatIf      只列出会停哪些进程、怎么停，不真停（也可以写 -DryRun）
   status    一张表：每个服务的状态、端口、进程号、起的时间、内存、版本；不正常的说出原因和下一步
   init      初始化点名的库：stack init 7997 8000（库号用空格或逗号隔开）。
             初始化 = 把这个库的全部元素解析进数据库，并生成这个库的模型；后端会把系统库和字典库
@@ -3544,6 +3905,8 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
     状态文件里没有记的进程当别人的，只有一种会被认领回来：它的程序就是运行目录里的那一个、
     又占着本套的端口——在后端的向导页里点了「重启」、或者 stack up 跑到一半窗口被关，就会有这种进程。
     连带收子进程（nginx 的工作进程）时只认创建时间不早于它的；占着受保护端口的进程一律不动。
+  · 停的时候先请数据库和 nginx 自己退出，最多等 [timeouts] stop_sec 秒（缺省 30），等不到再直接结束。
+    给数据库发 Ctrl+C 之前先看它的控制台上都有谁：除了它自己和入口包在它外面的那层 cmd 还有别的进程，就不发。
   · 缺省不改对谁开放：后端、rs-server、前端监听所有网卡。只想让本机访问，把 [listen] loopback_only 设成 true。
 
 文件都在哪（都在 [stack] root 下面）
@@ -3560,7 +3923,8 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
 
 退出码
   0 正常              2 配置或用法有问题      3 运行中越过内存线、等让路文件超时、或另一个 stack 正在跑
-  4 预检没过（包括开工时内存余量不够）、有服务没起好、或点名的库没初始化成        5 冒烟没过        1 其它
+  4 预检没过（包括开工时内存余量不够）、有服务没起好、或点名的库没初始化成        5 冒烟没过
+  6 down 没有停任何东西：后端正在忙，或者问不到它忙不忙（要停加 -Force）                1 其它
 "@
     Write-Host $text
 }
@@ -3569,6 +3933,9 @@ stack $script:StackVersion —— 读一份配置，把数据库、后端、rs-s
 
 # 测试用：点源本文件并带上 __lib（ . stack.ps1 __lib ），只把上面的函数定义进调用方，不执行任何命令。
 if ($Command -eq '__lib') { return }
+
+# 内部命令：接到另一个进程的控制台上发 Ctrl+C（down 请数据库自己退出时另起的那个小进程）。不读配置，只用退出码说话。
+if ($Command -eq '__ctrl') { exit (Invoke-CtrlCommand $Rest) }
 
 try {
     $commandName = $Command.ToLowerInvariant()
@@ -3642,7 +4009,7 @@ try {
 
     $outcome = 0
     if ($commandName -eq 'up') { Invoke-Up $cfg | Out-Null }
-    elseif ($commandName -eq 'down') { $outcome = Invoke-Down $cfg $onlyTell }
+    elseif ($commandName -eq 'down') { $outcome = Invoke-Down $cfg $onlyTell ([bool]$Force) }
     elseif ($commandName -eq 'status') { $outcome = Invoke-Status $cfg }
     elseif ($commandName -eq 'doctor') { $outcome = Invoke-Doctor $cfg }
     elseif ($commandName -eq 'init') { $outcome = Invoke-InitCommand $cfg $initDbnums }
