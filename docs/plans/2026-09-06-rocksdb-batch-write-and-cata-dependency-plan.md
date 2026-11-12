@@ -162,6 +162,9 @@ INSERT RELATION IGNORE INTO pe_owner [ {...}, {...} ] RETURN NONE;
 
 - 三个值进 `DbOption.toml` 可调（`data_tx_max_bytes` / `data_tx_max_write_rows` / `data_tx_elements`），默认取上表；
   `/health` 报生效值。Q6 让用户在「2 MiB 直接上」与「先 1 MiB 保守」之间拍。
+- **2026-11-12 补（GitHub #155）**：上表只说了「超过任一上限就劈半」，没说劈到只剩一个元素还超限怎么办——实现是报错，
+  而目录里一个属主名下上万个成员是真数据（成员边一名成员一行）。现在这种元素的成员边分几笔写，每笔仍在上限以内；
+  见 ADR-064 D1 的补记与 `element_batch::append_oversize_element`。
 - `dbnum_stats::render` 的 per-ref0 `$before / $after` 观测块与写块同事务的纪律**不变**；它按 ref0 分组，
   行数上限升高后每块的观测 SELECT 也随之变多，P0 要量一下它占事务的比例。
 - 冲突重试沿用 `versioned_db::database::conflict_retry_backoff`（指数 + 抖动）与 `surreal_retry`；写者仍是每进程一条数据链。
