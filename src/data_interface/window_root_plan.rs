@@ -983,13 +983,13 @@ fn anchor_lineage_exclusion(
     Ok(())
 }
 
-/// e3d-model `elmodl::SBFI_DESP_MIN`：墙名下的刀凑得齐这么多项 `DESP` 才开洞（`collect_host_fixings` /
-/// `collect_host_sleeves` 同一道门）。
+/// e3d-model `elmodl::SBFI_DESP_MIN`：墙名下的刀凑得齐这么多项 `DESP` 才开洞（`elmodl::carries_host_cut` 那道门）。
 const HOST_CUTTER_DESP_MIN: usize = 10;
 
-/// 宿主墙与它开洞用的刀：`(刀 noun, 宿主 noun)`。宿主的网格扣的是刀的**世界体**（e3d-model `elmodl.rs`：
-/// WALL → `collect_host_fixings` → `fixing_world_cutter`，GWALL → `collect_host_sleeves` → `sleeve_world_cutter`），
-/// 两边的收刀都是「沿成员往下钻，遇到刀 noun 就停」。
+/// 宿主墙与它开洞用的刀：`(刀 noun, 宿主 noun)`。宿主的网格扣的是刀的**世界体**（e3d-model `elmodl.rs` 的
+/// `HOST_CUTTERS` 那张表：WALL 收 FIXING → `fixing_world_cutter`，GWALL 收 SBFI → `sleeve_world_cutter`），收刀是
+/// `collect_host_cutters`：「沿成员往下钻，遇到刀 noun 就停」。这里管的是刚性前推那条路（挪刀不挪墙就不许前推）；
+/// 走重建那条路时「刀要重建 → 墙一并重建」由 e3d-model 的 `increment::host_cutter_walls_of` 管（gen-model #150）。
 const HOST_CUTTERS: [(&str, &str); 2] = [("FIXING", "WALL"), ("SBFI", "GWALL")];
 
 /// 墙 datum 的两级：没有 POS/ORI，标架由属主现算。
@@ -1147,7 +1147,7 @@ fn anchor_subtree_exclusion(
         {
             return Err(format!(
                 "anchor {refno} moves host cutter {cutter_noun} {cutter} but not its host cutter owner {host_noun} {host}; \
-                 the host cuts its hole from the cutter's world solid (e3d-model collect_host_fixings / collect_host_sleeves)"
+                 the host cuts its hole from the cutter's world solid (e3d-model collect_host_cutters)"
             ));
         }
     }
@@ -5104,8 +5104,8 @@ mod tests {
     ///
     /// - aps250110：GENSEC 的 `JOIS` / `JOIE` 关节 FIXING 挂在**别的**框架下，挪梁所在的那个框架——梁端头的负体取自
     ///   不动的 FIXING（e3d-model `elmodl::collect_joint_negatives`），左乘 Δ 的刀口是错的；
-    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（`collect_host_fixings` → `fixing_world_cutter` 在墙上开洞）、SBFI 在
-    ///   GWALL 下（`collect_host_sleeves` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
+    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（`collect_host_cutters` → `fixing_world_cutter` 在墙上开洞）、SBFI 在
+    ///   GWALL 下（`collect_host_cutters` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
     ///
     /// 三种形状都必须判 `rigid: Err`，原因分别带 `structural connection` 与 `host cutter owner`；顺带数出语料里这种框架 /
     /// 刀有多少个。

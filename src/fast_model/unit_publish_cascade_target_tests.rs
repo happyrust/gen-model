@@ -608,38 +608,85 @@ impl JointCutTrace {
 }
 
 fn joint_cut_trace(set: &Arc<DbSet>, beam: RefNo, joint: RefNo) -> JointCutTrace {
-    let element = set.element(beam);
-    let Ok(noun) = element.element_type() else {
+    let Some((noun, generated)) = modeled_solid(set, beam) else {
         return JointCutTrace::BeamNotModeled;
     };
-    let modeled =
+    cut_trace_in(&noun, &generated, joint, &[format!("关节 {joint}：")])
+}
+
+/// `refno` 这一端建出来的实体与它的 noun；建不出实体（读挂、建模失败、不出体）给 `None`。
+fn modeled_solid(set: &Arc<DbSet>, refno: RefNo) -> Option<(String, GeneratedElement)> {
+    let element = set.element(refno);
+    let noun = element.element_type().ok()?;
+    let category =
         e3d_model::category::element_category(&element, e3d_model::category::classify(&noun))
-            .ok()
-            .and_then(|category| e3d_model::elmodl::model_element(&element, category).ok());
-    let Some(e3d_model::elmodl::Modeled::Solid(generated)) = modeled else {
-        return JointCutTrace::BeamNotModeled;
-    };
+            .ok()?;
+    match e3d_model::elmodl::model_element(&element, category).ok()? {
+        e3d_model::elmodl::Modeled::Solid(generated) => Some((noun, *generated)),
+        _ => None,
+    }
+}
+
+/// 一只刀源在宿主建模账上留下的痕迹：`tags` 是它在 `notes` 里的抬头（「关节 X：」「成员配件 X：」……）。
+fn cut_trace_in(
+    host_noun: &str,
+    generated: &GeneratedElement,
+    source: RefNo,
+    tags: &[String],
+) -> JointCutTrace {
     if generated
         .negatives_skipped
         .iter()
         .chain(generated.joint_cuts_explained.iter())
-        .any(|skipped| skipped.refno == joint)
+        .any(|skipped| skipped.refno == source)
     {
         return JointCutTrace::Skipped;
     }
-    let tag = format!("关节 {joint}：");
-    if let Some(note) = generated.notes.iter().find(|note| note.contains(&tag)) {
+    if let Some(note) = generated
+        .notes
+        .iter()
+        .find(|note| tags.iter().any(|tag| note.contains(tag)))
+    {
         return if note.contains("没有负体") {
             JointCutTrace::NoCutters
         } else {
             JointCutTrace::Unclear
         };
     }
-    if noun == "SCTN" && generated.negatives_applied > 0 {
+    if host_noun == "SCTN" && generated.negatives_applied > 0 {
         JointCutTrace::Applied
     } else {
         JointCutTrace::Unclear
     }
+}
+
+/// 型钢成员链上的几只刀源（直属 `FITT`、`CMFI` 名下的 `SBFI`、`SNOD` 名下的 `SJOI`）在这根型钢建模账上的痕迹，
+/// 型钢只建一次。e3d-model `elmodl::collect_member_joint_negatives` 对每只来源恰好留一种（与
+/// [`joint_cut_trace`] 同一套）：NAPP 门挡下若干把、或有几何源却一把刀也没有 → `notes` 里一行带来源号；没有几何源
+/// 或读挂 → `negatives_skipped` / `joint_cuts_explained` 里一条；什么都没留 = 它的刀全数交出、扣在型钢上。
+/// 型钢建不出实体给 `None`。
+fn member_chain_cut_traces(
+    set: &Arc<DbSet>,
+    section: RefNo,
+    sources: &[RefNo],
+) -> Option<Vec<JointCutTrace>> {
+    let (noun, generated) = modeled_solid(set, section)?;
+    Some(
+        sources
+            .iter()
+            .map(|&source| {
+                cut_trace_in(
+                    &noun,
+                    &generated,
+                    source,
+                    &[
+                        format!("成员配件 {source}："),
+                        format!("成员链下嵌套关节 {source}："),
+                    ],
+                )
+            })
+            .collect(),
+    )
 }
 
 /// 梁建模时一共扣了几把负体（建不出实体给 0）。与 [`joint_cut_trace`] 合着看：账上分不出的那一类（NAPP 门挡下了
@@ -658,6 +705,100 @@ fn negatives_applied_on(set: &Arc<DbSet>, beam: RefNo) -> usize {
             usize::try_from(generated.negatives_applied).unwrap_or(0)
         }
         _ => 0,
+    }
+}
+
+/// 一本库在 `sesno` 这个会话上 noun 是 `noun` 的全部元素。
+fn elements_of_noun(file: &Path, sesno: u32, noun: &str) -> Vec<RefNo> {
+    let hash = e3d_attlib::db1_hash(noun);
+    let mut engine = ReadOnlyEngine::open_at(file, sesno).expect("open the DESI file");
+    engine
+        .scan_elements(ScanTier::Header)
+        .expect("scan element headers")
+        .filter_map(|scanned| scanned.ok())
+        .filter(|scanned| scanned.noun_hash == hash)
+        .map(|scanned| scanned.refno)
+        .collect()
+}
+
+/// 墙名下的开孔件 / 套管，照 e3d-model 建模的下钻（`elmodl::collect_host_cutters`）：见什么都往里走，碰到
+/// `part_noun` 就停、不再往里——`DESP` 凑得齐 10 项的进 `cutting`（墙照它开一个洞），凑不齐的进 `bare`（不开洞）。
+fn wall_parts(
+    set: &Arc<DbSet>,
+    at: RefNo,
+    part_noun: &str,
+    cutting: &mut Vec<RefNo>,
+    bare: &mut Vec<RefNo>,
+    budget: &mut usize,
+) {
+    let Ok(members) = set.element(at).members() else {
+        return;
+    };
+    for member in members {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let Ok(noun) = member.element_type() else {
+            continue;
+        };
+        if noun == part_noun {
+            if matches!(member.get_double_array("DESP"), Ok(Some(desp)) if desp.len() >= 10) {
+                cutting.push(member.refno());
+            } else {
+                bare.push(member.refno());
+            }
+        } else {
+            wall_parts(set, member.refno(), part_noun, cutting, bare, budget);
+        }
+    }
+}
+
+/// 型钢成员链上自成单元的刀源，照 e3d-model 建模的名单（`elmodl::member_chain_sources`）里语料有的三种：直属
+/// `FITT`、`CMFI` 名下的 `SBFI`、`SNOD` 名下的 `SJOI`。`(件, 哪一种)`。
+fn member_chain_units(set: &Arc<DbSet>, section: RefNo) -> Vec<(RefNo, &'static str)> {
+    let mut units = Vec::new();
+    let Ok(members) = set.element(section).members() else {
+        return units;
+    };
+    for member in members {
+        let Ok(noun) = member.element_type() else {
+            continue;
+        };
+        let nested = match noun.as_str() {
+            "FITT" => {
+                units.push((member.refno(), "FITT"));
+                continue;
+            }
+            "CMFI" => "SBFI",
+            "SNOD" => "SJOI",
+            _ => continue,
+        };
+        let Ok(subs) = member.members() else {
+            continue;
+        };
+        for sub in subs {
+            if matches!(sub.element_type().as_deref(), Ok(sub_noun) if sub_noun == nested) {
+                units.push((sub.refno(), nested));
+            }
+        }
+    }
+    units.retain(|(unit, _)| is_model_unit(set, *unit));
+    units
+}
+
+/// 这只件肯定没有给别人出刀的几何源：没有 `SPRE`（目录件），名下也没有 `TMPL`（模板）。e3d-model 的门
+/// （`elmodl::has_cut_source`）只在这两处找源。
+fn has_no_cut_source(set: &Arc<DbSet>, part: RefNo) -> bool {
+    let element = set.element(part);
+    if !matches!(element.get_ref("SPRE"), Ok(None)) {
+        return false;
+    }
+    match element.members() {
+        Ok(mut members) => {
+            !members.any(|member| matches!(member.element_type().as_deref(), Ok("TMPL")))
+        }
+        Err(_) => false,
     }
 }
 
@@ -1728,6 +1869,311 @@ fn live_aps7324_a_joint_without_a_body_and_the_section_it_cuts_are_planned_toget
     }
 }
 
+/// 墙上的套管 / 开孔件与照它开洞的墙（gen-model #150），ams1112 真库、假定窗。随整套跑；语料不在本机就跳过。
+///
+/// 墙建模时到自己名下把带 `DESP` 的件找出来、照每一只的 `DESP` 开一个洞：`WALL` 收 `FIXING`，`GWALL` 收 `SBFI`
+/// （e3d-model `elmodl::collect_host_cutters`）。这些件自己是模型单元，只改一只（改 `DESP`、挪位置），`plan_update`
+/// 原先上卷到它自己为止，墙不被点名——单元级发布只重建了套管，墙上的洞停在旧尺寸、旧位置。2026-11-12 起 e3d-model
+/// 补了一条从「要重建或已删除的单元」出发的腿（`increment::host_cutter_walls_of`）：
+///
+/// 1. 只改一只带 `DESP` 的件 → 照它开洞的墙被 `plan_update` 点名，墙所在的根在 regen 里、子计划里有这面墙；
+/// 2. 同一窗里同一面墙上的另一只件也改了 → 两只件与墙都被点名，子计划里有这面墙；
+/// 3. 带不起 `DESP` 的那种件动了 → 墙不被点名；
+/// 4. 取样的墙建模时确实扣过负体（生成这一侧的依据）。
+///
+/// 每一种都把件当成一窗仅有的候选，喂给真的 `plan_update_with`（[`Site::hypothetical`]）。
+#[test]
+fn live_ams1112_a_wall_sleeve_and_the_wall_it_holes_are_planned_together() {
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let file = ams.join("ams1112_0001");
+    if !file.is_file() {
+        eprintln!("skip: 语料不在本机（{}）", file.display());
+        return;
+    }
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let sesno = chain_steps(&file, 1).expect("ams1112 的会话链")[0].1;
+    let project = Project::open(&schema, &ams);
+    let site = Site::open(&project, &file, sesno);
+    let cap = env_usize("AIOS_150_PAIRS_PER_CLASS", 16);
+    let root_of = |wall: RefNo| {
+        *site
+            .root_chain(wall)
+            .first()
+            .unwrap_or_else(|| panic!("{wall}：墙该在某个生成根下"))
+    };
+    for (wall_noun, part_noun) in [("WALL", "FIXING"), ("GWALL", "SBFI")] {
+        let walls = elements_of_noun(&file, sesno, wall_noun);
+        // (件, 墙)：墙照它开洞的，与带不起 `DESP` 的；都只留自成单元的（不成单元的上卷本来就到墙）。
+        let (mut cutting, mut bare): (Vec<(RefNo, RefNo)>, Vec<(RefNo, RefNo)>) =
+            (Vec::new(), Vec::new());
+        for &wall in &walls {
+            if !is_model_unit(&site.set, wall) {
+                continue;
+            }
+            let (mut with_hole, mut without, mut budget) = (Vec::new(), Vec::new(), 20_000usize);
+            wall_parts(
+                &site.set,
+                wall,
+                part_noun,
+                &mut with_hole,
+                &mut without,
+                &mut budget,
+            );
+            for (parts, into) in [(with_hole, &mut cutting), (without, &mut bare)] {
+                into.extend(
+                    parts
+                        .into_iter()
+                        .filter(|part| is_model_unit(&site.set, *part))
+                        .map(|part| (part, wall)),
+                );
+            }
+        }
+        assert!(
+            !cutting.is_empty(),
+            "ams1112 里该有照名下的 {part_noun} 开洞的 {wall_noun}"
+        );
+        let (mut walked, mut with_neighbour, mut walls_cut) = (0usize, 0usize, 0usize);
+        let mut checked_walls: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let step = (cutting.len() / cap.max(1)).max(1);
+        for &(part, wall) in cutting.iter().step_by(step).take(cap) {
+            let wall_root = root_of(wall);
+            // 1. 只改这一只件。
+            let (facts, named) = site.hypothetical(&[part], false, wall_root, wall);
+            assert!(
+                named.contains(&key_of(part)) && named.contains(&key_of(wall)),
+                "只改 {wall_noun} {wall} 上的 {part_noun} {part}：件与墙都该被点名：{named:?}"
+            );
+            assert!(
+                !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                "只改 {part_noun} {part}：墙 {wall} 的根 {wall_root} 在 regen 里、子计划里有这面墙：{facts:?}"
+            );
+            // 2. 同一面墙上的另一只件也改了。
+            if let Some(&(other, _)) = cutting
+                .iter()
+                .find(|(other, host)| *host == wall && *other != part)
+            {
+                with_neighbour += 1;
+                let (facts, named) = site.hypothetical(&[part, other], false, wall_root, wall);
+                assert!(
+                    [part, other, wall]
+                        .iter()
+                        .all(|refno| named.contains(&key_of(*refno))),
+                    "改 {wall_noun} {wall} 上的两只 {part_noun}（{part}、{other}）：两只件与墙都该被点名：{named:?}"
+                );
+                assert!(
+                    !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                    "改同一面墙上的两只件：墙 {wall} 的根 {wall_root} 的子计划里要有这面墙：{facts:?}"
+                );
+            }
+            // 4. 墙建模时确实扣过负体。建模贵，每类只看头 3 面。
+            if checked_walls.len() < 3 && checked_walls.insert(key_of(wall)) {
+                let cuts = negatives_applied_on(&site.set, wall);
+                assert!(
+                    cuts > 0,
+                    "{wall_noun} {wall} 建模时该扣过负体（名下有带 DESP 的 {part_noun}）"
+                );
+                walls_cut += 1;
+            }
+            walked += 1;
+        }
+        // 3. 带不起 `DESP` 的件动了：不拉墙。
+        let mut walked_bare = 0usize;
+        let step = (bare.len() / cap.max(1)).max(1);
+        for &(part, wall) in bare.iter().step_by(step).take(cap) {
+            let (_, named) = site.hypothetical(&[part], false, root_of(wall), wall);
+            assert!(
+                !named.contains(&key_of(wall)),
+                "带不起 DESP 的 {part_noun} {part} 动了，不该带出 {wall_noun} {wall}：{named:?}"
+            );
+            walked_bare += 1;
+        }
+        println!(
+            "[墙上的洞] ams1112@{sesno} {wall_noun} ← {part_noun}: {wall_noun} {} 面；自成单元的 {part_noun}：墙照它开洞的 \
+             {} 只、带不起 DESP 的 {} 只；假定窗走了 {walked} 对（都点名了墙；同一面墙上另有一只可一起改 {with_neighbour} \
+             对；建模确认扣过负体的墙 {walls_cut} 面），带不起 DESP 的走了 {walked_bare} 只（都不拉墙）",
+            walls.len(),
+            cutting.len(),
+            bare.len()
+        );
+    }
+}
+
+/// 型钢成员链上的配件 / 关节与向它取刀的型钢（gen-model #150 的同型邻居；`SNOD` 下的 `SJOI` 这一支就是 gen-model #156），
+/// aps7324 / aps7200 真库、假定窗。随整套跑；语料不在本机就跳过。
+///
+/// 型钢建模时扫自己的成员链，向直属 `FITT`、`CMFI` 名下的 `SBFI`、`SNOD` 名下的 `SJOI` 取它目录件 / 模板里的负体扣在
+/// 自己身上（e3d-model `elmodl::member_chain_sources`）。这些件自成单元的只改一只，原先上卷到它自己为止，型钢不被
+/// 点名：现算标架那条级联带出来的是型钢**名下**的单元，关节级联带出来的是 `CREF` 那一头被接的梁，都不是这一根。
+/// 2026-11-12 起 e3d-model 补了 `increment::member_chain_host_of`：
+///
+/// 1. 只改一只给型钢出刀的件 → 型钢被 `plan_update` 点名，型钢所在的根在 regen 里、子计划里有这根型钢；
+/// 2. 同一窗里同根的另一根型钢也改了 → 两根都被点名，子计划里有被出刀的这一根；
+/// 3. 没有几何源的件动了、型钢名下也没有别的带源的件 → 型钢不被点名；
+/// 4. 只改被 `SJOI` 接着的那根梁 → 梁、关节、挂着关节的型钢三件都被点名：反向关节腿把关节带出来（它的目录件经
+///    `APAR` 读梁的型材，标架原点落在梁线上），关节又是宿主成员链上的刀源，宿主上按它扣的孔跟着梁走——与 GENSEC
+///    那边「梁 → FIXING → 宿主」（`datum_fixing_host_of`）对称。
+///
+/// 「给型钢出刀」的依据取自生成这一侧（[`member_chain_cut_traces`]）：`Applied` 是这只件的刀全数扣在型钢上；`Unclear`
+/// 是 NAPP 门挡下了若干把（aps7324 的 SJOI 每只交出 2 把、挡下 1 把）——有几何源，e3d-model 的门
+/// （`elmodl::has_cut_source`）同样认。有几何源却一把负体都没有的（`NoCutters`）也会带出型钢——门有意比建模宽，
+/// 多建的那根两端结果相同——这里只数、不下断言。
+#[test]
+fn live_aps_a_section_fitting_and_the_section_it_cuts_are_planned_together() {
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let names = ["aps7324_0001", "aps7200_0001"];
+    if let Some(missing) = names.iter().find(|name| !aps.join(name).is_file()) {
+        eprintln!("skip: 语料不在本机（{}）", aps.join(missing).display());
+        return;
+    }
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let project = Project::open(&schema, &aps);
+    let cap = env_usize("AIOS_150_PAIRS_PER_CLASS", 16);
+    // 哪一种件 → 假定窗里把型钢点了名的对数（依据是 Applied / Unclear 的）。
+    let mut brought: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for name in names {
+        let file = aps.join(name);
+        let sesno = chain_steps(&file, 1).expect("会话链")[0].1;
+        let site = Site::open(&project, &file, sesno);
+        let sections = elements_of_noun(&file, sesno, "SCTN");
+        // 型钢 → 它成员链上自成单元的刀源。
+        let chains: Vec<(RefNo, Vec<(RefNo, &'static str)>)> = sections
+            .iter()
+            .filter(|section| is_model_unit(&site.set, **section))
+            .map(|&section| (section, member_chain_units(&site.set, section)))
+            .filter(|(_, units)| !units.is_empty())
+            .collect();
+        let root_of = |section: RefNo| {
+            *site
+                .root_chain(section)
+                .first()
+                .unwrap_or_else(|| panic!("{section}：型钢该在某个生成根下"))
+        };
+        let mut traces_seen: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
+        let (mut with_neighbour, mut widened, mut bare_walked) = (0usize, 0usize, 0usize);
+        let mut via_beam = 0usize;
+        for kind in ["FITT", "SBFI", "SJOI"] {
+            let of_kind: Vec<&(RefNo, Vec<(RefNo, &'static str)>)> = chains
+                .iter()
+                .filter(|(_, units)| units.iter().any(|(_, unit_kind)| *unit_kind == kind))
+                .collect();
+            // 建模贵：每种均匀取 `cap` 根型钢，每根看这一种的头两只件。
+            let step = (of_kind.len() / cap.max(1)).max(1);
+            for &&(section, ref units) in of_kind.iter().step_by(step).take(cap) {
+                let refnos: Vec<RefNo> = units.iter().map(|(unit, _)| *unit).collect();
+                let Some(traces) = member_chain_cut_traces(&site.set, section, &refnos) else {
+                    continue;
+                };
+                let section_root = root_of(section);
+                let picked = units
+                    .iter()
+                    .zip(&traces)
+                    .filter(|((_, unit_kind), _)| *unit_kind == kind)
+                    .take(2);
+                for (&(unit, _), &trace) in picked {
+                    *traces_seen.entry((kind, trace.label())).or_default() += 1;
+                    let (facts, named) = site.hypothetical(&[unit], false, section_root, section);
+                    match trace {
+                        JointCutTrace::Applied | JointCutTrace::Unclear => {}
+                        JointCutTrace::NoCutters => {
+                            widened += usize::from(named.contains(&key_of(section)));
+                            continue;
+                        }
+                        JointCutTrace::Skipped | JointCutTrace::BeamNotModeled => continue,
+                    }
+                    // 1. 只改这一只件。
+                    assert!(
+                        named.contains(&key_of(unit)) && named.contains(&key_of(section)),
+                        "{name}：只改型钢 {section} 成员链上的 {kind} {unit}（{}）：件与型钢都该被点名：{named:?}",
+                        trace.label()
+                    );
+                    assert!(
+                        !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                        "{name}：只改 {kind} {unit}：型钢 {section} 的根 {section_root} 在 regen 里、子计划里有这根\
+                         型钢：{facts:?}"
+                    );
+                    *brought.entry(kind).or_default() += 1;
+                    // 2. 同根的另一根型钢也改了。
+                    if let Some(&neighbour) = sections.iter().find(|&&other| {
+                        other != section
+                            && is_model_unit(&site.set, other)
+                            && site.root_chain(other).first() == Some(&section_root)
+                    }) {
+                        with_neighbour += 1;
+                        let (facts, named) =
+                            site.hypothetical(&[unit, neighbour], false, section_root, section);
+                        assert!(
+                            named.contains(&key_of(section)) && named.contains(&key_of(neighbour)),
+                            "{name}：改 {kind} {unit} 与同根的另一根型钢 {neighbour}：向它取刀的型钢 {section} 与那一根\
+                             都该被点名：{named:?}"
+                        );
+                        assert!(
+                            !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                            "{name}：同根另有改动时，型钢 {section} 的根 {section_root} 的子计划里也要有这根型钢：\
+                             {facts:?}"
+                        );
+                    }
+                    // 4. 只改被这只关节接着的梁。
+                    if kind == "SJOI"
+                        && let Some(&beam) = connection_partners(&site.set, unit, "SJOI").first()
+                        && beam != section
+                        && is_model_unit(&site.set, beam)
+                        && matches!(site.set.element(beam).element_type().as_deref(), Ok("SCTN"))
+                    {
+                        let (facts, named) =
+                            site.hypothetical(&[beam], false, section_root, section);
+                        assert!(
+                            [beam, unit, section]
+                                .iter()
+                                .all(|refno| named.contains(&key_of(*refno))),
+                            "{name}：只改被 SJOI {unit} 接着的梁 {beam}：梁、关节、挂着关节的型钢 {section} 三件都该被\
+                             点名：{named:?}"
+                        );
+                        assert!(
+                            !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                            "{name}：只改梁 {beam}：型钢 {section} 的根 {section_root} 在 regen 里、子计划里有这根\
+                             型钢：{facts:?}"
+                        );
+                        via_beam += 1;
+                    }
+                }
+            }
+        }
+        // 3. 名下的件一只带源的都没有的型钢：改其中一只，型钢不被点名。
+        for (section, units) in chains
+            .iter()
+            .filter(|(_, units)| {
+                units
+                    .iter()
+                    .all(|(unit, _)| has_no_cut_source(&site.set, *unit))
+            })
+            .take(cap)
+        {
+            let (unit, kind) = units[0];
+            let (_, named) = site.hypothetical(&[unit], false, root_of(*section), *section);
+            assert!(
+                !named.contains(&key_of(*section)),
+                "{name}：没有几何源的 {kind} {unit} 动了、型钢 {section} 名下也没有别的带源的件，不该带出它：{named:?}"
+            );
+            bare_walked += 1;
+        }
+        println!(
+            "[型钢成员链] {name}@{sesno}: SCTN {} 根，成员链上有自成单元刀源的 {} 根；取样的件在型钢账上：{traces_seen:?}；\
+             出刀的假定窗都点名了型钢（同根另有型钢可一起改 {with_neighbour} 对；只改被关节接着的梁、型钢也被点名 \
+             {via_beam} 对）；有源却没有负体的件里带出型钢的 {widened} 只（门比建模宽）；名下一只带源的件都没有的型钢\
+             走了 {bare_walked} 根（都不被点名）",
+            sections.len(),
+            chains.len()
+        );
+    }
+    println!("[型钢成员链] 合计：假定窗把型钢点了名的对数 {brought:?}");
+    for (kind, floor) in [("FITT", 8), ("SJOI", 8), ("SBFI", 1)] {
+        assert!(
+            brought.get(kind).copied().unwrap_or(0) >= floor,
+            "aps7324 / aps7200 里该有给型钢出刀的 {kind}（至少 {floor} 对走过假定窗）：{brought:?}"
+        );
+    }
+}
+
 /// 量法（手动）：「不成单元的关节给梁出刀」这条腿接上之后，真实会话窗口上多点名了多少单元、规划慢了多少。
 ///
 /// 走遍下面几本库的整条会话链（`AIOS_JOINT_LAST_STEPS=n` 只走每本库最后 n 步；候选数超过
@@ -2010,59 +2456,42 @@ fn live_measure_what_the_bodiless_joint_cascade_adds_on_natural_windows() {
 ///
 /// 关节级联管的是「梁从 JOIS / JOIE 指的关节取负体」。建模里另有几处宿主向自己名下的件收刀，那些件自己都是模型
 /// 单元（改它们上卷到它们自己为止）：
-/// - `WALL` ← 名下带 `DESP` 的 `FIXING`（墙上的套管 / 开孔件，`elmodl::collect_host_fixings`）；
-/// - `GWALL` ← 名下带 `DESP` 的 `SBFI`（墙上套管，`elmodl::collect_host_sleeves`）；
-/// - `SCTN` ← 名下的 `FITT` / `CMFI`（成员链，`elmodl::collect_member_joint_negatives`）。
+/// - `WALL` ← 名下带 `DESP` 的 `FIXING`、`GWALL` ← 名下带 `DESP` 的 `SBFI`（墙上的套管 / 开孔件，
+///   `elmodl::collect_host_cutters`）；
+/// - `SCTN` ← 成员链上的 `FITT`、`CMFI` 名下的 `SBFI`、`SNOD` 名下的 `SJOI`（`elmodl::member_chain_sources`）。
 ///
 /// 每一类从几本库里取样（每类最多 `AIOS_144_PAIRS_PER_CLASS` 对，缺省 60），把那一件当成一窗仅有的候选喂给真的
 /// `plan_update_with`，数：宿主被点名的、没被点名的（其中宿主的根在 regen 里、子计划不空、里面没有宿主——单元级
-/// 发布只重建点名的那一件，宿主留在旧刀口上），以及宿主建模时确实扣过负体的。只打印、不下断言：这是给新票用的数，
-/// 不是这张票修的东西。
+/// 发布只重建点名的那一件，宿主留在旧刀口上；其中这只件肯定没有几何源的；其中宿主建模时确实扣过负体的）。
+///
+/// 这份普查最初是给 gen-model #150 立票用的（2026-11-12 修之前：墙两类各取样 60 对，宿主一面都没被点名）。#150
+/// 修好之后的口径：墙那几类，件带得起 `DESP`、宿主就必须被点名（下断言）；型钢成员链那几类，没被点名的只该剩
+/// e3d-model 的门（`elmodl::has_cut_source`）说没有几何源的——这里只打印，逐只的断言在 e3d-model 的真库测试与
+/// [`live_aps_a_section_fitting_and_the_section_it_cuts_are_planned_together`] 里。
 #[test]
 #[ignore = "manual live census: reads real DESI files of the AMS / APS sample projects; needs the E3D template directory"]
 fn live_census_units_whose_cutters_land_on_another_unit() {
-    fn descend(
-        set: &Arc<DbSet>,
-        at: RefNo,
-        wanted: &str,
-        out: &mut Vec<RefNo>,
-        budget: &mut usize,
-    ) {
-        let Ok(members) = set.element(at).members() else {
-            return;
-        };
-        for member in members {
-            if *budget == 0 {
-                return;
-            }
-            *budget -= 1;
-            let Ok(noun) = member.element_type() else {
-                continue;
-            };
-            if noun == wanted {
-                if matches!(member.get_double_array("DESP"), Ok(Some(desp)) if desp.len() >= 10) {
-                    out.push(member.refno());
-                }
-            } else {
-                descend(set, member.refno(), wanted, out, budget);
-            }
-        }
-    }
     let schema = DirectSchema::open_from_env().expect("E3D template directory");
     let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
     let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
     let cap = env_usize("AIOS_144_PAIRS_PER_CLASS", 60);
-    // (工程目录, 库, 宿主 noun, 收刀的件 noun, 件是不是宿主的直属成员)
-    let classes: [(&Path, &str, &str, &str, bool); 5] = [
-        (ams.as_path(), "ams1112_0001", "WALL", "FIXING", false),
-        (ams.as_path(), "ams1112_0001", "GWALL", "SBFI", false),
-        (aps.as_path(), "aps250110_0001", "WALL", "FIXING", false),
-        (ams.as_path(), "ams7997_0001", "SCTN", "FITT", true),
-        (aps.as_path(), "aps250110_0001", "SCTN", "FITT", true),
+    // (工程目录, 库, 宿主 noun, 给它出刀的件)：宿主是墙的照 `DESP` 往下找，是型钢的照成员链找。
+    let classes: [(&Path, &str, &str, &str); 11] = [
+        (ams.as_path(), "ams1112_0001", "WALL", "FIXING"),
+        (ams.as_path(), "ams1112_0001", "GWALL", "SBFI"),
+        (ams.as_path(), "ams7997_0001", "WALL", "FIXING"),
+        (ams.as_path(), "ams7997_0001", "GWALL", "SBFI"),
+        (aps.as_path(), "aps250110_0001", "WALL", "FIXING"),
+        (ams.as_path(), "ams7997_0001", "SCTN", "FITT"),
+        (ams.as_path(), "ams7350_0001", "SCTN", "FITT"),
+        (ams.as_path(), "ams7350_0001", "SCTN", "SJOI"),
+        (ams.as_path(), "ams251180_0001", "SCTN", "FITT"),
+        (aps.as_path(), "aps7200_0001", "SCTN", "FITT"),
+        (aps.as_path(), "aps7200_0001", "SCTN", "SBFI"),
     ];
     let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
     let mut sites: BTreeMap<PathBuf, Site> = BTreeMap::new();
-    for (project_dir, name, host_noun, part_noun, direct) in classes {
+    for (project_dir, name, host_noun, part_noun) in classes {
         let file = project_dir.join(name);
         if !file.is_file() {
             println!("[宿主收刀] skip {name}: 文件不在");
@@ -2079,16 +2508,8 @@ fn live_census_units_whose_cutters_land_on_another_unit() {
         let site = sites
             .entry(file.clone())
             .or_insert_with(|| Site::open(project, &file, sesno));
-        let host_hash = e3d_attlib::db1_hash(host_noun);
-        let mut engine = ReadOnlyEngine::open_at(&file, sesno).expect("open the DESI file");
-        let hosts: Vec<RefNo> = engine
-            .scan_elements(ScanTier::Header)
-            .expect("scan element headers")
-            .filter_map(|scanned| scanned.ok())
-            .filter(|scanned| scanned.noun_hash == host_hash)
-            .map(|scanned| scanned.refno)
-            .collect();
-        drop(engine);
+        let hosts = elements_of_noun(&file, sesno, host_noun);
+        let on_a_wall = host_noun != "SCTN";
         // (件, 宿主)
         let mut pairs: Vec<(RefNo, RefNo)> = Vec::new();
         let mut hosts_with_parts = 0usize;
@@ -2096,27 +2517,30 @@ fn live_census_units_whose_cutters_land_on_another_unit() {
             if !is_model_unit(&site.set, host) {
                 continue;
             }
-            let mut parts = Vec::new();
-            if direct {
-                if let Ok(members) = site.set.element(host).members() {
-                    parts.extend(
-                        members
-                            .filter(|member| {
-                                matches!(member.element_type().as_deref(), Ok(noun) if noun == part_noun)
-                            })
-                            .map(|member| member.refno()),
-                    );
-                }
+            let parts: Vec<RefNo> = if on_a_wall {
+                let (mut cutting, mut bare, mut budget) = (Vec::new(), Vec::new(), 20_000usize);
+                wall_parts(
+                    &site.set,
+                    host,
+                    part_noun,
+                    &mut cutting,
+                    &mut bare,
+                    &mut budget,
+                );
+                cutting.retain(|part| is_model_unit(&site.set, *part));
+                cutting
             } else {
-                let mut budget = 20_000usize;
-                descend(&site.set, host, part_noun, &mut parts, &mut budget);
-            }
-            parts.retain(|part| is_model_unit(&site.set, *part));
+                member_chain_units(&site.set, host)
+                    .into_iter()
+                    .filter(|(_, kind)| *kind == part_noun)
+                    .map(|(unit, _)| unit)
+                    .collect()
+            };
             hosts_with_parts += usize::from(!parts.is_empty());
             pairs.extend(parts.into_iter().map(|part| (part, host)));
         }
-        let (mut named_host, mut not_named, mut left_out, mut host_cut) =
-            (0usize, 0usize, 0usize, 0usize);
+        let (mut named_host, mut not_named, mut left_out, mut sourceless, mut host_cut) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
         let mut example: Option<String> = None;
         let step = (pairs.len() / cap.max(1)).max(1);
         let sampled: Vec<(RefNo, RefNo)> = pairs.iter().copied().step_by(step).take(cap).collect();
@@ -2131,6 +2555,7 @@ fn live_census_units_whose_cutters_land_on_another_unit() {
             }
             not_named += 1;
             left_out += usize::from(facts.leaves_implicated_out());
+            sourceless += usize::from(has_no_cut_source(&site.set, part));
             let cuts = negatives_applied_on(&site.set, host);
             host_cut += usize::from(cuts > 0);
             if example.is_none() {
@@ -2143,70 +2568,91 @@ fn live_census_units_whose_cutters_land_on_another_unit() {
         println!(
             "[宿主收刀] {name}@{sesno} {host_noun} ← {part_noun}: 宿主 {} 件，其中名下有这种件的 {hosts_with_parts} 件，\
              共 {} 对；取样 {} 对：改这一件时宿主被点名 {named_host}，没被点名 {not_named}（其中宿主的根在 regen 里、\
-             子计划不空、里面没有宿主 {left_out}；宿主建模时确实扣过负体 {host_cut}）",
+             子计划不空、里面没有宿主 {left_out}；这只件既没有 SPRE 也没有 TMPL {sourceless}；宿主建模时确实扣过负体 \
+             {host_cut}）",
             hosts.len(),
             pairs.len(),
             sampled.len()
         );
-        if let Some(example) = example {
-            println!("[宿主收刀]   例：{example}");
+        if let Some(example) = &example {
+            println!("[宿主收刀]   没被点名的例：{example}");
+        }
+        if on_a_wall {
+            assert_eq!(
+                not_named, 0,
+                "{name} {host_noun} ← {part_noun}：件带得起 DESP，墙就该被点名（gen-model #150）"
+            );
         }
     }
 }
 
-/// 量法（手动）：真实会话窗口里，「收刀的件被点名、吃它刀的宿主墙没被点名」出现过几处，宿主的形状两端到底变没变。
+/// 量法（手动）：gen-model #150 的两条腿——墙上的开孔件 / 套管带出墙、型钢成员链上的件带出型钢——接上之后，真实
+/// 会话窗口上多点名了多少宿主，它们的形状两端到底变没变，规划花了多久。
 ///
-/// 只看 [`live_census_units_whose_cutters_land_on_another_unit`] 里依据最硬的两类——`WALL` ← 带 `DESP` 的 `FIXING`、
-/// `GWALL` ← 带 `DESP` 的 `SBFI`（墙上的套管 / 开孔件，墙的洞照着它的 `DESP` 开）。走整条会话链
-/// （`AIOS_HOSTCUT_LAST_STEPS=n` 只走最后 n 步；候选数超过 `AIOS_HOSTCUT_MAX_CANDIDATES`、缺省两万的导入窗跳过；
-/// `AIOS_HOSTCUT_MEASURE_FILES`（`;` 分隔的文件路径）整体替换名单，缺省是 ams1112），每窗只做 `collect_window` +
-/// `plan_update_with`；计划里要重建或要删除的这种件，沿属主链找到宿主墙，宿主没被点名的记一处，宿主在窗口两端各建
-/// 一次比形状（`AIOS_HOSTCUT_COMPARE` 封顶，缺省 300）。「形状变了」的每一处都是：单元级发布只重建了套管，墙上的洞
-/// 停在旧尺寸 / 旧位置。只打印，不下断言。
+/// 走整条会话链（`AIOS_HOSTCUT_LAST_STEPS=n` 只走每本库最后 n 步；候选数超过 `AIOS_HOSTCUT_MAX_CANDIDATES`、缺省
+/// 两万的导入窗跳过；`AIOS_HOSTCUT_MEASURE_FILES`（`;` 分隔的文件路径）整体替换名单，缺省是 ams1112 加
+/// [`MEASURE_AMS_FILES`] 与 [`MEASURE_APS_FILES`]），每窗只做 `collect_window` + `plan_update_with`（生产同一个元数据
+/// 门），从计划的级联记录里认这两条腿带出来的宿主（e3d-model `increment::host_cutter_walls_of` /
+/// `member_chain_host_of` 各记的那一句），宿主在窗口两端各建一次比形状（`AIOS_HOSTCUT_COMPARE` 封顶，缺省 300）：
+///
+/// - 「形状变了」的每一处，修之前都是：单元级发布只重建了那只件，宿主的刀口停在旧尺寸 / 旧位置；
+/// - 「没变」的是多建的（件动了但刀没动，或件有几何源却没有负体——门有意比建模宽）：这两条腿的代价。
+///
+/// 只打印，不下断言。
 #[test]
-#[ignore = "manual live measurement: walks whole DESI session chains of the AMS sample project; needs the E3D template directory"]
-fn live_measure_host_walls_left_on_old_holes_on_natural_windows() {
-    #[derive(Default)]
-    struct Tally {
-        windows: usize,
-        skipped: usize,
+#[ignore = "manual live measurement: walks whole DESI session chains of the AMS / APS sample projects; needs the E3D template directory"]
+fn live_measure_what_the_host_cutter_cascades_add_on_natural_windows() {
+    /// 一条腿带出来的宿主，与它们两端各建一次的结论。
+    #[derive(Default, Clone)]
+    struct Leg {
         hit_windows: usize,
-        /// 件被点名（重建 / 删除）、宿主墙没被点名的处数，与其中宿主两端各建一次的结论。
-        left: usize,
+        hosts: usize,
         changed: usize,
         same: usize,
         unknown: usize,
         not_compared: usize,
-        /// 件被点名、宿主也被点名的处数（今天就对）。
-        both_named: usize,
+        /// 带出宿主的那只件的 noun → 处数。
+        by_part: BTreeMap<String, usize>,
     }
-    fn host_wall(set: &Arc<DbSet>, part: RefNo, part_noun: &str) -> Option<RefNo> {
-        let wanted = match part_noun {
-            "FIXING" => "WALL",
-            "SBFI" => "GWALL",
-            _ => return None,
-        };
-        let element = set.element(part);
-        if !matches!(element.get_double_array("DESP"), Ok(Some(desp)) if desp.len() >= 10) {
-            return None;
-        }
-        let mut current = element.owner().ok().flatten()?;
-        for _ in 0..12 {
-            let noun = current.element_type().ok()?;
-            if noun == wanted {
-                return Some(current.refno());
+    impl Leg {
+        fn add(&mut self, other: &Self) {
+            self.hit_windows += other.hit_windows;
+            self.hosts += other.hosts;
+            self.changed += other.changed;
+            self.same += other.same;
+            self.unknown += other.unknown;
+            self.not_compared += other.not_compared;
+            for (noun, count) in &other.by_part {
+                *self.by_part.entry(noun.clone()).or_default() += count;
             }
-            // 建模下钻时不进同类件（`collect_host_fixings` / `collect_host_sleeves`）：套在另一只里面的不算。
-            if noun == part_noun {
-                return None;
-            }
-            current = current.owner().ok().flatten()?;
         }
-        None
+        fn line(&self) -> String {
+            format!(
+                "带出 {} 件、分在 {} 窗（两端各建一次：形状变了 {}、没变 {}、建不出 {}、没比 {}；带出它的件 {:?}）",
+                self.hosts,
+                self.hit_windows,
+                self.changed,
+                self.same,
+                self.unknown,
+                self.not_compared,
+                self.by_part
+            )
+        }
+    }
+    #[derive(Default, Clone)]
+    struct Tally {
+        windows: usize,
+        skipped: usize,
+        /// 这些窗的计划一共要重建多少件、规划一共花了多久。
+        units: usize,
+        plan_seconds: f64,
+        walls: Leg,
+        sections: Leg,
     }
     let started = std::time::Instant::now();
     let schema = DirectSchema::open_from_env().expect("E3D template directory");
     let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
     let last = env_usize("AIOS_HOSTCUT_LAST_STEPS", 0);
     let cap = env_usize("AIOS_HOSTCUT_MAX_CANDIDATES", 20_000);
     let mut compare_left = env_usize("AIOS_HOSTCUT_COMPARE", 300);
@@ -2217,9 +2663,13 @@ fn live_measure_host_walls_left_on_old_holes_on_natural_windows() {
             .filter(|item| !item.is_empty())
             .map(PathBuf::from)
             .collect(),
-        Err(_) => vec![ams.join("ams1112_0001")],
+        Err(_) => std::iter::once(ams.join("ams1112_0001"))
+            .chain(MEASURE_AMS_FILES.iter().map(|name| ams.join(name)))
+            .chain(MEASURE_APS_FILES.iter().map(|name| aps.join(name)))
+            .collect(),
     };
     let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    let mut total = Tally::default();
     for file in &files {
         let name = file
             .file_name()
@@ -2268,6 +2718,7 @@ fn live_measure_host_walls_left_on_old_holes_on_natural_windows() {
                 println!("[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 两端开不了");
                 continue;
             };
+            let planning = std::time::Instant::now();
             let plan = plan_update_with(
                 &base,
                 &target,
@@ -2275,79 +2726,84 @@ fn live_measure_host_walls_left_on_old_holes_on_natural_windows() {
                 PlanLimits::default(),
                 change_metadata_tier,
             );
-            let named: BTreeSet<(u32, u32)> = plan
-                .regenerate
-                .iter()
-                .chain(plan.remove.iter())
-                .copied()
-                .collect();
-            // 宿主 → 这一窗点了名的件数；重建的件在 target 端找宿主，删掉的在 base 端找。
-            let mut hosts: BTreeMap<(u32, u32), usize> = BTreeMap::new();
-            for (units, side) in [(&plan.regenerate, &target), (&plan.remove, &base)] {
-                for &(word0, word1) in units {
-                    let part = RefNo::new(word0, word1);
-                    let Ok(noun) = side.element(part).element_type() else {
-                        continue;
-                    };
-                    if let Some(host) = host_wall(side, part, &noun) {
-                        *hosts.entry(key_of(host)).or_default() += 1;
-                    }
-                }
-            }
-            let (mut left, mut changed, mut same, mut unknown, mut not_compared, mut both) =
-                (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
-            for (&host, &parts) in &hosts {
-                if named.contains(&host) {
-                    both += parts;
+            tally.plan_seconds += planning.elapsed().as_secs_f64();
+            tally.units += plan.regenerate.len();
+            let (mut walls, mut sections) = (Leg::default(), Leg::default());
+            for incident in &plan.report.cascades {
+                let (leg, host) = if incident.detail.starts_with("墙上的洞照这只件的 DESP 开")
+                {
+                    (&mut walls, incident.detail.split("照它开洞的墙 ").nth(1))
+                } else if incident.detail.starts_with("型钢向成员链上的这只件取刀") {
+                    (
+                        &mut sections,
+                        incident.detail.split("向它取刀的型钢 ").nth(1),
+                    )
+                } else {
                     continue;
-                }
-                let host = RefNo::new(host.0, host.1);
-                if !target.element(host).exists().unwrap_or(false) {
+                };
+                leg.hosts += 1;
+                *leg.by_part.entry(incident.noun.clone()).or_default() += 1;
+                let host = host
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(crate::data_interface::cross_db_handoff::parse_refno);
+                let Some(host) = host else {
+                    leg.unknown += 1;
                     continue;
-                }
-                left += parts;
+                };
                 if compare_left == 0 {
-                    not_compared += parts;
+                    leg.not_compared += 1;
                     continue;
                 }
                 compare_left -= 1;
                 match unit_changed(&base, &target, host) {
-                    Some(true) => changed += parts,
-                    Some(false) => same += parts,
-                    None => unknown += parts,
+                    Some(true) => leg.changed += 1,
+                    Some(false) => leg.same += 1,
+                    None => leg.unknown += 1,
                 }
             }
-            if left > 0 {
-                tally.hit_windows += 1;
+            if walls.hosts + sections.hosts > 0 {
+                walls.hit_windows = usize::from(walls.hosts > 0);
+                sections.hit_windows = usize::from(sections.hosts > 0);
                 println!(
-                    "[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 候选 {candidates}，计划重建 {} 件；套管 / 开孔件\
-                     被点名而宿主墙没被点名 {left} 处（宿主两端各建一次：形状变了 {changed}、没变 {same}、建不出 \
-                     {unknown}、没比 {not_compared}）；宿主也被点名 {both} 处",
-                    plan.regenerate.len()
+                    "[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 候选 {candidates}，计划重建 {} 件；墙 {}；\
+                     型钢 {}",
+                    plan.regenerate.len(),
+                    walls.line(),
+                    sections.line()
                 );
+                tally.walls.add(&walls);
+                tally.sections.add(&sections);
             }
-            tally.left += left;
-            tally.changed += changed;
-            tally.same += same;
-            tally.unknown += unknown;
-            tally.not_compared += not_compared;
-            tally.both_named += both;
         }
         println!(
-            "[宿主收刀·自然窗] == {name}: {} 窗（另 {} 窗候选超 {cap} 跳过）；套管 / 开孔件被点名的：宿主墙也被点名 {} 处，\
-             宿主墙没被点名 {} 处、分在 {} 窗（宿主两端各建一次：形状变了 {}、没变 {}、建不出 {}、没比 {}）；用时 {:.0} 秒",
+            "[宿主收刀·自然窗] == {name}: {} 窗（另 {} 窗候选超 {cap} 跳过），计划一共重建 {} 件、规划 {:.1} 秒；\
+             墙上的件 → 墙：{}；成员链上的件 → 型钢：{}",
             tally.windows,
             tally.skipped,
-            tally.both_named,
-            tally.left,
-            tally.hit_windows,
-            tally.changed,
-            tally.same,
-            tally.unknown,
-            tally.not_compared,
-            started.elapsed().as_secs_f64()
+            tally.units,
+            tally.plan_seconds,
+            tally.walls.line(),
+            tally.sections.line()
         );
+        total.windows += tally.windows;
+        total.skipped += tally.skipped;
+        total.units += tally.units;
+        total.plan_seconds += tally.plan_seconds;
+        total.walls.add(&tally.walls);
+        total.sections.add(&tally.sections);
     }
+    println!(
+        "[宿主收刀·自然窗] ==== 合计（{:.0} 秒）: {} 窗（另 {} 窗候选超 {cap} 跳过），计划一共重建 {} 件、规划 {:.1} 秒；\
+         墙上的件 → 墙：{}；成员链上的件 → 型钢：{}",
+        started.elapsed().as_secs_f64(),
+        total.windows,
+        total.skipped,
+        total.units,
+        total.plan_seconds,
+        total.walls.line(),
+        total.sections.line()
+    );
+    assert!(total.windows > 0, "一窗都没量到——目录或模板目录不对");
 }
 
 /// 量法（手动）：主关节接进 e3d-model 的关节级联之后，真实会话窗口上多点名了多少单元。
