@@ -114,19 +114,120 @@ pub fn render(_dbnum: u32, ids: &[String], writes: &str) -> anyhow::Result<Strin
 }
 
 pub fn transaction(dbnum: u32, ids: &[String], writes: &str) -> anyhow::Result<String> {
+    transaction_with_limits(dbnum, ids, writes, super::tx_limits::data_tx_limits())
+}
+
+/// 一笔 PE 写事务有多大：包上 `BEGIN / COMMIT` 之后的字节数，与正文的写行数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxSize {
+    pub bytes: usize,
+    pub rows: u64,
+}
+
+/// 一笔事务超过了切块上限。
+///
+/// 上限是**怎么切**的依据，不是拒收数据的理由：拿到它的调用方把这一块再切小——`element_batch` 把元素劈半，
+/// 劈到只剩一个元素就把它的成员边分几笔写（gen-model #155）；[`insert_ignore_batches`] 劈半。真切不动才把它上报，
+/// 文案带实际大小与上限。字节先超时不再数行（数行要把整段正文解析一遍），`rows` 为 `None`。
+///
+/// 此前的文案是 `PE statistics batch exceeds … limit`——「statistics」是逐笔观测块还在时留下的叫法
+/// （ADR-071 D6 已退），这里数的一直是正文自己的行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceedsTxLimits {
+    pub bytes: usize,
+    pub rows: Option<u64>,
+    pub limits: super::tx_limits::DataTxLimits,
+}
+
+impl std::fmt::Display for ExceedsTxLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.rows {
+            None => write!(
+                f,
+                "PE write transaction exceeds the byte limit: {} bytes > {}",
+                self.bytes, self.limits.max_bytes
+            ),
+            Some(rows) => write!(
+                f,
+                "PE write transaction exceeds the write-row limit: {rows} write rows > {} ({} bytes)",
+                self.limits.max_write_rows, self.bytes
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExceedsTxLimits {}
+
+/// [`transaction`] 的显式上限形态。超限时的错误是 [`ExceedsTxLimits`]（`error.is::<ExceedsTxLimits>()`）。
+pub fn transaction_with_limits(
+    dbnum: u32,
+    ids: &[String],
+    writes: &str,
+    limits: super::tx_limits::DataTxLimits,
+) -> anyhow::Result<String> {
     let sql = format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
         render(dbnum, ids, writes)?
     );
-    anyhow::ensure!(
-        sql.len() <= max_batch_bytes(),
-        "PE statistics batch exceeds byte limit"
-    );
-    anyhow::ensure!(
-        batch_rows(ids, writes)? <= max_batch_write_rows(),
-        "PE statistics batch exceeds write-row limit"
-    );
+    if sql.len() > limits.max_bytes {
+        return Err(anyhow::Error::new(ExceedsTxLimits {
+            bytes: sql.len(),
+            rows: None,
+            limits,
+        }));
+    }
+    let rows = batch_rows(ids, writes)?;
+    if rows > limits.max_write_rows {
+        return Err(anyhow::Error::new(ExceedsTxLimits {
+            bytes: sql.len(),
+            rows: Some(rows),
+            limits,
+        }));
+    }
     Ok(sql)
+}
+
+/// 同 [`transaction_with_limits`]，写行数由调用方给：正文是调用方自己渲的、行数按构造就知道时用
+/// （`element_batch` 分笔写的成员边——一条边一行），省掉为了数行把整段正文解析一遍（调试版里解析一兆正文要一秒
+/// 上下，一个上万成员的属主光边就一兆）。字节照样量，id 照样校验。
+pub fn transaction_with_known_rows(
+    dbnum: u32,
+    ids: &[String],
+    writes: &str,
+    rows: u64,
+    limits: super::tx_limits::DataTxLimits,
+) -> anyhow::Result<String> {
+    let sql = format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render(dbnum, ids, writes)?
+    );
+    if sql.len() > limits.max_bytes {
+        return Err(anyhow::Error::new(ExceedsTxLimits {
+            bytes: sql.len(),
+            rows: None,
+            limits,
+        }));
+    }
+    if rows > limits.max_write_rows {
+        return Err(anyhow::Error::new(ExceedsTxLimits {
+            bytes: sql.len(),
+            rows: Some(rows),
+            limits,
+        }));
+    }
+    Ok(sql)
+}
+
+/// 这段正文包成一笔事务有多大——不看上限。切块的人据此算「这笔事务里还装得下多少」。
+pub fn measure(dbnum: u32, ids: &[String], writes: &str) -> anyhow::Result<TxSize> {
+    let sql = format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render(dbnum, ids, writes)?
+    );
+    Ok(TxSize {
+        bytes: sql.len(),
+        rows: batch_rows(ids, writes)?,
+    })
 }
 
 /// Keep each element's replacement intact. Auxiliary statements carry no ID.
@@ -161,7 +262,10 @@ pub fn batches(dbnum: u32, entries: &[(Option<String>, String)]) -> anyhow::Resu
         } else {
             anyhow::ensure!(
                 fits,
-                "single PE replacement exceeds transaction limits (including statistics)"
+                "single PE replacement exceeds the data transaction limits: {} bytes (limits: {} bytes / {} write rows)",
+                sql.len(),
+                max_batch_bytes(),
+                max_batch_write_rows()
             );
             out.push(sql);
         }
@@ -328,6 +432,77 @@ mod tests {
         }
         let rows: Vec<Count> = result.take(0).unwrap();
         assert_eq!(rows[0].n, (2 * per_batch + 5) as i64);
+    }
+
+    /// 超限的错误带类型（调用方靠它决定「再切」），文案带实际大小与上限、不再叫「statistics」；字节先超时不数行。
+    /// [`measure`] 不看上限。不是大小的错（id 不规范）不带这个类型。
+    #[test]
+    fn exceeding_a_limit_is_a_typed_error_that_states_the_size_and_the_limit() {
+        use super::super::tx_limits::DataTxLimits;
+        let ids = vec!["40_1".to_string()];
+        let writes = "INSERT IGNORE INTO pe [{ id: pe:40_1 }, { id: pe:40_2 }, { id: pe:40_3 }] RETURN NONE;";
+        let roomy = DataTxLimits::default();
+        let sql = transaction_with_limits(7, &ids, writes, roomy).unwrap();
+        assert_eq!(sql, transaction(7, &ids, writes).unwrap());
+        assert_eq!(
+            measure(7, &ids, writes).unwrap(),
+            TxSize {
+                bytes: sql.len(),
+                rows: 3
+            }
+        );
+
+        let two_rows = DataTxLimits {
+            max_write_rows: 2,
+            ..roomy
+        };
+        let by_rows = transaction_with_limits(7, &ids, writes, two_rows).unwrap_err();
+        let exceeded = by_rows
+            .downcast_ref::<ExceedsTxLimits>()
+            .expect("超限是带类型的错");
+        assert_eq!((exceeded.bytes, exceeded.rows), (sql.len(), Some(3)));
+        let text = by_rows.to_string();
+        assert!(text.contains("3 write rows > 2"), "{text}");
+        assert!(!text.contains("statistics"), "{text}");
+
+        let tight = DataTxLimits {
+            max_bytes: sql.len() - 1,
+            ..two_rows
+        };
+        let by_bytes = transaction_with_limits(7, &ids, writes, tight).unwrap_err();
+        let exceeded = by_bytes
+            .downcast_ref::<ExceedsTxLimits>()
+            .expect("超限是带类型的错");
+        assert_eq!(exceeded.rows, None, "字节先超就不数行");
+        let text = by_bytes.to_string();
+        assert!(
+            text.contains(&format!("{} bytes > {}", sql.len(), sql.len() - 1)),
+            "{text}"
+        );
+
+        let invalid =
+            transaction_with_limits(7, &["1_2; DELETE pe".into()], writes, roomy).unwrap_err();
+        assert!(!invalid.is::<ExceedsTxLimits>(), "{invalid:#}");
+
+        // 行数由调用方给的形态：同一段正文、同一个结果，只是不解析正文数行；id 照样校验、字节照样量。
+        assert_eq!(
+            transaction_with_known_rows(7, &ids, writes, 3, roomy).unwrap(),
+            sql
+        );
+        let by_known_rows = transaction_with_known_rows(7, &ids, writes, 3, two_rows).unwrap_err();
+        assert_eq!(
+            by_known_rows.downcast_ref::<ExceedsTxLimits>(),
+            by_rows.downcast_ref::<ExceedsTxLimits>()
+        );
+        assert!(
+            transaction_with_known_rows(7, &ids, writes, 3, tight)
+                .unwrap_err()
+                .downcast_ref::<ExceedsTxLimits>()
+                .is_some_and(|exceeded| exceeded.rows.is_none())
+        );
+        assert!(
+            transaction_with_known_rows(7, &["1_2; DELETE pe".into()], writes, 3, roomy).is_err()
+        );
     }
 
     #[test]
