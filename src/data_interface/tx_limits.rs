@@ -14,10 +14,6 @@
 //!
 //! 三个都是**上限**：超过任一项就把块劈半（`element_batch` / `pe_batch::batches` 已有的形状）。
 //! `/health` 报生效值。Q6 的取舍：先 2 MiB，P0 实测单笔超 3 s 再降。
-//!
-//! 上限定的是**怎么切**，不是什么数据收不进来（gen-model #155）：`element_batch` 劈到只剩一个元素还超限时，
-//! 把它的成员边（`pe_owner`，一名成员一行——目录里一个 `CATE` 名下上万个 `SCOM` 是真数据）分几笔写，每一笔
-//! 仍在上限以内。此前这种元素直接报 `single element … exceeds the data transaction limits`，所在的库整库进不来。
 
 /// 一笔数据面事务的 SQL 字节上限（默认 2 MiB）。
 pub const DATA_TX_MAX_BYTES_DEFAULT: usize = 2 * 1024 * 1024;

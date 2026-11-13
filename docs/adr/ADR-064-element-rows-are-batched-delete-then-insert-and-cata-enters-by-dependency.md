@@ -44,12 +44,6 @@ plant-ui 对它要么等、要么拿到错误。
 - 两档：`Fresh`（基线 / 父层补缺：不删，只插，已有行赢）与 `Replace`（增量 / 依赖行版本前移）。
 - 切块上限 `data_interface::tx_limits`：2 MiB / 5000 写行 / 1000 元素（`DbOption.toml` `data_tx_max_bytes` /
   `data_tx_max_write_rows` / `data_tx_elements`），超限劈半；每笔事务带 pe 统计观测（`dbnum_stats::transaction`）。
-  - **2026-11-12 补（GitHub #155）**：劈到只剩一个元素还超限时，不再报
-    `single element … exceeds the data transaction limits`（那会让所在的库整库进不来），而是把这个元素的成员边
-    （`pe_owner`，一名成员一行）分几笔写：头块带它自己的全部行（`Replace` 的删除块在内）与装得下的前一段边，续块只有边、
-    照槽位顺序排在头块之后（`element_batch::append_oversize_element`）。这是事务之间唯一的先后依赖；执行口都照顺序逐笔
-    执行。上限定的是怎么切，不是什么数据收不进来。起因：D5 的依赖闭包把属主链整条带进来，每个属主带着完整的成员表——
-    MDS 支吊架目录的一个 `CATE` 名下 10,920 个 `SCOM`，APS 支撑库 250104 的初始化就死在它上面。
 - **控制面单行**（`dbnum_watermark`、`gen_root`、`model_update_pending`、`increment_update_attempt`、`dbnum_info_table` /
   `dbnum_stats_state`、`spatial_epoch`、`model_publish_*`、`root_dependency`、`side_effect_pending`、`datacenter_version`、
   `cata_dependency_state`）是状态机，保留 UPSERT / UPDATE 点写，但只许出现在尾事务 / 回执块，绝不逐元素。

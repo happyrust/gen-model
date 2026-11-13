@@ -966,7 +966,6 @@ fn capped_booking(
 
 /// 整库重排到上限时记进失败账的那句话：是什么、为什么停、最近一次败在哪、怎么解除。
 /// 这句话会出现在 `/health.batch_failures.<dbnum>.reason`、阶段阻断与 `logs/batch-failures-*.jsonl` 里。
-/// 「最近一次败在哪」由 [`ledger_failure_sentence`] 给：哪几个根、各自的错误原话（GitHub #154）。
 fn whole_library_cap_message(dbnum: u32, run: WholeLibraryRun, last_failure: &str) -> String {
     format!(
         "dbnum={dbnum} 整库模型重排已连续失败 {} 次，到上限（{}，配置 model_whole_library_retry_limit），不再自动重排：\
@@ -1715,10 +1714,11 @@ async fn run_one_batch(
     let mut failure_streak = None;
     let retriable = retriable_root_failures(&result.units);
     let booking = data_failure_booking(job.intent, state, batch_status, retriable);
-    // 失败账上记的那句「这一次败在哪」：只跑模型的任务先看本任务的单元清单（GitHub #154——哪个根、什么错
-    // 只在那里），没有失败的根才取告警的最后一条；带数据窗口的任务照旧只取告警的最后一条。
-    let last_failure =
-        ledger_failure_sentence(job.dbnum, job.intent, &result.units, &result.warnings);
+    let last_failure = result
+        .warnings
+        .last()
+        .cloned()
+        .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
     // 整库重排的次数上限（[`capped_booking`]）：败在还会重试的根上本来不停跑，但从没盖过模型水位的库每次重试都是
     // 整库重算——连着败到上限就改走下面 `Record` 那一臂停下等人。停法只有一套，这里只多记一栏次数。
     let whole_library_run = (booking == DataFailureBooking::Untouched
@@ -1844,13 +1844,9 @@ async fn run_one_batch(
             .batch
             .as_ref()
             .and_then(|batch| batch.message.as_deref());
-        for line in render_failure_reason_lines(
-            job.dbnum,
-            &task_id,
-            batch_message,
-            &result.units,
-            &result.warnings,
-        ) {
+        for line in
+            render_failure_reason_lines(job.dbnum, &task_id, batch_message, &result.warnings)
+        {
             println!("{line}");
         }
         // 控制台那份会被下一轮冷启动的阶段日志冲掉，回执活不过重启。同一句话
@@ -1858,7 +1854,7 @@ async fn run_one_batch(
         // `current_stage` 与分步账从注册表同一次取：`finish` 不清前者（终态那一格
         // 就是死在哪一步），且刚把最后一步结算进了后者——这一刻的账本就是这次
         // 执行的全部脚印（ISSUE-025 §一）。
-        let (reason, reason_from) = failure_reason(batch_message, &result.units, &result.warnings);
+        let (reason, reason_from) = failure_reason(batch_message, &result.warnings);
         let entry = registry.get(&task_id);
         let died_at = entry.as_ref().and_then(|entry| entry.current_stage.clone());
         let (steps, steps_dropped) = entry
@@ -5722,11 +5718,9 @@ fn render_batch_steps_line(dbnum: u32, task_id: &str, steps: &[TaskStep], droppe
 /// 「死在收集增量这一步」说得清清楚楚，却唯独缺了「为什么」，而收集口有十几个各
 /// 自具名的硬失败出口，光靠阶段行分不出是哪一个。
 ///
-/// 四条纪律：
+/// 三条纪律：
 /// - `batch` 缺席（冻结重扫就失败、批次压根没建起来）时回落到 warnings，不许空手
-///   而归；并且**报出这一句是从哪儿来的**——几个来源的权威性不一样。
-/// - `batch` 缺席而单元清单里有没生成成的根（只跑模型的任务就是这个形状）时，原因是
-///   那几个根和它们的错误原话（[`failed_roots_summary`]，GitHub #154），排在 warnings 前面。
+///   而归；并且**报出这一句是从哪儿来的**——两个来源的权威性不一样。
 /// - warnings 截断并报剩余条数：净窗口的口径标注一条就一百多字，整串打出来会把
 ///   上方的阶段行冲掉，而阶段行正是判断死在哪一步的依据。
 /// - 只在非成功终态调用，成功批次一行都不加。
@@ -5734,12 +5728,11 @@ fn render_failure_reason_lines(
     dbnum: u32,
     task_id: &str,
     batch_message: Option<&str>,
-    units: &[ModelUnitResult],
     warnings: &[String],
 ) -> Vec<String> {
     const SHOWN: usize = 3;
     let head = format!("[增量] 失败原因 task={task_id} dbnum={dbnum}");
-    let (reason, from) = failure_reason(batch_message, units, warnings);
+    let (reason, from) = failure_reason(batch_message, warnings);
 
     let mut out = vec![format!("{head} 来源={from} {reason}")];
     for warning in warnings.iter().take(SHOWN) {
@@ -5758,121 +5751,20 @@ fn render_failure_reason_lines(
 /// 控制台行与落盘记录必须念同一句：两处各自挑一次来源，就会出现「屏幕上说 A、
 /// 文件里说 B」，而这两句的权威性本来就不一样——`batch.message` 是收集/写回口
 /// 自己抛的原话，`warnings.last()` 在硬失败路径上很可能只是一条口径标注。
-///
-/// 来源依次是：数据批次自己的原话；没生成成的根（[`failed_roots_summary`]）；告警的最后一条。
-/// 第二个来源是 GitHub #154 补的：只跑模型的任务没有数据批次，根失败、还在按退避重试时告警里也没有
-/// 这件事（判死那一次才写）。此前这种失败的原因取到的是告警里不相干的最后一条——现场是别的根的「未产管」
-/// 标注——告警是空的时候落到最后那句兜底话上，一次原因明明白白的失败被说成了引擎缺陷。兜底话只留给三样
-/// 都没有的时候。
-fn failure_reason(
-    batch_message: Option<&str>,
-    units: &[ModelUnitResult],
-    warnings: &[String],
-) -> (String, &'static str) {
-    if let Some(message) = batch_message {
-        return (message.to_string(), "result.batch.message");
+fn failure_reason(batch_message: Option<&str>, warnings: &[String]) -> (String, &'static str) {
+    match batch_message {
+        Some(message) => (message.to_string(), "result.batch.message"),
+        None => match warnings.last() {
+            Some(warning) => (
+                warning.clone(),
+                "warnings.last()（本批没有 batch，多半是冻结重扫阶段就失败了）",
+            ),
+            None => (
+                "本批既无回执消息也无告警——这是引擎缺陷，请带走 logs/ 整个目录".to_string(),
+                "无",
+            ),
+        },
     }
-    if let Some(roots) = failed_roots_summary(units) {
-        return (roots, "result.units（没生成成的根）");
-    }
-    match warnings.last() {
-        Some(warning) => (
-            warning.clone(),
-            "warnings.last()（本批没有 batch，多半是冻结重扫阶段就失败了）",
-        ),
-        None => (
-            "本批既无回执消息、也没有没生成成的根、也无告警——这是引擎缺陷，请带走 logs/ 整个目录"
-                .to_string(),
-            "无",
-        ),
-    }
-}
-
-/// [`failed_roots_summary`] 里点名几根；多的只报个数。
-const FAILED_ROOTS_SHOWN: usize = 3;
-/// [`failed_roots_summary`] 里每根的错误原话最多留几个字；全文在任务回执的单元清单里。
-const FAILED_ROOT_ERROR_CHARS: usize = 200;
-
-/// 没生成成的根的一句话摘要（GitHub #154）：一共几根，前 [`FAILED_ROOTS_SHOWN`] 根各是谁（根、noun）、
-/// 各自的错误原话；一根失败的都没有回 `None`。
-///
-/// 只跑模型的任务，「为什么败」只在单元清单里：没有数据批次的消息，根失败、还在按退避重试时告警里也没有
-/// 这件事（判死那一次才写）——告警里有的是别的根的生成标注。不从这里取，停下来的那句话与控制台那一行说的
-/// 就是告警里不相干的最后一条，告警是空的时候是兜底话、是「引擎缺陷」。
-///
-/// 错误原话取单元自己的 `message`——生成器报的错、`durable flush: …`、退避中没重算的那句（带着上次的错）——
-/// 换行压成空格（控制台那一行不许被撑成几行），截到 [`FAILED_ROOT_ERROR_CHARS`] 字、截过的补一个「…」。
-/// 与上一根同一句的写「同上」：冻不出房间计算器那种失败，每一根都是同一句话。
-fn failed_roots_summary(units: &[ModelUnitResult]) -> Option<String> {
-    let failed = units
-        .iter()
-        .filter(|unit| unit.status != UnitGenStatus::Generated);
-    let total = failed.clone().count();
-    if total == 0 {
-        return None;
-    }
-    let mut previous: Option<&str> = None;
-    let mut named = Vec::with_capacity(FAILED_ROOTS_SHOWN);
-    for unit in failed.take(FAILED_ROOTS_SHOWN) {
-        let error = unit
-            .message
-            .as_deref()
-            .map(str::trim)
-            .filter(|message| !message.is_empty());
-        let said = match error {
-            None => "没有留下错误信息".to_string(),
-            Some(error) if previous == Some(error) => "同上".to_string(),
-            Some(error) => {
-                let one_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
-                let mut clipped = one_line
-                    .chars()
-                    .take(FAILED_ROOT_ERROR_CHARS)
-                    .collect::<String>();
-                if one_line.chars().nth(FAILED_ROOT_ERROR_CHARS).is_some() {
-                    clipped.push('…');
-                }
-                clipped
-            }
-        };
-        previous = error;
-        let noun = unit.noun.trim();
-        named.push(if noun.is_empty() {
-            format!("{}：{said}", unit.root_refno)
-        } else {
-            format!("{}（{noun}）：{said}", unit.root_refno)
-        });
-    }
-    let mut summary = format!("{total} 根没生成成：{}", named.join("；"));
-    if total > FAILED_ROOTS_SHOWN {
-        summary.push_str(&format!("；另有 {} 根", total - FAILED_ROOTS_SHOWN));
-    }
-    Some(summary)
-}
-
-/// 失败账上记的那句「这一次败在哪」：`/health.batch_failures.<dbnum>.reason`、阶段阻断、整库重排次数账
-/// （`/health.whole_library_retries.<dbnum>.reason`）用它，到上限停下时它接在 [`whole_library_cap_message`]
-/// 的「最近一次」后面。
-///
-/// 只跑模型的任务（`ModelOnly`）先说没生成成的根（[`failed_roots_summary`]，GitHub #154）：这种任务停下来
-/// 只有两种原因——失败的根都已判死、整库重排到次数上限——都是根的事，而告警的最后一条说的不一定是根
-/// （判死的根各有一条告警，但别的根的生成标注、收尾那一笔与双水位判决的告警都可以排在它们后面；还在按退避
-/// 重试的根一条都没有）。一根失败的都没有（败在规划、收尾那一笔）才取告警的最后一条。
-///
-/// 带数据窗口的任务不看单元清单，照旧取告警的最后一条：它记进失败账是因为数据窗口没收口，口径不变。
-/// 两样都没有用兜底话。权威的那句原话与它的出处在同一个任务的 `batch_failure` 落盘记录里
-/// （[`failure_reason`]）。
-fn ledger_failure_sentence(
-    dbnum: u32,
-    intent: crate::data_interface::batch_queue::BatchIntent,
-    units: &[ModelUnitResult],
-    warnings: &[String],
-) -> String {
-    let roots = (intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly)
-        .then(|| failed_roots_summary(units))
-        .flatten();
-    roots
-        .or_else(|| warnings.last().cloned())
-        .unwrap_or_else(|| format!("dbnum={dbnum} 数据批次未完整收口"))
 }
 
 /// 生成根列表的日志渲染：多到刷屏时只留前若干个。
@@ -9109,7 +9001,6 @@ mod tests {
                  窗口终点 37 与快照冻结会话 36 不一致",
             ),
             &[],
-            &[],
         );
         assert_eq!(lines.len(), 1);
         assert!(
@@ -9124,270 +9015,15 @@ mod tests {
             8191,
             "t",
             None,
-            &[],
             &["冻结批次重扫失败: 文件身份与冻结 token 不一致".to_string()],
         );
         assert!(fallback[0].contains("warnings.last()"), "{:?}", fallback[0]);
         assert!(fallback[0].contains("文件身份"), "{:?}", fallback[0]);
 
         // 一条都没有仍要留一行：静默失败比错误的原因更难查。
-        let empty = render_failure_reason_lines(8191, "t", None, &[], &[]);
+        let empty = render_failure_reason_lines(8191, "t", None, &[]);
         assert_eq!(empty.len(), 1);
         assert!(empty[0].contains("引擎缺陷"), "{:?}", empty[0]);
-    }
-
-    /// GitHub #154：只跑模型的任务没有数据批次的消息，根失败、还在按退避重试时告警里也没有这件事——
-    /// 「为什么败」只在单元清单里。摘要点名前三根（根、noun、错误原话），多的报个数；同一句错误不重复抄；
-    /// 一根失败的都没有就没有摘要。
-    #[test]
-    fn failed_roots_are_summarised_by_root_and_error() {
-        let failed = |root: &str, noun: &str, message: Option<&str>| ModelUnitResult {
-            noun: noun.into(),
-            message: message.map(str::to_string),
-            ..unit(root, UnitGenStatus::Failed)
-        };
-
-        assert_eq!(failed_roots_summary(&[]), None);
-        assert_eq!(
-            failed_roots_summary(&[unit("24384/1", UnitGenStatus::Generated)]),
-            None,
-            "都生成成了：没有摘要"
-        );
-
-        // 现场那个形状：整库重排里一根失败，其余都成了。
-        let one = [
-            unit("24384/1", UnitGenStatus::Generated),
-            failed("24384/7", "EQUI", Some("manifold boolean failed")),
-            unit("24384/9", UnitGenStatus::Generated),
-        ];
-        assert_eq!(
-            failed_roots_summary(&one).as_deref(),
-            Some("1 根没生成成：24384/7（EQUI）：manifold boolean failed")
-        );
-
-        // 多了：点名前三根，其余报个数；与上一根同一句错误的不重复抄。
-        let many = [
-            failed("24384/7", "EQUI", Some("房间计算器冻不出")),
-            failed("24384/8", "BRAN", Some("房间计算器冻不出")),
-            failed("24384/9", "BRAN", Some("write-behind exhausted")),
-            failed("24384/10", "PANE", Some("房间计算器冻不出")),
-            failed("24384/11", "PANE", Some("房间计算器冻不出")),
-        ];
-        assert_eq!(
-            failed_roots_summary(&many).as_deref(),
-            Some(
-                "5 根没生成成：24384/7（EQUI）：房间计算器冻不出；24384/8（BRAN）：同上；\
-                 24384/9（BRAN）：write-behind exhausted；另有 2 根"
-            )
-        );
-        assert!(
-            !failed_roots_summary(&many[..3]).unwrap().contains("另有"),
-            "正好三根时不该冒出「另有 0 根」"
-        );
-
-        // 错误原话太长就截断并留记号；换行压成一行（控制台那一行不许被撑成几行）；没有 noun、没留下错误的
-        // 也说得出来。
-        let long = "e".repeat(FAILED_ROOT_ERROR_CHARS + 50);
-        let odd = [
-            failed("24384/7", "", Some(long.as_str())),
-            failed("24384/8", "BRAN", Some("第一行\n  第二行")),
-            failed("24384/9", "BRAN", None),
-        ];
-        let summary = failed_roots_summary(&odd).unwrap();
-        assert!(
-            summary.contains(&format!(
-                "24384/7：{}…；",
-                "e".repeat(FAILED_ROOT_ERROR_CHARS)
-            )),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("24384/8（BRAN）：第一行 第二行；"),
-            "{summary}"
-        );
-        assert!(
-            summary.ends_with("24384/9（BRAN）：没有留下错误信息"),
-            "{summary}"
-        );
-        assert!(!summary.contains('\n'), "{summary}");
-    }
-
-    /// GitHub #154：只跑模型的任务根失败时，控制台的失败原因行说的是哪个根、什么错，出处写明是单元清单；
-    /// 「引擎缺陷」那一句只留给真的什么都没有的时候。落盘记录与控制台念同一句（同一个函数）。
-    #[test]
-    fn a_model_only_failure_names_the_failed_roots_instead_of_blaming_the_engine() {
-        // 回放用例 `t4-whole-library-retry-limit` 第三次失败的形状：测试钩让指定的根必败，别的根都成了，
-        // 告警是空的——此前这一行是「来源=无 … 引擎缺陷」。
-        let units = [
-            unit("24384/1", UnitGenStatus::Generated),
-            ModelUnitResult {
-                message: Some("AIOS_TEST_FAIL_ROOTS".into()),
-                ..unit("24384/7", UnitGenStatus::Failed)
-            },
-        ];
-        let lines = render_failure_reason_lines(7997, "t", None, &units, &[]);
-        assert_eq!(
-            lines,
-            vec![
-                "[增量] 失败原因 task=t dbnum=7997 来源=result.units（没生成成的根） \
-                 1 根没生成成：24384/7（EQUI）：AIOS_TEST_FAIL_ROOTS"
-                    .to_string()
-            ]
-        );
-
-        // 同一条用例前两次失败的形状：回执里带着别的根的生成标注（现场是几十条「未产管」）。此前原因行取的是
-        // 其中最后一条——把一条管段标注说成了失败原因。有失败的根时它不抢这一句，照旧列在伴随告警里。
-        let noted = ["dbnum=7997: 未产管=1（misaligned=1：24384/22593#0）".to_string()];
-        let lines = render_failure_reason_lines(7997, "t", None, &units, &noted);
-        assert!(
-            lines[0].contains("来源=result.units") && lines[0].contains("24384/7（EQUI）"),
-            "{lines:?}"
-        );
-        assert!(
-            lines[1].contains("伴随告警") && lines[1].contains("未产管=1"),
-            "{lines:?}"
-        );
-
-        // 数据批次自己的原话仍排第一；单元都成了的失败照旧取告警的最后一条。
-        let (reason, from) = failure_reason(Some("读取增量数据失败: boom"), &units, &noted);
-        assert_eq!(
-            (reason.as_str(), from),
-            ("读取增量数据失败: boom", "result.batch.message")
-        );
-        let (reason, from) = failure_reason(None, &units[..1], &noted);
-        assert!(
-            from.starts_with("warnings.last()") && reason.contains("未产管=1"),
-            "{reason} / {from}"
-        );
-        let (reason, from) = failure_reason(None, &units, &[]);
-        assert_eq!(
-            (reason.as_str(), from),
-            (
-                "1 根没生成成：24384/7（EQUI）：AIOS_TEST_FAIL_ROOTS",
-                "result.units（没生成成的根）"
-            )
-        );
-    }
-
-    /// GitHub #154：整库重排连败到上限停下时，失败账上的那句话（`/health.batch_failures.<dbnum>.reason`、
-    /// 阶段阻断、落盘记录）要带出最近一次败在哪个根、什么错——此前「最近一次」后面恒是兜底话
-    /// 「数据批次未完整收口」。没到上限的那几次，次数账（`/health.whole_library_retries`）的那一句同样点名。
-    #[tokio::test]
-    async fn the_whole_library_stop_says_which_root_failed_and_why() {
-        use crate::data_interface::batch_queue::BatchIntent::ModelOnly;
-        // 失败账是进程全局的：用自己的 dbnum，别和别的测试互清。
-        let dbnum = 996_311;
-        reset_batch_failure(dbnum);
-        let key = dbnum.to_string();
-        let units = [
-            unit("24384/1", UnitGenStatus::Generated),
-            ModelUnitResult {
-                dbnum,
-                noun: "BRAN".into(),
-                message: Some("db 7004 会话 3 的索引里没有 15196/40431".into()),
-                ..unit("24384/7", UnitGenStatus::Failed)
-            },
-        ];
-        // 只跑模型的任务：根失败、还在按退避重试，告警是空的。
-        let sentence = ledger_failure_sentence(dbnum, ModelOnly, &units, &[]);
-        assert_eq!(
-            sentence,
-            "1 根没生成成：24384/7（BRAN）：db 7004 会话 3 的索引里没有 15196/40431"
-        );
-
-        for failed_runs in 1..=2 {
-            let run = note_whole_library_failure_with_limit(dbnum, 1139, &sentence, 3);
-            assert!(run.failed_runs == failed_runs && !run.capped());
-        }
-        let retries = whole_library_retry_snapshot().expect("次数账");
-        assert_eq!(
-            retries[key.as_str()]["reason"],
-            sentence.as_str(),
-            "还在自动重试的那几次也点名"
-        );
-
-        let run = note_whole_library_failure_with_limit(dbnum, 1139, &sentence, 3);
-        let (booking, cause) = capped_booking(DataFailureBooking::Untouched, ModelOnly, Some(&run));
-        assert_eq!(
-            (booking, cause),
-            (
-                DataFailureBooking::Record,
-                ParkCause::WholeLibraryRetryLimit
-            )
-        );
-        let message = whole_library_cap_message(dbnum, run, &sentence);
-        note_batch_failure(dbnum, 1139, &message, cause).await;
-
-        let health = batch_failure_snapshot().expect("停着");
-        let reason = health[key.as_str()]["reason"].as_str().expect("reason");
-        assert!(
-            reason.contains(
-                "最近一次：1 根没生成成：24384/7（BRAN）：db 7004 会话 3 的索引里没有 15196/40431。解除："
-            ),
-            "停下来的那句话要带出哪个根、什么错: {reason}"
-        );
-        assert!(!reason.contains("数据批次未完整收口"), "{reason}");
-        reset_batch_failure(dbnum);
-
-        // 有失败的根时，排在后面的不相干告警不抢这一句。
-        let noted = ["读取批次终态的双水位判决失败（不影响已提交数据）: timeout".to_string()];
-        assert_eq!(
-            ledger_failure_sentence(dbnum, ModelOnly, &units, &noted),
-            sentence
-        );
-        // 一根失败的都没有（败在规划、收尾那一笔）：照旧取告警的最后一条；两样都没有才是兜底话。
-        let planning = ["模型恢复规划失败: boom".to_string()];
-        assert_eq!(
-            ledger_failure_sentence(dbnum, ModelOnly, &units[..1], &planning),
-            "模型恢复规划失败: boom"
-        );
-        assert_eq!(
-            ledger_failure_sentence(dbnum, ModelOnly, &[], &[]),
-            format!("dbnum={dbnum} 数据批次未完整收口")
-        );
-        // 带数据窗口的任务记进失败账是因为数据窗口没收口：不看单元清单，口径与此前逐字相同。
-        use crate::data_interface::batch_queue::BatchIntent::ApplyWindow;
-        let data = ["读取增量数据失败: boom".to_string()];
-        assert_eq!(
-            ledger_failure_sentence(dbnum, ApplyWindow, &units, &data),
-            "读取增量数据失败: boom"
-        );
-        assert_eq!(
-            ledger_failure_sentence(dbnum, ApplyWindow, &units, &[]),
-            format!("dbnum={dbnum} 数据批次未完整收口")
-        );
-    }
-
-    /// 上面三条只有接在 `run_one_batch` 的收口上才算数：失败账的那句话、控制台的原因行、落盘记录，三处都把
-    /// 本任务的单元清单递进去。
-    #[test]
-    fn run_one_batch_hands_the_unit_list_to_all_three_failure_sentences() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn run_one_batch(")
-            .expect("run_one_batch 必须存在")
-            .1
-            .split_once("pub(crate) enum ExplicitFlag")
-            .expect("run_one_batch 之后是 ExplicitFlag")
-            .0;
-        assert!(
-            body.contains(
-                "ledger_failure_sentence(job.dbnum, job.intent, &result.units, &result.warnings);"
-            ),
-            "失败账上那句话先看单元清单: {body}"
-        );
-        let console = body
-            .split_once("for line in render_failure_reason_lines(")
-            .expect("控制台的原因行")
-            .1
-            .split_once(") {")
-            .expect("实参表有结尾")
-            .0;
-        assert!(console.contains("&result.units,"), "{console}");
-        assert!(
-            body.contains("failure_reason(batch_message, &result.units, &result.warnings);"),
-            "落盘记录与控制台念同一句: {body}"
-        );
     }
 
     /// 告警截断：净窗口口径标注一条上百字，整串打出来会把上方的阶段行冲掉，
@@ -9395,7 +9031,7 @@ mod tests {
     #[test]
     fn accompanying_warnings_are_truncated_but_still_report_the_rest() {
         let warnings = (0..5).map(|i| format!("w{i}")).collect::<Vec<_>>();
-        let lines = render_failure_reason_lines(8191, "t", Some("boom"), &[], &warnings);
+        let lines = render_failure_reason_lines(8191, "t", Some("boom"), &warnings);
         assert_eq!(lines.len(), 1 + 3 + 1, "原因 1 行 + 前 3 条 + 剩余提示");
         assert!(lines.last().unwrap().contains("另有 2 条"), "{lines:?}");
         assert!(
@@ -9403,7 +9039,7 @@ mod tests {
             "截断了就得指出去哪儿取全: {lines:?}"
         );
 
-        let exact = render_failure_reason_lines(8191, "t", Some("boom"), &[], &warnings[..3]);
+        let exact = render_failure_reason_lines(8191, "t", Some("boom"), &warnings[..3]);
         assert_eq!(exact.len(), 4, "正好三条时不该冒出「另有 0 条」");
     }
 

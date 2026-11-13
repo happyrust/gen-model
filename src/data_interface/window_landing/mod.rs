@@ -99,9 +99,6 @@ pub async fn land_increment_window(
         }
         report.elements = elements.elements;
         report.element_transactions = elements.transactions;
-        if let Some(notice) = elements.split_notice(window.dbnum) {
-            println!("{notice}");
-        }
         report
             .warnings
             .extend(uda_keys.misses_warning(window.dbnum));

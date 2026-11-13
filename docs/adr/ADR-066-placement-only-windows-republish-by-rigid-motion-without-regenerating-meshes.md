@@ -148,8 +148,8 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    （2026-09-14 起走目录构件 GMRE），只有这一条接得住「FIXING 在 SCTN 下挪位」；我们今天不把它的 `TMPL` 负体扣到宿主上，但 core 那一票是「重建」，
    少算方向两票缺一不放行。结构件**自己**挪位不在此列（它的网格只依赖自身属性 + 目录）。
    **第六 / 七 / 八类（2026-09-30 修订 · GitHub #36）：越过锚点边界的几何依赖。** e3d-model 09-27 起 GENSEC 两端扣 `JOIS` / `JOIE`
-   关节 FIXING 名下的负体（`elmodl::collect_joint_negatives`），09-15 起 WALL / GWALL 扣名下刀的世界体（`collect_host_cutters`；
-   2026-11-12 之前是 `collect_host_fixings` / `collect_host_sleeves` 两份），WALL 名下 FIXING 的实例标架由 `fixing_host_frame` 沿墙 spine 现算——三处都读锚点子树**之外**的东西，
+   关节 FIXING 名下的负体（`elmodl::collect_joint_negatives`），09-15 起 WALL / GWALL 扣名下刀的世界体（`collect_host_fixings` /
+   `collect_host_sleeves`），WALL 名下 FIXING 的实例标架由 `fixing_host_frame` 沿墙 spine 现算——三处都读锚点子树**之外**的东西，
    前五类只看锚点及其祖先的 noun，接不住。判在 `window_root_plan::anchor_subtree_exclusion`（事实由 `anchor_subtree_facts` 沿 T 端
    成员表把锚点子树走一遍收齐，子树超过 20 万元素就不审、判不刚），排在前五类与路由容器之后：
    (d) **宿主墙上的刀**：锚点之上有 WALL / GWALL（中间没隔着同名刀），锚点自己或名下有那面墙开洞用的刀（WALL 名下 `DESP` 凑得齐

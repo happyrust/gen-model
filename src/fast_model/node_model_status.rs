@@ -1,1 +1,1674 @@
-//! 节点模型状态与生成预检（ADR-099；`GET /api/v1/node/model-status`，spec §4.5.3）。//!//! 一次回答一个节点（含 SITE / ZONE）的三个问题：它下面的模型**生成过没有**、**是不是最新**、**要生成的话有多少**。//! 全部是按需算的派生量，来源四样：水位行（库里唯一的持久事实，ADR-079）、库文件（生成单元清单、两个会话之间的差分）、//! 进程内的投影回执与生成根账本、任务登记表。不建表、不写任何东西；后端没有任何一条判据读这里的输出——它只给人和//! 前端看，所以不是第二份事实。//!//! 三段：//! - 判定是纯函数（[`classify_unit`] / [`window_facts`] / [`judge`]），事实由调用方喂进来，单测不需要库文件；//! - 文件侧两类计算（[`node_scope`]：子树里有哪些生成单元；[`scope_window`]：一段会话之间这个节点下变了什么）各有一个//!   进程内缓存，键里带库文件指纹，文件一动就失效。水位、回执、账本、任务每次现读，不缓存；//! - [`node_model_status`] 把它们串起来。//!//! 「落后」的尺子是 [`crate::fast_model::node_diff_summary`]：从一个单元对应到的会话到库文件最新做一次**净**差分，//! 影响判定用的是生成那条路自己的 `classify_operation_impact`。登录写的记账会话、只改名字描述的修改判成 noop，不算落后。use std::collections::{BTreeMap, BTreeSet, HashMap};use std::path::{Path, PathBuf};use std::sync::{Arc, Mutex, OnceLock};use std::time::Instant;use aios_core::{RefU64, RefnoEnum};use e3d_io::refno::RefNo;use serde::Serialize;use crate::data_interface::direct_tree::DirectTreeService;use crate::data_interface::generation_root::{    configured_delivery_unit_types, refno_from_e3d, refno_to_e3d,};use crate::data_interface::model_read_route::{MemoryReason, ModelReadRoute};use crate::data_interface::model_source::RootDbError;use crate::fast_model::node_diff_summary::{    DiffScope, DiffStatus, DiffSummaryReport, StatusCounts, confirm_gate, confirm_threshold_units,    node_diff_summary,};/// 一次判定最多比几段会话。已生成的单元对应到的会话多于这个数时，只比最早的一段和最近的几段，其余按最早那一段算/// （范围更大，可能多报落后），并把 `units.exact` 记成 false。const MAX_WINDOWS: usize = 4;/// 两个进程内缓存各留多少项；满了整体清空（与版本表那一族同一个做法）。const CACHE_CAPACITY: usize = 256;/// 回执里最多带几条告警。const MAX_WARNINGS: usize = 20;/// 节点的总判定。字面值是给前端的契约（spec §4.5.3），只许加、不许改。#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]#[serde(rename_all = "snake_case")]pub enum NodeModelVerdict {    /// 判不了：两枚水位失配 / 读不到，或要比的那一段差分算不出来。    Unknown,    /// 这个库此刻正在被写。    Updating,    /// 子树里没有任何生成单元。    Empty,    NotGenerated,    Partial,    Lagging,    Latest,}/// 所属库的事实。数值与 `/dbnums` 那一行同源（水位行、`dbnum_consistency::verdict`、`model_read_route::route`）。#[derive(Debug, Clone, PartialEq, Eq, Serialize)]pub struct LibraryStatus {    pub file_latest_sesno: u32,    pub file_latest_time: Option<String>,    pub applied_sesno: i32,    pub model_sesno: i32,    pub model_sesno_time: Option<String>,    pub initialized: bool,    pub model_verdict: &'static str,    pub model_verdict_reason: Option<&'static str>,    pub model_source: &'static str,    pub model_source_reason: Option<&'static str>,    pub data_batch_running: bool,    pub model_task_running: bool,    pub in_watch_scope: bool,    /// 路由结论本身：判定按它问「库里的整库模型读不读得到」，不自己重拼判据。    #[serde(skip)]    pub route: ModelReadRoute,}impl LibraryStatus {    /// 库里的整库模型读得到时，它盖到的会话（ADR-099 D2 第 3 条）：模型水位的承诺是「到这个会话为止每个生成单元都已    /// 发布」（ADR-079 D3）。「读得到」取路由的现成结论——`database`，或 `memory` 而允许按根回读库。    pub fn durable_promise(&self) -> Option<u32> {        let readable = self.route.is_database() || self.route.allows_durable_fallback();        (readable && self.model_sesno > 0).then_some(self.model_sesno as u32)    }    /// 两枚水位说不清的两档：库行不可信，节点一级也就判不了。    fn unjudgeable(&self) -> Option<&'static str> {        match self.route.reason {            Some(MemoryReason::WatermarksInconsistent) => Some("watermarks_inconsistent"),            Some(MemoryReason::ModelWatermarkUnavailable) => Some("model_watermark_unavailable"),            _ => None,        }    }}/// 账本对一个单元说了什么。#[derive(Debug, Clone, Copy, PartialEq, Eq)]pub enum LedgerFact {    Absent,    /// 最近一次生成成了，按哪一版源（`0` = 调用方当时不知道）。    Generated { sesno: i32 },    /// 失败还没重新成功，或已放弃：那份几何不可信（ADR-079 D6）。    Unsettled,}/// 进到判定里的、一个生成单元的进程内事实。#[derive(Debug, Clone, Copy, PartialEq, Eq)]pub struct UnitFacts {    pub root: RefNo,    /// 投影里这一根的回执是按哪个会话生成的。    pub receipt_sesno: Option<u32>,    pub ledger: LedgerFact,}/// 一个生成单元的状态。#[derive(Debug, Clone, Copy, PartialEq, Eq)]pub enum UnitState {    Failed,    Missing,    /// 有模型。`valid_through` = 这份模型对应到的会话；`by_library` = 靠库的模型水位担保（否则是它自己的生成会话）。    Generated { valid_through: u32, by_library: bool },}fn key(refno: RefNo) -> (u32, u32) {    (refno.word0, refno.word1)}fn refno_text(refno: RefNo) -> String {    format!("{}/{}", refno.word0, refno.word1)}fn parse_key(text: &str) -> Option<(u32, u32)> {    let (word0, word1) = text.split_once('/')?;    Some((word0.trim().parse().ok()?, word1.trim().parse().ok()?))}/// 一个单元算不算已生成（纯函数，ADR-099 D2）。`added_after_promise` = 它是模型水位之后才新建的，水位担保不到。pub fn classify_unit(    library: &LibraryStatus,    unit: &UnitFacts,    added_after_promise: bool,) -> UnitState {    if unit.ledger == LedgerFact::Unsettled {        return UnitState::Failed;    }    let readable = library.durable_promise();    // 库里读得到时，回执已被逐出投影的根仍有账本里那一句「按需生成到了哪一版」；库里读不到（未初始化）时没有回执    // 就没有东西可给 records 读，账本那一句不作数。    let own = unit.receipt_sesno.or(match unit.ledger {        LedgerFact::Generated { sesno } if sesno > 0 && readable.is_some() => Some(sesno as u32),        _ => None,    });    let promise = readable.filter(|_| !added_after_promise);    match (own, promise) {        // 回执比水位旧：它没被之后的批次碰过，那份模型到水位仍然有效（规划器的 `advance` 根）。        (Some(own), Some(promise)) if promise >= own => UnitState::Generated {            valid_through: promise,            by_library: true,        },        (Some(own), _) => UnitState::Generated {            valid_through: own,            by_library: false,        },        (None, Some(promise)) => UnitState::Generated {            valid_through: promise,            by_library: true,        },        (None, None) => UnitState::Missing,    }}/// 一段会话之间（`from_sesno` → `to_sesno`）这个节点下变了什么，折成判定要的那几格。#[derive(Debug, Clone, Default, PartialEq, Eq)]pub struct WindowFacts {    pub from_sesno: u32,    pub to_sesno: u32,    /// 元素级计数，就是 `node/diff-summary` 的 `elements`。    pub elements: StatusCounts,    /// 有几何变化的交付单元数，就是 `node/diff-summary` 的 `units.changed`。    pub units_changed: usize,    /// 其中单元根自己是新增的个数。    pub units_added: usize,    /// 有几何变化的生成根：交付单元根，以及自己那条记录变了的其它生成根。    pub changed_roots: BTreeSet<(u32, u32)>,    /// 这一段里新建出来的生成根：库的模型水位担保不到它们。    pub added_roots: BTreeSet<(u32, u32)>,    /// 这一段里被删掉的交付单元根。    pub removed_units: BTreeSet<(u32, u32)>,    /// 有不属于任何生成单元的构件发生了几何变化（归不到某个单元头上）。    pub unattributed: bool,    /// 归属不完整：某一组的行被截断，或子树没数完。    pub truncated: bool,    pub warnings: Vec<String>,}/// 把一份差异摘要折成 [`WindowFacts`]（纯函数）。`roots` = 子树里（库文件最新会话上）的全部生成根。////// 交付单元那几组的归属是摘要自己给的（`unit_root`）；不在任何交付单元下的那一组，行自己就是生成根的记在那根头上，/// 其余记成「归不到单元上」。pub fn window_facts(report: &DiffSummaryReport, roots: &BTreeSet<(u32, u32)>) -> WindowFacts {    let mut facts = WindowFacts {        from_sesno: report.a,        to_sesno: report.b,        elements: report.elements.clone(),        units_changed: report.units.changed,        truncated: !report.units.complete,        warnings: report.warnings.clone(),        ..WindowFacts::default()    };    for group in &report.groups {        let cut = group.rows_truncated > 0;        match group.unit_root.as_deref().and_then(parse_key) {            Some(unit) => {                if group.geometry_changed {                    facts.changed_roots.insert(unit);                }                let own = group                    .rows                    .iter()                    .find(|row| parse_key(&row.refno) == Some(unit));                match own.map(|row| row.status) {                    Some(DiffStatus::Added) => {                        facts.units_added += 1;                        facts.added_roots.insert(unit);                    }                    Some(DiffStatus::Deleted) => {                        facts.removed_units.insert(unit);                    }                    Some(_) => {}                    // 单元根那一行可能正好在被截掉的那部分里：它是不是新增 / 被删认不出来。                    None if cut => facts.truncated = true,                    None => {}                }            }            None => {                for row in &group.rows {                    if row.status == DiffStatus::Noop {                        continue;                    }                    match parse_key(&row.refno).filter(|root| roots.contains(root)) {                        Some(root) => {                            facts.changed_roots.insert(root);                            if row.status == DiffStatus::Added {                                facts.added_roots.insert(root);                            }                        }                        None => facts.unattributed = true,                    }                }                if cut && group.geometry_changed {                    facts.truncated = true;                    facts.unattributed = true;                }            }        }    }    facts}/// 子树里生成单元的计数。恒有 `total = generated + missing + failed`，`lagging <= generated`。#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]pub struct UnitTally {    pub total: usize,    pub generated: usize,    pub missing: usize,    pub failed: usize,    pub lagging: usize,    /// `lagging` 与 `missing` 是不是精确的。    pub exact: bool,}/// 已生成的那部分对应到哪些会话。#[derive(Debug, Clone, PartialEq, Eq, Serialize)]pub struct GeneratedAt {    pub sesno_min: u32,    pub sesno_max: u32,    pub time_min: Option<String>,    pub time_max: Option<String>,    /// `library_watermark` / `own_generation` / `mixed`    pub basis: &'static str,}/// 生成之后到库文件最新之间这个节点下变了什么（最早那一段）。#[derive(Debug, Clone, PartialEq, Eq, Serialize)]pub struct ChangeSummary {    pub from_sesno: u32,    pub to_sesno: u32,    pub units_changed: usize,    pub units_added: usize,    pub units_removed: usize,    pub elements: StatusCounts,    pub unattributed: bool,}/// 生成预检。#[derive(Debug, Clone, PartialEq, Eq, Serialize)]pub struct Precheck {    pub units_to_generate: usize,    pub needs_confirm: bool,    pub confirm_threshold_units: usize,}/// [`judge`] 的结论。#[derive(Debug, Clone, PartialEq, Eq)]pub struct Judgement {    pub verdict: NodeModelVerdict,    pub verdict_reason: Option<&'static str>,    pub units: UnitTally,    pub generated_at: Option<GeneratedAt>,    pub changes: Option<ChangeSummary>,    pub precheck: Precheck,    pub warnings: Vec<String>,}/// 把事实折成结论（纯函数，ADR-099 D2–D5）。////// - `load_window(from)`：`from` → 库文件最新那一段的 [`WindowFacts`]；同一个 `from` 只会被问一次。算不出来回 `Err`。/// - `holds_receipt(根)`：一个**已被删掉**的单元在进程内投影里还有没有回执（有 = 屏幕上还可能画着它）。/// - `session_time(会话)`：那个会话的保存时刻。/// - `threshold`：需确认的阈值（[`confirm_threshold_units`]）。pub fn judge(    library: &LibraryStatus,    units: &[UnitFacts],    mut load_window: impl FnMut(u32) -> Result<Arc<WindowFacts>, String>,    holds_receipt: impl Fn(RefNo) -> bool,    session_time: impl Fn(u32) -> Option<String>,    threshold: usize,) -> Judgement {    let latest = library.file_latest_sesno;    let promise = library.durable_promise();    let mut warnings: Vec<String> = Vec::new();    let mut loaded: BTreeMap<u32, Option<Arc<WindowFacts>>> = BTreeMap::new();    let mut unreadable = false;    let mut window = |from: u32,                      loaded: &mut BTreeMap<u32, Option<Arc<WindowFacts>>>,                      warnings: &mut Vec<String>|     -> Option<Arc<WindowFacts>> {        if let Some(known) = loaded.get(&from) {            return known.clone();        }        let facts = match load_window(from) {            Ok(facts) => {                warnings.extend(facts.warnings.iter().cloned());                Some(facts)            }            Err(reason) => {                warnings.push(format!("会话 {from} → {latest} 的差分算不出来：{reason}"));                None            }        };        loaded.insert(from, facts.clone());        facts    };    // 水位之后才新建的单元，水位担保不到：先看水位那一段里新建了哪些根。子树里一个单元都没有就不必算。    let empty = BTreeSet::new();    let promise_window = match promise.filter(|promise| *promise < latest && !units.is_empty()) {        Some(promise) => {            let facts = window(promise, &mut loaded, &mut warnings);            unreadable |= facts.is_none();            facts        }        None => None,    };    let added_after_promise = promise_window        .as_ref()        .map_or(&empty, |facts| &facts.added_roots);    let states: Vec<UnitState> = units        .iter()        .map(|unit| classify_unit(library, unit, added_after_promise.contains(&key(unit.root))))        .collect();    // 要比的那几段：已生成的单元对应到的、早于库文件最新的会话。    let sessions: BTreeSet<u32> = states        .iter()        .filter_map(|state| match state {            UnitState::Generated { valid_through, .. } if *valid_through < latest => {                Some(*valid_through)            }            _ => None,        })        .collect();    let mut exact = true;    let kept: Vec<u32> = if sessions.len() > MAX_WINDOWS {        exact = false;        warnings.push(format!(            "已生成的单元对应到 {} 个不同的会话，只比最早的一段和最近的 {} 段",            sessions.len(),            MAX_WINDOWS - 1        ));        let ordered: Vec<u32> = sessions.iter().copied().collect();        std::iter::once(ordered[0])            .chain(ordered[ordered.len() - (MAX_WINDOWS - 1)..].iter().copied())            .collect()    } else {        sessions.iter().copied().collect()    };    let window_of = |valid_through: u32| {        if kept.contains(&valid_through) {            valid_through        } else {            kept[0]        }    };    let mut tally = UnitTally {        total: units.len(),        ..UnitTally::default()    };    let mut used: BTreeSet<u32> = BTreeSet::new();    let (mut sesno_min, mut sesno_max) = (u32::MAX, 0u32);    let (mut by_library, mut by_own) = (false, false);    for (unit, state) in units.iter().zip(&states) {        match state {            UnitState::Failed => tally.failed += 1,            UnitState::Missing => tally.missing += 1,            UnitState::Generated {                valid_through,                by_library: library_backed,            } => {                tally.generated += 1;                sesno_min = sesno_min.min(*valid_through);                sesno_max = sesno_max.max(*valid_through);                by_library |= *library_backed;                by_own |= !*library_backed;                if *valid_through >= latest {                    continue;                }                let from = window_of(*valid_through);                used.insert(from);                match window(from, &mut loaded, &mut warnings) {                    Some(facts) => {                        if facts.changed_roots.contains(&key(unit.root)) {                            tally.lagging += 1;                        }                    }                    None => unreadable = true,                }            }        }    }    // 归不到单元头上的两类变化：不属于任何生成单元的构件变了；有模型的单元被删了。    let mut other_changes = false;    for from in &used {        let Some(Some(facts)) = loaded.get(from) else {            continue;        };        exact &= !facts.truncated;        other_changes |= facts.unattributed;        let library_backed = promise == Some(*from);        other_changes |= facts            .removed_units            .iter()            .any(|unit| library_backed || holds_receipt(RefNo::new(unit.0, unit.1)));    }    exact &= !unreadable;    tally.exact = exact;    let (verdict, verdict_reason) = if let Some(reason) = library.unjudgeable() {        (NodeModelVerdict::Unknown, Some(reason))    } else if library.data_batch_running {        (NodeModelVerdict::Updating, Some("data_batch_running"))    } else if library.model_task_running {        (NodeModelVerdict::Updating, Some("model_task_running"))    } else if unreadable {        (NodeModelVerdict::Unknown, Some("changes_unreadable"))    } else if tally.total == 0 {        (NodeModelVerdict::Empty, None)    } else if tally.generated == 0 {        (NodeModelVerdict::NotGenerated, None)    } else if tally.generated < tally.total {        (NodeModelVerdict::Partial, None)    } else if tally.lagging > 0 {        (NodeModelVerdict::Lagging, Some("units_changed"))    } else if other_changes {        (NodeModelVerdict::Lagging, Some("other_changes"))    } else {        (NodeModelVerdict::Latest, None)    };    let generated_at = (tally.generated > 0).then(|| GeneratedAt {        sesno_min,        sesno_max,        time_min: session_time(sesno_min),        time_max: session_time(sesno_max),        basis: match (by_library, by_own) {            (true, false) => "library_watermark",            (false, true) => "own_generation",            _ => "mixed",        },    });    let changes = kept        .first()        .and_then(|from| loaded.get(from).cloned().flatten())        .map(|facts| ChangeSummary {            from_sesno: facts.from_sesno,            to_sesno: facts.to_sesno,            units_changed: facts.units_changed,            units_added: facts.units_added,            units_removed: facts.removed_units.len(),            elements: facts.elements.clone(),            unattributed: facts.unattributed,        });    let units_to_generate = tally.missing + tally.failed;    let (needs_confirm, _) = confirm_gate(units_to_generate, threshold);    let total_warnings = warnings.len();    if total_warnings > MAX_WARNINGS {        warnings.truncate(MAX_WARNINGS);        warnings.push(format!(            "…另有 {} 条告警未列出",            total_warnings - MAX_WARNINGS        ));    }    Judgement {        verdict,        verdict_reason,        units: tally,        generated_at,        changes,        precheck: Precheck {            units_to_generate,            needs_confirm,            confirm_threshold_units: threshold,        },        warnings,    }}/// 请求没法答的三种原因；HTTP 层按 `code` 分型。#[derive(Debug, Clone, PartialEq, Eq)]pub struct NodeStatusError {    /// `REFNO_NOT_FOUND` / `SOURCE_NOT_FOUND` / `internal`    pub code: &'static str,    pub message: String,}impl NodeStatusError {    fn new(code: &'static str, message: impl std::fmt::Display) -> Self {        Self {            code,            message: message.to_string(),        }    }    /// 生成根定库那一步的失败按类别分：元素 / 库不在是「没有这个节点」，文件打不开是「源不可用」。    fn from_source(error: anyhow::Error) -> Self {        let message = format!("{error:#}");        let code = match error            .chain()            .find_map(|cause| cause.downcast_ref::<RootDbError>())        {            Some(                RootDbError::InvalidRefNo { .. }                | RootDbError::DbNotInMdb { .. }                | RootDbError::NotAnElementDb { .. }                | RootDbError::ElementMissing { .. },            ) => "REFNO_NOT_FOUND",            _ => "SOURCE_NOT_FOUND",        };        Self::new(code, message)    }}impl std::fmt::Display for NodeStatusError {    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {        write!(f, "{}: {}", self.code, self.message)    }}impl std::error::Error for NodeStatusError {}/// 一个节点在文件侧的事实：它的库、库文件最新会话、子树里的生成单元。#[derive(Debug, Clone)]pub struct NodeScope {    pub node: RefNo,    pub noun: String,    pub dbnum: u32,    pub source_file: PathBuf,    /// 库文件指纹（路径 + 长度 + 修改时刻）：两个缓存的键都带它。    pub fingerprint: String,    pub file_latest_sesno: u32,    pub file_latest_time: Option<String>,    /// 请求的节点在某个生成单元**之内**时，那个单元的根。    pub unit_root: Option<RefNo>,    /// 差分以它为范围：节点自己，或它所属的单元根。    pub judged: RefNo,    /// 子树里的生成根，`/model/generate` 对同一个节点会枚举出的那一批、同序。    pub roots: Vec<RefNo>,    pub root_keys: BTreeSet<(u32, u32)>,}type ScopeKey = ((u32, u32), String);type WindowKey = (u32, (u32, u32), u32, u32, String);fn scope_cache() -> &'static Mutex<HashMap<ScopeKey, Arc<NodeScope>>> {    static CACHE: OnceLock<Mutex<HashMap<ScopeKey, Arc<NodeScope>>>> = OnceLock::new();    CACHE.get_or_init(|| Mutex::new(HashMap::new()))}fn window_cache() -> &'static Mutex<HashMap<WindowKey, Arc<WindowFacts>>> {    static CACHE: OnceLock<Mutex<HashMap<WindowKey, Arc<WindowFacts>>>> = OnceLock::new();    CACHE.get_or_init(|| Mutex::new(HashMap::new()))}fn cached<K: std::hash::Hash + Eq, V: Clone>(cache: &Mutex<HashMap<K, V>>, key: &K) -> Option<V> {    cache        .lock()        .unwrap_or_else(std::sync::PoisonError::into_inner)        .get(key)        .cloned()}fn remember<K: std::hash::Hash + Eq, V>(cache: &Mutex<HashMap<K, V>>, key: K, value: V) {    let mut guard = cache        .lock()        .unwrap_or_else(std::sync::PoisonError::into_inner);    if guard.len() >= CACHE_CAPACITY {        guard.clear();    }    guard.insert(key, value);}/// 测试 / 运维：清掉两个进程内缓存。pub fn forget_all() {    scope_cache()        .lock()        .unwrap_or_else(std::sync::PoisonError::into_inner)        .clear();    window_cache()        .lock()        .unwrap_or_else(std::sync::PoisonError::into_inner)        .clear();}/// 节点的文件侧事实（或从缓存取）。回 `(事实, 是否命中缓存)`。同步、读文件，调用方负责 `spawn_blocking`。////// 生成单元取 `DirectTreeService::generation_roots_in_subtree`——`/model/generate` 用的同一段遍历；节点在某个单元之内/// 时它回那一个单元，这里把它记成 `unit_root`、差分范围改成那个单元。pub fn node_scope(    tree: &DirectTreeService,    node: RefNo,) -> Result<(Arc<NodeScope>, bool), NodeStatusError> {    let version = crate::data_interface::model_source::root_source_version(node)        .map_err(NodeStatusError::from_source)?;    let fingerprint = crate::fast_model::historical_model::source_fingerprint(&version.file)        .map_err(|error| NodeStatusError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;    let cache_key: ScopeKey = (key(node), fingerprint.clone());    if let Some(scope) = cached(scope_cache(), &cache_key) {        return Ok((scope, true));    }    let internal = |error: anyhow::Error| NodeStatusError::new("internal", format!("{error:#}"));    let refu = RefU64::from_two_nums(node.word0, node.word1);    let requested = RefnoEnum::from(refu);    let unit_types = configured_delivery_unit_types();    let noun = tree.noun_of(refu).map_err(internal)?;    let owning = tree        .generation_root_of(refu, &unit_types)        .map_err(internal)?        .filter(|root| root.root != requested);    let (unit_root, roots) = match owning {        Some(root) => {            let root = refno_to_e3d(root.root);            (Some(root), vec![root])        }        None => (            None,            tree.generation_roots_in_subtree(refu, &unit_types)                .map_err(internal)?                .into_iter()                .map(|root| refno_to_e3d(root.root))                .collect(),        ),    };    let scope = Arc::new(NodeScope {        node,        noun: noun.trim().to_ascii_uppercase(),        dbnum: version.dbnum,        source_file: version.file,        fingerprint,        file_latest_sesno: version.sesno,        file_latest_time: version.session_time,        unit_root,        judged: unit_root.unwrap_or(node),        root_keys: roots.iter().copied().map(key).collect(),        roots,    });    remember(scope_cache(), cache_key, scope.clone());    Ok((scope, false))}/// `from_sesno` → 库文件最新这一段里，这个节点下变了什么（或从缓存取）。回 `(事实, 是否命中缓存)`。/// 同步、读文件。就是一次 [`node_diff_summary`]，不另写一遍差分。pub fn scope_window(    scope: &NodeScope,    from_sesno: u32,) -> Result<(Arc<WindowFacts>, bool), String> {    let cache_key: WindowKey = (        scope.dbnum,        key(scope.judged),        from_sesno,        scope.file_latest_sesno,        scope.fingerprint.clone(),    );    if let Some(facts) = cached(window_cache(), &cache_key) {        return Ok((facts, true));    }    let report = node_diff_summary(        scope.dbnum,        scope.judged,        from_sesno,        scope.file_latest_sesno,        DiffScope::Subtree,    )    .map_err(|error| format!("{}: {}", error.code, error.message))?;    let facts = Arc::new(window_facts(&report, &scope.root_keys));    remember(window_cache(), cache_key, facts.clone());    Ok((facts, false))}/// 某个会话的保存时刻。水位与文件最新那两个号的时刻调用方手里已经有了，只有别的号才走到会话链上。fn chain_time(source_file: &Path, sesno: u32) -> Option<String> {    crate::data_interface::db_file_header::session_chain(source_file)        .ok()?        .iter()        .find(|stamp| stamp.sesno == sesno)?        .rfc3339()}/// 所属库此刻的事实。水位行走镜像（[`crate::data_interface::dbnum_state::DbnumState::read`]）；读透形态没有这张表，/// 不白读（与 `/dbnums` 同一个做法）。库级判决与路由各用它们自己的那一个纯函数，不在这里重拼。pub async fn library_status(scope: &NodeScope) -> anyhow::Result<LibraryStatus> {    use crate::data_interface::dbnum_consistency::{RootCensus, verdict};    use crate::data_interface::dbnum_state::DbnumState;    use crate::data_interface::task_registry::TaskRegistry;    let dbnum = scope.dbnum;    let face = crate::options::data_face();    let stored = if face.is_read_through() {        None    } else {        DbnumState::read(dbnum).await?    };    let row = stored.unwrap_or_else(|| DbnumState {        dbnum,        ..DbnumState::default()    });    let registry = TaskRegistry::global();    let data_batch_running = registry.has_running_data_batch_for(dbnum);    let model_task_running = registry.active_dbnum_model_ensure(dbnum).is_some();    let route = crate::data_interface::model_read_route::route(        dbnum,        face,        row.applied_sesno,        row.model_sesno,        data_batch_running,    );    let census = RootCensus::from(crate::data_interface::model_root_ledger::census(dbnum));    let columns = verdict(&row, &census, face).columns();    Ok(LibraryStatus {        file_latest_sesno: scope.file_latest_sesno,        file_latest_time: scope.file_latest_time.clone(),        applied_sesno: row.applied_sesno,        model_sesno: row.model_sesno,        model_sesno_time: row.model_sesno_time,        initialized: row.initialized,        model_verdict: columns.model_verdict,        model_verdict_reason: columns.model_verdict_reason,        model_source: route.source.as_str(),        model_source_reason: route.reason.map(MemoryReason::as_str),        data_batch_running,        model_task_running,        in_watch_scope: crate::data_interface::watch_scope::admits(dbnum),        route,    })}/// 子树里每个生成单元的进程内事实：投影回执的会话（一把读锁取完）与账本条目。pub fn unit_facts(scope: &NodeScope) -> Vec<UnitFacts> {    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};    let receipts =        ModelMemoryStore::global().receipt_sesnos(ProjectionScope::Current, &scope.roots);    scope        .roots        .iter()        .zip(receipts)        .map(|(root, receipt_sesno)| {            let ledger = match crate::data_interface::model_root_ledger::entry(                scope.dbnum,                refno_from_e3d(*root),            ) {                None => LedgerFact::Absent,                Some(entry) if entry.is_settled() => LedgerFact::Generated {                    sesno: entry.source_end_sesno,                },                Some(_) => LedgerFact::Unsettled,            };            UnitFacts {                root: *root,                receipt_sesno,                ledger,            }        })        .collect()}/// HTTP 回执（spec §4.5.3）。#[derive(Debug, Clone, Serialize)]pub struct NodeModelStatus {    /// `a/b`    pub refno: String,    pub noun: String,    pub dbnum: u32,    /// 请求的节点在某个生成单元之内时，那个单元的根（`a/b`）；此时下面的数字说的都是这一个单元。    pub unit_root: Option<String>,    pub verdict: NodeModelVerdict,    pub verdict_reason: Option<&'static str>,    pub library: LibraryStatus,    pub units: UnitTally,    pub generated_at: Option<GeneratedAt>,    pub changes: Option<ChangeSummary>,    pub precheck: Precheck,    /// 这一次没有做文件侧的计算（生成单元清单与差分都命中了进程内缓存）。    pub cached: bool,    pub elapsed_ms: u128,    #[serde(skip_serializing_if = "Vec::is_empty")]    pub warnings: Vec<String>,}/// 在文件上把 [`judge`] 跑一遍：差分走 [`scope_window`]，被删单元的回执问投影，时刻先用手里已有的两个。/// 回 `(结论, 差分是否全部命中缓存)`。同步、读文件。pub fn judge_on_files(    scope: &NodeScope,    library: &LibraryStatus,    units: &[UnitFacts],) -> (Judgement, bool) {    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};    let mut all_cached = true;    let judgement = judge(        library,        units,        |from| {            let (facts, hit) = scope_window(scope, from)?;            all_cached &= hit;            Ok(facts)        },        |unit| {            ModelMemoryStore::global()                .receipt_sesnos(ProjectionScope::Current, &[unit])                .first()                .copied()                .flatten()                .is_some()        },        |sesno| {            if sesno == library.file_latest_sesno {                library.file_latest_time.clone()            } else if library.model_sesno > 0 && sesno == library.model_sesno as u32 {                library.model_sesno_time.clone()            } else {                chain_time(&scope.source_file, sesno)            }        },        confirm_threshold_units(),    );    (judgement, all_cached)}/// 入口：一个节点的模型状态与生成预检。读文件的两段各进一次 `spawn_blocking`，水位在两段之间读。pub async fn node_model_status(    tree: Arc<DirectTreeService>,    node: RefNo,) -> Result<NodeModelStatus, NodeStatusError> {    let started = Instant::now();    let joined = |error: tokio::task::JoinError| {        NodeStatusError::new("internal", format!("节点模型状态计算线程异常退出: {error}"))    };    let (scope, scope_cached) = tokio::task::spawn_blocking(move || node_scope(&tree, node))        .await        .map_err(joined)??;    let library = library_status(&scope)        .await        .map_err(|error| NodeStatusError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;    let units = unit_facts(&scope);    let (judgement, windows_cached, scope, library) = tokio::task::spawn_blocking(move || {        let (judgement, windows_cached) = judge_on_files(&scope, &library, &units);        (judgement, windows_cached, scope, library)    })    .await    .map_err(joined)?;    Ok(NodeModelStatus {        refno: refno_text(scope.node),        noun: scope.noun.clone(),        dbnum: scope.dbnum,        unit_root: scope.unit_root.map(refno_text),        verdict: judgement.verdict,        verdict_reason: judgement.verdict_reason,        library,        units: judgement.units,        generated_at: judgement.generated_at,        changes: judgement.changes,        precheck: judgement.precheck,        cached: scope_cached && windows_cached,        elapsed_ms: started.elapsed().as_millis(),        warnings: judgement.warnings,    })}#[cfg(test)]mod tests {    use super::*;    use crate::data_interface::model_read_route::route;    use crate::fast_model::node_diff_summary::{DiffGroup, DiffRow, DiffSummaryStats, UnitTally as DiffUnits};    use crate::fast_model::unit_versions::UnitVersionImpact;    use crate::options::DataFace;    const DBNUM: u32 = 7999;    fn refno(id: u32) -> RefNo {        RefNo::new(24383, id)    }    /// 一个库的事实：数据面形态 + 三枚水位（+ 有没有批次在跑），其余格由同一批纯函数推出来。    fn library(face: DataFace, applied: i32, model: i32, latest: u32, running: bool) -> LibraryStatus {        let route = route(DBNUM, face, applied, model, running);        LibraryStatus {            file_latest_sesno: latest,            file_latest_time: Some(format!("t{latest}")),            applied_sesno: applied,            model_sesno: model,            model_sesno_time: (model > 0).then(|| format!("t{model}")),            initialized: applied > 0,            model_verdict: "in_sync",            model_verdict_reason: None,            model_source: route.source.as_str(),            model_source_reason: route.reason.map(MemoryReason::as_str),            data_batch_running: running,            model_task_running: false,            in_watch_scope: true,            route,        }    }    /// 已初始化、水位追平数据的库：模型从库里读。    fn initialized(model: i32, latest: u32) -> LibraryStatus {        library(DataFace::Ingest, model, model, latest, false)    }    /// 未初始化的库：数据水位没建立，模型只在进程内投影里。    fn uninitialized(latest: u32) -> LibraryStatus {        library(DataFace::Ingest, 0, 0, latest, false)    }    fn cold(id: u32) -> UnitFacts {        UnitFacts {            root: refno(id),            receipt_sesno: None,            ledger: LedgerFact::Absent,        }    }    fn generated(id: u32, sesno: u32) -> UnitFacts {        UnitFacts {            root: refno(id),            receipt_sesno: Some(sesno),            ledger: LedgerFact::Generated {                sesno: sesno as i32,            },        }    }    fn row(id: u32, status: DiffStatus) -> DiffRow {        DiffRow {            refno: refno_text(refno(id)),            noun: Some("ELBO".to_owned()),            status,            impact: match status {                DiffStatus::Added => UnitVersionImpact::Delivery,                DiffStatus::Deleted => UnitVersionImpact::Tombstone,                DiffStatus::Modified => UnitVersionImpact::Mesh,                DiffStatus::Noop => UnitVersionImpact::Noop,            },            is_node: false,        }    }    fn group(unit: Option<u32>, rows: Vec<DiffRow>) -> DiffGroup {        let mut counts = StatusCounts::default();        for row in &rows {            match row.status {                DiffStatus::Added => counts.added += 1,                DiffStatus::Deleted => counts.deleted += 1,                DiffStatus::Modified => counts.modified += 1,                DiffStatus::Noop => counts.noop += 1,            }        }        DiffGroup {            unit_root: unit.map(|id| refno_text(refno(id))),            unit_noun: unit.map(|_| "BRAN".to_owned()),            unit_name: None,            geometry_changed: counts.geometry_changed(),            counts,            rows,            rows_truncated: 0,        }    }    fn report(a: u32, b: u32, groups: Vec<DiffGroup>) -> DiffSummaryReport {        let mut elements = StatusCounts::default();        for group in &groups {            elements.added += group.counts.added;            elements.deleted += group.counts.deleted;            elements.modified += group.counts.modified;            elements.noop += group.counts.noop;        }        let changed = groups            .iter()            .filter(|group| group.unit_root.is_some() && group.geometry_changed)            .count();        DiffSummaryReport {            dbnum: DBNUM,            refno: refno_text(refno(1)),            noun: Some("ZONE".to_owned()),            scope: DiffScope::Subtree,            a,            b,            units: DiffUnits {                changed,                unchanged: 0,                total: changed,                complete: true,            },            elements,            groups,            needs_confirm: false,            estimated_projections: changed * 2,            confirm_threshold_units: 20,            elapsed_ms: 0,            stats: DiffSummaryStats::default(),            warnings: Vec::new(),        }    }    fn roots(ids: &[u32]) -> BTreeSet<(u32, u32)> {        ids.iter().map(|id| key(refno(*id))).collect()    }    /// 用一张「起点会话 → 差异摘要」的表跑判定；表里没有的起点就是算不出来。记下问过哪些起点。    fn run(        library: &LibraryStatus,        units: &[UnitFacts],        windows: &[DiffSummaryReport],        threshold: usize,    ) -> (Judgement, Vec<u32>) {        let root_keys: BTreeSet<(u32, u32)> = units.iter().map(|unit| key(unit.root)).collect();        let mut asked = Vec::new();        let judgement = judge(            library,            units,            |from| {                asked.push(from);                windows                    .iter()                    .find(|report| report.a == from)                    .map(|report| Arc::new(window_facts(report, &root_keys)))                    .ok_or_else(|| format!("没有 {from} 这一段"))            },            |unit| unit == refno(99),            |sesno| Some(format!("t{sesno}")),            threshold,        );        (judgement, asked)    }    /// ADR-099 D2：失败一票否决；回执优先；库里读得到时水位担保没有回执的单元，回执比水位旧的也对应到水位；    /// 水位之后新建的单元水位担保不到；未初始化的库只认回执。    #[test]    fn a_unit_is_generated_by_its_receipt_or_by_the_library_watermark() {        let ready = initialized(738, 748);        let bare = uninitialized(447);        let by_library = |sesno| UnitState::Generated {            valid_through: sesno,            by_library: true,        };        let by_own = |sesno| UnitState::Generated {            valid_through: sesno,            by_library: false,        };        assert_eq!(classify_unit(&ready, &cold(1), false), by_library(738));        assert_eq!(classify_unit(&ready, &generated(1, 700), false), by_library(738));        assert_eq!(classify_unit(&ready, &generated(1, 745), false), by_own(745));        // 水位之后才新建的：水位担保不到，只看它自己。        assert_eq!(classify_unit(&ready, &cold(1), true), UnitState::Missing);        assert_eq!(classify_unit(&ready, &generated(1, 745), true), by_own(745));        // 回执已被逐出投影，账本里还记着它按需生成到了 745：库里读得到，作数。        let evicted = UnitFacts {            root: refno(1),            receipt_sesno: None,            ledger: LedgerFact::Generated { sesno: 745 },        };        assert_eq!(classify_unit(&ready, &evicted, true), by_own(745));        // 账本里悬着失败：水位和回执都救不了。        let failed = UnitFacts {            ledger: LedgerFact::Unsettled,            ..generated(1, 748)        };        assert_eq!(classify_unit(&ready, &failed, false), UnitState::Failed);        assert_eq!(classify_unit(&bare, &cold(1), false), UnitState::Missing);        assert_eq!(classify_unit(&bare, &generated(1, 440), false), by_own(440));        // 未初始化的库没有东西可回读：账本说成了、投影里却没有回执，records 读不到，不算已生成。        assert_eq!(classify_unit(&bare, &evicted, false), UnitState::Missing);        // 模型落后于数据的库：路由是 memory，但允许按根回读库里 S 时刻那份——水位照样担保。        let lagging = library(DataFace::Ingest, 750, 738, 750, false);        assert_eq!(lagging.model_source, "memory");        assert_eq!(classify_unit(&lagging, &cold(1), false), by_library(738));        // 读透形态库里从来不是权威。        let read_through = library(DataFace::ReadThrough, 0, 0, 447, false);        assert_eq!(classify_unit(&read_through, &cold(1), false), UnitState::Missing);    }    /// 差异摘要 → 判定要的几格：交付单元那几组按摘要给的单元根记；单元根自己新增 / 被删单列；不在交付单元下的那一组，    /// 行自己是生成根的记在它头上，其余是「归不到单元上」；noop 不算。    #[test]    fn a_diff_summary_folds_into_changed_added_and_removed_roots() {        let summary = report(            738,            748,            vec![                group(Some(10), vec![row(101, DiffStatus::Modified)]),                group(Some(20), vec![row(20, DiffStatus::Added), row(201, DiffStatus::Added)]),                group(Some(30), vec![row(30, DiffStatus::Deleted)]),                group(Some(40), vec![row(401, DiffStatus::Noop)]),                group(                    None,                    vec![                        row(50, DiffStatus::Modified),                        row(60, DiffStatus::Added),                        row(1, DiffStatus::Noop),                    ],                ),            ],        );        let facts = window_facts(&summary, &roots(&[10, 20, 40, 50, 60]));        assert_eq!((facts.from_sesno, facts.to_sesno), (738, 748));        assert_eq!(facts.units_changed, 3, "就是摘要的 units.changed");        assert_eq!(facts.units_added, 1);        assert_eq!(facts.changed_roots, roots(&[10, 20, 30, 50, 60]));        assert_eq!(facts.added_roots, roots(&[20, 60]));        assert_eq!(facts.removed_units, roots(&[30]));        assert!(!facts.unattributed);        assert!(!facts.truncated);        assert_eq!(facts.elements, summary.elements);        // 不在交付单元下、自己也不是生成根的构件有几何变化：归不到单元上。        let orphan = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Modified)])]);        let facts = window_facts(&orphan, &roots(&[10]));        assert!(facts.unattributed);        assert!(facts.changed_roots.is_empty());        // 行被截断的组：交付单元仍然知道是哪一个，但它的根是不是新增说不准；不在单元下的那一组截断就是归属不完整。        let mut cut = group(Some(10), vec![row(101, DiffStatus::Modified)]);        cut.rows_truncated = 7;        let facts = window_facts(&report(738, 748, vec![cut]), &roots(&[10]));        assert_eq!(facts.changed_roots, roots(&[10]));        assert!(facts.truncated);        let mut cut = group(None, vec![row(50, DiffStatus::Modified)]);        cut.rows_truncated = 7;        let facts = window_facts(&report(738, 748, vec![cut]), &roots(&[50]));        assert!(facts.truncated && facts.unattributed);    }    /// 三个基线 SITE 的形状：库已初始化，库文件比模型水位新，但水位之后没有改到这个节点 → 最新。    /// 库已经追平时连差分都不做。    #[test]    fn an_initialized_node_is_latest_when_nothing_under_it_changed_after_the_watermark() {        let units = [cold(10), cold(20), cold(30)];        let quiet = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Noop)])]);        let (judgement, asked) = run(&initialized(738, 748), &units, &[quiet], 20);        assert_eq!(asked, vec![738], "水位那一段只算一次");        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);        assert_eq!(judgement.verdict_reason, None);        assert_eq!(            judgement.units,            UnitTally {                total: 3,                generated: 3,                missing: 0,                failed: 0,                lagging: 0,                exact: true            }        );        let at = judgement.generated_at.expect("有已生成的单元");        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (738, 738, "library_watermark"));        assert_eq!(at.time_min.as_deref(), Some("t738"));        let changes = judgement.changes.expect("比过一段");        assert_eq!((changes.from_sesno, changes.to_sesno), (738, 748));        assert_eq!(changes.units_changed, 0);        assert_eq!(changes.elements.noop, 1);        assert_eq!(judgement.precheck.units_to_generate, 0);        assert!(!judgement.precheck.needs_confirm);        let (judgement, asked) = run(&initialized(748, 748), &units, &[], 20);        assert!(asked.is_empty(), "库已追平，不做差分");        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);        assert_eq!(judgement.changes, None);    }    /// 水位之后有会话改到了它下面的单元 → 落后，点得出几个；只有归不到单元上的变化或被删的单元 → 也是落后，原因不同。    #[test]    fn an_initialized_node_lags_when_units_under_it_changed_after_the_watermark() {        let units = [cold(10), cold(20), cold(30)];        let touched = report(            738,            748,            vec![                group(Some(10), vec![row(101, DiffStatus::Modified)]),                group(Some(30), vec![row(301, DiffStatus::Deleted)]),                group(Some(20), vec![row(201, DiffStatus::Noop)]),            ],        );        let (judgement, _) = run(&initialized(738, 748), &units, &[touched], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);        assert_eq!(judgement.verdict_reason, Some("units_changed"));        assert_eq!(judgement.units.lagging, 2);        assert_eq!(judgement.units.generated, 3);        assert_eq!(judgement.changes.expect("比过").units_changed, 2);        let zone_moved = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Modified)])]);        let (judgement, _) = run(&initialized(738, 748), &units, &[zone_moved], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);        assert_eq!(judgement.verdict_reason, Some("other_changes"));        assert_eq!(judgement.units.lagging, 0);        assert!(judgement.changes.expect("比过").unattributed);        // 一个有模型的单元被删了：它不在库文件最新的清单里，但库里那份还在。        let unit_deleted = report(738, 748, vec![group(Some(40), vec![row(40, DiffStatus::Deleted)])]);        let (judgement, _) = run(&initialized(738, 748), &units, &[unit_deleted], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);        assert_eq!(judgement.verdict_reason, Some("other_changes"));        assert_eq!(judgement.changes.expect("比过").units_removed, 1);    }    /// 水位之后才新建的单元：水位担保不到，没人按需生成过就是缺的 → 部分生成，预检数它。    #[test]    fn a_unit_created_after_the_watermark_is_missing_until_someone_generates_it() {        let units = [cold(10), cold(20)];        let created = report(738, 748, vec![group(Some(20), vec![row(20, DiffStatus::Added)])]);        let (judgement, _) = run(&initialized(738, 748), &units, &[created.clone()], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);        assert_eq!((judgement.units.generated, judgement.units.missing), (1, 1));        assert_eq!(judgement.precheck.units_to_generate, 1);        assert_eq!(judgement.changes.expect("比过").units_added, 1);        // 按需生成到了库文件最新：补齐了，而且不落后。        let units = [cold(10), generated(20, 748)];        let (judgement, _) = run(&initialized(738, 748), &units, &[created], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);        let at = judgement.generated_at.expect("有已生成的单元");        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (738, 748, "mixed"));    }    /// 未初始化的库（7997 `24381/535` 那种）：只认本进程的回执。一个都没有 → 未生成；有一部分 → 部分生成；    /// 全有且都对应到库文件最新 → 最新，不做差分。    #[test]    fn an_uninitialized_node_counts_only_what_this_process_generated() {        let bare = uninitialized(447);        let (judgement, asked) = run(&bare, &[cold(10), cold(20), cold(30)], &[], 20);        assert!(asked.is_empty());        assert_eq!(judgement.verdict, NodeModelVerdict::NotGenerated);        assert_eq!(judgement.units.missing, 3);        assert_eq!(judgement.generated_at, None);        assert_eq!(judgement.precheck.units_to_generate, 3);        let (judgement, asked) = run(&bare, &[generated(10, 447), generated(20, 447), cold(30)], &[], 20);        assert!(asked.is_empty());        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);        assert_eq!((judgement.units.generated, judgement.units.missing), (2, 1));        let at = judgement.generated_at.expect("有已生成的单元");        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (447, 447, "own_generation"));        let all = [generated(10, 447), generated(20, 447), generated(30, 447)];        let (judgement, asked) = run(&bare, &all, &[], 20);        assert!(asked.is_empty());        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);    }    /// 未初始化的库里每个单元按它自己的生成会话比：440 生成的单元之后被改到了才落后；447 生成的那个不受 440→447    /// 那一段影响。被删的单元只有投影里还留着回执（屏幕上还可能画着）才算数。    #[test]    fn each_unit_is_compared_from_its_own_generation_session() {        let bare = uninitialized(447);        let units = [generated(10, 440), generated(20, 447), generated(30, 440)];        let since_440 = report(            440,            447,            vec![                group(Some(10), vec![row(101, DiffStatus::Modified)]),                group(Some(20), vec![row(201, DiffStatus::Modified)]),            ],        );        let (judgement, asked) = run(&bare, &units, &[since_440], 20);        assert_eq!(asked, vec![440]);        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);        assert_eq!(judgement.units.lagging, 1, "20 是 447 生成的，440→447 的改动已经在它里面");        let gone_without_receipt =            report(440, 447, vec![group(Some(41), vec![row(41, DiffStatus::Deleted)])]);        let (judgement, _) = run(&bare, &units, &[gone_without_receipt], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);        let gone_with_receipt =            report(440, 447, vec![group(Some(99), vec![row(99, DiffStatus::Deleted)])]);        let (judgement, _) = run(&bare, &units, &[gone_with_receipt], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);        assert_eq!(judgement.verdict_reason, Some("other_changes"));    }    /// 失败的单元不算已生成，预检把它和缺的一起数；阈值是「超过」才要确认，0 = 从不确认。    #[test]    fn failed_units_are_not_generated_and_the_precheck_counts_them_with_the_missing() {        let failed = UnitFacts {            ledger: LedgerFact::Unsettled,            ..generated(10, 447)        };        let (judgement, _) = run(&uninitialized(447), &[failed, generated(20, 447), cold(30)], &[], 2);        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);        assert_eq!(            (judgement.units.generated, judgement.units.missing, judgement.units.failed),            (1, 1, 1)        );        assert_eq!(judgement.precheck.units_to_generate, 2);        assert!(!judgement.precheck.needs_confirm, "恰好等于阈值不用确认");        assert_eq!(judgement.precheck.confirm_threshold_units, 2);        let many: Vec<UnitFacts> = (0..21).map(|id| cold(100 + id)).collect();        let (judgement, _) = run(&uninitialized(447), &many, &[], 20);        assert!(judgement.precheck.needs_confirm);        let (judgement, _) = run(&uninitialized(447), &many, &[], 0);        assert!(!judgement.precheck.needs_confirm);    }    /// 没有生成单元的节点、正在被写的库、水位失配的库、差分算不出来——各有各的判定，计数照常给。    #[test]    fn empty_updating_and_unknown_are_told_apart() {        let (judgement, _) = run(&initialized(738, 748), &[], &[], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Empty);        assert_eq!(judgement.units.total, 0);        let writing = library(DataFace::Ingest, 748, 738, 748, true);        assert_eq!(writing.model_source_reason, Some("initialization_publishing"));        let quiet = report(738, 748, Vec::new());        let (judgement, _) = run(&writing, &[cold(10)], &[quiet.clone()], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Updating);        assert_eq!(judgement.verdict_reason, Some("data_batch_running"));        assert_eq!(judgement.units.generated, 1, "计数照常给");        let mut task = initialized(738, 748);        task.model_task_running = true;        let (judgement, _) = run(&task, &[cold(10)], &[quiet], 20);        assert_eq!(judgement.verdict, NodeModelVerdict::Updating);        assert_eq!(judgement.verdict_reason, Some("model_task_running"));        // 模型水位越过数据水位：库行不可信。        let inverted = library(DataFace::Ingest, 700, 738, 748, false);        let (judgement, asked) = run(&inverted, &[cold(10)], &[], 20);        assert!(asked.is_empty(), "库里那份不作数，没有可比的起点");        assert_eq!(judgement.verdict, NodeModelVerdict::Unknown);        assert_eq!(judgement.verdict_reason, Some("watermarks_inconsistent"));        // 要比的那一段算不出来（会话不在链上之类）。        let (judgement, asked) = run(&initialized(738, 748), &[cold(10)], &[], 20);        assert_eq!(asked, vec![738]);        assert_eq!(judgement.verdict, NodeModelVerdict::Unknown);        assert_eq!(judgement.verdict_reason, Some("changes_unreadable"));        assert!(!judgement.units.exact);        assert_eq!(judgement.warnings.len(), 1);        assert_eq!(judgement.changes, None);    }    /// 已生成的单元对应到的会话太多时：只比最早的一段和最近的几段，其余按最早那一段算，并说明计数不精确。    #[test]    fn too_many_generation_sessions_are_capped_and_flagged_inexact() {        let units: Vec<UnitFacts> = (0..6).map(|i| generated(10 + i, 440 + i)).collect();        let windows: Vec<DiffSummaryReport> = [440, 443, 444, 445]            .into_iter()            .map(|from| report(from, 447, Vec::new()))            .collect();        let (judgement, mut asked) = run(&uninitialized(447), &units, &windows, 20);        asked.sort_unstable();        assert_eq!(asked, vec![440, 443, 444, 445], "441 / 442 并进最早的 440 那一段");        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);        assert!(!judgement.units.exact);        assert_eq!(judgement.changes.expect("比过").from_sesno, 440);    }    /// 字面值是给前端的契约。    #[test]    fn the_verdict_and_report_serialize_with_the_frozen_names() {        for (verdict, name) in [            (NodeModelVerdict::Unknown, "unknown"),            (NodeModelVerdict::Updating, "updating"),            (NodeModelVerdict::Empty, "empty"),            (NodeModelVerdict::NotGenerated, "not_generated"),            (NodeModelVerdict::Partial, "partial"),            (NodeModelVerdict::Lagging, "lagging"),            (NodeModelVerdict::Latest, "latest"),        ] {            assert_eq!(serde_json::to_value(verdict).unwrap(), name);        }        let library = uninitialized(447);        let (judgement, _) = run(&library, &[generated(10, 447), cold(20)], &[], 20);        let status = NodeModelStatus {            refno: "24383/1".to_owned(),            noun: "ZONE".to_owned(),            dbnum: DBNUM,            unit_root: None,            verdict: judgement.verdict,            verdict_reason: judgement.verdict_reason,            library,            units: judgement.units,            generated_at: judgement.generated_at,            changes: judgement.changes,            precheck: judgement.precheck,            cached: false,            elapsed_ms: 3,            warnings: judgement.warnings,        };        let json = serde_json::to_value(&status).unwrap();        assert_eq!(json["verdict"], "partial");        assert_eq!(json["verdict_reason"], serde_json::Value::Null);        assert_eq!(json["unit_root"], serde_json::Value::Null);        assert_eq!(json["library"]["model_source"], "memory");        assert_eq!(json["library"]["model_source_reason"], "data_watermark_unestablished");        assert!(json["library"].get("route").is_none(), "路由结论只在进程里用，不上线");        assert_eq!(json["units"]["total"], 2);        assert_eq!(json["generated_at"]["basis"], "own_generation");        assert_eq!(json["changes"], serde_json::Value::Null);        assert_eq!(json["precheck"]["confirm_threshold_units"], 20);        assert!(json.get("warnings").is_none(), "空告警不进回执");    }    /// 在真库文件上跑一遍文件侧的两段，看数和用时（不连数据库、不写任何东西）。水位由环境变量给——就是在问    /// 「假如这个库的模型水位是 S，这个节点现在算什么」。    ///    /// `AIOS_NODE_STATUS_PROBE_REFNO`（缺省 `9304/2`）、`AIOS_NODE_STATUS_PROBE_MODEL_SESNO`（缺省 0 = 按未初始化算）。    /// 在仓库根目录跑：`cargo test --lib live_probe_node_model_status -- --ignored --nocapture`。    #[test]    #[ignore = "requires local project source files (read-only)"]    fn live_probe_node_model_status_on_real_files() {        let refno_text_in = std::env::var("AIOS_NODE_STATUS_PROBE_REFNO").unwrap_or_else(|_| "9304/2".into());        let model_sesno: i32 = std::env::var("AIOS_NODE_STATUS_PROBE_MODEL_SESNO")            .ok()            .and_then(|raw| raw.trim().parse().ok())            .unwrap_or(0);        let node = crate::fast_model::e3d_model_service::parse_refno(&refno_text_in).expect("refno");        let option = aios_core::get_db_option();        let tree = DirectTreeService::open(&option.project_name, &option.mdb_name).expect("direct tree");        for round in ["cold", "warm"] {            let started = Instant::now();            let (scope, scope_cached) = node_scope(&tree, node).expect("node scope");            let scope_ms = started.elapsed().as_millis();            let route = route(scope.dbnum, DataFace::Ingest, model_sesno, model_sesno, false);            let library = LibraryStatus {                file_latest_sesno: scope.file_latest_sesno,                file_latest_time: scope.file_latest_time.clone(),                applied_sesno: model_sesno,                model_sesno,                model_sesno_time: None,                initialized: model_sesno > 0,                model_verdict: "probe",                model_verdict_reason: None,                model_source: route.source.as_str(),                model_source_reason: route.reason.map(MemoryReason::as_str),                data_batch_running: false,                model_task_running: false,                in_watch_scope: true,                route,            };            let units: Vec<UnitFacts> = scope                .roots                .iter()                .map(|root| UnitFacts {                    root: *root,                    receipt_sesno: None,                    ledger: LedgerFact::Absent,                })                .collect();            let judge_started = Instant::now();            let (judgement, windows_cached) = judge_on_files(&scope, &library, &units);            println!(                "[{round}] {} {} dbnum={} latest={} model_sesno={model_sesno} roots={} unit_root={:?} \                 scope={scope_ms}ms(cached={scope_cached}) judge={}ms(cached={windows_cached}) \                 verdict={:?}/{:?} units={:?} generated_at={:?} changes={:?} precheck={:?} warnings={:?}",                refno_text(scope.node),                scope.noun,                scope.dbnum,                scope.file_latest_sesno,                scope.roots.len(),                scope.unit_root.map(refno_text),                judge_started.elapsed().as_millis(),                judgement.verdict,                judgement.verdict_reason,                judgement.units,                judgement.generated_at,                judgement.changes,                judgement.precheck,                judgement.warnings,            );        }    }    /// 「库文件最新会话号」三处读法在真库文件上逐库对一遍（只读文件头，不连数据库）：    ///    /// - 模型树骨架上钉的会话（`/dbnums` 引导形状的 `file_latest_sesno`）；    /// - `model_source::latest_source_version`（本接口的 `library.file_latest_sesno`，`/dbnums` 带身份形态    ///   2026-11-11 起也读它）；    /// - `db_file_header::latest_sesno`（增量扫描读的那个数，登记表里的观察值就是它当时的值）。    ///    /// 三者必须相等——前端拿模型树的数和「模型生成」面板的数、节点状态里的库水位互相比。    /// 在仓库根目录跑：`cargo test --lib live_probe_file_latest_sesno -- --ignored --nocapture`。    #[test]    #[ignore = "requires local project source files (read-only)"]    fn live_probe_file_latest_sesno_agrees_across_readers() {        let option = aios_core::get_db_option();        let tree = DirectTreeService::open(&option.project_name, &option.mdb_name).expect("direct tree");        let metadata = tree.metadata().expect("tree metadata");        let mut different = 0usize;        for database in metadata.databases() {            let header = crate::data_interface::db_file_header::latest_sesno(&database.file)                .expect("file header");            let version = crate::data_interface::model_source::latest_source_version(database.dbnum)                .expect("latest source version");            let same = database.sesno == header && version.sesno == header && version.file == database.file;            if !same {                different += 1;            }            println!(                "file-latest-probe dbnum={} type={} tree={} model_source={} header={} same_file={} {}",                database.dbnum,                database.db_type,                database.sesno,                version.sesno,                header,                version.file == database.file,                if same { "ok" } else { "DIFFERENT" },            );        }        println!(            "file-latest-probe libraries={} different={different}",            metadata.databases().len()        );        assert!(!metadata.databases().is_empty(), "当前 MDB 一个元素库都没有");        assert_eq!(different, 0, "三处读到的库文件最新会话号必须相同");    }}
+//! 节点模型状态与生成预检（ADR-099；`GET /api/v1/node/model-status`，spec §4.5.3）。
+//!
+//! 一次回答一个节点（含 SITE / ZONE）的三个问题：它下面的模型**生成过没有**、**是不是最新**、**要生成的话有多少**。
+//! 全部是按需算的派生量，来源四样：水位行（库里唯一的持久事实，ADR-079）、库文件（生成单元清单、两个会话之间的差分）、
+//! 进程内的投影回执与生成根账本、任务登记表。不建表、不写任何东西；后端没有任何一条判据读这里的输出——它只给人和
+//! 前端看，所以不是第二份事实。
+//!
+//! 三段：
+//! - 判定是纯函数（[`classify_unit`] / [`window_facts`] / [`judge`]），事实由调用方喂进来，单测不需要库文件；
+//! - 文件侧两类计算（[`node_scope`]：子树里有哪些生成单元；[`scope_window`]：一段会话之间这个节点下变了什么）各有一个
+//!   进程内缓存，键里带库文件指纹，文件一动就失效。水位、回执、账本、任务每次现读，不缓存；
+//! - [`node_model_status`] 把它们串起来。
+//!
+//! 「落后」的尺子是 [`crate::fast_model::node_diff_summary`]：从一个单元对应到的会话到库文件最新做一次**净**差分，
+//! 影响判定用的是生成那条路自己的 `classify_operation_impact`。登录写的记账会话、只改名字描述的修改判成 noop，不算落后。
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+
+use aios_core::{RefU64, RefnoEnum};
+use e3d_io::refno::RefNo;
+use serde::Serialize;
+
+use crate::data_interface::direct_tree::DirectTreeService;
+use crate::data_interface::generation_root::{
+    configured_delivery_unit_types, refno_from_e3d, refno_to_e3d,
+};
+use crate::data_interface::model_read_route::{MemoryReason, ModelReadRoute};
+use crate::data_interface::model_source::RootDbError;
+use crate::fast_model::node_diff_summary::{
+    DiffScope, DiffStatus, DiffSummaryReport, StatusCounts, confirm_gate, confirm_threshold_units,
+    node_diff_summary,
+};
+
+/// 一次判定最多比几段会话。已生成的单元对应到的会话多于这个数时，只比最早的一段和最近的几段，其余按最早那一段算
+/// （范围更大，可能多报落后），并把 `units.exact` 记成 false。
+const MAX_WINDOWS: usize = 4;
+/// 两个进程内缓存各留多少项；满了整体清空（与版本表那一族同一个做法）。
+const CACHE_CAPACITY: usize = 256;
+/// 回执里最多带几条告警。
+const MAX_WARNINGS: usize = 20;
+
+/// 节点的总判定。字面值是给前端的契约（spec §4.5.3），只许加、不许改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeModelVerdict {
+    /// 判不了：两枚水位失配 / 读不到，或要比的那一段差分算不出来。
+    Unknown,
+    /// 这个库此刻正在被写。
+    Updating,
+    /// 子树里没有任何生成单元。
+    Empty,
+    NotGenerated,
+    Partial,
+    Lagging,
+    Latest,
+}
+
+/// 所属库的事实。数值与 `/dbnums` 那一行同源（水位行、`dbnum_consistency::verdict`、`model_read_route::route`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryStatus {
+    pub file_latest_sesno: u32,
+    pub file_latest_time: Option<String>,
+    pub applied_sesno: i32,
+    pub model_sesno: i32,
+    pub model_sesno_time: Option<String>,
+    pub initialized: bool,
+    pub model_verdict: &'static str,
+    pub model_verdict_reason: Option<&'static str>,
+    pub model_source: &'static str,
+    pub model_source_reason: Option<&'static str>,
+    pub data_batch_running: bool,
+    pub model_task_running: bool,
+    pub in_watch_scope: bool,
+    /// 路由结论本身：判定按它问「库里的整库模型读不读得到」，不自己重拼判据。
+    #[serde(skip)]
+    pub route: ModelReadRoute,
+}
+
+impl LibraryStatus {
+    /// 库里的整库模型读得到时，它盖到的会话（ADR-099 D2 第 3 条）：模型水位的承诺是「到这个会话为止每个生成单元都已
+    /// 发布」（ADR-079 D3）。「读得到」取路由的现成结论——`database`，或 `memory` 而允许按根回读库。
+    pub fn durable_promise(&self) -> Option<u32> {
+        let readable = self.route.is_database() || self.route.allows_durable_fallback();
+        (readable && self.model_sesno > 0).then_some(self.model_sesno as u32)
+    }
+
+    /// 两枚水位说不清的两档：库行不可信，节点一级也就判不了。
+    fn unjudgeable(&self) -> Option<&'static str> {
+        match self.route.reason {
+            Some(MemoryReason::WatermarksInconsistent) => Some("watermarks_inconsistent"),
+            Some(MemoryReason::ModelWatermarkUnavailable) => Some("model_watermark_unavailable"),
+            _ => None,
+        }
+    }
+}
+
+/// 账本对一个单元说了什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerFact {
+    Absent,
+    /// 最近一次生成成了，按哪一版源（`0` = 调用方当时不知道）。
+    Generated { sesno: i32 },
+    /// 失败还没重新成功，或已放弃：那份几何不可信（ADR-079 D6）。
+    Unsettled,
+}
+
+/// 进到判定里的、一个生成单元的进程内事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitFacts {
+    pub root: RefNo,
+    /// 投影里这一根的回执是按哪个会话生成的。
+    pub receipt_sesno: Option<u32>,
+    pub ledger: LedgerFact,
+}
+
+/// 一个生成单元的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitState {
+    Failed,
+    Missing,
+    /// 有模型。`valid_through` = 这份模型对应到的会话；`by_library` = 靠库的模型水位担保（否则是它自己的生成会话）。
+    Generated { valid_through: u32, by_library: bool },
+}
+
+fn key(refno: RefNo) -> (u32, u32) {
+    (refno.word0, refno.word1)
+}
+
+fn refno_text(refno: RefNo) -> String {
+    format!("{}/{}", refno.word0, refno.word1)
+}
+
+fn parse_key(text: &str) -> Option<(u32, u32)> {
+    let (word0, word1) = text.split_once('/')?;
+    Some((word0.trim().parse().ok()?, word1.trim().parse().ok()?))
+}
+
+/// 一个单元算不算已生成（纯函数，ADR-099 D2）。`added_after_promise` = 它是模型水位之后才新建的，水位担保不到。
+pub fn classify_unit(
+    library: &LibraryStatus,
+    unit: &UnitFacts,
+    added_after_promise: bool,
+) -> UnitState {
+    if unit.ledger == LedgerFact::Unsettled {
+        return UnitState::Failed;
+    }
+    let readable = library.durable_promise();
+    // 库里读得到时，回执已被逐出投影的根仍有账本里那一句「按需生成到了哪一版」；库里读不到（未初始化）时没有回执
+    // 就没有东西可给 records 读，账本那一句不作数。
+    let own = unit.receipt_sesno.or(match unit.ledger {
+        LedgerFact::Generated { sesno } if sesno > 0 && readable.is_some() => Some(sesno as u32),
+        _ => None,
+    });
+    let promise = readable.filter(|_| !added_after_promise);
+    match (own, promise) {
+        // 回执比水位旧：它没被之后的批次碰过，那份模型到水位仍然有效（规划器的 `advance` 根）。
+        (Some(own), Some(promise)) if promise >= own => UnitState::Generated {
+            valid_through: promise,
+            by_library: true,
+        },
+        (Some(own), _) => UnitState::Generated {
+            valid_through: own,
+            by_library: false,
+        },
+        (None, Some(promise)) => UnitState::Generated {
+            valid_through: promise,
+            by_library: true,
+        },
+        (None, None) => UnitState::Missing,
+    }
+}
+
+/// 一段会话之间（`from_sesno` → `to_sesno`）这个节点下变了什么，折成判定要的那几格。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowFacts {
+    pub from_sesno: u32,
+    pub to_sesno: u32,
+    /// 元素级计数，就是 `node/diff-summary` 的 `elements`。
+    pub elements: StatusCounts,
+    /// 有几何变化的交付单元数，就是 `node/diff-summary` 的 `units.changed`。
+    pub units_changed: usize,
+    /// 其中单元根自己是新增的个数。
+    pub units_added: usize,
+    /// 有几何变化的生成根：交付单元根，以及自己那条记录变了的其它生成根。
+    pub changed_roots: BTreeSet<(u32, u32)>,
+    /// 这一段里新建出来的生成根：库的模型水位担保不到它们。
+    pub added_roots: BTreeSet<(u32, u32)>,
+    /// 这一段里被删掉的交付单元根。
+    pub removed_units: BTreeSet<(u32, u32)>,
+    /// 有不属于任何生成单元的构件发生了几何变化（归不到某个单元头上）。
+    pub unattributed: bool,
+    /// 归属不完整：某一组的行被截断，或子树没数完。
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+}
+
+/// 把一份差异摘要折成 [`WindowFacts`]（纯函数）。`roots` = 子树里（库文件最新会话上）的全部生成根。
+///
+/// 交付单元那几组的归属是摘要自己给的（`unit_root`）；不在任何交付单元下的那一组，行自己就是生成根的记在那根头上，
+/// 其余记成「归不到单元上」。
+pub fn window_facts(report: &DiffSummaryReport, roots: &BTreeSet<(u32, u32)>) -> WindowFacts {
+    let mut facts = WindowFacts {
+        from_sesno: report.a,
+        to_sesno: report.b,
+        elements: report.elements.clone(),
+        units_changed: report.units.changed,
+        truncated: !report.units.complete,
+        warnings: report.warnings.clone(),
+        ..WindowFacts::default()
+    };
+    for group in &report.groups {
+        let cut = group.rows_truncated > 0;
+        match group.unit_root.as_deref().and_then(parse_key) {
+            Some(unit) => {
+                if group.geometry_changed {
+                    facts.changed_roots.insert(unit);
+                }
+                let own = group
+                    .rows
+                    .iter()
+                    .find(|row| parse_key(&row.refno) == Some(unit));
+                match own.map(|row| row.status) {
+                    Some(DiffStatus::Added) => {
+                        facts.units_added += 1;
+                        facts.added_roots.insert(unit);
+                    }
+                    Some(DiffStatus::Deleted) => {
+                        facts.removed_units.insert(unit);
+                    }
+                    Some(_) => {}
+                    // 单元根那一行可能正好在被截掉的那部分里：它是不是新增 / 被删认不出来。
+                    None if cut => facts.truncated = true,
+                    None => {}
+                }
+            }
+            None => {
+                for row in &group.rows {
+                    if row.status == DiffStatus::Noop {
+                        continue;
+                    }
+                    match parse_key(&row.refno).filter(|root| roots.contains(root)) {
+                        Some(root) => {
+                            facts.changed_roots.insert(root);
+                            if row.status == DiffStatus::Added {
+                                facts.added_roots.insert(root);
+                            }
+                        }
+                        None => facts.unattributed = true,
+                    }
+                }
+                if cut && group.geometry_changed {
+                    facts.truncated = true;
+                    facts.unattributed = true;
+                }
+            }
+        }
+    }
+    facts
+}
+
+/// 子树里生成单元的计数。恒有 `total = generated + missing + failed`，`lagging <= generated`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct UnitTally {
+    pub total: usize,
+    pub generated: usize,
+    pub missing: usize,
+    pub failed: usize,
+    pub lagging: usize,
+    /// `lagging` 与 `missing` 是不是精确的。
+    pub exact: bool,
+}
+
+/// 已生成的那部分对应到哪些会话。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GeneratedAt {
+    pub sesno_min: u32,
+    pub sesno_max: u32,
+    pub time_min: Option<String>,
+    pub time_max: Option<String>,
+    /// `library_watermark` / `own_generation` / `mixed`
+    pub basis: &'static str,
+}
+
+/// 生成之后到库文件最新之间这个节点下变了什么（最早那一段）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeSummary {
+    pub from_sesno: u32,
+    pub to_sesno: u32,
+    pub units_changed: usize,
+    pub units_added: usize,
+    pub units_removed: usize,
+    pub elements: StatusCounts,
+    pub unattributed: bool,
+}
+
+/// 生成预检。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Precheck {
+    pub units_to_generate: usize,
+    pub needs_confirm: bool,
+    pub confirm_threshold_units: usize,
+}
+
+/// [`judge`] 的结论。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judgement {
+    pub verdict: NodeModelVerdict,
+    pub verdict_reason: Option<&'static str>,
+    pub units: UnitTally,
+    pub generated_at: Option<GeneratedAt>,
+    pub changes: Option<ChangeSummary>,
+    pub precheck: Precheck,
+    pub warnings: Vec<String>,
+}
+
+/// 把事实折成结论（纯函数，ADR-099 D2–D5）。
+///
+/// - `load_window(from)`：`from` → 库文件最新那一段的 [`WindowFacts`]；同一个 `from` 只会被问一次。算不出来回 `Err`。
+/// - `holds_receipt(根)`：一个**已被删掉**的单元在进程内投影里还有没有回执（有 = 屏幕上还可能画着它）。
+/// - `session_time(会话)`：那个会话的保存时刻。
+/// - `threshold`：需确认的阈值（[`confirm_threshold_units`]）。
+pub fn judge(
+    library: &LibraryStatus,
+    units: &[UnitFacts],
+    mut load_window: impl FnMut(u32) -> Result<Arc<WindowFacts>, String>,
+    holds_receipt: impl Fn(RefNo) -> bool,
+    session_time: impl Fn(u32) -> Option<String>,
+    threshold: usize,
+) -> Judgement {
+    let latest = library.file_latest_sesno;
+    let promise = library.durable_promise();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut loaded: BTreeMap<u32, Option<Arc<WindowFacts>>> = BTreeMap::new();
+    let mut unreadable = false;
+    let mut window = |from: u32,
+                      loaded: &mut BTreeMap<u32, Option<Arc<WindowFacts>>>,
+                      warnings: &mut Vec<String>|
+     -> Option<Arc<WindowFacts>> {
+        if let Some(known) = loaded.get(&from) {
+            return known.clone();
+        }
+        let facts = match load_window(from) {
+            Ok(facts) => {
+                warnings.extend(facts.warnings.iter().cloned());
+                Some(facts)
+            }
+            Err(reason) => {
+                warnings.push(format!("会话 {from} → {latest} 的差分算不出来：{reason}"));
+                None
+            }
+        };
+        loaded.insert(from, facts.clone());
+        facts
+    };
+
+    // 水位之后才新建的单元，水位担保不到：先看水位那一段里新建了哪些根。子树里一个单元都没有就不必算。
+    let empty = BTreeSet::new();
+    let promise_window = match promise.filter(|promise| *promise < latest && !units.is_empty()) {
+        Some(promise) => {
+            let facts = window(promise, &mut loaded, &mut warnings);
+            unreadable |= facts.is_none();
+            facts
+        }
+        None => None,
+    };
+    let added_after_promise = promise_window
+        .as_ref()
+        .map_or(&empty, |facts| &facts.added_roots);
+
+    let states: Vec<UnitState> = units
+        .iter()
+        .map(|unit| classify_unit(library, unit, added_after_promise.contains(&key(unit.root))))
+        .collect();
+
+    // 要比的那几段：已生成的单元对应到的、早于库文件最新的会话。
+    let sessions: BTreeSet<u32> = states
+        .iter()
+        .filter_map(|state| match state {
+            UnitState::Generated { valid_through, .. } if *valid_through < latest => {
+                Some(*valid_through)
+            }
+            _ => None,
+        })
+        .collect();
+    let mut exact = true;
+    let kept: Vec<u32> = if sessions.len() > MAX_WINDOWS {
+        exact = false;
+        warnings.push(format!(
+            "已生成的单元对应到 {} 个不同的会话，只比最早的一段和最近的 {} 段",
+            sessions.len(),
+            MAX_WINDOWS - 1
+        ));
+        let ordered: Vec<u32> = sessions.iter().copied().collect();
+        std::iter::once(ordered[0])
+            .chain(ordered[ordered.len() - (MAX_WINDOWS - 1)..].iter().copied())
+            .collect()
+    } else {
+        sessions.iter().copied().collect()
+    };
+    let window_of = |valid_through: u32| {
+        if kept.contains(&valid_through) {
+            valid_through
+        } else {
+            kept[0]
+        }
+    };
+
+    let mut tally = UnitTally {
+        total: units.len(),
+        ..UnitTally::default()
+    };
+    let mut used: BTreeSet<u32> = BTreeSet::new();
+    let (mut sesno_min, mut sesno_max) = (u32::MAX, 0u32);
+    let (mut by_library, mut by_own) = (false, false);
+    for (unit, state) in units.iter().zip(&states) {
+        match state {
+            UnitState::Failed => tally.failed += 1,
+            UnitState::Missing => tally.missing += 1,
+            UnitState::Generated {
+                valid_through,
+                by_library: library_backed,
+            } => {
+                tally.generated += 1;
+                sesno_min = sesno_min.min(*valid_through);
+                sesno_max = sesno_max.max(*valid_through);
+                by_library |= *library_backed;
+                by_own |= !*library_backed;
+                if *valid_through >= latest {
+                    continue;
+                }
+                let from = window_of(*valid_through);
+                used.insert(from);
+                match window(from, &mut loaded, &mut warnings) {
+                    Some(facts) => {
+                        if facts.changed_roots.contains(&key(unit.root)) {
+                            tally.lagging += 1;
+                        }
+                    }
+                    None => unreadable = true,
+                }
+            }
+        }
+    }
+
+    // 归不到单元头上的两类变化：不属于任何生成单元的构件变了；有模型的单元被删了。
+    let mut other_changes = false;
+    for from in &used {
+        let Some(Some(facts)) = loaded.get(from) else {
+            continue;
+        };
+        exact &= !facts.truncated;
+        other_changes |= facts.unattributed;
+        let library_backed = promise == Some(*from);
+        other_changes |= facts
+            .removed_units
+            .iter()
+            .any(|unit| library_backed || holds_receipt(RefNo::new(unit.0, unit.1)));
+    }
+    exact &= !unreadable;
+    tally.exact = exact;
+
+    let (verdict, verdict_reason) = if let Some(reason) = library.unjudgeable() {
+        (NodeModelVerdict::Unknown, Some(reason))
+    } else if library.data_batch_running {
+        (NodeModelVerdict::Updating, Some("data_batch_running"))
+    } else if library.model_task_running {
+        (NodeModelVerdict::Updating, Some("model_task_running"))
+    } else if unreadable {
+        (NodeModelVerdict::Unknown, Some("changes_unreadable"))
+    } else if tally.total == 0 {
+        (NodeModelVerdict::Empty, None)
+    } else if tally.generated == 0 {
+        (NodeModelVerdict::NotGenerated, None)
+    } else if tally.generated < tally.total {
+        (NodeModelVerdict::Partial, None)
+    } else if tally.lagging > 0 {
+        (NodeModelVerdict::Lagging, Some("units_changed"))
+    } else if other_changes {
+        (NodeModelVerdict::Lagging, Some("other_changes"))
+    } else {
+        (NodeModelVerdict::Latest, None)
+    };
+
+    let generated_at = (tally.generated > 0).then(|| GeneratedAt {
+        sesno_min,
+        sesno_max,
+        time_min: session_time(sesno_min),
+        time_max: session_time(sesno_max),
+        basis: match (by_library, by_own) {
+            (true, false) => "library_watermark",
+            (false, true) => "own_generation",
+            _ => "mixed",
+        },
+    });
+    let changes = kept
+        .first()
+        .and_then(|from| loaded.get(from).cloned().flatten())
+        .map(|facts| ChangeSummary {
+            from_sesno: facts.from_sesno,
+            to_sesno: facts.to_sesno,
+            units_changed: facts.units_changed,
+            units_added: facts.units_added,
+            units_removed: facts.removed_units.len(),
+            elements: facts.elements.clone(),
+            unattributed: facts.unattributed,
+        });
+    let units_to_generate = tally.missing + tally.failed;
+    let (needs_confirm, _) = confirm_gate(units_to_generate, threshold);
+
+    let total_warnings = warnings.len();
+    if total_warnings > MAX_WARNINGS {
+        warnings.truncate(MAX_WARNINGS);
+        warnings.push(format!(
+            "…另有 {} 条告警未列出",
+            total_warnings - MAX_WARNINGS
+        ));
+    }
+    Judgement {
+        verdict,
+        verdict_reason,
+        units: tally,
+        generated_at,
+        changes,
+        precheck: Precheck {
+            units_to_generate,
+            needs_confirm,
+            confirm_threshold_units: threshold,
+        },
+        warnings,
+    }
+}
+
+/// 请求没法答的三种原因；HTTP 层按 `code` 分型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeStatusError {
+    /// `REFNO_NOT_FOUND` / `SOURCE_NOT_FOUND` / `internal`
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl NodeStatusError {
+    fn new(code: &'static str, message: impl std::fmt::Display) -> Self {
+        Self {
+            code,
+            message: message.to_string(),
+        }
+    }
+
+    /// 生成根定库那一步的失败按类别分：元素 / 库不在是「没有这个节点」，文件打不开是「源不可用」。
+    fn from_source(error: anyhow::Error) -> Self {
+        let message = format!("{error:#}");
+        let code = match error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RootDbError>())
+        {
+            Some(
+                RootDbError::InvalidRefNo { .. }
+                | RootDbError::DbNotInMdb { .. }
+                | RootDbError::NotAnElementDb { .. }
+                | RootDbError::ElementMissing { .. },
+            ) => "REFNO_NOT_FOUND",
+            _ => "SOURCE_NOT_FOUND",
+        };
+        Self::new(code, message)
+    }
+}
+
+impl std::fmt::Display for NodeStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for NodeStatusError {}
+
+/// 一个节点在文件侧的事实：它的库、库文件最新会话、子树里的生成单元。
+#[derive(Debug, Clone)]
+pub struct NodeScope {
+    pub node: RefNo,
+    pub noun: String,
+    pub dbnum: u32,
+    pub source_file: PathBuf,
+    /// 库文件指纹（路径 + 长度 + 修改时刻）：两个缓存的键都带它。
+    pub fingerprint: String,
+    pub file_latest_sesno: u32,
+    pub file_latest_time: Option<String>,
+    /// 请求的节点在某个生成单元**之内**时，那个单元的根。
+    pub unit_root: Option<RefNo>,
+    /// 差分以它为范围：节点自己，或它所属的单元根。
+    pub judged: RefNo,
+    /// 子树里的生成根，`/model/generate` 对同一个节点会枚举出的那一批、同序。
+    pub roots: Vec<RefNo>,
+    pub root_keys: BTreeSet<(u32, u32)>,
+}
+
+type ScopeKey = ((u32, u32), String);
+type WindowKey = (u32, (u32, u32), u32, u32, String);
+
+fn scope_cache() -> &'static Mutex<HashMap<ScopeKey, Arc<NodeScope>>> {
+    static CACHE: OnceLock<Mutex<HashMap<ScopeKey, Arc<NodeScope>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn window_cache() -> &'static Mutex<HashMap<WindowKey, Arc<WindowFacts>>> {
+    static CACHE: OnceLock<Mutex<HashMap<WindowKey, Arc<WindowFacts>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached<K: std::hash::Hash + Eq, V: Clone>(cache: &Mutex<HashMap<K, V>>, key: &K) -> Option<V> {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .cloned()
+}
+
+fn remember<K: std::hash::Hash + Eq, V>(cache: &Mutex<HashMap<K, V>>, key: K, value: V) {
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() >= CACHE_CAPACITY {
+        guard.clear();
+    }
+    guard.insert(key, value);
+}
+
+/// 测试 / 运维：清掉两个进程内缓存。
+pub fn forget_all() {
+    scope_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    window_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// 节点的文件侧事实（或从缓存取）。回 `(事实, 是否命中缓存)`。同步、读文件，调用方负责 `spawn_blocking`。
+///
+/// 生成单元取 `DirectTreeService::generation_roots_in_subtree`——`/model/generate` 用的同一段遍历；节点在某个单元之内
+/// 时它回那一个单元，这里把它记成 `unit_root`、差分范围改成那个单元。
+pub fn node_scope(
+    tree: &DirectTreeService,
+    node: RefNo,
+) -> Result<(Arc<NodeScope>, bool), NodeStatusError> {
+    let version = crate::data_interface::model_source::root_source_version(node)
+        .map_err(NodeStatusError::from_source)?;
+    let fingerprint = crate::fast_model::historical_model::source_fingerprint(&version.file)
+        .map_err(|error| NodeStatusError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
+    let cache_key: ScopeKey = (key(node), fingerprint.clone());
+    if let Some(scope) = cached(scope_cache(), &cache_key) {
+        return Ok((scope, true));
+    }
+    let internal = |error: anyhow::Error| NodeStatusError::new("internal", format!("{error:#}"));
+    let refu = RefU64::from_two_nums(node.word0, node.word1);
+    let requested = RefnoEnum::from(refu);
+    let unit_types = configured_delivery_unit_types();
+    let noun = tree.noun_of(refu).map_err(internal)?;
+    let owning = tree
+        .generation_root_of(refu, &unit_types)
+        .map_err(internal)?
+        .filter(|root| root.root != requested);
+    let (unit_root, roots) = match owning {
+        Some(root) => {
+            let root = refno_to_e3d(root.root);
+            (Some(root), vec![root])
+        }
+        None => (
+            None,
+            tree.generation_roots_in_subtree(refu, &unit_types)
+                .map_err(internal)?
+                .into_iter()
+                .map(|root| refno_to_e3d(root.root))
+                .collect(),
+        ),
+    };
+    let scope = Arc::new(NodeScope {
+        node,
+        noun: noun.trim().to_ascii_uppercase(),
+        dbnum: version.dbnum,
+        source_file: version.file,
+        fingerprint,
+        file_latest_sesno: version.sesno,
+        file_latest_time: version.session_time,
+        unit_root,
+        judged: unit_root.unwrap_or(node),
+        root_keys: roots.iter().copied().map(key).collect(),
+        roots,
+    });
+    remember(scope_cache(), cache_key, scope.clone());
+    Ok((scope, false))
+}
+
+/// `from_sesno` → 库文件最新这一段里，这个节点下变了什么（或从缓存取）。回 `(事实, 是否命中缓存)`。
+/// 同步、读文件。就是一次 [`node_diff_summary`]，不另写一遍差分。
+pub fn scope_window(
+    scope: &NodeScope,
+    from_sesno: u32,
+) -> Result<(Arc<WindowFacts>, bool), String> {
+    let cache_key: WindowKey = (
+        scope.dbnum,
+        key(scope.judged),
+        from_sesno,
+        scope.file_latest_sesno,
+        scope.fingerprint.clone(),
+    );
+    if let Some(facts) = cached(window_cache(), &cache_key) {
+        return Ok((facts, true));
+    }
+    let report = node_diff_summary(
+        scope.dbnum,
+        scope.judged,
+        from_sesno,
+        scope.file_latest_sesno,
+        DiffScope::Subtree,
+    )
+    .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let facts = Arc::new(window_facts(&report, &scope.root_keys));
+    remember(window_cache(), cache_key, facts.clone());
+    Ok((facts, false))
+}
+
+/// 某个会话的保存时刻。水位与文件最新那两个号的时刻调用方手里已经有了，只有别的号才走到会话链上。
+fn chain_time(source_file: &Path, sesno: u32) -> Option<String> {
+    crate::data_interface::db_file_header::session_chain(source_file)
+        .ok()?
+        .iter()
+        .find(|stamp| stamp.sesno == sesno)?
+        .rfc3339()
+}
+
+/// 所属库此刻的事实。水位行走镜像（[`crate::data_interface::dbnum_state::DbnumState::read`]）；读透形态没有这张表，
+/// 不白读（与 `/dbnums` 同一个做法）。库级判决与路由各用它们自己的那一个纯函数，不在这里重拼。
+pub async fn library_status(scope: &NodeScope) -> anyhow::Result<LibraryStatus> {
+    use crate::data_interface::dbnum_consistency::{RootCensus, verdict};
+    use crate::data_interface::dbnum_state::DbnumState;
+    use crate::data_interface::task_registry::TaskRegistry;
+
+    let dbnum = scope.dbnum;
+    let face = crate::options::data_face();
+    let stored = if face.is_read_through() {
+        None
+    } else {
+        DbnumState::read(dbnum).await?
+    };
+    let row = stored.unwrap_or_else(|| DbnumState {
+        dbnum,
+        ..DbnumState::default()
+    });
+    let registry = TaskRegistry::global();
+    let data_batch_running = registry.has_running_data_batch_for(dbnum);
+    let model_task_running = registry.active_dbnum_model_ensure(dbnum).is_some();
+    let route = crate::data_interface::model_read_route::route(
+        dbnum,
+        face,
+        row.applied_sesno,
+        row.model_sesno,
+        data_batch_running,
+    );
+    let census = RootCensus::from(crate::data_interface::model_root_ledger::census(dbnum));
+    let columns = verdict(&row, &census, face).columns();
+    Ok(LibraryStatus {
+        file_latest_sesno: scope.file_latest_sesno,
+        file_latest_time: scope.file_latest_time.clone(),
+        applied_sesno: row.applied_sesno,
+        model_sesno: row.model_sesno,
+        model_sesno_time: row.model_sesno_time,
+        initialized: row.initialized,
+        model_verdict: columns.model_verdict,
+        model_verdict_reason: columns.model_verdict_reason,
+        model_source: route.source.as_str(),
+        model_source_reason: route.reason.map(MemoryReason::as_str),
+        data_batch_running,
+        model_task_running,
+        in_watch_scope: crate::data_interface::watch_scope::admits(dbnum),
+        route,
+    })
+}
+
+/// 子树里每个生成单元的进程内事实：投影回执的会话（一把读锁取完）与账本条目。
+pub fn unit_facts(scope: &NodeScope) -> Vec<UnitFacts> {
+    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+
+    let receipts =
+        ModelMemoryStore::global().receipt_sesnos(ProjectionScope::Current, &scope.roots);
+    scope
+        .roots
+        .iter()
+        .zip(receipts)
+        .map(|(root, receipt_sesno)| {
+            let ledger = match crate::data_interface::model_root_ledger::entry(
+                scope.dbnum,
+                refno_from_e3d(*root),
+            ) {
+                None => LedgerFact::Absent,
+                Some(entry) if entry.is_settled() => LedgerFact::Generated {
+                    sesno: entry.source_end_sesno,
+                },
+                Some(_) => LedgerFact::Unsettled,
+            };
+            UnitFacts {
+                root: *root,
+                receipt_sesno,
+                ledger,
+            }
+        })
+        .collect()
+}
+
+/// 未建立库级水位（`durable_promise().is_none()`）且允许按根回读持久库时，在进程冷重启后内存投影清空，
+/// 从 `SUL_DB` 的 `inst_relate` / `tubi_relate` 回读已落盘单元的 `model_sesno` 作为 `receipt_sesno`
+/// （2026-11-13，GitHub #146）。
+async fn hydrate_durable_unit_facts(
+    library: &LibraryStatus,
+    units: &mut [UnitFacts],
+) -> anyhow::Result<()> {
+    hydrate_durable_unit_facts_on(
+        &aios_core::SUL_DB,
+        crate::options::store_mode().is_durable(),
+        crate::options::data_face().is_read_through(),
+        library,
+        units,
+    )
+    .await
+}
+
+async fn hydrate_durable_unit_facts_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    store_is_durable: bool,
+    read_through: bool,
+    library: &LibraryStatus,
+    units: &mut [UnitFacts],
+) -> anyhow::Result<()> {
+    if !store_is_durable
+        || read_through
+        || library.durable_promise().is_some()
+        || !(library.route.is_database() || library.route.allows_durable_fallback())
+    {
+        return Ok(());
+    }
+    let missing_roots: Vec<RefnoEnum> = units
+        .iter()
+        .filter(|unit| unit.receipt_sesno.is_none() && unit.ledger != LedgerFact::Unsettled)
+        .map(|unit| refno_from_e3d(unit.root))
+        .collect();
+    if missing_roots.is_empty() {
+        return Ok(());
+    }
+    let durable = crate::data_interface::model_coverage::durable_roots_model_sesnos_on(
+        db,
+        &missing_roots,
+    )
+    .await?;
+    for unit in units.iter_mut() {
+        if unit.receipt_sesno.is_none()
+            && unit.ledger != LedgerFact::Unsettled
+            && let Some(&sesno) = durable.get(&refno_from_e3d(unit.root))
+            && let Ok(sesno_u32) = u32::try_from(sesno)
+            && sesno_u32 > 0
+        {
+            unit.receipt_sesno = Some(sesno_u32);
+        }
+    }
+    Ok(())
+}
+
+/// HTTP 回执（spec §4.5.3）。
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeModelStatus {
+    /// `a/b`
+    pub refno: String,
+    pub noun: String,
+    pub dbnum: u32,
+    /// 请求的节点在某个生成单元之内时，那个单元的根（`a/b`）；此时下面的数字说的都是这一个单元。
+    pub unit_root: Option<String>,
+    pub verdict: NodeModelVerdict,
+    pub verdict_reason: Option<&'static str>,
+    pub library: LibraryStatus,
+    pub units: UnitTally,
+    pub generated_at: Option<GeneratedAt>,
+    pub changes: Option<ChangeSummary>,
+    pub precheck: Precheck,
+    /// 这一次没有做文件侧的计算（生成单元清单与差分都命中了进程内缓存）。
+    pub cached: bool,
+    pub elapsed_ms: u128,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// 在文件上把 [`judge`] 跑一遍：差分走 [`scope_window`]，被删单元的回执问投影，时刻先用手里已有的两个。
+/// 回 `(结论, 差分是否全部命中缓存)`。同步、读文件。
+pub fn judge_on_files(
+    scope: &NodeScope,
+    library: &LibraryStatus,
+    units: &[UnitFacts],
+) -> (Judgement, bool) {
+    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+
+    let mut all_cached = true;
+    let judgement = judge(
+        library,
+        units,
+        |from| {
+            let (facts, hit) = scope_window(scope, from)?;
+            all_cached &= hit;
+            Ok(facts)
+        },
+        |unit| {
+            ModelMemoryStore::global()
+                .receipt_sesnos(ProjectionScope::Current, &[unit])
+                .first()
+                .copied()
+                .flatten()
+                .is_some()
+        },
+        |sesno| {
+            if sesno == library.file_latest_sesno {
+                library.file_latest_time.clone()
+            } else if library.model_sesno > 0 && sesno == library.model_sesno as u32 {
+                library.model_sesno_time.clone()
+            } else {
+                chain_time(&scope.source_file, sesno)
+            }
+        },
+        confirm_threshold_units(),
+    );
+    (judgement, all_cached)
+}
+
+/// 入口：一个节点的模型状态与生成预检。读文件的两段各进一次 `spawn_blocking`，水位在两段之间读。
+pub async fn node_model_status(
+    tree: Arc<DirectTreeService>,
+    node: RefNo,
+) -> Result<NodeModelStatus, NodeStatusError> {
+    let started = Instant::now();
+    let joined = |error: tokio::task::JoinError| {
+        NodeStatusError::new("internal", format!("节点模型状态计算线程异常退出: {error}"))
+    };
+    let (scope, scope_cached) = tokio::task::spawn_blocking(move || node_scope(&tree, node))
+        .await
+        .map_err(joined)??;
+    let library = library_status(&scope)
+        .await
+        .map_err(|error| NodeStatusError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
+    let mut units = unit_facts(&scope);
+    hydrate_durable_unit_facts(&library, &mut units)
+        .await
+        .map_err(|error| NodeStatusError::new("internal", format!("读取持久库单元状态失败: {error:#}")))?;
+    let (judgement, windows_cached, scope, library) = tokio::task::spawn_blocking(move || {
+        let (judgement, windows_cached) = judge_on_files(&scope, &library, &units);
+        (judgement, windows_cached, scope, library)
+    })
+    .await
+    .map_err(joined)?;
+    Ok(NodeModelStatus {
+        refno: refno_text(scope.node),
+        noun: scope.noun.clone(),
+        dbnum: scope.dbnum,
+        unit_root: scope.unit_root.map(refno_text),
+        verdict: judgement.verdict,
+        verdict_reason: judgement.verdict_reason,
+        library,
+        units: judgement.units,
+        generated_at: judgement.generated_at,
+        changes: judgement.changes,
+        precheck: judgement.precheck,
+        cached: scope_cached && windows_cached,
+        elapsed_ms: started.elapsed().as_millis(),
+        warnings: judgement.warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_interface::model_read_route::route;
+    use crate::fast_model::node_diff_summary::{DiffGroup, DiffRow, DiffSummaryStats, UnitTally as DiffUnits};
+    use crate::fast_model::unit_versions::UnitVersionImpact;
+    use crate::options::DataFace;
+
+    const DBNUM: u32 = 7999;
+
+    fn refno(id: u32) -> RefNo {
+        RefNo::new(24383, id)
+    }
+
+    /// 一个库的事实：数据面形态 + 三枚水位（+ 有没有批次在跑），其余格由同一批纯函数推出来。
+    fn library(face: DataFace, applied: i32, model: i32, latest: u32, running: bool) -> LibraryStatus {
+        let route = route(DBNUM, face, applied, model, running);
+        LibraryStatus {
+            file_latest_sesno: latest,
+            file_latest_time: Some(format!("t{latest}")),
+            applied_sesno: applied,
+            model_sesno: model,
+            model_sesno_time: (model > 0).then(|| format!("t{model}")),
+            initialized: applied > 0,
+            model_verdict: "in_sync",
+            model_verdict_reason: None,
+            model_source: route.source.as_str(),
+            model_source_reason: route.reason.map(MemoryReason::as_str),
+            data_batch_running: running,
+            model_task_running: false,
+            in_watch_scope: true,
+            route,
+        }
+    }
+
+    /// 已初始化、水位追平数据的库：模型从库里读。
+    fn initialized(model: i32, latest: u32) -> LibraryStatus {
+        library(DataFace::Ingest, model, model, latest, false)
+    }
+
+    /// 未初始化的库：数据水位没建立，模型只在进程内投影里。
+    fn uninitialized(latest: u32) -> LibraryStatus {
+        library(DataFace::Ingest, 0, 0, latest, false)
+    }
+
+    fn cold(id: u32) -> UnitFacts {
+        UnitFacts {
+            root: refno(id),
+            receipt_sesno: None,
+            ledger: LedgerFact::Absent,
+        }
+    }
+
+    fn generated(id: u32, sesno: u32) -> UnitFacts {
+        UnitFacts {
+            root: refno(id),
+            receipt_sesno: Some(sesno),
+            ledger: LedgerFact::Generated {
+                sesno: sesno as i32,
+            },
+        }
+    }
+
+    fn row(id: u32, status: DiffStatus) -> DiffRow {
+        DiffRow {
+            refno: refno_text(refno(id)),
+            noun: Some("ELBO".to_owned()),
+            status,
+            impact: match status {
+                DiffStatus::Added => UnitVersionImpact::Delivery,
+                DiffStatus::Deleted => UnitVersionImpact::Tombstone,
+                DiffStatus::Modified => UnitVersionImpact::Mesh,
+                DiffStatus::Noop => UnitVersionImpact::Noop,
+            },
+            is_node: false,
+        }
+    }
+
+    fn group(unit: Option<u32>, rows: Vec<DiffRow>) -> DiffGroup {
+        let mut counts = StatusCounts::default();
+        for row in &rows {
+            match row.status {
+                DiffStatus::Added => counts.added += 1,
+                DiffStatus::Deleted => counts.deleted += 1,
+                DiffStatus::Modified => counts.modified += 1,
+                DiffStatus::Noop => counts.noop += 1,
+            }
+        }
+        DiffGroup {
+            unit_root: unit.map(|id| refno_text(refno(id))),
+            unit_noun: unit.map(|_| "BRAN".to_owned()),
+            unit_name: None,
+            geometry_changed: counts.geometry_changed(),
+            counts,
+            rows,
+            rows_truncated: 0,
+        }
+    }
+
+    fn report(a: u32, b: u32, groups: Vec<DiffGroup>) -> DiffSummaryReport {
+        let mut elements = StatusCounts::default();
+        for group in &groups {
+            elements.added += group.counts.added;
+            elements.deleted += group.counts.deleted;
+            elements.modified += group.counts.modified;
+            elements.noop += group.counts.noop;
+        }
+        let changed = groups
+            .iter()
+            .filter(|group| group.unit_root.is_some() && group.geometry_changed)
+            .count();
+        DiffSummaryReport {
+            dbnum: DBNUM,
+            refno: refno_text(refno(1)),
+            noun: Some("ZONE".to_owned()),
+            scope: DiffScope::Subtree,
+            a,
+            b,
+            units: DiffUnits {
+                changed,
+                unchanged: 0,
+                total: changed,
+                complete: true,
+            },
+            elements,
+            groups,
+            needs_confirm: false,
+            estimated_projections: changed * 2,
+            confirm_threshold_units: 20,
+            elapsed_ms: 0,
+            stats: DiffSummaryStats::default(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn roots(ids: &[u32]) -> BTreeSet<(u32, u32)> {
+        ids.iter().map(|id| key(refno(*id))).collect()
+    }
+
+    /// 用一张「起点会话 → 差异摘要」的表跑判定；表里没有的起点就是算不出来。记下问过哪些起点。
+    fn run(
+        library: &LibraryStatus,
+        units: &[UnitFacts],
+        windows: &[DiffSummaryReport],
+        threshold: usize,
+    ) -> (Judgement, Vec<u32>) {
+        let root_keys: BTreeSet<(u32, u32)> = units.iter().map(|unit| key(unit.root)).collect();
+        let mut asked = Vec::new();
+        let judgement = judge(
+            library,
+            units,
+            |from| {
+                asked.push(from);
+                windows
+                    .iter()
+                    .find(|report| report.a == from)
+                    .map(|report| Arc::new(window_facts(report, &root_keys)))
+                    .ok_or_else(|| format!("没有 {from} 这一段"))
+            },
+            |unit| unit == refno(99),
+            |sesno| Some(format!("t{sesno}")),
+            threshold,
+        );
+        (judgement, asked)
+    }
+
+    /// ADR-099 D2：失败一票否决；回执优先；库里读得到时水位担保没有回执的单元，回执比水位旧的也对应到水位；
+    /// 水位之后新建的单元水位担保不到；未初始化的库只认回执。
+    #[test]
+    fn a_unit_is_generated_by_its_receipt_or_by_the_library_watermark() {
+        let ready = initialized(738, 748);
+        let bare = uninitialized(447);
+        let by_library = |sesno| UnitState::Generated {
+            valid_through: sesno,
+            by_library: true,
+        };
+        let by_own = |sesno| UnitState::Generated {
+            valid_through: sesno,
+            by_library: false,
+        };
+
+        assert_eq!(classify_unit(&ready, &cold(1), false), by_library(738));
+        assert_eq!(classify_unit(&ready, &generated(1, 700), false), by_library(738));
+        assert_eq!(classify_unit(&ready, &generated(1, 745), false), by_own(745));
+        // 水位之后才新建的：水位担保不到，只看它自己。
+        assert_eq!(classify_unit(&ready, &cold(1), true), UnitState::Missing);
+        assert_eq!(classify_unit(&ready, &generated(1, 745), true), by_own(745));
+        // 回执已被逐出投影，账本里还记着它按需生成到了 745：库里读得到，作数。
+        let evicted = UnitFacts {
+            root: refno(1),
+            receipt_sesno: None,
+            ledger: LedgerFact::Generated { sesno: 745 },
+        };
+        assert_eq!(classify_unit(&ready, &evicted, true), by_own(745));
+        // 账本里悬着失败：水位和回执都救不了。
+        let failed = UnitFacts {
+            ledger: LedgerFact::Unsettled,
+            ..generated(1, 748)
+        };
+        assert_eq!(classify_unit(&ready, &failed, false), UnitState::Failed);
+
+        assert_eq!(classify_unit(&bare, &cold(1), false), UnitState::Missing);
+        assert_eq!(classify_unit(&bare, &generated(1, 440), false), by_own(440));
+        // 未初始化的库没有东西可回读：账本说成了、投影里却没有回执，records 读不到，不算已生成。
+        assert_eq!(classify_unit(&bare, &evicted, false), UnitState::Missing);
+
+        // 模型落后于数据的库：路由是 memory，但允许按根回读库里 S 时刻那份——水位照样担保。
+        let lagging = library(DataFace::Ingest, 750, 738, 750, false);
+        assert_eq!(lagging.model_source, "memory");
+        assert_eq!(classify_unit(&lagging, &cold(1), false), by_library(738));
+        // 读透形态库里从来不是权威。
+        let read_through = library(DataFace::ReadThrough, 0, 0, 447, false);
+        assert_eq!(classify_unit(&read_through, &cold(1), false), UnitState::Missing);
+    }
+
+    /// 差异摘要 → 判定要的几格：交付单元那几组按摘要给的单元根记；单元根自己新增 / 被删单列；不在交付单元下的那一组，
+    /// 行自己是生成根的记在它头上，其余是「归不到单元上」；noop 不算。
+    #[test]
+    fn a_diff_summary_folds_into_changed_added_and_removed_roots() {
+        let summary = report(
+            738,
+            748,
+            vec![
+                group(Some(10), vec![row(101, DiffStatus::Modified)]),
+                group(Some(20), vec![row(20, DiffStatus::Added), row(201, DiffStatus::Added)]),
+                group(Some(30), vec![row(30, DiffStatus::Deleted)]),
+                group(Some(40), vec![row(401, DiffStatus::Noop)]),
+                group(
+                    None,
+                    vec![
+                        row(50, DiffStatus::Modified),
+                        row(60, DiffStatus::Added),
+                        row(1, DiffStatus::Noop),
+                    ],
+                ),
+            ],
+        );
+        let facts = window_facts(&summary, &roots(&[10, 20, 40, 50, 60]));
+        assert_eq!((facts.from_sesno, facts.to_sesno), (738, 748));
+        assert_eq!(facts.units_changed, 3, "就是摘要的 units.changed");
+        assert_eq!(facts.units_added, 1);
+        assert_eq!(facts.changed_roots, roots(&[10, 20, 30, 50, 60]));
+        assert_eq!(facts.added_roots, roots(&[20, 60]));
+        assert_eq!(facts.removed_units, roots(&[30]));
+        assert!(!facts.unattributed);
+        assert!(!facts.truncated);
+        assert_eq!(facts.elements, summary.elements);
+
+        // 不在交付单元下、自己也不是生成根的构件有几何变化：归不到单元上。
+        let orphan = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Modified)])]);
+        let facts = window_facts(&orphan, &roots(&[10]));
+        assert!(facts.unattributed);
+        assert!(facts.changed_roots.is_empty());
+
+        // 行被截断的组：交付单元仍然知道是哪一个，但它的根是不是新增说不准；不在单元下的那一组截断就是归属不完整。
+        let mut cut = group(Some(10), vec![row(101, DiffStatus::Modified)]);
+        cut.rows_truncated = 7;
+        let facts = window_facts(&report(738, 748, vec![cut]), &roots(&[10]));
+        assert_eq!(facts.changed_roots, roots(&[10]));
+        assert!(facts.truncated);
+        let mut cut = group(None, vec![row(50, DiffStatus::Modified)]);
+        cut.rows_truncated = 7;
+        let facts = window_facts(&report(738, 748, vec![cut]), &roots(&[50]));
+        assert!(facts.truncated && facts.unattributed);
+    }
+
+    /// 三个基线 SITE 的形状：库已初始化，库文件比模型水位新，但水位之后没有改到这个节点 → 最新。
+    /// 库已经追平时连差分都不做。
+    #[test]
+    fn an_initialized_node_is_latest_when_nothing_under_it_changed_after_the_watermark() {
+        let units = [cold(10), cold(20), cold(30)];
+        let quiet = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Noop)])]);
+        let (judgement, asked) = run(&initialized(738, 748), &units, &[quiet], 20);
+        assert_eq!(asked, vec![738], "水位那一段只算一次");
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+        assert_eq!(judgement.verdict_reason, None);
+        assert_eq!(
+            judgement.units,
+            UnitTally {
+                total: 3,
+                generated: 3,
+                missing: 0,
+                failed: 0,
+                lagging: 0,
+                exact: true
+            }
+        );
+        let at = judgement.generated_at.expect("有已生成的单元");
+        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (738, 738, "library_watermark"));
+        assert_eq!(at.time_min.as_deref(), Some("t738"));
+        let changes = judgement.changes.expect("比过一段");
+        assert_eq!((changes.from_sesno, changes.to_sesno), (738, 748));
+        assert_eq!(changes.units_changed, 0);
+        assert_eq!(changes.elements.noop, 1);
+        assert_eq!(judgement.precheck.units_to_generate, 0);
+        assert!(!judgement.precheck.needs_confirm);
+
+        let (judgement, asked) = run(&initialized(748, 748), &units, &[], 20);
+        assert!(asked.is_empty(), "库已追平，不做差分");
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+        assert_eq!(judgement.changes, None);
+    }
+
+    /// 水位之后有会话改到了它下面的单元 → 落后，点得出几个；只有归不到单元上的变化或被删的单元 → 也是落后，原因不同。
+    #[test]
+    fn an_initialized_node_lags_when_units_under_it_changed_after_the_watermark() {
+        let units = [cold(10), cold(20), cold(30)];
+        let touched = report(
+            738,
+            748,
+            vec![
+                group(Some(10), vec![row(101, DiffStatus::Modified)]),
+                group(Some(30), vec![row(301, DiffStatus::Deleted)]),
+                group(Some(20), vec![row(201, DiffStatus::Noop)]),
+            ],
+        );
+        let (judgement, _) = run(&initialized(738, 748), &units, &[touched], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);
+        assert_eq!(judgement.verdict_reason, Some("units_changed"));
+        assert_eq!(judgement.units.lagging, 2);
+        assert_eq!(judgement.units.generated, 3);
+        assert_eq!(judgement.changes.expect("比过").units_changed, 2);
+
+        let zone_moved = report(738, 748, vec![group(None, vec![row(1, DiffStatus::Modified)])]);
+        let (judgement, _) = run(&initialized(738, 748), &units, &[zone_moved], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);
+        assert_eq!(judgement.verdict_reason, Some("other_changes"));
+        assert_eq!(judgement.units.lagging, 0);
+        assert!(judgement.changes.expect("比过").unattributed);
+
+        // 一个有模型的单元被删了：它不在库文件最新的清单里，但库里那份还在。
+        let unit_deleted = report(738, 748, vec![group(Some(40), vec![row(40, DiffStatus::Deleted)])]);
+        let (judgement, _) = run(&initialized(738, 748), &units, &[unit_deleted], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);
+        assert_eq!(judgement.verdict_reason, Some("other_changes"));
+        assert_eq!(judgement.changes.expect("比过").units_removed, 1);
+    }
+
+    /// 水位之后才新建的单元：水位担保不到，没人按需生成过就是缺的 → 部分生成，预检数它。
+    #[test]
+    fn a_unit_created_after_the_watermark_is_missing_until_someone_generates_it() {
+        let units = [cold(10), cold(20)];
+        let created = report(738, 748, vec![group(Some(20), vec![row(20, DiffStatus::Added)])]);
+        let (judgement, _) = run(&initialized(738, 748), &units, &[created.clone()], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);
+        assert_eq!((judgement.units.generated, judgement.units.missing), (1, 1));
+        assert_eq!(judgement.precheck.units_to_generate, 1);
+        assert_eq!(judgement.changes.expect("比过").units_added, 1);
+
+        // 按需生成到了库文件最新：补齐了，而且不落后。
+        let units = [cold(10), generated(20, 748)];
+        let (judgement, _) = run(&initialized(738, 748), &units, &[created], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+        let at = judgement.generated_at.expect("有已生成的单元");
+        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (738, 748, "mixed"));
+    }
+
+    /// 未初始化的库（7997 `24381/535` 那种）：只认本进程的回执。一个都没有 → 未生成；有一部分 → 部分生成；
+    /// 全有且都对应到库文件最新 → 最新，不做差分。
+    #[test]
+    fn an_uninitialized_node_counts_only_what_this_process_generated() {
+        let bare = uninitialized(447);
+        let (judgement, asked) = run(&bare, &[cold(10), cold(20), cold(30)], &[], 20);
+        assert!(asked.is_empty());
+        assert_eq!(judgement.verdict, NodeModelVerdict::NotGenerated);
+        assert_eq!(judgement.units.missing, 3);
+        assert_eq!(judgement.generated_at, None);
+        assert_eq!(judgement.precheck.units_to_generate, 3);
+
+        let (judgement, asked) = run(&bare, &[generated(10, 447), generated(20, 447), cold(30)], &[], 20);
+        assert!(asked.is_empty());
+        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);
+        assert_eq!((judgement.units.generated, judgement.units.missing), (2, 1));
+        let at = judgement.generated_at.expect("有已生成的单元");
+        assert_eq!((at.sesno_min, at.sesno_max, at.basis), (447, 447, "own_generation"));
+
+        let all = [generated(10, 447), generated(20, 447), generated(30, 447)];
+        let (judgement, asked) = run(&bare, &all, &[], 20);
+        assert!(asked.is_empty());
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+    }
+
+    /// 未初始化的库里每个单元按它自己的生成会话比：440 生成的单元之后被改到了才落后；447 生成的那个不受 440→447
+    /// 那一段影响。被删的单元只有投影里还留着回执（屏幕上还可能画着）才算数。
+    #[test]
+    fn each_unit_is_compared_from_its_own_generation_session() {
+        let bare = uninitialized(447);
+        let units = [generated(10, 440), generated(20, 447), generated(30, 440)];
+        let since_440 = report(
+            440,
+            447,
+            vec![
+                group(Some(10), vec![row(101, DiffStatus::Modified)]),
+                group(Some(20), vec![row(201, DiffStatus::Modified)]),
+            ],
+        );
+        let (judgement, asked) = run(&bare, &units, &[since_440], 20);
+        assert_eq!(asked, vec![440]);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);
+        assert_eq!(judgement.units.lagging, 1, "20 是 447 生成的，440→447 的改动已经在它里面");
+
+        let gone_without_receipt =
+            report(440, 447, vec![group(Some(41), vec![row(41, DiffStatus::Deleted)])]);
+        let (judgement, _) = run(&bare, &units, &[gone_without_receipt], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+        let gone_with_receipt =
+            report(440, 447, vec![group(Some(99), vec![row(99, DiffStatus::Deleted)])]);
+        let (judgement, _) = run(&bare, &units, &[gone_with_receipt], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Lagging);
+        assert_eq!(judgement.verdict_reason, Some("other_changes"));
+    }
+
+    /// 失败的单元不算已生成，预检把它和缺的一起数；阈值是「超过」才要确认，0 = 从不确认。
+    #[test]
+    fn failed_units_are_not_generated_and_the_precheck_counts_them_with_the_missing() {
+        let failed = UnitFacts {
+            ledger: LedgerFact::Unsettled,
+            ..generated(10, 447)
+        };
+        let (judgement, _) = run(&uninitialized(447), &[failed, generated(20, 447), cold(30)], &[], 2);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Partial);
+        assert_eq!(
+            (judgement.units.generated, judgement.units.missing, judgement.units.failed),
+            (1, 1, 1)
+        );
+        assert_eq!(judgement.precheck.units_to_generate, 2);
+        assert!(!judgement.precheck.needs_confirm, "恰好等于阈值不用确认");
+        assert_eq!(judgement.precheck.confirm_threshold_units, 2);
+
+        let many: Vec<UnitFacts> = (0..21).map(|id| cold(100 + id)).collect();
+        let (judgement, _) = run(&uninitialized(447), &many, &[], 20);
+        assert!(judgement.precheck.needs_confirm);
+        let (judgement, _) = run(&uninitialized(447), &many, &[], 0);
+        assert!(!judgement.precheck.needs_confirm);
+    }
+
+    /// 没有生成单元的节点、正在被写的库、水位失配的库、差分算不出来——各有各的判定，计数照常给。
+    #[test]
+    fn empty_updating_and_unknown_are_told_apart() {
+        let (judgement, _) = run(&initialized(738, 748), &[], &[], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Empty);
+        assert_eq!(judgement.units.total, 0);
+
+        let writing = library(DataFace::Ingest, 748, 738, 748, true);
+        assert_eq!(writing.model_source_reason, Some("initialization_publishing"));
+        let quiet = report(738, 748, Vec::new());
+        let (judgement, _) = run(&writing, &[cold(10)], &[quiet.clone()], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Updating);
+        assert_eq!(judgement.verdict_reason, Some("data_batch_running"));
+        assert_eq!(judgement.units.generated, 1, "计数照常给");
+
+        let mut task = initialized(738, 748);
+        task.model_task_running = true;
+        let (judgement, _) = run(&task, &[cold(10)], &[quiet], 20);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Updating);
+        assert_eq!(judgement.verdict_reason, Some("model_task_running"));
+
+        // 模型水位越过数据水位：库行不可信。
+        let inverted = library(DataFace::Ingest, 700, 738, 748, false);
+        let (judgement, asked) = run(&inverted, &[cold(10)], &[], 20);
+        assert!(asked.is_empty(), "库里那份不作数，没有可比的起点");
+        assert_eq!(judgement.verdict, NodeModelVerdict::Unknown);
+        assert_eq!(judgement.verdict_reason, Some("watermarks_inconsistent"));
+
+        // 要比的那一段算不出来（会话不在链上之类）。
+        let (judgement, asked) = run(&initialized(738, 748), &[cold(10)], &[], 20);
+        assert_eq!(asked, vec![738]);
+        assert_eq!(judgement.verdict, NodeModelVerdict::Unknown);
+        assert_eq!(judgement.verdict_reason, Some("changes_unreadable"));
+        assert!(!judgement.units.exact);
+        assert_eq!(judgement.warnings.len(), 1);
+        assert_eq!(judgement.changes, None);
+    }
+
+    /// 已生成的单元对应到的会话太多时：只比最早的一段和最近的几段，其余按最早那一段算，并说明计数不精确。
+    #[test]
+    fn too_many_generation_sessions_are_capped_and_flagged_inexact() {
+        let units: Vec<UnitFacts> = (0..6).map(|i| generated(10 + i, 440 + i)).collect();
+        let windows: Vec<DiffSummaryReport> = [440, 443, 444, 445]
+            .into_iter()
+            .map(|from| report(from, 447, Vec::new()))
+            .collect();
+        let (judgement, mut asked) = run(&uninitialized(447), &units, &windows, 20);
+        asked.sort_unstable();
+        assert_eq!(asked, vec![440, 443, 444, 445], "441 / 442 并进最早的 440 那一段");
+        assert_eq!(judgement.verdict, NodeModelVerdict::Latest);
+        assert!(!judgement.units.exact);
+        assert_eq!(judgement.changes.expect("比过").from_sesno, 440);
+    }
+
+    /// 字面值是给前端的契约。
+    #[test]
+    fn the_verdict_and_report_serialize_with_the_frozen_names() {
+        for (verdict, name) in [
+            (NodeModelVerdict::Unknown, "unknown"),
+            (NodeModelVerdict::Updating, "updating"),
+            (NodeModelVerdict::Empty, "empty"),
+            (NodeModelVerdict::NotGenerated, "not_generated"),
+            (NodeModelVerdict::Partial, "partial"),
+            (NodeModelVerdict::Lagging, "lagging"),
+            (NodeModelVerdict::Latest, "latest"),
+        ] {
+            assert_eq!(serde_json::to_value(verdict).unwrap(), name);
+        }
+        let library = uninitialized(447);
+        let (judgement, _) = run(&library, &[generated(10, 447), cold(20)], &[], 20);
+        let status = NodeModelStatus {
+            refno: "24383/1".to_owned(),
+            noun: "ZONE".to_owned(),
+            dbnum: DBNUM,
+            unit_root: None,
+            verdict: judgement.verdict,
+            verdict_reason: judgement.verdict_reason,
+            library,
+            units: judgement.units,
+            generated_at: judgement.generated_at,
+            changes: judgement.changes,
+            precheck: judgement.precheck,
+            cached: false,
+            elapsed_ms: 3,
+            warnings: judgement.warnings,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["verdict"], "partial");
+        assert_eq!(json["verdict_reason"], serde_json::Value::Null);
+        assert_eq!(json["unit_root"], serde_json::Value::Null);
+        assert_eq!(json["library"]["model_source"], "memory");
+        assert_eq!(json["library"]["model_source_reason"], "data_watermark_unestablished");
+        assert!(json["library"].get("route").is_none(), "路由结论只在进程里用，不上线");
+        assert_eq!(json["units"]["total"], 2);
+        assert_eq!(json["generated_at"]["basis"], "own_generation");
+        assert_eq!(json["changes"], serde_json::Value::Null);
+        assert_eq!(json["precheck"]["confirm_threshold_units"], 20);
+        assert!(json.get("warnings").is_none(), "空告警不进回执");
+    }
+
+    /// 在真库文件上跑一遍文件侧的两段，看数和用时（不连数据库、不写任何东西）。水位由环境变量给——就是在问
+    /// 「假如这个库的模型水位是 S，这个节点现在算什么」。
+    ///
+    /// `AIOS_NODE_STATUS_PROBE_REFNO`（缺省 `9304/2`）、`AIOS_NODE_STATUS_PROBE_MODEL_SESNO`（缺省 0 = 按未初始化算）。
+    /// 在仓库根目录跑：`cargo test --lib live_probe_node_model_status -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "requires local project source files (read-only)"]
+    fn live_probe_node_model_status_on_real_files() {
+        let refno_text_in = std::env::var("AIOS_NODE_STATUS_PROBE_REFNO").unwrap_or_else(|_| "9304/2".into());
+        let model_sesno: i32 = std::env::var("AIOS_NODE_STATUS_PROBE_MODEL_SESNO")
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or(0);
+        let node = crate::fast_model::e3d_model_service::parse_refno(&refno_text_in).expect("refno");
+        let option = aios_core::get_db_option();
+        let tree = DirectTreeService::open(&option.project_name, &option.mdb_name).expect("direct tree");
+
+        for round in ["cold", "warm"] {
+            let started = Instant::now();
+            let (scope, scope_cached) = node_scope(&tree, node).expect("node scope");
+            let scope_ms = started.elapsed().as_millis();
+            let route = route(scope.dbnum, DataFace::Ingest, model_sesno, model_sesno, false);
+            let library = LibraryStatus {
+                file_latest_sesno: scope.file_latest_sesno,
+                file_latest_time: scope.file_latest_time.clone(),
+                applied_sesno: model_sesno,
+                model_sesno,
+                model_sesno_time: None,
+                initialized: model_sesno > 0,
+                model_verdict: "probe",
+                model_verdict_reason: None,
+                model_source: route.source.as_str(),
+                model_source_reason: route.reason.map(MemoryReason::as_str),
+                data_batch_running: false,
+                model_task_running: false,
+                in_watch_scope: true,
+                route,
+            };
+            let units: Vec<UnitFacts> = scope
+                .roots
+                .iter()
+                .map(|root| UnitFacts {
+                    root: *root,
+                    receipt_sesno: None,
+                    ledger: LedgerFact::Absent,
+                })
+                .collect();
+            let judge_started = Instant::now();
+            let (judgement, windows_cached) = judge_on_files(&scope, &library, &units);
+            println!(
+                "[{round}] {} {} dbnum={} latest={} model_sesno={model_sesno} roots={} unit_root={:?} \
+                 scope={scope_ms}ms(cached={scope_cached}) judge={}ms(cached={windows_cached}) \
+                 verdict={:?}/{:?} units={:?} generated_at={:?} changes={:?} precheck={:?} warnings={:?}",
+                refno_text(scope.node),
+                scope.noun,
+                scope.dbnum,
+                scope.file_latest_sesno,
+                scope.roots.len(),
+                scope.unit_root.map(refno_text),
+                judge_started.elapsed().as_millis(),
+                judgement.verdict,
+                judgement.verdict_reason,
+                judgement.units,
+                judgement.generated_at,
+                judgement.changes,
+                judgement.precheck,
+                judgement.warnings,
+            );
+        }
+    }
+
+    /// 「库文件最新会话号」三处读法在真库文件上逐库对一遍（只读文件头，不连数据库）：
+    ///
+    /// - 模型树骨架上钉的会话（`/dbnums` 引导形状的 `file_latest_sesno`）；
+    /// - `model_source::latest_source_version`（本接口的 `library.file_latest_sesno`，`/dbnums` 带身份形态
+    ///   2026-11-11 起也读它）；
+    /// - `db_file_header::latest_sesno`（增量扫描读的那个数，登记表里的观察值就是它当时的值）。
+    ///
+    /// 三者必须相等——前端拿模型树的数和「模型生成」面板的数、节点状态里的库水位互相比。
+    /// 在仓库根目录跑：`cargo test --lib live_probe_file_latest_sesno -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "requires local project source files (read-only)"]
+    fn live_probe_file_latest_sesno_agrees_across_readers() {
+        let option = aios_core::get_db_option();
+        let tree = DirectTreeService::open(&option.project_name, &option.mdb_name).expect("direct tree");
+        let metadata = tree.metadata().expect("tree metadata");
+        let mut different = 0usize;
+        for database in metadata.databases() {
+            let header = crate::data_interface::db_file_header::latest_sesno(&database.file)
+                .expect("file header");
+            let version = crate::data_interface::model_source::latest_source_version(database.dbnum)
+                .expect("latest source version");
+            let same = database.sesno == header && version.sesno == header && version.file == database.file;
+            if !same {
+                different += 1;
+            }
+            println!(
+                "file-latest-probe dbnum={} type={} tree={} model_source={} header={} same_file={} {}",
+                database.dbnum,
+                database.db_type,
+                database.sesno,
+                version.sesno,
+                header,
+                version.file == database.file,
+                if same { "ok" } else { "DIFFERENT" },
+            );
+        }
+        println!(
+            "file-latest-probe libraries={} different={different}",
+            metadata.databases().len()
+        );
+        assert!(!metadata.databases().is_empty(), "当前 MDB 一个元素库都没有");
+        assert_eq!(different, 0, "三处读到的库文件最新会话号必须相同");
+    }
+
+    #[tokio::test]
+    async fn uninitialized_durable_library_hydrates_persisted_unit_sesno_after_restart() {
+        let db = surrealdb::engine::any::connect("mem://").await.expect("mem db");
+        db.use_ns("test").use_db("test").await.expect("use ns/db");
+        let unit = refno(101);
+        let packed = crate::fast_model::model_memory_store::packed_refno(unit);
+        db.query(format!(
+            "INSERT INTO inst_relate {{ id: inst_relate:⟨24383_101⟩, in: pe:⟨24383_101⟩, anc: [{packed}], model_sesno: 447 }};"
+        ))
+        .await
+        .expect("insert inst_relate")
+        .check()
+        .expect("check insert");
+
+        let bare = library(DataFace::Ingest, 0, 0, 447, false);
+        assert!(bare.route.allows_durable_fallback());
+        assert_eq!(bare.durable_promise(), None);
+
+        // 重启后进程内投影和账本均为空（cold unit）
+        let mut units = vec![cold(101)];
+        hydrate_durable_unit_facts_on(&db, true, false, &bare, &mut units)
+            .await
+            .expect("hydrate durable");
+        assert_eq!(units[0].receipt_sesno, Some(447));
+        assert_eq!(
+            classify_unit(&bare, &units[0], false),
+            UnitState::Generated {
+                valid_through: 447,
+                by_library: false,
+            }
+        );
+
+        // 纯内存（非 durable）和读透模式下不回读持久库
+        let mut mem_units = vec![cold(101)];
+        hydrate_durable_unit_facts_on(&db, false, false, &bare, &mut mem_units)
+            .await
+            .expect("skip non-durable");
+        assert_eq!(mem_units[0].receipt_sesno, None);
+
+        let rt = library(DataFace::ReadThrough, 0, 0, 447, false);
+        let mut rt_units = vec![cold(101)];
+        hydrate_durable_unit_facts_on(&db, true, true, &rt, &mut rt_units)
+            .await
+            .expect("skip read-through");
+        assert_eq!(rt_units[0].receipt_sesno, None);
+    }
+}

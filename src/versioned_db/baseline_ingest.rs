@@ -444,10 +444,7 @@ fn dispatch_chunk(
             .extend(seeds);
     }
     // 与增量路同一个渲染器（`element_batch`，Fresh）：每笔事务就是一条消息，切块按 `tx_limits`。
-    let (transactions, report) = render_baseline_batches(chunk, dbnum as i32, uda_keys)?;
-    if let Some(notice) = report.split_notice(dbnum) {
-        println!("{notice}");
-    }
+    let (transactions, _report) = render_baseline_batches(chunk, dbnum as i32, uda_keys)?;
     let first = chunk
         .elements
         .first()

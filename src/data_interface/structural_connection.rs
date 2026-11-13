@@ -51,11 +51,7 @@
 //! ——见 `fast_model::unit_publish_cascade_target_tests` 的 aps7166 测试。**不成单元的关节同日落地**：没有目录正体、
 //! 只有负体的 SJOI / PJOI（`/MDS/FT54` 的端关节那一族）自己不画、却照样切认领它的型钢；改它、改它模板里的负体、
 //! 挪它的 PNOD / SNOD / 宿主，被它切的型钢都由 `plan_update` 点名（`increment::loose_joint_consumer_of`，aps7324
-//! 测试）。**关节挂着的那根型钢同日落地**（GitHub #150 / #156）：型钢还向自己成员链上的件取刀——`SNOD` 名下的 `SJOI`
-//! 把螺栓孔打在挂着它的立杆上，直属 `FITT`、`CMFI` 名下的 `SBFI` 同理（`elmodl::member_chain_sources`）。这条边是
-//! 属主链、不经 `CREF` / `JOIS` / `JOIE`，件与宿主又总在同一个根里，本开关从来管不到；`plan_update` 多了一条腿
-//! `increment::member_chain_host_of`，排在关节级联之后——改关节、或改被关节接着的梁（关节被反向带出来），宿主都被
-//! 点名，与 GENSEC 那边的 `datum_fixing_host_of` 对称。仍只有本开关补得上的同库形状是 `SCOJ` / `PCOJ` / `SUBJ` → SCTN（语料里没有带几何源的）、
+//! 测试）。仍只有本开关补得上的同库形状是 `SCOJ` / `PCOJ` / `SUBJ` → SCTN（语料里没有带几何源的）、
 //! `FIXING ↔ STWALL`、`CMPF.CFRA`，以及梁不认领的关节（`CREF` 陈旧，回指对不上）。跨库那一格两边都盖不住：
 //! e3d-model 对 `CREF` 指到别的库的关节只记一条 note（`JointConsumer::OtherDatabase`）。
 

@@ -17,7 +17,7 @@
 //!
 //! | | 记什么 | 活多久 |
 //! |---|---|---|
-//! | `/health` 的 `batch_failures` | 连败次数与最近一句（只跑模型的任务有没生成成的根时是根摘要，其余是 `warnings.last()`） | 进程内 |
+//! | `/health` 的 `batch_failures` | 连败次数与最近一句 `warnings.last()` | 进程内 |
 //! | `logs/queue-stalls-*.jsonl` | 队列**姿态**（谁在等、被哪道门挡着） | 落盘 |
 //! | 本模块 | 批次**为什么**失败：原话、出处、死在哪一步、分步账、全部告警 | 落盘 |
 //!
@@ -115,8 +115,8 @@ pub struct BatchPark<'a> {
     /// 连败期间观察到的窗口右端。它不前进，就说明没人往这个库里存新会话。
     pub end_sesno: i32,
     pub file_path: Option<&'a str>,
-    /// 账本里记的最近一句失败原因（`batch_worker::ledger_failure_sentence`：只跑模型的任务有没生成成的根时
-    /// 是它们的摘要，其余是 `warnings.last()`；权威那句在同 dbnum 的 `batch_failure` 记录里）。
+    /// 账本里记的最近一句失败原因（`warnings.last()` 口径，权威那句在同 dbnum
+    /// 的 `batch_failure` 记录里）。
     pub last_reason: &'a str,
     pub first_at: &'a str,
     pub last_at: &'a str,
