@@ -125,7 +125,7 @@ let is_dir = match entry.file_type() {
 ## 9. 追记（2026-09-16）：掉线根等的不是我们的 15 s，是 `canonicalize` 在调用方线程上兑 OS 超时——已修
 
 §5 里「28 s 就绪 … `read_dir` 快速失败、不是 15 s 超时那条路」归因不对。2026-09-16 00:1x 用现场服务器
-`\\10.181.11.245\PDM`（SCB `custom_evars.bat` 里的地址，此刻 445 不通）对 `POST /api/v1/setup/probe/mdb` 重测：
+`\\<文件服务器>\<共享>`（SCB `custom_evars.bat` 里的地址，此刻 445 不通）对 `POST /api/v1/setup/probe/mdb` 重测：
 
 - **修前**（HEAD `9ea9f0bcc`，9099 那台）：wall **21,083 ms**，可 `roots[1].scan_ms = 0`、problem 是 OS 的
   `os error 53`——扫描线程根本没等，等的是线程起来**之前**：`mdb_closure::search_roots`（根去重）、`plan_key`

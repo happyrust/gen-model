@@ -41,7 +41,7 @@ core.dll 拿它拼 `%<项目码>000%` 去定位文件，从头到尾没有「项
 | `DLL_PDMSProject::BuildProjectsList()` | `0x5840b80` | `GetEnvironmentStrings()` 逐条扫：名字第 4 个字符起是 `000=` 的就是一个项目（`AMS000=`），`000ID=` 是项目 ID。**E3D 的「已知项目全集」就是环境变量，没有第二张表** |
 
 E3D 里 `%ACP000%` 由 `evars.bat` → `%projects_dir%custom_evars.bat` → 各 `evars<Project>.bat` 设定；现场脚本里外部项目常在 UNC
-（`SCB\custom_evars.bat`：`\\10.181.11.245\PDM\PDM000`、`REF000`、`MSP000`……）。这些脚本形态各异、还会 `call` 到远程，本计划**不解析它们**：
+（`SCB\custom_evars.bat`：`\\<文件服务器>\<共享>\PDM000`、`REF000`、`MSP000`……）。这些脚本形态各异、还会 `call` 到远程，本计划**不解析它们**：
 人把这些远程根填进 `project_search_paths`，我们只在根里找 `<code>000`。`set_project_evars.bat` 自己文档化了库目录的三种摆法（§D2 照搬）。
 目录名大小写随手写（`acp000` / `ZDJ000` / `SCB000`），Windows 不区分。
 

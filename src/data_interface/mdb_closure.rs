@@ -716,7 +716,7 @@ pub fn search_roots(db_option: &DbOption) -> Vec<PathBuf> {
 /// 先写的在前——顺序即优先级。
 ///
 /// 这里**只看字面、不碰文件系统**。根可能是掉线的 UNC：`path_identity` 走 `canonicalize`，
-/// 会在调用方线程上阻塞到 OS 自己放弃（2026-09-16 用现场服务器 `\\10.181.11.245\PDM` 实测 21 s），
+/// 会在调用方线程上阻塞到 OS 自己放弃（2026-09-16 用现场服务器 `\\<文件服务器>\<共享>` 实测 21 s），
 /// 把 [`scan_roots`] 每根独立线程 + 15 s 的上限整个绕过——启动、重扫、向导「看闭包」每个掉线根
 /// 都要多等一个 OS 超时，而且报出来的是 OS 的 error 53 而不是「扫描 15 s 未答」。
 /// 代价是联接 / 符号链接与它的目标、8.3 短名这类「字面不同、实为一处」的写法不再合并：
@@ -1166,14 +1166,14 @@ mod tests {
             r"d:\aveva\projects\e3d3.1",
             r#""\\nas01\PDM""#,
             "//nas01/pdm/",
-            r"\\10.181.11.245\PDM\PDM000",
+            r"\\fileserver\PDM\PDM000",
         ]);
         assert_eq!(
             roots,
             vec![
                 PathBuf::from(r"D:\AVEVA\Projects\E3D3.1"),
                 PathBuf::from(r"\\nas01\PDM"),
-                PathBuf::from(r"\\10.181.11.245\PDM\PDM000"),
+                PathBuf::from(r"\\fileserver\PDM\PDM000"),
             ]
         );
     }

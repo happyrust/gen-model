@@ -4165,7 +4165,7 @@
 
 ### 修：搜索根去重与闭包 key 改用字面 `path_key`，掉线 UNC 不再绕过扫描线程的 15 s 上限（ADR-078 追记）
 
-- 起因：用现场服务器 `\\10.181.11.245\PDM`（445 不通）实测 `POST /api/v1/setup/probe/mdb`：wall **21,083 ms**，
+- 起因：用现场服务器 `\\<文件服务器>\<共享>`（445 不通）实测 `POST /api/v1/setup/probe/mdb`：wall **21,083 ms**，
   可 `roots[1].scan_ms = 0`、problem 报的是 OS 的 `os error 53` 而不是「扫描 15 s 未答」——等的不是扫描线程，
   是线程起来**之前**调用方就对每个根调了 `project_paths::path_identity` → `std::fs::canonicalize`，它在掉线 UNC
   上把调用方线程阻塞到 OS 自己放弃（PowerShell `[IO.Directory]::Exists` 同一路径同样 21 s）。三处：

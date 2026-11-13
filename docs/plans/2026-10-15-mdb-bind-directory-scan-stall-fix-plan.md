@@ -2,7 +2,7 @@
 
 - 日期：2026-10-15
 - 关联：ADR-028（extract 族选主）、ADR-078（项目闭包）、ADR-085（成员绑定登记表）、`docs/plans/2026-09-29-update-scope-reads-the-registered-declaration-fix-plan.md`（同族：取范围曾每轮重扫全盘）
-- 现场：`web-offline-v0.2.4-backend-v0.1.39-20261015` 在另一台机器上初始化，项目根为 UNC `\\10.30.230.8\projects$\E3D2.1\9001`，JEU /ALL `decoded_databases=480`。日志停在 `included_projects = ["JEU"] 已不再参与项目解析` 一行之后，长时间无输出。
+- 现场：`web-offline-v0.2.4-backend-v0.1.39-20261015` 在另一台机器上初始化，项目根为 UNC `\\<文件服务器>\<共享>\E3D2.1\9001`，JEU /ALL `decoded_databases=480`。日志停在 `included_projects = ["JEU"] 已不再参与项目解析` 一行之后，长时间无输出。
 
 ---
 
