@@ -9369,4 +9369,320 @@ mod tests {
             .expect("写入标记");
         assert!(lock < marker, "任务在飞锁要在写入标记之前拿");
     }
+
+    /// GitHub #170：模型水位为 0、数据水位 > 0（含整库重排连败到上限停下之后）来了新会话时，
+    /// 数据批次的模型窗口必须从数据水位起算，不得去打开库文件里不存在的会话 0；数据批次收口后
+    /// 由连续性闸保持 `model_sesno = 0`、不清成 `data_batch` 停跑，整库重排交回稳态补偿。
+    #[tokio::test]
+    async fn a_new_session_after_the_whole_library_retry_limit_plans_from_the_data_watermark_not_session_zero()
+     {
+        use crate::data_interface::batch_queue::BatchIntent;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+        use crate::data_interface::increment_pipeline::model_plan_base_sesno;
+        use crate::data_interface::startup_reconcile::{
+            startup_model_recovery_plan, steady_catch_up_plan,
+        };
+        use crate::data_interface::table_parity::{fresh_mem_db, init_schema_on};
+        use crate::data_interface::task_end::{
+            RoomGenerationStamp, TaskEnd, TaskModelOutcome, commit_task_end_on,
+        };
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+        use DataFailureBooking::{Clear, Record, Untouched};
+        use e3d_attlib::db1_hash;
+        use e3d_io::db_element::{DbFilePin, DbSet};
+        use e3d_io::record::descriptor::DescriptorValue;
+        use e3d_io::record::template::TemplateProvider;
+        use e3d_io::record::text::TextFormat;
+        use e3d_io::refno::RefNo;
+        use e3d_io::write::record::pack_offset;
+        use e3d_io::write::{ElementWrite, RecordDraft, SessionRequest, write_element_session};
+
+        const SOURCE_DB: u32 = 8000;
+        const PAGE_WORDS: usize = 1024;
+        const PAGE_BYTES: usize = PAGE_WORDS * 4;
+        let source_ref = |n: u32| RefNo::new(SOURCE_DB | (1 << 13), n);
+        let put = |page: &mut [u8], offset: usize, value: u32| {
+            page[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        let binaries = e3d_io::bundled_schema_root().join("e3d31/binaries");
+        assert!(
+            binaries.join("attlib.dat").is_file() && binaries.join("desvir.dat").is_file(),
+            "缺少随仓 schema 二进制：{}",
+            binaries.display()
+        );
+        let mut provider =
+            TemplateProvider::open(binaries.join("desvir.dat"), Some(db1_hash("DESI")))
+                .expect("DESI 模板");
+        let seed_draft = |provider: &mut TemplateProvider,
+                          n: u32,
+                          noun: &str,
+                          owner: RefNo,
+                          pos: [f64; 3],
+                          size: Option<[f64; 3]>| {
+            let template = provider.template_for(db1_hash(noun)).unwrap().unwrap();
+            let mut draft = RecordDraft::from_template(source_ref(n), owner, template).unwrap();
+            for (name, value) in [
+                ("POS", DescriptorValue::RealArray(pos.to_vec())),
+                ("ORI", DescriptorValue::RealArray(vec![0.; 3])),
+            ] {
+                draft
+                    .set_attribute(template, db1_hash(name), &value, TextFormat::Detect)
+                    .unwrap();
+            }
+            if let Some(size) = size {
+                for (name, value) in ["XLEN", "YLEN", "ZLEN"].into_iter().zip(size) {
+                    draft
+                        .set_attribute(
+                            template,
+                            db1_hash(name),
+                            &DescriptorValue::Real(value),
+                            TextFormat::Detect,
+                        )
+                        .unwrap();
+                }
+            }
+            draft
+        };
+
+        // 造一份会话链从 1 到 2 的真实 dabacon DESI 文件（没有会话 0）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_file = dir.path().join("ams8000_0001");
+        let mut parent = seed_draft(&mut provider, 10, "EQUI", RefNo::new(0, 0), [100.; 3], None);
+        parent.push_member(source_ref(11));
+        let child = seed_draft(
+            &mut provider,
+            11,
+            "BOX",
+            source_ref(10),
+            [20., 0., 0.],
+            Some([40., 20., 10.]),
+        );
+        let mut drafts = vec![parent, child];
+        for n in [20, 30, 40, 50, 60, 70] {
+            drafts.push(seed_draft(
+                &mut provider,
+                n,
+                "EQUI",
+                RefNo::new(0, 0),
+                [0.; 3],
+                None,
+            ));
+        }
+        let count = drafts.len();
+        let mut pages = vec![vec![0u8; PAGE_BYTES]; 3 + count];
+        for (offset, value) in [
+            (0x08, SOURCE_DB),
+            (0x20, db1_hash("DESI")),
+            (0x28, 1),
+            (0x2c, 1),
+            (0x30, 1),
+            (0x34, PAGE_WORDS as u32),
+            (0x38, source_ref(10).word0),
+            (0x3c, source_ref(10).word1),
+            (0x154, 1),
+        ] {
+            put(&mut pages[0], offset, value);
+        }
+        for (offset, value) in [
+            (0, 3),
+            (4, u32::MAX),
+            (0x0c, 1),
+            (0x10, u32::MAX),
+            (0x14, (pages.len() - 1) as u32),
+            (0x18, 1),
+            (0x1c, 2),
+            (0x20, 1),
+        ] {
+            put(&mut pages[1], offset, value);
+        }
+        let free = PAGE_WORDS - 7 - count * 4;
+        for (i, value) in [5, 13_387_743, 0, 2, 2, 0, free as u32]
+            .into_iter()
+            .enumerate()
+        {
+            put(&mut pages[2], i * 4, value);
+        }
+        for (i, draft) in drafts.into_iter().enumerate() {
+            let page = 3 + i;
+            put(&mut pages[page], 0, 7);
+            let placed = draft.encode(page as u32, 10, 1);
+            pages[page][40..40 + placed.bytes.len()].copy_from_slice(&placed.bytes);
+            for (j, value) in [
+                placed.refno.word0,
+                placed.refno.word1,
+                page as u32,
+                pack_offset(10, 1),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                put(&mut pages[2], (7 + i * 4 + j) * 4, value);
+            }
+        }
+        std::fs::write(&db_file, pages.concat()).expect("write session 1");
+
+        // 1. 数据水位 = 1、模型水位 = 0，整库重排连败 3 次后停下。
+        let ledger_dbnum = 996_170;
+        reset_batch_failure(ledger_dbnum);
+        assert_eq!(
+            settle_whole_library_failure(ledger_dbnum, 1, 3).await,
+            Untouched
+        );
+        assert_eq!(
+            settle_whole_library_failure(ledger_dbnum, 1, 3).await,
+            Untouched
+        );
+        assert_eq!(
+            settle_whole_library_failure(ledger_dbnum, 1, 3).await,
+            Record
+        );
+        let parked = batch_failure_parked(ledger_dbnum, 1).expect("整库重排到上限应停跑");
+        assert_eq!(parked.cause, ParkCause::WholeLibraryRetryLimit);
+        assert!(
+            steady_catch_up_plan(1, 0, 1, false, false, true).is_none(),
+            "停下之后同一右端不再自动重排"
+        );
+
+        // 2. 推入新会话 2（EQUI 10 位移）。
+        let mut engine = e3d_io::ReadOnlyEngine::open(&db_file).expect("open session 1");
+        let element = engine
+            .find_element(source_ref(10))
+            .expect("read index")
+            .expect("EQUI 10 exists");
+        let mut updated = RecordDraft::from_record_bytes(&element.raw_bytes).expect("decode EQUI");
+        let equi_template = provider.template_for(db1_hash("EQUI")).unwrap().unwrap();
+        updated
+            .set_attribute(
+                equi_template,
+                db1_hash("POS"),
+                &DescriptorValue::RealArray(vec![250., 100., 100.]),
+                TextFormat::Detect,
+            )
+            .expect("update POS");
+        drop(engine);
+        let commit = write_element_session(
+            &db_file,
+            &SessionRequest {
+                user: "issue170",
+                comment: "new session after whole-library retry limit",
+                clock: None,
+            },
+            &[ElementWrite::Update(updated)],
+            &[],
+        )
+        .expect("commit session 2");
+        assert_eq!((commit.previous.sesno, commit.written.sesno), (1, 2));
+
+        // 右端前进到 2：旧停跑账作废，进入 2..=2 的数据批次。
+        assert!(
+            batch_failure_parked(ledger_dbnum, 2).is_none(),
+            "新会话推进右端后旧停跑账应清零"
+        );
+        let applied_sesno = 1;
+        let model_sesno = 0;
+        let requested_start = 2;
+        let target_sesno = 2u32;
+        let model_floor = startup_model_recovery_plan(applied_sesno, model_sesno)
+            .map(|recovery| recovery.model_start_sesno);
+        assert_eq!(model_floor, Some(0));
+
+        let base_sesno = model_plan_base_sesno(requested_start, model_floor);
+        let open_at = |sesno: u32| -> anyhow::Result<std::sync::Arc<DbSet>> {
+            let set = std::sync::Arc::new(DbSet::with_attlib_file(binaries.join("attlib.dat"))?);
+            set.add_db(DbFilePin {
+                file: db_file.clone(),
+                template: binaries.join("desvir.dat"),
+                db_type: Some("DESI".into()),
+                sesno: Some(sesno),
+            })?;
+            Ok(set)
+        };
+        let base = open_at(base_sesno)
+            .expect("模型水位为 0、数据水位 > 0 时，数据批次不得去打开不存在的会话 0");
+        let target = open_at(target_sesno).expect("打开新会话 2");
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let sources = WindowRootSources::collect(
+            &db_file,
+            base_sesno,
+            target_sesno,
+            &base,
+            &target,
+            &unit_types,
+            &[],
+        )
+        .expect("从数据水位 1 到新会话 2 的窗口规划应成功");
+        assert_eq!(base_sesno, 1, "窗口左端应取数据水位 1");
+        let roots_s: Vec<PersistedRoot> = sources.roots_s.clone();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        assert_eq!(
+            plan.regen.len(),
+            1,
+            "本窗改动的 EQUI 正常选根: {:?}",
+            plan.regen
+        );
+
+        // 3. 数据批次落库后收尾：连续性闸拒盖 model_sesno（仍为 0），任务 Partial 但数据已 Applied，
+        //    不记 data_batch 失败，稳态补偿接着排起点 0 的整库 ModelOnly。
+        let db = fresh_mem_db("issue170", "after_whole_library_cap")
+            .await
+            .expect("mem db");
+        init_schema_on(&db).await.expect("schema");
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 2, model_sesno = 0;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let receipt = commit_task_end_on(
+            &db,
+            &TaskEnd {
+                dbnum: SOURCE_DB,
+                target_sesno: target_sesno as i32,
+                data: None,
+                target_time: None,
+                model: Some(TaskModelOutcome {
+                    all_roots_ok: true,
+                    dead_roots: 0,
+                    catalogue_sessions: None,
+                    room_generation: RoomGenerationStamp::Untouched,
+                }),
+                model_base_sesno: Some(base_sesno as i32),
+            },
+        )
+        .await
+        .expect("commit task end");
+        assert!(
+            receipt.model_watermark_discontinuous,
+            "模型水位为 0 时仅跑 1→2 增量窗不得跳盖 model_sesno: {receipt:?}"
+        );
+        assert_eq!(receipt.model_sesno, Some(0));
+        assert_eq!(
+            data_failure_booking(
+                BatchIntent::ApplyWindow,
+                TaskState::Partial,
+                Some(BatchStatus::Applied),
+                0,
+            ),
+            Clear,
+            "数据已 Applied 的连续性闸 Partial 不记 data_batch 停跑"
+        );
+        assert_eq!(
+            steady_catch_up_plan(
+                2,
+                0,
+                2,
+                false,
+                false,
+                batch_failure_parked(ledger_dbnum, 2).is_some(),
+            )
+            .map(|recovery| recovery.model_start_sesno),
+            Some(0),
+            "数据批次完成后稳态补偿继续排起点 0 的整库重排"
+        );
+        reset_batch_failure(ledger_dbnum);
+    }
 }
