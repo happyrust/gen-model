@@ -789,7 +789,11 @@ fn render_one_catalogue<'a>(
             dependency: true,
         })
         .collect::<Vec<_>>();
-    let (transactions, _) = render_item_transactions(&items, dbnum as i32, mode)?;
+    let (transactions, report) = render_item_transactions(&items, dbnum as i32, mode)?;
+    // 目录里一个属主名下上万个成员是常态（MDS 支吊架的 `CATE`、船体型材的 `SECT`）：它的成员边分笔写，说一声。
+    if let Some(notice) = report.split_notice(dbnum) {
+        println!("[cata_dependency] {notice}");
+    }
     Ok(transactions)
 }
 
@@ -2451,6 +2455,510 @@ mod tests {
                 "任务库上建的 locator 不得写进进程级缓存"
             );
             watch_scope::clear_for_tests();
+        });
+    }
+
+    /// 一个属主在库里的成员边：条数，与指定槽位上的那个成员。
+    async fn owner_edges_in_db(
+        db: &Surreal<Any>,
+        owner: RefU64,
+        slot: usize,
+    ) -> (i64, Option<String>) {
+        #[derive(serde::Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        let mut response = db
+            .query(format!(
+                "SELECT count() AS n FROM pe_owner:[pe:{owner}, NONE]..=[pe:{owner}, ..] GROUP ALL;\n\
+                 SELECT VALUE in FROM pe_owner:[pe:{owner}, {slot}];"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let count: Vec<Count> = response.take(0).unwrap();
+        let at_slot: Vec<surrealdb::sql::Thing> = response.take(1).unwrap();
+        (
+            count.first().map_or(0, |row| row.n),
+            at_slot.first().map(ToString::to_string),
+        )
+    }
+
+    /// gen-model #155：依赖闭包沿属主链带进来的目录属主，名下的成员比一笔事务装得下的还多（MDS 支吊架目录
+    /// 7320 的 `CATE /ATTA-FT03` 有 10,920 个 `SCOM`，闭包只用到其中几个，属主却带着整份成员表）。此前这一库的行
+    /// 渲不出来——`CATA 依赖闭包失败: single element 15512_5547 exceeds the data transaction limits`——设计库的
+    /// 初始化跟着失败、挂起。现在照进程的上限落得进去：属主的行在、边一条不少、状态行与记忆照常。
+    #[tokio::test]
+    async fn a_catalogue_owner_with_more_members_than_one_transaction_holds_still_lands() {
+        const MEMBERS: u64 = 5_200;
+        let limits = crate::data_interface::tx_limits::data_tx_limits();
+        if limits.max_write_rows >= MEMBERS {
+            eprintln!(
+                "skip: 这份配置把一笔事务的写行上限调到了 {}，{MEMBERS} 个成员的属主一笔就装得下",
+                limits.max_write_rows
+            );
+            return;
+        }
+        let _guard = memo_test_guard();
+        forget_persisted_catalogue_rows(ForgetScope::Everything);
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("dep").use_db("oversize_owner").await.unwrap();
+        let uda_keys = UdaKeyMap::empty();
+
+        let catalogue_element = |refno: RefU64, noun: &str, name: &str, children: Vec<RefU64>| {
+            let mut att = NamedAttrMap::default();
+            att.map
+                .insert("REFNO".into(), NamedAttrValue::RefU64Type(refno));
+            att.map
+                .insert("TYPE".into(), NamedAttrValue::StringType(noun.into()));
+            att.map
+                .insert("NAME".into(), NamedAttrValue::StringType(name.into()));
+            att.map
+                .insert("DBNUM".into(), NamedAttrValue::IntegerType(7320));
+            element_from_attmap(refno, att, children)
+        };
+        let cate = refu(15512, 5547);
+        let members: Vec<RefU64> = (0..MEMBERS).map(|n| refu(15512, 100_000 + n)).collect();
+        let mut rows = CataDependencyRows::default();
+        rows.by_dbnum.insert(
+            7320,
+            vec![
+                (
+                    14,
+                    catalogue_element(cate, "CATE", "/ATTA-FT03", members.clone()),
+                ),
+                (14, catalogue_element(members[0], "SCOM", "/FT03-1", vec![])),
+                (14, catalogue_element(members[1], "SCOM", "/FT03-2", vec![])),
+            ],
+        );
+
+        let report = land_dependency_rows_on(&db, &rows, &uda_keys)
+            .await
+            .expect("成员再多也只是多写几笔，不是这一库落不了的理由");
+        assert_eq!(report.elements, 3);
+        assert!(
+            report.transactions >= 3,
+            "属主的边至少分两笔，加上别的元素：{} 笔",
+            report.transactions
+        );
+        assert_eq!(dependency_facts(&db, 7320).await, (3, 3));
+        let last = MEMBERS as usize - 1;
+        assert_eq!(
+            owner_edges_in_db(&db, cate, last).await,
+            (MEMBERS as i64, Some(members[last].to_pe_key())),
+            "边一条不少，最后一个槽位上是最后一个成员"
+        );
+        assert_eq!(
+            owner_edges_in_db(&db, cate, 0).await.1,
+            Some(members[0].to_pe_key())
+        );
+
+        // 记忆照常：再落一次一笔事务都不发。
+        let again = land_dependency_rows_on(&db, &rows, &uda_keys)
+            .await
+            .unwrap();
+        assert_eq!((again.skipped_persisted, again.transactions), (3, 0));
+    }
+
+    /// 扫文件建的定位器（生产是 MDB 路由目录，这里只读文件）：工程目录 + 同一 Projects 根下的
+    /// `AvevaCatalogue\acp000`；同号多份时工程目录下那份赢。与 [`live_ams_fixture`] 同一种建法。
+    /// 语料或模板不在本机 → `None`。
+    fn live_project_locator(
+        project_dir: &std::path::Path,
+    ) -> Option<(
+        std::sync::Arc<e3d_model::db_discovery::DirectoryDbResolver>,
+        FileLocator,
+        std::path::PathBuf,
+    )> {
+        use std::path::Path;
+
+        use e3d_model::db_discovery::DirectoryDbResolver;
+
+        use crate::data_interface::direct_store::DirectSchema;
+
+        if !project_dir.is_dir() {
+            return None;
+        }
+        let schema = DirectSchema::open_from_env().ok()?;
+        let template_dir = schema.template_dir().to_path_buf();
+        let mut dirs = vec![project_dir.to_path_buf()];
+        if let Some(projects) = project_dir.parent().and_then(Path::parent) {
+            let acp = projects.join("AvevaCatalogue").join("acp000");
+            if acp.is_dir() && acp != project_dir {
+                dirs.push(acp);
+            }
+        }
+        let resolver = std::sync::Arc::new(DirectoryDbResolver::scan(&dirs, &template_dir).ok()?);
+        let mut dbs: HashMap<u32, (String, std::path::PathBuf)> = HashMap::new();
+        for db in resolver.discovered() {
+            if db.ext_no > 1 {
+                continue;
+            }
+            let in_project = db.file.starts_with(project_dir);
+            match dbs.get(&db.dbno) {
+                Some((_, existing)) if existing.starts_with(project_dir) && !in_project => {}
+                _ => {
+                    dbs.insert(db.dbno, (db.db_type.clone(), db.file.clone()));
+                }
+            }
+        }
+        let project = project_dir
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some((resolver, FileLocator { project, dbs }, template_dir))
+    }
+
+    /// 一本设计库（文件最新会话）全库元素的目录 seed——基线收尾就是拿全库元素取的 seed
+    /// （`baseline_ingest`：每块 `seeds_from_elements`）。返回 `(dbnum, seeds, 读到的元素数, 读不出的元素数)`。
+    fn live_library_seeds(
+        resolver: &std::sync::Arc<e3d_model::db_discovery::DirectoryDbResolver>,
+        template_dir: &std::path::Path,
+        file: &std::path::Path,
+    ) -> anyhow::Result<(u32, BTreeSet<RefU64>, usize, usize)> {
+        use std::sync::Arc;
+
+        use e3d_io::db_element::{DbFilePin, DbFileResolver, DbSet, template_file_for};
+        use e3d_io::engine::{ReadOnlyEngine, ScanTier};
+        use e3d_model::db_discovery::DirectoryDbResolver;
+
+        use crate::data_interface::e3d_collector::read_ele_data;
+
+        struct Shared(Arc<DirectoryDbResolver>);
+        impl DbFileResolver for Shared {
+            fn resolve(&self, dbno: u32) -> Option<DbFilePin> {
+                self.0.resolve(dbno)
+            }
+        }
+        let failed = |what: &str, error: &dyn std::fmt::Display| {
+            anyhow::anyhow!("{what} {}: {error}", file.display())
+        };
+        let set = Arc::new(
+            DbSet::with_attlib_file_and_resolver(
+                template_dir.join("attlib.dat"),
+                Box::new(Shared(resolver.clone())),
+            )
+            .map_err(|error| failed("attlib", &error))?,
+        );
+        let dbnum = set
+            .add_db(DbFilePin {
+                file: file.to_path_buf(),
+                template: template_file_for(template_dir, "DESI")
+                    .map_err(|error| failed("DESI template", &error))?,
+                db_type: Some("DESI".into()),
+                sesno: None,
+            })
+            .map_err(|error| failed("pin", &error))?;
+        let mut engine = ReadOnlyEngine::open(file).map_err(|error| failed("open", &error))?;
+        let refnos: Vec<e3d_io::refno::RefNo> = engine
+            .scan_elements(ScanTier::Header)
+            .map_err(|error| failed("scan", &error))?
+            .filter_map(|scanned| scanned.ok())
+            .map(|scanned| scanned.refno)
+            .collect();
+        drop(engine);
+        let mut seeds = BTreeSet::new();
+        let (mut read, mut unreadable) = (0usize, 0usize);
+        for refno in refnos {
+            match read_ele_data(&set, RefU64::from_two_nums(refno.word0, refno.word1)) {
+                Ok(Some(element)) => {
+                    read += 1;
+                    seeds.extend(seeds_from_attmap(element.att_map()));
+                }
+                Ok(None) => {}
+                Err(_) => unreadable += 1,
+            }
+        }
+        Ok((dbnum, seeds, read, unreadable))
+    }
+
+    /// 闭包里名下成员最多的那个元素：`(refno, noun, 成员数)`。
+    fn widest_owner(rows: &CataDependencyRows) -> Option<(RefU64, String, usize)> {
+        rows.by_dbnum
+            .values()
+            .flatten()
+            .map(|(_, element)| {
+                (
+                    element.refno,
+                    element.att_map().get_type(),
+                    element.children.iter().count(),
+                )
+            })
+            .max_by_key(|(_, _, members)| *members)
+    }
+
+    /// 真库（gen-model #155；语料或模板不在本机就跳过）：APS 支撑库 250104 的 CATA 依赖闭包照缺省上限落库。
+    ///
+    /// 这本库的支撑件指着 MDS 支吊架目录 7320；闭包沿属主链把 `CATE /ATTA-FT03`（15512/5547）带进来，它名下
+    /// 10,920 个 `SCOM`。此前这一步渲不出来（`single element 15512_5547 exceeds the data transaction limits`），
+    /// 整库初始化挂起。走的是生产同一条路，只有定位器换成扫文件的、库换成内存库：全库元素 → `seeds_from_attmap`
+    /// → 闭包（`resolve_rows_with_config`）→ `render_dependency_transactions`（`Fresh`、缺省上限）。
+    ///
+    /// 这一条随整套跑，只到「渲得出来、每一笔都在上限以内、边一条不少」为止——当初失败的就是渲这一步。
+    /// 把渲出来的事务真落进库的是下面手动的那一条（十几万条边落内存库，调试版要两分钟）。
+    #[test]
+    fn live_aps250104_dependency_closure_renders_under_the_default_limits() {
+        live_aps250104_dependency_closure(false);
+    }
+
+    /// 同上，再把渲出来的事务逐笔落进内存库、回读核对：闭包里的行一行不少，成员最多的那个属主的边一条不少。
+    #[test]
+    #[ignore = "manual live: lands ~130k member edges on an in-memory database (about two minutes in a debug build)"]
+    fn live_aps250104_dependency_closure_lands_on_a_database() {
+        live_aps250104_dependency_closure(true);
+    }
+
+    fn live_aps250104_dependency_closure(land: bool) {
+        let file =
+            std::path::PathBuf::from(std::env::var("AIOS_155_DESIGN_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000\aps250104_0001".into()
+            }));
+        let Some((resolver, locator, template_dir)) = file
+            .parent()
+            .filter(|_| file.is_file())
+            .and_then(live_project_locator)
+        else {
+            eprintln!("skip: 语料或 E3D 模板不在本机（{}）", file.display());
+            return;
+        };
+        // 闭包解析会动进程级的解析失败账本：与 parse_error 的测试共用一把锁。
+        crate::data_interface::parse_error::with_ledger_locked(async {
+            let started = std::time::Instant::now();
+            let (design_dbnum, seeds, read, unreadable) =
+                live_library_seeds(&resolver, &template_dir, &file).expect("读设计库");
+            assert_eq!(unreadable, 0, "设计库里有读不出的元素");
+            assert!(!seeds.is_empty(), "{read} 个元素一个目录引用都没有？");
+            let seeds_ms = started.elapsed().as_millis();
+
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("dep").use_db("live_250104").await.unwrap();
+            let rows =
+                resolve_rows_with_config(&db, &locator, closure_config(Some(design_dbnum)), &seeds)
+                    .await
+                    .expect("resolve the dependency closure");
+            let (widest, noun, members) = widest_owner(&rows).expect("闭包不空");
+            let limits = crate::data_interface::tx_limits::DataTxLimits::default();
+            assert!(
+                members as u64 > limits.max_write_rows,
+                "前提：这本库的闭包里有一个成员数超过缺省写行上限的属主；现在最多的是 {noun} {widest}：{members}"
+            );
+            // 属主带的是整份成员表：闭包里一共多少条成员边，其中指着闭包里的行的有多少。
+            let in_closure: std::collections::HashSet<RefU64> = rows
+                .by_dbnum
+                .values()
+                .flatten()
+                .map(|(_, element)| element.refno)
+                .collect();
+            let (mut member_edges, mut edges_to_closure_rows, mut oversize_owners) =
+                (0usize, 0usize, 0usize);
+            for (_, element) in rows.by_dbnum.values().flatten() {
+                let count = element.children.iter().count();
+                member_edges += count;
+                edges_to_closure_rows += element
+                    .children
+                    .iter()
+                    .filter(|child| in_closure.contains(*child))
+                    .count();
+                oversize_owners += usize::from(count as u64 + 2 > limits.max_write_rows);
+            }
+
+            let render_started = std::time::Instant::now();
+            let rendered = render_dependency_transactions(&rows, &UdaKeyMap::empty(), WriteMode::Fresh)
+                .expect("成员再多也渲得出来——此前就是这一步报 single element … exceeds the data transaction limits");
+            let render_ms = render_started.elapsed().as_millis();
+            let transactions: Vec<&String> =
+                rendered.iter().flat_map(|(_, sqls)| sqls.iter()).collect();
+            let largest = transactions.iter().map(|sql| sql.len()).max().unwrap_or(0);
+            assert!(
+                largest <= limits.max_bytes,
+                "最大的一笔事务 {largest} 字节，超过上限 {}",
+                limits.max_bytes
+            );
+            // 写行数逐笔数要把十几兆正文再解析一遍；数最大的三笔（行数上限由 `element_batch` 的单测逐笔钉着）。
+            let mut by_size = transactions.clone();
+            by_size.sort_by_key(|sql| std::cmp::Reverse(sql.len()));
+            for sql in by_size.iter().take(3) {
+                let rows_in_tx =
+                    crate::data_interface::staging::replay_safe::estimate_write_rows(sql).unwrap();
+                assert!(
+                    rows_in_tx <= limits.max_write_rows,
+                    "一笔事务 {rows_in_tx} 行，超过上限"
+                );
+            }
+            // 边一条不少：全部成员边都渲出来了，成员最多的那个属主的也齐。
+            let rendered_edges: usize = transactions
+                .iter()
+                .map(|sql| sql.matches("{ id: pe_owner:[").count())
+                .sum();
+            assert_eq!(rendered_edges, member_edges, "渲出来的成员边条数");
+            let of_widest = format!("{{ id: pe_owner:[pe:{widest}, ");
+            assert_eq!(
+                transactions
+                    .iter()
+                    .map(|sql| sql.matches(&of_widest).count())
+                    .sum::<usize>(),
+                members,
+                "{noun} {widest} 的成员边一条不少"
+            );
+
+            let mut land_ms = 0u128;
+            if land {
+                let land_started = std::time::Instant::now();
+                for sql in &transactions {
+                    crate::data_interface::pe_batch::execute_on(&db, sql)
+                        .await
+                        .unwrap_or_else(|error| panic!("落库失败：{error:#}"));
+                }
+                let (ids, _) = dependency_facts(&db, design_dbnum).await;
+                assert_eq!(ids, rows.elements(), "闭包里的行一行不少地进了库");
+                let (edges, last) = owner_edges_in_db(&db, widest, members - 1).await;
+                assert_eq!(
+                    edges as usize, members,
+                    "{noun} {widest} 在库里的成员边一条不少"
+                );
+                assert!(last.is_some(), "最后一个槽位上有成员");
+                land_ms = land_started.elapsed().as_millis();
+            }
+            println!(
+                "[#155 真库] {}：元素 {read}，seed {}，闭包 {} 行 / {} 库（缺失 {}）；自己就超过一笔事务上限的属主 {oversize_owners} 个，\
+                 成员最多的 {noun} {widest}：{members} 个成员；成员边一共 {member_edges} 条，其中指着闭包里的行的 {edges_to_closure_rows} 条；\
+                 {} 笔事务，最大一笔 {largest} 字节；读库取 seed {seeds_ms} ms，闭包 {} ms，渲 {render_ms} ms，落库 {land_ms} ms（{}）",
+                file.file_name().unwrap().to_string_lossy(),
+                seeds.len(),
+                rows.elements(),
+                rows.by_dbnum.len(),
+                rows.manifest.missing,
+                transactions.len(),
+                rows.account.resolve_ms,
+                if land {
+                    "内存库"
+                } else {
+                    "这一条不落库"
+                },
+            );
+        });
+    }
+
+    /// 普查（手动，gen-model #155）：一个工程目录下的每一本设计库，它的 CATA 依赖闭包里有没有「自己就超过
+    /// 一笔事务上限」的属主——有的话，这本库在修之前的后端上初始化必失败（`CATA 依赖闭包失败: single element …`）。
+    ///
+    /// 工程目录：`AIOS_155_PROJECT_DIRS`（分号分开），缺省 AvevaMarineSample 与 AvevaPlantSample 两个样例工程。
+    /// `AIOS_155_ONLY`（逗号分开的 dbnum）只看其中几本。只打印，不断言。
+    #[test]
+    #[ignore = "manual census: walks every design library of the sample projects"]
+    fn live_census_design_libraries_whose_dependency_closure_holds_an_oversize_owner() {
+        let dirs = std::env::var("AIOS_155_PROJECT_DIRS").unwrap_or_else(|_| {
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000;D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000"
+                .into()
+        });
+        let only: Option<BTreeSet<u32>> = std::env::var("AIOS_155_ONLY").ok().map(|list| {
+            list.split(',')
+                .filter_map(|dbnum| dbnum.trim().parse().ok())
+                .collect()
+        });
+        let limits = crate::data_interface::tx_limits::DataTxLimits::default();
+        crate::data_interface::parse_error::with_ledger_locked(async {
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("dep").use_db("census_155").await.unwrap();
+            for dir in dirs.split(';').filter(|dir| !dir.trim().is_empty()) {
+                let project_dir = std::path::PathBuf::from(dir.trim());
+                let Some((resolver, locator, template_dir)) = live_project_locator(&project_dir)
+                else {
+                    println!("[#155 普查] 跳过 {}：目录或模板不在", project_dir.display());
+                    continue;
+                };
+                let mut design: Vec<(u32, std::path::PathBuf)> = locator
+                    .dbs
+                    .iter()
+                    .filter(|(dbnum, (db_type, file))| {
+                        db_type == "DESI"
+                            && file.starts_with(&project_dir)
+                            && only.as_ref().is_none_or(|only| only.contains(*dbnum))
+                    })
+                    .map(|(dbnum, (_, file))| (*dbnum, file.clone()))
+                    .collect();
+                design.sort();
+                println!(
+                    "[#155 普查] {}：{} 本设计库",
+                    project_dir.display(),
+                    design.len()
+                );
+                let started = std::time::Instant::now();
+                let (mut walked, mut with_closure, mut blocked) = (0usize, 0usize, Vec::new());
+                let mut widest_seen: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+                for (dbnum, file) in design {
+                    let (design_dbnum, seeds, read, unreadable) =
+                        match live_library_seeds(&resolver, &template_dir, &file) {
+                            Ok(found) => found,
+                            Err(error) => {
+                                println!("[#155 普查]   {dbnum}：读不了（{error:#}）");
+                                continue;
+                            }
+                        };
+                    walked += 1;
+                    if seeds.is_empty() {
+                        continue;
+                    }
+                    let rows = match resolve_rows_with_config(
+                        &db,
+                        &locator,
+                        closure_config(Some(design_dbnum)),
+                        &seeds,
+                    )
+                    .await
+                    {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            println!("[#155 普查]   {dbnum}：闭包解不出（{error:#}）");
+                            continue;
+                        }
+                    };
+                    with_closure += 1;
+                    // 一个属主自己的行 = 自己的 pe / noun 两行 + 一名成员一条边：过不过得了一笔事务的上限。
+                    let oversize: Vec<(RefU64, String, usize)> = rows
+                        .by_dbnum
+                        .values()
+                        .flatten()
+                        .map(|(_, element)| {
+                            (
+                                element.refno,
+                                element.att_map().get_type(),
+                                element.children.iter().count(),
+                            )
+                        })
+                        .filter(|(_, _, members)| *members as u64 + 2 > limits.max_write_rows)
+                        .collect();
+                    if let Some((_, noun, members)) = widest_owner(&rows) {
+                        let entry = widest_seen.entry(noun).or_default();
+                        entry.0 = entry.0.max(members);
+                        entry.1 += 1;
+                    }
+                    if oversize.is_empty() {
+                        continue;
+                    }
+                    let detail: Vec<String> = oversize
+                        .iter()
+                        .map(|(refno, noun, members)| format!("{noun} {refno}（{members} 个成员）"))
+                        .collect();
+                    println!(
+                        "[#155 普查]   {dbnum}（{}，元素 {read}，读不出 {unreadable}，seed {}，闭包 {} 行）：超限的属主 {}",
+                        file.file_name().unwrap().to_string_lossy(),
+                        seeds.len(),
+                        rows.elements(),
+                        detail.join("、")
+                    );
+                    blocked.push(dbnum);
+                }
+                println!(
+                    "[#155 普查] {}：走了 {walked} 本，有目录依赖的 {with_closure} 本；闭包里有超限属主的 {} 本 {blocked:?}；\
+                     各库闭包里成员最多的属主按 noun（最大成员数, 库数）{widest_seen:?}；{:.0} 秒",
+                    project_dir.display(),
+                    blocked.len(),
+                    started.elapsed().as_secs_f64()
+                );
+            }
         });
     }
 }

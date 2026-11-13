@@ -1591,6 +1591,9 @@ impl IncrementPipeline {
             "增量主数据落库完成，共 {} 条（批量先删后插，{} 笔事务，最大一笔 {} 字节，墓碑 {}；仅最新状态，不写历史）",
             report.elements, report.transactions, report.max_transaction_bytes, report.tombstones
         );
+        if let Some(notice) = report.split_notice(dbnum as u32) {
+            println!("{notice}");
+        }
         let mut warnings = Vec::new();
         warnings.extend(uda_keys.misses_warning(dbnum as u32));
         warnings.extend(report.warning(dbnum as u32));

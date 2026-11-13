@@ -822,7 +822,10 @@ pub const DESIGN_CASCADE_ATTRIBUTES: [&str; 1] = ["POSREF"];
 ///
 /// `COMPRE`：支撑件（`ANCI` 一族）的管外径。e3d-io 目录求值的 `ATTRIB POD` 在设计件自己没有 `LSTU` 时经它的
 /// `COMPRE` 找到被支撑的构件，取那只构件的 `LSTU`（弯头、三通一类）或 `HSTU`（`BRAN`）走到管子的目录件要 `PARA[2]`
-/// （e3d-io `db_param_env.rs` 的 `catalogue_component_trace`）；外径决定支撑件整件沿 z 的平移。支撑件自己的 `COMPRE`
+/// （e3d-io `db_param_env.rs` 的 `catalogue_component_trace`）。外径进的是支撑件自己的形状，不是把整件平移：E3D 实测
+/// （`/MDS-Ancillaries/ANCI/AN02-300mm`，被支撑管 DN300 / DN250 / DN100 三档）件在自己局部系里的下沿恒为
+/// −(外径 / 2 + 100)，跟着管底走；上沿另算（DN300 → DN250 下沿上抬 25.40、上沿上抬 34.70），所以换管径时件的形状
+/// 也变。全量生成的与 E3D 逐件相同（GitHub #143 的验证评论）；验收时别拿「平移了多少」去比上沿。支撑件自己的 `COMPRE`
 /// 改指别处归元数据门管（GitHub #132，`model_impact::E3D_IO_DESIGN_SIDE_READS`）；这里管的是反方向——被指的那件换了
 /// 规格。名单与 e3d-io 的读点由测试 `the_conditional_list_matches_what_e3d_io_reads_on_the_referenced_component`
 /// 钉在一起。
