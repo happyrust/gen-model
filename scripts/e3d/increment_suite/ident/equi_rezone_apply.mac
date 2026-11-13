@@ -1,0 +1,33 @@
+-- 登记: A02（变更类型 CT-S5、CT-D10；按名称案例 B-06 的单元一级、F-01 的改挂版） | 语义: 整台设备改挂——把设备 EQ-CP（下面带着 BOX-CP1）从区域 Z 整台挪到区域 Z2（比 Z 高 3000）。命令里没有写位置，设备和 BOX 的本地坐标一个字没改，但在世界里上移了 3000
+-- expected_net: modified | restore 搭档: ident/equi_rezone_restore.mac
+-- 预期 gen-model（按 refno）: EQ-CP 是 Reparented，新旧两端都上卷，位置输入变了，整台重建一次（模型落到新的世界坐标）；
+--   Z 里别的设备、Z2 里原有的设备 EQ-Z2 只是所在区域的成员表变了，不该动（对照）；没有 datacenter_delete（参考号没变、名字没变）。
+-- 2026-11-12 探针实测（ident/rehome_probe.mac 第 2 段）：INCLUDE 保持本地坐标，世界坐标从 U 0 变成 U 3000；被挪的元素插到新属主成员表第 1 位。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-EQUI-REZONE-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q OWNER
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-BOX-CP1
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-Z2
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z2
+Q REF
+Q NAME
+INCLUDE /AIOS-SUITE-T3-EQ-CP
+Q MEMB
+/AIOS-SUITE-T3-EQ-CP
+Q OWNER
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/equi_rezone apply: EQ-CP moved from ZONE Z to ZONE Z2'
+$P SUITE-T3-EQUI-REZONE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,28 @@
+-- 登记: gen-model #143 的对照（不该多算；CT-A6 / CT-C2 规格换件） | 语义: 给一根**没有**支撑件指着的支管换一档管径——
+-- 管道库 250132 的 BRAN /100-D-20/B1 的 HSTU 从 /A1A/PA100 换成 /A1A/PA80。
+-- 预期：这根支管自己重算；设计引用那一行里**没有** target_reads 这一段（一条 COMPRE 边都没碰到），
+-- 没有跨库交接，250104 没有新任务。
+-- expected_net: modified | restore 搭档: support/compre_ctl_unref_restore.mac
+--
+-- 工程: APS（MDB /ALL），只在私有副本上跑——动的是生产元素。本宏不用世界锚点。
+--
+-- 语料（2026-11-12 离线读库文件核过）：
+--   /100-D-20/B1 = BRAN =2013286676/1774（属主 PIPE /100-A-20），HSTU = /A1A/PA100（=15192/235104），头尾都没接（HREF / TREF 空）
+--   它和它名下 7 个管件（6 只三通、1 只弯头）都不在 234 条 COMPRE 边的被指一端。
+--   /A1A/PA80    = SPCO =15192/235102
+--
+-- 写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-CTL-UNREF-APPLY-ALIVE
+/100-D-20/B1
+Q REF
+Q NAME
+Q TYPE
+Q HSTU
+Q HBOR
+HSTU /A1A/PA80
+Q HSTU
+Q HBOR
+SAVEWORK 'AIOS suite support/compre_ctl_unref apply: /100-D-20/B1 HSTU PA100 -> PA80'
+$P SUITE-SUPPORT-COMPRE-CTL-UNREF-APPLY-DONE
+ALPHA LOG END

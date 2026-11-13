@@ -1,24 +1,11 @@
--- 登记: H03 | 语义: 探针——列出 7998 的 WORL 下全部 SITE 与已有的 AIOS-SUITE 元素，确认库号与命名不撞 | expected_net: 无（不写） | restore 搭档: 无
-ONERROR CONTINUE
 ALPHA LOG "{{LOG_PATH}}" OVER
-$P SUITE-H03-PROBE-ALIVE
+$P SUITE-PROBE-7998-ALIVE
 {{WORLD_ANCHOR}}
-Q TYPE
-Q REF
-VAR !sites COLLECT ALL SITE FOR CE
-DO !s VALUES !sites
-  !!CE = !s.dbref()
-  Q REF
+VAR !s COLLECT ALL SITE
+Q VAR !s
+DO !x VALUES !s
+  !!CE = !x.dbref()
   Q NAME
-  Q TYPE
 ENDDO
-VAR !mine COLLECT ALL WITH (MATCHWILD(NAME,'/AIOS-SUITE-7998*')) FOR CE
-DO !m VALUES !mine
-  !!CE = !m.dbref()
-  Q REF
-  Q NAME
-  Q TYPE
-  Q POS WRT /*
-ENDDO
-$P SUITE-H03-PROBE-DONE
+$P SUITE-PROBE-7998-DONE
 ALPHA LOG END

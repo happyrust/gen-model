@@ -1,0 +1,22 @@
+-- 登记: D06 | 语义: 移动 run-owned ZONE（下挂 EQ-MV1 / EQ-MV2）。预期整棵子树重建，两件 BOX 的世界坐标跟着平移；本地没有再写 POS | expected_net: modified | restore 搭档: xform/zone_move_restore.mac
+-- 来源: xform/move_apply.mac 的 BY E 500 WRT /*。2026-11-04 隔离副本实测：BY 之后 BOX-MV1 / BOX-MV2 的 Q POS WRT /* 各 +500 E，子件跟着 ZONE 走
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ZONE-MOVE-APPLY-ALIVE
+/AIOS-SUITE-ZONE-MV
+Q REF
+Q NAME
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q POS WRT /*
+/AIOS-SUITE-ZONE-MV
+BY E 500 WRT /*
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/zone_move apply: ZONE-MV BY E 500'
+$P SUITE-XFORM-ZONE-MOVE-APPLY-DONE
+ALPHA LOG END

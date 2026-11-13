@@ -1,0 +1,94 @@
+-- 探针（APS 工程，MDB /ALL）：电缆这一组用例开跑之前看靶子和写法。
+-- 本文件**无 SAVEWORK**：试写不落库，会话由 wrapper QUIT 丢弃；不进录制清单。带 ONERROR CONTINUE（探针允许）。
+--
+-- 要答的问题：
+--   1. 路由节点 /CWAY-AREA01-POWER_B7-RNODE-003（桥架库 250182）在不在、现在是什么型（取证代理在另一份沙箱里量过：TAKE，有 2 根电缆经过）。
+--   2. 经过它的是哪两根电缆（节点所在分支的 CLIST）、它们在哪个库、哪个 ZONE（导出根）、两头各接在谁身上（STAREF / ENDREF）。
+--   3. 节点改成 OFFS 并给偏移、再写回 TAKE 和 0 的写法成不成立。
+--
+-- ═══ 实测结论 ═══ （跑完之后填）
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CABLE-PROBE-ALIVE
+
+$P SUITE-CABLE-PROBE-NODE
+/CWAY-AREA01-POWER_B7-RNODE-003
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q RNTYPE
+Q XOFF
+Q YOFF
+Q ZOFF
+Q POS WRT /*
+Q CLIST
+/CWAY-AREA01-POWER_B7
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q CLIST
+!cl = !!CE.CLIST
+!n = !cl.size()
+$P SUITE-CABLE-PROBE-CLIST-SIZE $!n
+
+$P SUITE-CABLE-PROBE-CABLES
+DO !i FROM 1 TO !n
+  !!CE = !cl[$!i]
+  $P SUITE-CABLE-PROBE-CABLE $!i
+  Q REF
+  Q NAME
+  Q TYPE
+  Q OWNER
+  Q STAREF
+  Q ENDREF
+  Q MEMB
+  !cab = !!CE
+  OWNER
+  Q REF
+  Q NAME
+  Q TYPE
+  OWNER
+  Q REF
+  Q NAME
+  Q TYPE
+  !!CE = !cab
+  !s = !!CE.STAREF
+  !!CE = !s
+  $P SUITE-CABLE-PROBE-START-OF $!i
+  Q REF
+  Q NAME
+  Q TYPE
+  Q OWNER
+  Q POS WRT /*
+  !!CE = !cab
+  !e = !!CE.ENDREF
+  !!CE = !e
+  $P SUITE-CABLE-PROBE-END-OF $!i
+  Q REF
+  Q NAME
+  Q TYPE
+  Q OWNER
+  Q POS WRT /*
+ENDDO
+
+$P SUITE-CABLE-PROBE-TRY
+/CWAY-AREA01-POWER_B7-RNODE-003
+RNTYPE OFFS
+XOFF 200
+ZOFF 100
+Q RNTYPE
+Q XOFF
+Q ZOFF
+Q POS WRT /*
+RNTYPE TAKE
+XOFF 0
+ZOFF 0
+Q RNTYPE
+Q XOFF
+Q ZOFF
+Q POS WRT /*
+
+$P SUITE-CABLE-PROBE-DONE
+ALPHA LOG END

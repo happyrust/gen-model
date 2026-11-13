@@ -1,0 +1,16 @@
+-- 登记: G03 | 语义: 把房间容器的名字改回来 | apply 搭档: pipeline/room_rename_xdb_apply.mac | 存盘只落在 7998
+-- 该有的行为: R901 又是一间房，8000 里的 EQ-RM1 又属于它。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-ROOM-RENAME-XDB-RESTORE-ALIVE
+/AIOS-SUITE-T4-X-STRU
+VAR !f COLLECT ALL FRMW WITH (NAME EQ '/AIOS-SUITE-T4-NOT-A-ROOM') FOR CE
+DO !x VALUES !f
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T4-RM-R901
+  Q NAME
+ENDDO
+SAVEWORK 'AIOS suite T4 pipeline/room_rename_xdb restore: R901 name back'
+$P SUITE-T4-ROOM-RENAME-XDB-RESTORE-DONE
+ALPHA LOG END

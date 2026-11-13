@@ -1,0 +1,17 @@
+-- 登记: A02（变更类型 CT-A4；按名称案例 B-04；会话窗口形状「改了又改回原样」的前半） | 语义: 只把 EQ-M 下有名成员 BOX-M1 的 XLEN 从 1000 改成 1300，refno 都不变
+-- expected_net: modified | restore 搭档: window/attr_roundtrip_restore.mac
+-- 预期 gen-model（按 refno）: 单看这一腿——EQ-M regen 一次，行数不变、包围盒变；EQ-U 不动。
+-- 把这一腿和 restore 那一腿并进同一个消费窗口（回放层一步跨过两条腿）时：BOX-M1 的记录被写了两次、内容回到原样，
+--   逐元素差分应判 unchanged，交付单元 0、EQ-M 不重建。这就是「改了又改回原样」。
+-- 写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-ATTR-ROUNDTRIP-APPLY-ALIVE
+/AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+Q XLEN
+XLEN 1300
+Q XLEN
+SAVEWORK 'AIOS suite T3 window/attr_roundtrip apply: BOX-M1 XLEN 1000 -> 1300'
+$P SUITE-T3-WINDOW-ATTR-ROUNDTRIP-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,15 @@
+-- Generated restore template. Replace {{TARGET_NAME}}, {{POS_LINE}}, {{ORI_LINES}},
+-- {{DESC_LINE}}, {{PURP_LINE}}, and {{LOG_PATH}} before execution.
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-INPLACE-RESTORE-ALIVE
+{{TARGET_NAME}}
+{{POS_LINE}}
+{{ORI_LINES}}
+{{DESC_LINE}}
+{{PURP_LINE}}
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AMS in-place incremental restore'
+$P AMS-INPLACE-RESTORE-DONE
+ALPHA LOG END

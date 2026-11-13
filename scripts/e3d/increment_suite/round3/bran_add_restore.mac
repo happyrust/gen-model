@@ -1,0 +1,18 @@
+-- P82 restore：删除本轮追加的 FTUB，保留 BRAN 副本及其余成员。
+-- 先导航到 BRAN，再收集直接子级；重复执行时集合为空，不会崩溃。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-BRAN-ADD-RESTORE-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+VAR !f COLLECT ALL FTUB WITH (NAME EQ '{{TARGET_NAME}}-FTUB-ADD') FOR CE
+DO !x VALUES !f
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  DELETE FTUB
+ENDDO
+{{TARGET_NAME}}
+Q MEMB
+SAVEWORK 'AMS round3 bran add restore'
+$P AMS-R3-BRAN-ADD-RESTORE-DONE
+ALPHA LOG END

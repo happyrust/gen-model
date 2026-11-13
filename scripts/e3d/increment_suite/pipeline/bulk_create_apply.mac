@@ -1,0 +1,26 @@
+-- 登记: A04（变更类型 CT-S1、CT-W10；管线行为「超预算的大窗」） | 语义: 在一个很小的库里，一次保存建 20 台设备（每台一个盒子）
+-- expected_net: cancelled | restore 搭档: pipeline/bulk_create_restore.mac | 存盘只落在 7998
+-- 为什么在 7998 做：这个库只有几十个元素，一次建 40 个，变更元素占索引的比例远超 30%
+--   （window_root_plan.rs 的 CREDENTIAL_ADVANCE_CANDIDATE_RATIO）。
+-- 该有的行为: 这一窗退化——不信「哪些根受影响」的推算，库里已有的根全部重算（回执 credential_advance_degraded 有原因），
+--   新建的 20 个根照常生成；算出来的东西与整库重建逐条相等。对照是 pipeline/small_create：同一个库里只建一台不退化。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-BULK-CREATE-APPLY-ALIVE
+/AIOS-SUITE-T4-X-BULKZ
+Q REF
+Q NAME
+DO !i FROM 1 TO 20
+  !n = 60000 + !i * 1500
+  /AIOS-SUITE-T4-X-BULKZ
+  NEW EQUIPMENT /AIOS-SUITE-T4-BK-EQ$!i
+  POS E 140000 N $!n U 0
+  Q REF
+  Q NAME
+  NEW BOX XLEN 600 YLEN 600 ZLEN 600
+  NAME /AIOS-SUITE-T4-BK-BOX$!i
+ENDDO
+/AIOS-SUITE-T4-X-BULKZ
+Q MEMB
+SAVEWORK 'AIOS suite T4 pipeline/bulk_create apply: 20 equipment in a tiny db'
+$P SUITE-T4-BULK-CREATE-APPLY-DONE
+ALPHA LOG END

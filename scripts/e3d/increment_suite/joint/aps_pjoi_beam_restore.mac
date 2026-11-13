@@ -1,0 +1,37 @@
+-- 登记: D5-pjoi-beam-aps | 语义: 把柱 /SB3/PANEL/1/COL/C03 的两端写回 W 1250 N 1250 U 170 / U 5250
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/aps_pjoi_beam_apply.mac 的 restore | 库: aps7166（APS 副本，MDB /SDNF）
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：重建柱 C03 与端板主关节两件，端板回到原来的原点。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-BEAM-RESTORE-ALIVE
+=23550/1066
+Q REF
+Q NAME
+Q POS WRT /*
+/SB3/PANEL/1/COL/C03
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+POSS E -1250 N 1250 U 170
+POSE E -1250 N 1250 U 5250
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+=23550/1066
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+=23550/1065
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_beam restore: column C03 back to W 1250'
+$P SUITE-T2-JOINT-APS-PJOI-BEAM-RESTORE-DONE
+ALPHA LOG END

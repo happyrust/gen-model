@@ -1,0 +1,2072 @@
+{
+  "version": 1,
+  "owner": "T3",
+  "topic": "ident",
+  "copy": "ams",
+  "sites": [
+    "/AIOS-SUITE-T3",
+    "/AIOS-SUITE-T3-S2"
+  ],
+  "setup": "ident/setup_t3.mac",
+  "teardown": "ident/teardown_t3.mac",
+  "description": "名称与身份：改名、删后同名重建（单元 / 成员，内容不变 / 有变）、删掉重建同时换名、名称只差大小写、成员重建后换了位置、自动命名（Copy-of）的成员。每个用例的期望分两栏：expect.rebuild / remove / untouched / why 加逐腿的 expect.legs 是现在要断言的（现行增量按 refno 认身份，判据仍是「增量 = 两端全量」）；expect.name_keyed 是按名称口径的期望，照 docs/plans/2026-11-11-name-keyed-increment-cases.md 抄成数据，现在不断言——那个功能还没实现，留给实现它的人直接用。",
+  "setup_note": "T3 的语料是 db8000 里自己的两个 SITE，由 ident/setup_t3.mac 建：/AIOS-SUITE-T3（下面区域 /AIOS-SUITE-T3-Z 和第二批加的 /AIOS-SUITE-T3-Z2）、第二批加的 /AIOS-SUITE-T3-S2。幂等，先按名删自己的 SITE 再建；不依赖公共基线 /AIOS-SUITE-8000，只读地 COPY 一条生产支管。T3 的各份片段共用这一套语料。这一份里的用例只用到 /AIOS-SUITE-T3-Z 下面的元素；RVM 导出根是 /AIOS-SUITE-T3，成员键都以 AIOS-SUITE-T3-Z/ 开头。第二批改 setup 时没有动这些元素的建法和次序（只在区域末尾加了一台 EQ-SUB、给 EQ-CP 加了 FUNC / PURP / 两个自定义属性的基线值）。",
+  "doc_names": {
+    "note": "按名称案例文档里的元素名是套件原有语料上的例子；T3 另起一套同形的语料，免得和别的用例抢同一个元素。左边是文档里的名字，右边是这里用的。",
+    "/AIOS-SUITE-EQ-A": "/AIOS-SUITE-T3-EQ-M",
+    "/AIOS-SUITE-BOX-A1": "/AIOS-SUITE-T3-BOX-M2（A-04）、/AIOS-SUITE-T3-BOX-M3（B-05 ③）",
+    "/AIOS-SUITE-BRAN-S": "/AIOS-SUITE-T3-BRAN-R",
+    "/AIOS-SUITE-BRAN-S-M2": "/AIOS-SUITE-T3-BRAN-R-M2",
+    "/AIOS-SUITE-EQ-B": "/AIOS-SUITE-T3-EQ-RN（A-06）、/AIOS-SUITE-T3-EQ-CASE（D-04）",
+    "/AIOS-SUITE-EQ-C": "/AIOS-SUITE-T3-EQ-RN2",
+    "/aios-suite-eq-b": "/aios-suite-t3-eq-case",
+    "/Copy-of-AIOS-SUITE-BOX-A1": "/Copy-of-AIOS-SUITE-T3-BOX-CP1（挂在 /AIOS-SUITE-T3-EQ-CP 下）"
+  },
+  "expect_vocabulary": {
+    "note": "refno 一栏的词用在每个用例的 expect.legs.<腿> 里；name_keyed 一栏的词用在 expect.name_keyed 里。",
+    "refno": {
+      "名字后缀": "@before = 这条腿跑之前叫这个名字的元素的 refno；@after = 跑完之后叫这个名字的元素的 refno；不带后缀 = 这条腿前后是同一个 refno。refno 从宏日志里相邻的 Ref / Name 两行回读（同名出现两次时，第一次是 @before、最后一次是 @after）。",
+      "roots_regen": "这一窗该重建的生成根（回放层：unit_kinds 里是 regen、records_present）",
+      "roots_removed": "这一窗该清掉的生成根（回放层：records_absent，库上 inst_relate 也没有）",
+      "roots_untouched": "对照：这一窗连候选都不该有它的生成根（回放层：generate_already_available，且不在 result.units 里）",
+      "roots_no_rebuild": "它自己或名下的记录在这一窗被写过（只改名、只动元数据、改了又改回），但模型不该重建的生成根（回放层：generate_already_available，且不在 result.units 里）。例外见 roots_rebuild_optional 的 ②：根自己的记录只剩戳不同时，现行设计会重算它一次，那种根不登记在这里",
+      "unit_count": "任务回执 result.units 的条数。被删的根在规划出来的那一刻就地清理、不进工作单（src/data_interface/batch_worker.rs 的 DeleteCleanup 一段），所以不计入",
+      "datacenter_delete": "这一窗该新落的交付删除记录（src/data_interface/increment_pipeline.rs：交付单元自身被删记 deleted、自身改名记 renamed，下属成员不记；INSERT IGNORE，同一 refno 只留首次事件；前提是该 refno 的 datacenter_version 已存在，核对时要先预置）",
+      "full_equal": "增量 = 两端全量：这些根在窗后的 /model/records 与同数据整库重建之后逐条相等（回放层 rebuild_records_equal）",
+      "plan_line": "窗口规划那一行（src/data_interface/window_root_plan.rs 的 plan_totals_line：candidates=N (+新建 ~修改 -删除) … units regen= remove= derived=）里的数。这里的 units 是 e3d-model 的模型单元（BOX、管件算，EQUI、ZONE 不算）。带 calibrate 的是照规则推出来的数，首轮实测后订正，不当硬断言",
+      "roots_rebuild_optional": "这一窗重建一次或不重建都符合「增量 = 两端全量」的生成根：不设硬断言，回放层跑出来是哪一种照实登记。两种来法——① 纯换序（成员的顺序变了、几何没变）；② 根的记录两端只有戳（CACHID / SPAMAP）不同：只有戳跳了的候选不上卷、不级联，但照旧做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（src/data_interface/window_root_plan.rs 的 metadata_only_change_seeds_no_root；设计如此）。E3D 改一个成员的属性就给属主盖一次戳，所以「改了又改回」并成一窗时属主根都属于 ②",
+      "unit_count_either": "任务回执 result.units 的条数是这两个数之一（有 roots_rebuild_optional 的窗口：那个根重算了就多一条）",
+      "now": "第二批起：已知缺口的腿另记「现在的行为」，用窗口规划那一行里的数说（units_regen / derived_containers / cascades）。上面的各项仍是该有的行为，不因此改",
+      "legs 的键": "第一批以 apply / restore 之类为键（按 chain 或 apply、restore 的次序对到宏）；第二批起以宏的相对路径为键"
+    },
+    "name_keyed": {
+      "category": "added = 新增，deleted = 删除，modified = 修改，unchanged = 未修改",
+      "renumbered": "换号：同一个名称前后对应的参考号不同",
+      "never_delivered": "从未提资（只在提资对比里出现）",
+      "renamed_to / renamed_from": "改名的两行互相指明",
+      "delivery.action": "skip = 跳过，resend = 重发，delete = 提删除，first = 首次提资，rename = 改名提资（旧位号删除、新位号新增），legacy = 照原来的办法",
+      "windows": "键是「从哪条腿之前到哪条腿之后」。指定对比：直接比这两个会话。提资对比的结果取决于上一次提资在哪，这里只在 delivery 里写案例文档说的那种前提"
+    }
+  },
+  "cases": [
+    {
+      "id": "S4-unit-recreate-equi",
+      "situation": "用户把整台设备删掉，又在原位按原样建了一台同名的（成员也起回原名），然后保存。",
+      "change_types": [
+        "CT-S4"
+      ],
+      "name_case": "A02",
+      "name_keyed_cases": [
+        "A-02"
+      ],
+      "tickets": [
+        "gen-model#113"
+      ],
+      "apply": "ident/unit_recreate_equi_apply.mac",
+      "restore": null,
+      "db": 8000,
+      "expected_net": "deleted",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "remove": [
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "按 refno 认身份：旧设备和三个 BOX 是删除，新设备和三个 BOX 是新建（docs/specs/incr-gen-audit-aux/increment-change-types.md §4.1 CT-S4）。 删除的单元不上卷、直接出 Remove；新建在 target 端上卷到最近单元重建（vendor/shared/e3d-model/src/increment.rs 模块头注「候选分类」；同文档 §3 第 5 步）。 ZONE 只是成员表变了：它不是模型单元，也没有位置或属主变化，不触发子树级联，所以同 ZONE 的 EQ-U、BRAN-R 不该动——这是对照。 旧 refno 是交付单元自身被删，记 datacenter_delete reason=deleted；新 refno 没有版本记录，不记（src/data_interface/increment_pipeline.rs）。 换了参考号的构件，管线内部仍按新参考号重新生成、落库（ADR-098 D4）。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-M@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-M@before",
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "type": "EQUI",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M@after"
+            ],
+            "plan_line": {
+              "inserted": 4,
+              "modified": 1,
+              "deleted": 4,
+              "units_regen": 3,
+              "units_remove": 3
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md A-02（那里的例子是支管；设备是同一条规则）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M1",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M2",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M3",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": true
+                }
+              ],
+              "none_of": [
+                "added",
+                "deleted",
+                "modified"
+              ],
+              "delivery": {
+                "premise": "这台设备提资过",
+                "action": "skip",
+                "preview_column": "跳过（计入「换了参考号」的数）",
+                "delete_for_old_refno": false,
+                "version_record": "转到新参考号，位号和版本号沿用；旧参考号的版本记录和待删除记录随之消失",
+                "pending_delete_before_delivery": "旧参考号那一条标「已被接替」"
+              }
+            }
+          },
+          "note": "容器 ZONE 的有名成员名单和顺序按名不变（宏把新设备建回成员表原来的位置），所以指定对比里 ZONE 那一行也应是未修改。"
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034153-ident-1",
+      "rvm_truth": {
+        "ident/unit_recreate_equi_apply.mac": {
+          "aabb_blind": true,
+          "note": "删后同名同尺寸同位置重建：按名快照与跑之前完全相等，只有 refno 变。RVM 在这里只证几何没被改坏、别的成员没被带动。"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "unit_recreate_equi_apply.mac：逐字相同 32、变了 0"
+        ],
+        "plan_offline": [
+          "apply：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg1-split → 1217：相符（根 touched=2 regen=1 delete=1；件 +4 ~2 -4，metadata_only=0 cache_stamp=0 cascades=0，单元重建 3、清掉 3、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S4-unit-recreate-bran",
+      "situation": "用户把整条支管删掉，又按原样重建了一条同名的（成员也起回原名），然后保存。",
+      "change_types": [
+        "CT-S4",
+        "CT-D1"
+      ],
+      "name_case": "A02",
+      "name_keyed_cases": [
+        "A-02"
+      ],
+      "tickets": [
+        "gen-model#113"
+      ],
+      "apply": "ident/unit_recreate_bran_apply.mac",
+      "restore": null,
+      "db": 8000,
+      "expected_net": "deleted",
+      "registration": "A01",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "remove": [
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U"
+        ],
+        "why": "旧支管和 9 个成员是删除，新支管和 9 个成员是新建；PIPE 只是成员表变了（CT-S4）。 支管是路由容器：旧支管名下的管身行按 base 端的旧槽位键一并清掉，新支管整链重算（vendor/shared/e3d-model/src/increment.rs 模块头注「派生单元」）。旧根的管件行和管身行窗后都不该留在库上。 旧 refno 记 datacenter_delete reason=deleted；成员的增删不记（increment_pipeline.rs：「不包含其下属管件」）。 设备 EQ-M、EQ-U 在别的子树里，没有任何候选点到它们——对照。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "modified": 1,
+              "deleted": 10,
+              "units_regen": 9,
+              "units_remove": 9
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md A-02",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "type": "BRAN",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                },
+                {
+                  "name_pattern": "/AIOS-SUITE-T3-BRAN-R-M<1..9>",
+                  "count": 9,
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "category": "unchanged",
+                  "renumbered": true
+                }
+              ],
+              "none_of": [
+                "added",
+                "deleted",
+                "modified"
+              ],
+              "delivery": {
+                "premise": "这条支管提资过；重建出来的内容和原来逐项相同",
+                "action": "skip",
+                "preview_column": "跳过（计入「换了参考号」的数）",
+                "delete_for_old_refno": false,
+                "version_record": "转到新参考号，位号和版本号沿用",
+                "pending_delete_before_delivery": "旧参考号那一条标「已被接替」"
+              }
+            }
+          },
+          "note": "案例文档的说明：结果取决于「删掉再重建出来的内容是否逐项相同」，要在第一次实测时确认（例如单元内部互相引用的属性是否都指向了新建的成员）。不相同就会判修改，按 A-05 处理。这条腿录下来之后，拿前后两个会话按名逐属性对一遍，结论记进 CATALOG。"
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034153-ident-1",
+      "rvm_truth": {
+        "ident/unit_recreate_bran_apply.mac": {
+          "aabb_blind": true,
+          "note": "整条支管重 COPY 再抬高同样的 6000、成员补回原名：按名快照与跑之前相等。隐含管段的缺省名若因 refno 变化而变，按 connect/bran_del_member_restore 的先例处理（那条腿的 equals 实测成立）。"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "unit_recreate_bran_apply.mac：逐字相同 32、变了 0"
+        ],
+        "plan_offline": [
+          "apply：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg1-split → 1220：相符（根 touched=2 regen=1 delete=1；件 +10 ~2 -10，metadata_only=0 cache_stamp=0 cascades=0，单元重建 9、清掉 9、派生 2）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S4-member-recreate-changed",
+      "situation": "用户删掉设备下面一个有名的 BOX，在成员表原来的位置建了一个同名的，但长度改了（XLEN 400 → 700），然后保存。",
+      "change_types": [
+        "CT-S4",
+        "CT-A4"
+      ],
+      "name_case": "A04",
+      "name_keyed_cases": [
+        "A-04",
+        "A-03"
+      ],
+      "tickets": [
+        "gen-model#113"
+      ],
+      "apply": "ident/member_recreate_changed_apply.mac",
+      "restore": "ident/member_recreate_changed_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "成员删后重建：旧 BOX 是删除（base 端上卷到属主单元 EQ-M 重建），新 BOX 是新建（target 端上卷到 EQ-M）；设备自己的 refno 没变，只是成员表变了。根 EQ-M 重建一次。 先例：tests/increment_replay/cases/db8000-two-delete.json 第一步——删 BOX 子件，EQUI 根 regen。 下属成员的增删改名不记 datacenter_delete。 按 refno 看，这一窗与「成员删后同名重建、内容不变」（套件已有的 A01-recreate-same）形状完全相同，分不出内容变没变——这正是按名称口径要补的。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数不变（3 → 3）；按 refno 少一件（旧 BOX-M2）、多一件（新 BOX-M2），并集包围盒 E 方向各外扩 150",
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md A-04（apply）、A-03（apply 加 restore 合成一窗）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M2",
+                  "type": "BOX",
+                  "category": "modified",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "XLEN 400 → 700"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M2",
+                  "type": "BOX",
+                  "category": "modified",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "XLEN 700 → 400"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "apply+restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M2",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "none_of": [
+                "added",
+                "deleted",
+                "modified"
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              },
+              "note": "这就是 A-03：成员删后同名重建、内容不变、位置不变。"
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034153-ident-1",
+      "rvm_truth": {
+        "ident/member_recreate_changed_apply.mac": {
+          "resized": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-M/AIOS-SUITE-T3-BOX-M2": [
+              101150,
+              29800,
+              -300,
+              101850,
+              30200,
+              300
+            ]
+          },
+          "note": "BOX-M2 中心 (101500, 30000, 0)，基线 400×400×600 即 [101300,29800,-300,101700,30200,300]；XLEN 改 700 后 E 方向各外扩 150。数值照 setup 的坐标算出，没有实测过。"
+        },
+        "ident/member_recreate_changed_restore.mac": {
+          "equals_state_before": "ident/member_recreate_changed_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "member_recreate_changed_apply.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M2",
+          "member_recreate_changed_restore.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M2"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg1-split → 1223：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）",
+          "restore 腿：t3-seg1-split → 1226：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S4-unit-recreate-changed",
+      "situation": "用户把整条支管删掉后同名重建、成员起回原名，但重建时把其中一个弯头换了规格，然后保存。",
+      "change_types": [
+        "CT-S4",
+        "CT-A6",
+        "CT-C2"
+      ],
+      "name_case": "A05",
+      "name_keyed_cases": [
+        "A-05",
+        "E-02"
+      ],
+      "tickets": [
+        "gen-model#113",
+        "gen-model#99"
+      ],
+      "apply": "ident/unit_recreate_changed_apply.mac",
+      "restore": "ident/unit_recreate_changed_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A01",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "remove": [
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U"
+        ],
+        "why": "apply 一窗按 refno 与 S4-unit-recreate-bran 完全相同：旧支管删除、新支管新建。新支管的 M2 用的是哪个规格，只是新建内容的一部分——按 refno 分不出内容变没变。 restore 一窗是普通的规格换件：SPRE 是连接 / 目录依赖类属性，过不了元数据门，所在的支管重建（src/data_interface/model_impact.rs 的 DEPENDENCY_CASCADE_ATTR_NAMES；先例 E04-spre-swap）。refno 都不变，所以没有删除记录。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "modified": 1,
+              "deleted": 10,
+              "units_regen": 9,
+              "units_remove": 9
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 2,
+              "deleted": 0,
+              "cache_stamp": 1,
+              "units_regen": 1,
+              "units_remove": 0
+            },
+            "plan_line_note": "修改 2 条 = 弯头 M2（SPRE，连带 SPAMAP）+ 属主支管（只有 CACHID 这个戳变了：E3D 改成员的规格时顺手盖的）。支管那一条是纯元数据（cache_stamp 一档），不该单独触发什么；支管这个根因为弯头而重建一次。2026-11-12 离线规划核对实测。"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md A-05（apply）、E-02（restore：引用换到另一个名称的对象）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R-M2",
+                  "type": "BEND",
+                  "category": "modified",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R",
+                  "summary": "SPRE /ACP1000-Trough/ACP1000-TBR:50 → /ACP1000-Trough/ACP1000-TBR90:50X150（引用按目标的名称比）"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "type": "BRAN",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                },
+                {
+                  "name_pattern": "/AIOS-SUITE-T3-BRAN-R-M<1,3..9>",
+                  "count": 8,
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "category": "modified",
+                  "renumbered": true
+                }
+              ],
+              "delivery": {
+                "premise": "这条支管提资过",
+                "action": "resend",
+                "preview_column": "重发",
+                "how": "按原位号提交修改（不是新增），版本号接着旧记录往下走",
+                "delete_for_old_refno": false,
+                "version_record": "提资成功后落在新参考号上，旧参考号的版本记录和待删除记录都没有了"
+              }
+            },
+            "restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R-M2",
+                  "type": "BEND",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R",
+                  "summary": "SPRE /ACP1000-Trough/ACP1000-TBR90:50X150 → /ACP1000-Trough/ACP1000-TBR:50"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "apply+restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "type": "BRAN",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                },
+                {
+                  "name_pattern": "/AIOS-SUITE-T3-BRAN-R-M<1..9>",
+                  "count": 9,
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-BRAN-R"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-BRAN-R",
+                  "category": "unchanged",
+                  "renumbered": true
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过（计入「换了参考号」的数）"
+              },
+              "note": "合成一窗就是 A-02。"
+            }
+          },
+          "note": "案例文档的说明：按原位号按修改重发、版本号接着走，数据中台是否符合预期要在实施时验证。"
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034531-ident-2",
+      "rvm_truth": {
+        "ident/unit_recreate_changed_apply.mac": {
+          "subtree": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-PIPE/AIOS-SUITE-T3-BRAN-R": {
+              "count_delta": 0
+            }
+          },
+          "resized": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-PIPE/AIOS-SUITE-T3-BRAN-R/AIOS-SUITE-T3-BRAN-R-M2": [
+              9178.2368,
+              13217.0532,
+              8901.5,
+              9664.1171,
+              13457.0421,
+              8930.0
+            ]
+          },
+          "calibrate": true,
+          "note": "★ 包围盒是照 pipe/spre_swap_apply 在 BRAN-S 上的实测值（[9178.24,13217.05,2901.50,9664.12,13457.04,2930.00]）加上 BRAN-R 抬高的 6000 推出来的，没有在 BRAN-R 上量过，所以整腿挂 calibrate；首轮后填实测值、去掉 calibrate。"
+        },
+        "ident/unit_recreate_changed_restore.mac": {
+          "equals_state_before": "ident/unit_recreate_changed_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "unit_recreate_changed_apply.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BRAN-R-M2",
+          "unit_recreate_changed_restore.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BRAN-R-M2"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg1-split → 1229：相符（根 touched=2 regen=1 delete=1；件 +10 ~2 -10，metadata_only=0 cache_stamp=0 cascades=0，单元重建 9、清掉 9、派生 2）",
+          "restore 腿：t3-seg1-split → 1232：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 1、清掉 0、派生 1）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S4-recreate-renamed",
+      "situation": "用户删掉一台设备，在原位新建了一台内容相同、但换了名字的设备，然后保存。",
+      "change_types": [
+        "CT-S3",
+        "CT-S1"
+      ],
+      "name_case": "A06",
+      "name_keyed_cases": [
+        "A-06",
+        "A-02"
+      ],
+      "tickets": [
+        "gen-model#113"
+      ],
+      "apply": "ident/recreate_renamed_apply.mac",
+      "restore": "ident/recreate_renamed_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-RN2"
+        ],
+        "remove": [
+          "/AIOS-SUITE-T3-EQ-RN"
+        ],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U"
+        ],
+        "why": "按 refno 看，这一窗与「单元删后同名重建」是同一个形状：旧根删除、新根新建。差别只在删除记录上的位号是旧名、新根的名字是新名。 规则出处同 S4-unit-recreate-equi。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-RN2@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-RN@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-RN@before",
+                "name": "/AIOS-SUITE-T3-EQ-RN",
+                "type": "EQUI",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-RN2@after"
+            ],
+            "plan_line": {
+              "inserted": 2,
+              "modified": 1,
+              "deleted": 2,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-RN@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-RN2@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-RN2@before",
+                "name": "/AIOS-SUITE-T3-EQ-RN2",
+                "type": "EQUI",
+                "reason": "deleted",
+                "only_if": "EQ-RN2 的 refno 在这一窗之前被预置了 datacenter_version；没预置就一条都不该有"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-RN@after"
+            ],
+            "plan_line": {
+              "inserted": 2,
+              "modified": 1,
+              "deleted": 2,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md A-06（apply）；apply 加 restore 合成一窗是 A-02",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN",
+                  "type": "EQUI",
+                  "category": "deleted",
+                  "unit": "/AIOS-SUITE-T3-EQ-RN"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN2",
+                  "type": "EQUI",
+                  "category": "added",
+                  "never_delivered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-RN2"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN",
+                  "category": "deleted"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN2",
+                  "category": "added",
+                  "never_delivered": true
+                }
+              ],
+              "linked": false,
+              "delivery": {
+                "premise": "/AIOS-SUITE-T3-EQ-RN 提资过",
+                "action": "旧位号 delete，新位号 first",
+                "preview_column": "旧名归「删除」，新名归「首次提资」"
+              },
+              "note": "参考号和名称都变了，没有依据认定是同一个东西；内容相同也不配对，配对只看名称。设备下面的无名 BOX 不出行。"
+            },
+            "apply+restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-RN"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-RN",
+                  "category": "unchanged",
+                  "renumbered": true
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过（计入「换了参考号」的数）"
+              },
+              "note": "中间出现过又消失的 /AIOS-SUITE-T3-EQ-RN2 在两端都不存在，不出行。"
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034531-ident-2",
+      "rvm_truth": {
+        "ident/recreate_renamed_apply.mac": {
+          "removed": [
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-RN/BOX 1 of EQUIPMENT /AIOS-SUITE-T3-EQ-RN"
+          ],
+          "added": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-RN2/BOX 1 of EQUIPMENT /AIOS-SUITE-T3-EQ-RN2": [
+              99600,
+              31800,
+              -150,
+              100400,
+              32200,
+              150
+            ]
+          },
+          "calibrate": true,
+          "note": "★ 无名 BOX 在 RVM 里的键是 E3D 的缺省名（create/equi_copy 的先例：BOX 1 of EQUIPMENT /…）。键的确切写法和包围盒都是推出来的，首轮后订正再去掉 calibrate。"
+        },
+        "ident/recreate_renamed_restore.mac": {
+          "equals_state_before": "ident/recreate_renamed_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "recreate_renamed_apply.mac：逐字相同 30、变了 0；只在改前 2 组；只在改后 2 组",
+          "recreate_renamed_restore.mac：逐字相同 30、变了 0；只在改前 2 组；只在改后 2 组"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg1-split → 1235：相符（根 touched=2 regen=1 delete=1；件 +2 ~2 -2，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）",
+          "restore 腿：t3-seg1-split → 1238：相符（根 touched=2 regen=1 delete=1；件 +2 ~2 -2，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A1-rename-case-only",
+      "situation": "用户只把设备的名字改成了只差大小写的另一个写法，别的都没动，然后保存。",
+      "change_types": [
+        "CT-A1"
+      ],
+      "name_case": "D04",
+      "name_keyed_cases": [
+        "D-04",
+        "A-01"
+      ],
+      "tickets": [
+        "gen-model#76",
+        "V14"
+      ],
+      "apply": "ident/rename_case_apply.mac",
+      "restore": "ident/rename_case_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A07",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/aios-suite-t3-eq-case",
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "why": "只动 NAME：元数据门的 metadata_only 一档，记 no_model，不上卷不级联（src/data_interface/window_root_plan.rs 的 change_metadata_tier；先例 attr/rename，换后端方案 V14）。 交付单元自身 NAME 变了，记改前的位号、reason=renamed；改前改后的名字相同才不记，这里两个名字只差大小写，按原文比是不同的（src/data_interface/increment_pipeline.rs）。 设备自己的模型行不该动：对照就是它自己（仍是 AlreadyAvailable）。gen-model #76 的前一半修的正是「只改名白算一根」。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_no_rebuild": [
+              "/aios-suite-t3-eq-case"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-CASE@before",
+                "name": "/AIOS-SUITE-T3-EQ-CASE",
+                "type": "EQUI",
+                "reason": "renamed"
+              }
+            ],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "metadata_only": 1,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          },
+          "restore": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-EQ-CASE"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "datacenter_delete_note": "改回原名也是一次改名，但同一 refno 的 INSERT IGNORE 只留首次事件：这一窗不新增记录，apply 那一条（位号 /AIOS-SUITE-T3-EQ-CASE、reason=renamed）仍在。",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "metadata_only": 1,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md D-04（同一个参考号改的名，两行互相指明，和 A-01 一样）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CASE",
+                  "type": "EQUI",
+                  "category": "deleted",
+                  "renamed_to": "/aios-suite-t3-eq-case",
+                  "unit": "/AIOS-SUITE-T3-EQ-CASE"
+                },
+                {
+                  "name": "/aios-suite-t3-eq-case",
+                  "type": "EQUI",
+                  "category": "added",
+                  "renamed_from": "/AIOS-SUITE-T3-EQ-CASE",
+                  "never_delivered": false,
+                  "unit": "/aios-suite-t3-eq-case"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-CASE",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "note": "上级只是改名，不算换了属主、也不算换了单元（F-03）"
+                }
+              ],
+              "same_refno": true,
+              "delivery": {
+                "premise": "这台设备提资过",
+                "action": "rename",
+                "preview_column": "改名"
+              },
+              "note": "名称整串精确比较：区分大小写，带前导斜杠，只去掉首尾空白。E3D 认为不同的两个名称，判定不把它们并成一个。"
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CASE",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              },
+              "note": "两端名字相同、参考号相同、内容相同：未修改。"
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034730-ident-3",
+      "depends_on_probe": "ident/name_probe.mac#2：若 E3D 把名字折成大写，这条腿是同值写回，期望改成 unchanged（交付单元 0、没有 renamed 记录），并在 CATALOG 里写明 D-04 在 E3D 里造不出来。",
+      "rvm_truth": {
+        "ident/rename_case_apply.mac": {
+          "renamed": [
+            {
+              "from": "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-CASE",
+              "to": "AIOS-SUITE-T3-Z/aios-suite-t3-eq-case"
+            }
+          ],
+          "aabb_blind": true,
+          "note": "只改设备名；renamed 把 after 的路径折回后应与 before 完全相等（room/frmw_rename_apply 同款）。"
+        },
+        "ident/rename_case_restore.mac": {
+          "equals_state_before": "ident/rename_case_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "rename_case_apply.mac：逐字相同 30、变了 0；只在改前 2 组；只在改后 2 组",
+          "rename_case_restore.mac：逐字相同 30、变了 0；只在改前 2 组；只在改后 2 组"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg2-split → 1244：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "restore 腿：t3-seg2-split → 1247：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S6-member-recreate-moved",
+      "situation": "用户删掉设备的最后一个有名 BOX，又同名同尺寸同位置建了回来，但新建的落在成员表的第 1 位，然后保存。",
+      "change_types": [
+        "CT-S4",
+        "CT-S6"
+      ],
+      "name_case": "B05",
+      "name_keyed_cases": [
+        "B-05",
+        "A-03"
+      ],
+      "tickets": [
+        "gen-model#113"
+      ],
+      "apply": "ident/member_recreate_moved_apply.mac",
+      "restore": "ident/member_recreate_moved_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "按 refno 与 S4-member-recreate-changed 同形：成员删除加新建，属主设备的成员表变了，根 EQ-M 重建一次。成员落在第几位，对按 refno 的规划没有区别。 设备的基本体换了顺序不改几何：重建前后的模型应逐件相同（只是 refno 换了一个），所以 full_equal 之外，行数和包围盒也不该变。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数与并集包围盒都不变；按 refno 少一件、多一件",
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md B-05 第 ③ 种（apply、restore 各一次）；apply 加 restore 合成一窗是 A-03",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M3",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "有名成员的顺序变了：M1, M2, M3 → M3, M1, M2"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              },
+              "note": "和 A-03 的区别只在位置：位置没变，上一级未修改；位置变了，上一级判修改。"
+            },
+            "restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M3",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "有名成员的顺序变了：M3, M1, M2 → M1, M2, M3"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "apply+restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M3",
+                  "type": "BOX",
+                  "category": "unchanged",
+                  "renumbered": true,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              },
+              "note": "合成一窗是 A-03：成员换了号，名单和顺序都回到原样。"
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034730-ident-3",
+      "rvm_truth": {
+        "ident/member_recreate_moved_apply.mac": {
+          "aabb_blind": true,
+          "note": "BOX-M3 同名同尺寸同位置重建，只是在成员表里的位置变了：按名快照与跑之前完全相等。"
+        },
+        "ident/member_recreate_moved_restore.mac": {
+          "equals_state_before": "ident/member_recreate_moved_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "member_recreate_moved_apply.mac：逐字相同 32、变了 0",
+          "member_recreate_moved_restore.mac：逐字相同 32、变了 0"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg2-split → 1250：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）",
+          "restore 腿：t3-seg2-split → 1253：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S1-copyof-member",
+      "situation": "用户在设备下面多了一个自动命名（名字以 /Copy-of- 开头）的 BOX 并保存；又改了这个 BOX 的尺寸并保存；最后把它删掉并保存。",
+      "change_types": [
+        "CT-S1",
+        "CT-A4",
+        "CT-S3"
+      ],
+      "name_case": "C07",
+      "name_keyed_cases": [
+        "C-07"
+      ],
+      "tickets": [],
+      "apply": "ident/copyof_member_1_apply.mac",
+      "restore": "ident/copyof_member_restore.mac",
+      "chain": [
+        "ident/copyof_member_1_apply.mac",
+        "ident/copyof_member_2_apply.mac",
+        "ident/copyof_member_restore.mac"
+      ],
+      "db": 8000,
+      "expected_net": "cancelled",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-CP"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U"
+        ],
+        "why": "按 refno，名字是不是 Copy-of 开头没有区别：增子件、改子件尺寸、删子件，都是属主设备的根重建一次（先例 A02-box-add、B01-resize、A01-delete-box）。 三腿合成一窗时，这个 BOX 建了又删、在净窗口里不存在（同窗建了又删折成 Cancelled，increment-change-types.md CT-S3 / CT-W1）；EQ-CP 的成员表回到原样，应判没变、不重建。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "1_apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "geometry": "根 EQ-CP 的行数 1 → 2",
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "2_apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "geometry": "根 EQ-CP 的行数不变（2），并集包围盒 E 方向上界外扩 150",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 2,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "修改 2 条 = 那个 BOX（XLEN）+ 属主设备（只有 CACHID 这个戳变了）。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "geometry": "根 EQ-CP 的行数 2 → 1",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 0,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md C-07",
+          "asserted_now": false,
+          "windows": {
+            "1_apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-CP",
+                  "summary": "名下多了一个成员（第 2 个）"
+                }
+              ],
+              "absent_rows": [
+                "/Copy-of-AIOS-SUITE-T3-BOX-CP1"
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "2_apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-CP",
+                  "summary": "名下第 2 个成员的 XLEN 300 → 600"
+                }
+              ],
+              "absent_rows": [
+                "/Copy-of-AIOS-SUITE-T3-BOX-CP1"
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-CP",
+                  "summary": "名下少了一个成员（第 2 个）"
+                }
+              ],
+              "absent_rows": [
+                "/Copy-of-AIOS-SUITE-T3-BOX-CP1"
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "1_apply+2_apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-CP",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          },
+          "note": "自动命名不是设计人员起的，不能当身份用：挂在有名构件下面的自动命名成员和无名成员一样处理——不出行，变化算到所属的有名构件上，它的名称本身不参与比较。名称以 /Copy-(数字)-of- 开头的同样处理。"
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-034949-ident-4",
+      "depends_on_probe": "ident/name_probe.mac#6：若 E3D 把名字折成大写，/COPY-OF-… 不以自动命名的前缀开头，按名称口径它是一个普通的有名成员，name_keyed 那一栏要改写；按 refno 的那一栏不受影响。",
+      "rvm_truth": {
+        "ident/copyof_member_1_apply.mac": {
+          "added": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-CP/Copy-of-AIOS-SUITE-T3-BOX-CP1": [
+              101350,
+              39850,
+              -150,
+              101650,
+              40150,
+              150
+            ]
+          },
+          "note": "EQ-CP 在 (100000, 40000, 0)，新 BOX 300³ 在 POS E 1500。键里的大小写以 E3D 实际存下的名字为准（见 depends_on_probe）。数值照坐标算出，没有实测过。"
+        },
+        "ident/copyof_member_2_apply.mac": {
+          "resized": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-CP/Copy-of-AIOS-SUITE-T3-BOX-CP1": [
+              101200,
+              39850,
+              -150,
+              101800,
+              40150,
+              150
+            ]
+          },
+          "note": "XLEN 300 → 600，中心不动，E 方向各外扩 150。"
+        },
+        "ident/copyof_member_restore.mac": {
+          "equals_state_before": "ident/copyof_member_1_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "copyof_member_1_apply.mac：逐字相同 32、变了 0；只在改后 1 组",
+          "copyof_member_2_apply.mac：逐字相同 32、变了 1；变的组：/Copy-of-AIOS-SUITE-T3-BOX-CP1",
+          "copyof_member_restore.mac：逐字相同 32、变了 0；只在改前 1 组"
+        ],
+        "plan_offline": [
+          "1_apply：过",
+          "2_apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "1_apply 腿：t3-seg3-split → 1261：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 0、派生 0）",
+          "2_apply 腿：t3-seg3-split → 1264：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 1、清掉 0、派生 0）",
+          "restore 腿：t3-seg3-split → 1267：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 1、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S6-member-reorder",
+      "situation": "用户只把设备下面的一个有名 BOX 在成员表里挪了位置（排到另一个的前面），别的都没动，然后保存。",
+      "change_types": [
+        "CT-S6"
+      ],
+      "name_case": "B05",
+      "name_keyed_cases": [
+        "B-05"
+      ],
+      "tickets": [],
+      "apply": "ident/member_reorder_apply.mac",
+      "restore": "ident/member_reorder_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "纯换序：没有元素被建、被删、被改属性，候选只有属主设备一条（成员表的顺序变了，变更类型总表 CT-S6：MembersChanged 的纯换序一支）。设备的基本体换序不改几何，所以硬断言只有两条：窗后这个根的模型与整库重建逐条相等；同 ZONE 的另一台设备和支管不动。属主设备这个根重建一次还是不重建，两种都符合「增量 = 两端全量」——成员表变了过不了元数据门，现行规则下多半会重建一次；这里先不设硬断言（roots_rebuild_optional），回放层跑出来是哪一种就照实登记。",
+        "note": "rebuild 留空不是说「不该重建」，见 why。逐腿的期望在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数、每一件的 refno、并集包围盒都不变（设备的基本体换序不改几何）",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数、每一件的 refno、并集包围盒都不变（设备的基本体换序不改几何）",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md B-05",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "有名成员的顺序变了：M1, M2, M3 → M3, M1, M2"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              },
+              "note": "成员按顺序比：E3D 里成员的顺序就是管路的走向，顺序变了内容就变了。成员自己那几行未修改、不换号。"
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035811-reorder",
+      "rvm_truth": {
+        "ident/member_reorder_apply.mac": {
+          "aabb_blind": true,
+          "note": "只换成员顺序：按名快照与跑之前完全相等。"
+        },
+        "ident/member_reorder_restore.mac": {
+          "equals_state_before": "ident/member_reorder_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "member_reorder_apply.mac：逐字相同 32、变了 0",
+          "member_reorder_restore.mac：逐字相同 32、变了 0"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg5-split → 1315：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33601：重算了（kind=regen，几何差 0/0/0）",
+          "restore 腿：t3-seg5-split → 1318：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33601：重算了（kind=regen，几何差 0/0/0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S6-unnamed-reorder",
+      "situation": "用户把设备下面两个没有名字的 BOX 在成员表里互换了位置，别的都没动，然后保存。",
+      "change_types": [
+        "CT-S6"
+      ],
+      "name_case": "C04",
+      "name_keyed_cases": [
+        "C-04"
+      ],
+      "tickets": [],
+      "apply": "ident/unnamed_reorder_apply.mac",
+      "restore": "ident/unnamed_reorder_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "纯换序：没有元素被建、被删、被改属性，候选只有属主设备一条（成员表的顺序变了，变更类型总表 CT-S6：MembersChanged 的纯换序一支）。设备的基本体换序不改几何，所以硬断言只有两条：窗后这个根的模型与整库重建逐条相等；同 ZONE 的另一台设备和支管不动。属主设备这个根重建一次还是不重建，两种都符合「增量 = 两端全量」——成员表变了过不了元数据门，现行规则下多半会重建一次；这里先不设硬断言（roots_rebuild_optional），回放层跑出来是哪一种就照实登记。",
+        "note": "rebuild 留空不是说「不该重建」，见 why。逐腿的期望在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "geometry": "根 EQ-U 的行数、每一件的 refno、并集包围盒都不变（设备的基本体换序不改几何）",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "restore": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "geometry": "根 EQ-U 的行数、每一件的 refno、并集包围盒都不变（设备的基本体换序不改几何）",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md C-04",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-U",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-U",
+                  "summary": "名下无名成员的顺序变了（第 2、3 个互换）"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-U",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              },
+              "note": "成员按顺序比：E3D 里成员的顺序就是管路的走向，顺序变了内容就变了。成员自己那几行未修改、不换号；无名成员不出行。"
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-U",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035811-reorder",
+      "rvm_truth": {
+        "ident/unnamed_reorder_apply.mac": {
+          "resized": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-U/BOX 2 of EQUIPMENT /AIOS-SUITE-T3-EQ-U": [
+              102850,
+              35650,
+              -100,
+              103150,
+              36350,
+              100
+            ],
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-U/BOX 3 of EQUIPMENT /AIOS-SUITE-T3-EQ-U": [
+              101150,
+              35850,
+              -100,
+              101850,
+              36150,
+              100
+            ]
+          },
+          "note": "无名件在 RVM 里的键是 E3D 的缺省名，带着「第几个 BOX」的序号。两个无名 BOX 互换位置之后，几何一点没变，但「BOX 2」「BOX 3」这两个键指的东西对调了：按键比是两件各换了一个包围盒。2026-11-12 实测 E3D 前后两次导出正是这样（两组变了，其余 30 组逐字相同）。数值照 setup 的坐标算出。这也是按名称口径不拿「属主 + 类型 + 序号」认无名成员的原因。"
+        },
+        "ident/unnamed_reorder_restore.mac": {
+          "equals_state_before": "ident/unnamed_reorder_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "unnamed_reorder_apply.mac：逐字相同 30、变了 2；变的组：BOX 2 of EQUIPMENT /AIOS-SUITE-T3-EQ-U；BOX 3 of EQUIPMENT /AIOS-SUITE-T3-EQ-U",
+          "unnamed_reorder_restore.mac：逐字相同 30、变了 2；变的组：BOX 2 of EQUIPMENT /AIOS-SUITE-T3-EQ-U；BOX 3 of EQUIPMENT /AIOS-SUITE-T3-EQ-U"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg5-split → 1321：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33574：重算了（kind=regen，几何差 0/0/0）",
+          "restore 腿：t3-seg5-split → 1324：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33574：重算了（kind=regen，几何差 0/0/0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [
+    {
+      "id": "ident/copyof_member",
+      "note": "三腿必须连着跑：第 1 腿建自动命名的 BOX，第 2 腿改它，restore 删它。单跑第 2 腿只是空转（它不按名字导航），但那样就没测到东西。",
+      "legs": [
+        "ident/copyof_member_1_apply.mac",
+        "ident/copyof_member_2_apply.mac",
+        "ident/copyof_member_restore.mac"
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "macro": "ident/name_probe.mac",
+      "purpose": "只探不存：PML 字符串 EQ 分不分大小写；NAME 改成只差大小写的名字回读是什么；同属主下只差大小写的两个名字能否并存；同库重名 E3D 拒不拒；同名再写报不报错；/Copy-of-… 的大小写留不留；FUNC / PURP 的赋值句",
+      "no_savework": true,
+      "decides": [
+        "A1-rename-case-only",
+        "S1-copyof-member"
+      ],
+      "result": "2026-11-12 03:40 跑过，证据 T3/20261112-033254-probes；结论见 agents/T3/CATALOG.md 第 4 节"
+    },
+    {
+      "macro": "ident/order_probe.mac",
+      "purpose": "只探不存：成员换序的完整句式 REORDER <成员> BEFORE|AFTER <成员>（按名、按序号、按类型加序号），以及同属主 INCLUDE 会不会把成员挪到第 1 位。成立的那一种用来补「纯换序」用例",
+      "no_savework": true,
+      "result": "2026-11-12 03:40 跑过，证据 T3/20261112-033254-probes；结论见 agents/T3/CATALOG.md 第 4 节"
+    },
+    {
+      "macro": "ident/refs_probe.mac",
+      "purpose": "只探不存：在伙伴库 7998 里建一个与 8000 里同名的设备 E3D 拒不拒；支管 HREF 指到管口之后管口的 CREF 有没有被回写；HREF =0/0 解开之后两端各是什么。引用目标那一组用例据此定写法",
+      "no_savework": true,
+      "result": "2026-11-12 03:40 跑过，证据 T3/20261112-033254-probes；结论见 agents/T3/CATALOG.md 第 4 节"
+    },
+    {
+      "macro": "ident/risky_probe.mac",
+      "purpose": "只探不存，最后跑：CHANGETYPE TO <类型>、CONNECT PH TO <管口> 两句没有先例的写法。崩了也是结论",
+      "no_savework": true,
+      "result": "2026-11-12 03:40 跑过，证据 T3/20261112-033254-probes；结论见 agents/T3/CATALOG.md 第 4 节"
+    }
+  ],
+  "rvm_truth_setup": {
+    "ident/setup_t3.mac": {
+      "note": "T3 语料的基线。数值照 setup 里的坐标和尺寸算出（设备缺省朝向，BOX 以自己的 POS 为中心），首轮后用实测订正；无名件的键是 E3D 的缺省名，先只列有名件，整腿挂 calibrate。",
+      "calibrate": true,
+      "unchanged_elsewhere": true,
+      "added": {
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-M/AIOS-SUITE-T3-BOX-M1": [
+          99500,
+          29800,
+          -100,
+          100500,
+          30200,
+          100
+        ],
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-M/AIOS-SUITE-T3-BOX-M2": [
+          101300,
+          29800,
+          -300,
+          101700,
+          30200,
+          300
+        ],
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-M/AIOS-SUITE-T3-BOX-M3": [
+          102850,
+          29850,
+          -150,
+          103150,
+          30150,
+          150
+        ],
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-CASE/AIOS-SUITE-T3-BOX-CASE": [
+          99700,
+          33850,
+          -100,
+          100300,
+          34150,
+          100
+        ],
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-U/AIOS-SUITE-T3-BOX-U0": [
+          99750,
+          35750,
+          -250,
+          100250,
+          36250,
+          250
+        ],
+        "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-CP/AIOS-SUITE-T3-BOX-CP1": [
+          99750,
+          39850,
+          -150,
+          100250,
+          40150,
+          150
+        ]
+      },
+      "subtree": {
+        "AIOS-SUITE-T3-Z": {
+          "calibrate": true,
+          "observed": "待首轮：基本体 11 件（EQ-M 3、EQ-RN 1、EQ-CASE 1、EQ-U 3、无名设备 2、EQ-CP 1）加 BRAN-R 的 9 个管件与隐含管段"
+        }
+      }
+    }
+  }
+}

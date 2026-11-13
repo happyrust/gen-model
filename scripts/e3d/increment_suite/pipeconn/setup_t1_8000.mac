@@ -1,0 +1,98 @@
+-- T1 基线（AMS，db8000）：管嘴与管线连接这一组用例自己的语料。自己建一个 SITE /AIOS-SUITE-T1-8000，
+-- 不碰套件的 /AIOS-SUITE-8000，也不碰生产元素。幂等：先删同名 SITE 再重建。
+-- expected_net: added（基线，不计入链） | 拆除搭档: pipeconn/teardown_t1_8000.mac
+--
+-- 建出来的东西（每一个都有显式 NAME——命名纪律同 common/setup_8000.mac）：
+--   ZONE /AIOS-SUITE-T1-Z
+--     EQUI /AIOS-SUITE-T1-EQ-NZ      POS E 100000 N 30000 U 0（远离套件区 E 8000–98000 / N 5000–25000）
+--       BOX  /AIOS-SUITE-T1-EQ-NZ-BOX  1000 x 1000 x 1000（西面在 E 99500）
+--       NOZZ /AIOS-SUITE-T1-NZ1        对焊管嘴 /NOZZ-BW/ACZW200JJ（=13246/396437，口径 50），HEIG 300，
+--                                      设备系里 POS W 800：管嘴口 P1 在 E 99200、朝 W，根部正好落在盒子西面上
+--     PIPE /AIOS-SUITE-T1-PIPE       管道规格 /VMB1（=13245/846025，生产支管 /1RCV0101-60.3-VMB-R23-R342/B1 用的那一套）
+--       BRAN /AIOS-SUITE-T1-BRAN-C     空支管（没有管件）：头 E 99200 N 30000 U 0 朝 W，尾 E 96200 N 30000 U 0，
+--                                      管子规格由 CONN 按口径从 /VMB1 里选出（/VMB1/CPP00102:P,50）。一根 3 米的 DN50 直管。
+--
+-- 为什么自建管嘴：db8000 里没有带 NOZZ 的生产设备（套件 README「语料限制」），7997 里有 53 只带目录件的管嘴但
+--   一只都没接管（CREF 全空）。所以连接这件事只能自己造：管嘴的目录件、管道规格取真的，接管由宏来做。
+--
+-- 对齐的做法：先 CONN PH TO 管嘴，让 E3D 自己把头的位置 / 方向 / 口径 / 连接型式 / 管子规格写进支管，
+--   再按头的位置与方向把尾放到轴线上 3000 mm 处，最后把 HREF 清掉——基线是「对齐了、但没有接」。
+--
+-- 写法都在私有副本上探过（pipeconn/probe_t1_conn.mac，2026-11-12 两轮）：
+--   CATREF =refno；PIPE 带了 PSPE 之后 CONN PH TO /管嘴 不报错（不带时会报 HSTUB not selected，写步里不能有报错行）；
+--   !!CE.HPOS / !!CE.HDIR 取成对象、.Offset()、.Opposite()、TPOS $!var、TDIR $!var；HREF =0/0 清引用、管嘴的 CREF 跟着清。
+-- 自己建的元素在本宏里一律用变量回到它（!!CE = !var），不按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-SETUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-8000*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-T1-8000
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T1-Z
+!zone = !!CE
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T1-EQ-NZ
+!eq = !!CE
+POS E 100000 N 30000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+NAME /AIOS-SUITE-T1-EQ-NZ-BOX
+Q REF
+Q NAME
+!!CE = !eq
+NEW NOZZ /AIOS-SUITE-T1-NZ1
+!nz = !!CE
+CATREF =13246/396437
+HEIG 300
+POS W 800 N 0 U 0
+Q REF
+Q NAME
+Q CATREF
+Q HEIG
+Q POS WRT /*
+Q ORI WRT /*
+Q P1
+!!CE = !zone
+NEW PIPE /AIOS-SUITE-T1-PIPE
+PSPE =13245/846025
+Q REF
+Q NAME
+Q PSPE
+NEW BRAN /AIOS-SUITE-T1-BRAN-C
+!br = !!CE
+Q REF
+Q NAME
+$P SUITE-PIPECONN-SETUP-ALIGN
+CONN PH TO /AIOS-SUITE-T1-NZ1
+Q HREF
+Q HPOS WRT /*
+Q HDIR WRT /*
+Q HBOR
+Q HCON
+Q HSTU
+!hp = !!CE.HPOS
+!hd = !!CE.HDIR
+!tp = !hp.Offset(!hd, 3000)
+!td = !hd.Opposite()
+TPOS $!tp
+TDIR $!td
+TBOR 50
+TCON OPEN
+Q TPOS WRT /*
+Q TDIR WRT /*
+HREF =0/0
+Q HREF
+Q HPOS WRT /*
+!!CE = !nz
+Q CREF
+SAVEWORK 'AIOS suite T1: baseline setup db8000 (nozzle + aligned branch, not connected)'
+$P SUITE-PIPECONN-SETUP-DONE
+ALPHA LOG END

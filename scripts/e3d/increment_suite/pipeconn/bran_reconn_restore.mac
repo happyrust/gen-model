@@ -1,0 +1,26 @@
+-- 登记: A01（管道）/ CT-A5 | 语义: 设备挪回原位之后再接一次——BRAN /AIOS-SUITE-T1-BRAN-C 的头回到基线位置，
+-- 尾端同样放回轴线上 3000 mm 处。预期：支管这个根进 regen，管身平移 [0, -300, 0]，回到第 1 腿之后的样子。
+-- expected_net: cancelled | restore 搭档: 本文件是 pipeconn/bran_reconn_apply.mac 的 restore
+--
+-- 链: pipeconn/nozz_conn 的第 5 腿（前一腿把设备挪回了原位）。位置由 E3D 按管嘴口算，不是手写的增量，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-RECONN-RESTORE-ALIVE
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+CONN PH TO /AIOS-SUITE-T1-NZ1
+!hp = !!CE.HPOS
+!hd = !!CE.HDIR
+!tp = !hp.Offset(!hd, 3000)
+!td = !hd.Opposite()
+TPOS $!tp
+TDIR $!td
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+SAVEWORK 'AIOS suite pipeconn/bran_reconn restore: BRAN-C reconnected at the baseline position'
+$P SUITE-PIPECONN-RECONN-RESTORE-DONE
+ALPHA LOG END

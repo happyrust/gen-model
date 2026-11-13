@@ -1,0 +1,16 @@
+-- 登记: D06 | 语义: ZONE-MV 反向平移，子树回到 apply 之前 | expected_net: cancelled | restore 搭档: 本文件是 xform/zone_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ZONE-MOVE-RESTORE-ALIVE
+/AIOS-SUITE-ZONE-MV
+Q REF
+Q NAME
+Q POS WRT /*
+BY W 500 WRT /*
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/zone_move restore: ZONE-MV BY W 500'
+$P SUITE-XFORM-ZONE-MOVE-RESTORE-DONE
+ALPHA LOG END

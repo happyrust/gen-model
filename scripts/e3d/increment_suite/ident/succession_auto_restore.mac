@@ -1,0 +1,25 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 G-09 的收尾：把自动命名的成员起回真实名字） | 语义: 把支管 BRAN-R 下面 9 个 /Copy-of- 开头的成员逐个改回原来的名字（BRAN-R-M1 … M9），别的都不动
+-- expected_net: modified | apply 搭档: ident/succession_auto_apply.mac；跑完之后按名回到接替之前的样子（支管换了参考号）
+-- 预期 gen-model（按 refno）: 任务 succeeded、交付单元 0、模型行不变（9 个成员只动了 NAME，metadata_only）；没有 datacenter_delete（改名的是成员）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SUCCESSION-AUTO-RESTORE-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q MEMB
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (MATCHWILD(!cn,'/Copy-of-*')) THEN
+    !nm = '/AIOS-SUITE-T3-BRAN-R-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/succession_auto restore: Copy-of members of BRAN-R named back to M1..M9'
+$P SUITE-T3-SUCCESSION-AUTO-RESTORE-DONE
+ALPHA LOG END

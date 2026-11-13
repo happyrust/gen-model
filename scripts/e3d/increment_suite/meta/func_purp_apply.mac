@@ -1,0 +1,18 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 B-03） | 语义: 只改设备 EQ-CP 的 FUNC 和 PURP——模型和提资都不用的两个属性
+-- expected_net: modified | restore 搭档: meta/func_purp_restore.mac
+-- 预期 gen-model（按 refno）: 任务 succeeded、交付单元 0、模型行不变、没有 datacenter_delete（元数据门的 metadata_only 一档，老名单上的两个名字）。
+-- 老名单是 NAME / DESC / PURP / FUNC / LCHKDA；套件里原先只有前两个有宏，这条补 FUNC 和 PURP。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-FUNC-PURP-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q FUNC
+Q PURP
+FUNC 'AIOS T3 func changed'
+PURP PUMP
+Q FUNC
+Q PURP
+SAVEWORK 'AIOS suite T3 meta/func_purp apply: EQ-CP FUNC and PURP changed'
+$P SUITE-T3-META-FUNC-PURP-APPLY-DONE
+ALPHA LOG END

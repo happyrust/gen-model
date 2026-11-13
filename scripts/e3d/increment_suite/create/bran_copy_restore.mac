@@ -9,6 +9,33 @@ DO !x VALUES !t
   Q MEMB
   DELETE BRAN
 ENDDO
-SAVEWORK 'AIOS suite create/bran_copy restore (delete BRAN-NEW)'
+-- 改挂按名把 M5 送回 BRAN-S 的第 1 位，成员顺序不回到基线。这里删掉 BRAN-NEW 之后，
+-- 把 BRAN-S 按 setup 的原件重新 COPY 并补名。链结束时支管回到命名基线，
+-- 后面的用例才能按 /AIOS-SUITE-BRAN-S-M<n> 导航。
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+DELETE BRAN
+/AIOS-SUITE-PIPE-P
+NEW BRAN /AIOS-SUITE-BRAN-S
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-BRAN-S
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-BRAN-S-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-BRAN-S
+Q MEMB
+SAVEWORK 'AIOS suite create/bran_copy restore (delete BRAN-NEW, recopy BRAN-S)'
 $P SUITE-CREATE-BRANCOPY-RESTORE-DONE
 ALPHA LOG END

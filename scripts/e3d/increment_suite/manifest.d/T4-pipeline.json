@@ -1,0 +1,389 @@
+{
+  "version": 1,
+  "owner": "T4",
+  "topic": "pipeline",
+  "copy": "ams",
+  "mdb": "/ALL",
+  "sites": [
+    "/AIOS-SUITE-T4",
+    "/AIOS-SUITE-T4-X"
+  ],
+  "setup": "pipeline/setup_t4_8000.mac",
+  "teardown": "pipeline/teardown_t4_8000.mac",
+  "setup_also": [
+    "pipeline/setup_t4_7998.mac@7998"
+  ],
+  "teardown_also": [
+    "pipeline/teardown_t4_7998.mac@7998"
+  ],
+  "description": "后端管线行为类的用例里要在 E3D 里造改动的那几个：房间定义在别的库、超预算的大窗、一次保存动两个库、认领与释放。其余管线行为（失败与退避、重启、并窗、开关的另一态）复用仓库里现成的会话链，只有回放用例，不在这份片段里。",
+  "setup_note": "两份 setup：主库 8000 里的 SITE /AIOS-SUITE-T4（四台设备），伙伴库 7998 里的 SITE /AIOS-SUITE-T4-X（两间自建的房、一个空 ZONE、一台设备）。都是自建元素，不碰生产元素，不依赖公共基线。两间房的建法照 L3 夹具（FRMW → PANE → PLOO 高 2000 → 四个顶点）。",
+  "cases": [
+    {
+      "id": "D8-room-panel-xdb",
+      "situation": "用户把一间房的地板轮廓整块挪走了（后来又挪回）；房里的设备在另一个库里，自己没被动过。",
+      "change_types": [
+        "CT-D8",
+        "CT-A3",
+        "CT-C3"
+      ],
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeline/room_panel_xdb_apply.mac",
+      "restore": "pipeline/room_panel_xdb_restore.mac",
+      "db": 7998,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T4-RM-R901-P1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-RM2",
+          "/AIOS-SUITE-T4-RM-R902-P1"
+        ],
+        "rooms": {
+          "/AIOS-SUITE-T4-EQ-RM1": {
+            "before": [
+              "R901"
+            ],
+            "after": []
+          },
+          "/AIOS-SUITE-T4-EQ-RM2": {
+            "before": [
+              "R902"
+            ],
+            "after": [
+              "R902"
+            ]
+          }
+        },
+        "backend": "7998 这一窗重算 R901 的归属：8000 里的 EQ-RM1 的房间边没了，它的几何不重建、8000 没有新窗口；restore 之后边回来。",
+        "why": "联动分类表第 7 类（房间归属：PANE 搬迁 → 整间重算）；房间在一个库、成员在另一个库是 AMS 样例的常态，登记表 INC-G03 待写、计划文档记着「跨库成员传播未验」。"
+      },
+      "status": "known_gap",
+      "known_gap": "板挪走之后，别的库里成员的房间边还留着这间房。现在的表现：跨库的成员不在这一窗里重算，而是停放给成员所在的库，等那个库下一次有任务才接上；那个库没有新会话时，库上的房间边一直是旧的。新票草稿在这一轮工作区的 agents/T4/drafts/new-issue-cross-db-room-membership-parked.md。",
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "apply / restore 各 1 个设计候选（这块板，改的格是 POS 加 E3D 盖的戳），板这一个单元重建",
+      "replay": [
+        "t4-room-panel-xdb",
+        "t4-room-panel-merged-stamp-only"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-room-panel-xdb：初始化后 EQ-RM1 在 R901 里（过）；板挪走那一窗之后「还留着 R901」（不过，已知缺口）。t4-room-panel-xdb-drained：8000 自己有一次不相干的任务之后，边更新了（过）。t4-room-panel-merged-stamp-only：板挪走又挪回并成一窗，交付 2 个单元、期望 0（不过，另一个已知缺口：只被盖戳的根整根重算）",
+        "l3": "没跑（等隔离后端）"
+      },
+      "partner_db": 8000,
+      "registration": "G03"
+    },
+    {
+      "id": "D8-room-rename-xdb",
+      "situation": "用户把一间房的容器改了名，改完它不再是一间房（后来又改回）；房里的设备在另一个库里。",
+      "change_types": [
+        "CT-D8",
+        "CT-A1",
+        "CT-C3"
+      ],
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeline/room_rename_xdb_apply.mac",
+      "restore": "pipeline/room_rename_xdb_restore.mac",
+      "db": 7998,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-RM-R901-P1",
+          "/AIOS-SUITE-T4-EQ-RM2",
+          "/AIOS-SUITE-T4-RM-R902-P1"
+        ],
+        "rooms": {
+          "/AIOS-SUITE-T4-EQ-RM1": {
+            "before": [
+              "R901"
+            ],
+            "after": []
+          },
+          "/AIOS-SUITE-T4-EQ-RM2": {
+            "before": [
+              "R902"
+            ],
+            "after": [
+              "R902"
+            ]
+          }
+        },
+        "backend": "只改了名字，几何单元一个不重建；但 R901 这间房没了，8000 里 EQ-RM1 的房间边要跟着没；改回之后回来。",
+        "why": "联动分类表第 7 类（改名 → 整间重算）；元数据门放行的改名，读账本的房间这一路仍然看得见（变更类型总表 CT-A1、CT-D8）。"
+      },
+      "status": "known_gap",
+      "known_gap": "房间改回来之后，别的库里的成员没有被重新算进去。现在的表现：跨库的成员不在这一窗里重算，而是停放给成员所在的库，等那个库下一次有任务才接上；那个库没有新会话时，库上的房间边一直是旧的。新票草稿在这一轮工作区的 agents/T4/drafts/new-issue-cross-db-room-membership-parked.md。",
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "apply / restore 各 1 个设计候选（FRMW，只改 NAME），不进模型；并窗时记 unchanged",
+      "replay": [
+        "t4-room-rename-xdb"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-room-rename-xdb：改名那一窗是对的（房间没了，边跟着没了，零单元）；改回那一窗之后 EQ-RM1 的房间边「少了 R901」（不过，已知缺口）",
+        "l3": "没跑（等隔离后端）"
+      },
+      "partner_db": 8000,
+      "registration": "G03"
+    },
+    {
+      "id": "S1-small-create-ctl",
+      "situation": "对照：用户在一个很小的库里只建了一台带一个盒子的设备（后来删掉）。",
+      "change_types": [
+        "CT-S1",
+        "CT-S3"
+      ],
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeline/small_create_apply.mac",
+      "restore": "pipeline/small_create_restore.mac",
+      "db": 7998,
+      "expected_net": "cancelled",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T4-SM-EQ"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-X",
+          "/AIOS-SUITE-T4-RM-R901-P1"
+        ],
+        "backend": "这一窗不退化：回执里没有退化的原因，只生成新建的这一个根，库里别的根不重算。",
+        "why": "W10-bulk-create-degraded 的对照：变更元素两三个，占索引的比例远不到 30%。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "apply：新建 2（EQUI、BOX）加属主 ZONE 的成员变化，1 个单元重建；restore：1 个单元清掉",
+      "replay": [
+        "t4-bulk-degraded"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-bulk-degraded 的前两步：过。服务日志里这一窗只重算了新建的那一个根",
+        "l3": "没跑（等隔离后端）"
+      },
+      "registration": "A02"
+    },
+    {
+      "id": "W10-bulk-create-degraded",
+      "situation": "用户在一个很小的库里一次保存建了 20 台设备（后来一次删掉）：变更元素占这个库的一多半。",
+      "change_types": [
+        "CT-W10",
+        "CT-S1",
+        "CT-S3"
+      ],
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeline/bulk_create_apply.mac",
+      "restore": "pipeline/bulk_create_restore.mac",
+      "db": 7998,
+      "expected_net": "cancelled",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T4-BK-EQ1",
+          "/AIOS-SUITE-T4-BK-EQ20",
+          "/AIOS-SUITE-T4-EQ-X"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-RM1"
+        ],
+        "backend": "候选数超过索引键数的 30%：这一窗退化，不信「哪些根受影响」的推算，库里已有的根全部重算，回执 credential_advance_degraded 有原因；新建的 20 个根照常生成；算出来的与整库重建逐条相等。restore（一次删 20 台）同样退化，删完这 20 个根的记录清空。不该动的在别的库：8000 没有新窗口，那边的 EQ-RM1 回执不过期、房间归属不变。7998 自己没有「不该动的」——退化的意思就是全都重算；不退化的对照在 S1-small-create-ctl。",
+        "why": "window_root_plan.rs 模块头注与 CREDENTIAL_ADVANCE_CANDIDATE_RATIO = 0.30（ADR-056 实施约束 5）。这条护栏只有单测，没有 E3D 实改到后端实算的用例。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "apply：新建 40 加 ZONE 成员变化，20 个单元重建；restore：20 个单元清掉；两条并窗只剩 ZONE（unchanged）、零单元",
+      "replay": [
+        "t4-bulk-degraded",
+        "t4-bulk-merged-net-zero"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-bulk-degraded：过。服务日志里建 20 台那一窗重算了 25 个根（20 个新根加库里已有的 5 个），删 20 台那一窗重算了已有的 5 个；跑完后 EQ-X 与整库重建逐条相等。t4-bulk-merged-net-zero（建了又删并成一窗）：过，零单元。07:23 第二趟多判了回执里的退化那一行：建 20 台、删 20 台两窗都有，对照两窗都没有，过",
+        "l3": "没跑（等隔离后端）"
+      },
+      "registration": "A04"
+    },
+    {
+      "id": "W9-two-db-one-save",
+      "situation": "用户一次保存里同时挪了两台设备，一台在主库，一台在伙伴库（后来各自落回）。",
+      "change_types": [
+        "CT-W9",
+        "CT-A3"
+      ],
+      "name_case": null,
+      "tickets": [
+        "V18"
+      ],
+      "apply": "pipeline/two_db_save_apply.mac",
+      "restore": "pipeline/two_db_save_restore.mac",
+      "db": [
+        8000,
+        7998
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T4-EQ-MV",
+          "/AIOS-SUITE-T4-EQ-X"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-CLM",
+          "/AIOS-SUITE-T4-EQ-RM1"
+        ],
+        "backend": "两个库各开一窗、各重算自己那一台，互不拖累。给 7998 那一窗注入数据批次失败时，8000 那一窗照常做完，不用等（ADR-094 D1）。",
+        "why": "变更类型总表 CT-W9（按库分窗各自规划）；换后端方案 V18；登记表 INC-H03 待写。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "两个库各 2 个设计候选（设备的 POS，和它名下盒子被 E3D 盖的戳），各 1 个单元重建。实测：这次保存 8000 只多 1 个会话，7998 多 2 个（退出时的尾会话只记在 7998）",
+      "replay": [
+        "t4-two-db-one-save",
+        "t4-two-db-one-fails"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-two-db-one-save：过，两个库各自追平。t4-two-db-one-fails（给 7998 那一窗注入失败）：过，7998 停下、8000 照常做完，7998 来了新会话后清账追平",
+        "l3": "没跑（等隔离后端）"
+      },
+      "registration": "H03"
+    },
+    {
+      "id": "W3-claim-unclaim-save",
+      "situation": "用户认领了一台设备、马上又释放、然后保存；设备的属性一个没改。",
+      "change_types": [
+        "CT-W3"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "pipeline/stamp_claim_unclaim_save.mac",
+      "restore": null,
+      "db": 8000,
+      "expected_net": "unchanged",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-CLM"
+        ],
+        "backend": "这一窗零单元，水位照推，EQ-CLM 的回执不过期。",
+        "why": "离线核对：这个会话里一个设计元素都没变，只有记账记录——和「只登录」是同一种窗（变更类型总表 CT-W3）。所以结构连接级联真机步骤验 4 里「认领再释放」造不出只盖戳的根；只盖戳的根要靠「改了又改回并成一窗」造。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "0 个设计候选，只有记账记录被改",
+      "replay": [
+        "t4-stamp-claim"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-stamp-claim：过，零单元",
+        "l3": "没跑（等隔离后端）"
+      },
+      "registration": "A06"
+    },
+    {
+      "id": "W3-claim-kept",
+      "situation": "用户认领了一台设备后保存，认领留着（后来释放、再保存）；设备的属性一个没改。",
+      "change_types": [
+        "CT-W3"
+      ],
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeline/stamp_claim_apply.mac",
+      "restore": "pipeline/stamp_claim_restore.mac",
+      "db": 8000,
+      "expected_net": "unchanged",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T4-EQ-CLM"
+        ],
+        "backend": "两窗都零单元，水位照推。",
+        "why": "同上：认领状态不写进元素的记录。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T4/20261112-043232-cases1",
+      "plan_check": "两条腿都是 0 个设计候选",
+      "replay": [
+        "t4-stamp-claim"
+      ],
+      "layers": {
+        "macro": "pass（2026-11-12 04:33，13 条腿一批跑通）",
+        "e3d_rvm": "没做（等 T0 的对拍配方）",
+        "plan_offline": "核过（agents/T4/plan-check/summary.tsv，程序是 11-08 编的规划器对拍程序）",
+        "replay": "t4-stamp-claim：过，两步都零单元",
+        "l3": "没跑（等隔离后端）"
+      },
+      "registration": "A06"
+    }
+  ],
+  "chains": [],
+  "probes": [
+    {
+      "macro": "pipeline/claim_probe.mac",
+      "purpose": "只读探针：认领、释放的句子（CLAIM CE / UNCLAIM CE / CLAIM CE HIERARCHY / UNCLAIM ALL 都成立），8000 是 MULTIWRITE、隐式认领",
+      "no_savework": true,
+      "evidence": "T4/20261112-043006-claim-probe"
+    }
+  ],
+  "replay_windows": {
+    "note": "并窗：from 是前一条腿跑之前，to 是后一条腿跑完之后。不开 E3D，回放层一步推过去。",
+    "windows": [
+      {
+        "id": "W2-room-panel-there-and-back",
+        "from": "pipeline/room_panel_xdb_apply.mac",
+        "to": "pipeline/room_panel_xdb_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-A3"
+        ],
+        "shape": "只留下盖戳的窗口：窗口两端这块板的位置相同，变的只有 E3D 盖的戳",
+        "expect": "一个单元都不重算，R901 的归属不变",
+        "known_gap_candidate": "缺省配置下只盖戳的根多半整根重算一遍（结果相同）；首跑后定",
+        "replay": "t4-room-panel-merged-stamp-only"
+      },
+      {
+        "id": "W2-bulk-create-delete",
+        "from": "pipeline/bulk_create_apply.mac",
+        "to": "pipeline/bulk_create_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-W1"
+        ],
+        "shape": "建了一大批又删掉，并成一窗",
+        "expect": "净窗口里这 20 台从没出现过：零单元，没有它们的记录",
+        "replay": "t4-bulk-merged-net-zero"
+      }
+    ]
+  }
+}

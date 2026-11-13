@@ -1,0 +1,54 @@
+-- 登记: gen-model #143 / #132（被支撑件被删那一组的前置；变更类型 CT-S1 新建 + CT-A2 + CT-A6） | 语义: 自建一根支管当靶子——
+--   管道库 250132：在世界下自建 SITE /AIOS-SUITE-T1-S7 → ZONE → PIPE（PSPE /A3B）→ BRAN /AIOS-SUITE-T1-S7-B1（HSTU /A3B/PA300）。
+--   支撑库 250104：/PS-01-00194.1 的 COMPRE 从 /300-A-42/B1 改托到这根自建支管。
+-- 自建支管的管径和原来托着的那根一样（DN300），所以这一窗之后支撑件的形状该和基线相同。
+-- 重跑幂等：先删掉上一次留下的 /AIOS-SUITE-T1-S7*。
+-- expected_net: modified | 收尾: support/compre_target_own_teardown.mac
+-- 入口里这一步要点名两个库（@250132+250104）。
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，全部写绝对值，重跑幂等。不用世界锚点，按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-TARGET-OWN-SETUP-ALIVE
+/SITE-PIPING-AREA01
+Q REF
+Q NAME
+OWNER
+!world = !!CE
+Q REF
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-S7*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+!!CE = !world
+NEW SITE /AIOS-SUITE-T1-S7
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T1-S7-Z
+NEW PIPE /AIOS-SUITE-T1-S7-P
+PSPE /A3B
+Q REF
+Q NAME
+NEW BRAN /AIOS-SUITE-T1-S7-B1
+HSTU /A3B/PA300
+HBOR 300
+TBOR 300
+HPOS W 321000 N 312000 U 106000
+TPOS W 318000 N 312000 U 106000
+HDIR W
+TDIR E
+Q REF
+Q NAME
+Q HSTU
+Q OWNER
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+COMPRE /AIOS-SUITE-T1-S7-B1
+Q COMPRE
+SAVEWORK 'AIOS suite support/compre_target_own setup: own BRAN /AIOS-SUITE-T1-S7-B1 and /PS-01-00194.1 COMPRE -> it'
+$P SUITE-SUPPORT-COMPRE-TARGET-OWN-SETUP-DONE
+ALPHA LOG END

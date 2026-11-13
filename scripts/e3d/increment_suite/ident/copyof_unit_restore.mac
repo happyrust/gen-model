@@ -1,0 +1,28 @@
+-- 登记: A01（变更类型 CT-S3；按名称案例 C-08、C-09、G-10） | 语义: 把那两台设备（自动命名的一台、名字中间含 Copy-of 的一台）整台删掉
+-- expected_net: cancelled（三腿链 ident/copyof_unit 的还原腿）
+-- 预期 gen-model（按 refno）: 两台设备的模型行清掉；各记一条 datacenter_delete reason=deleted（已发布时）；别的设备不动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-COPYOF-UNIT-RESTORE-ALIVE
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+VAR !a COLLECT ALL EQUI WITH (NAME EQ '/Copy-of-AIOS-SUITE-T3-EQ-CP') FOR CE
+DO !e VALUES !a
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-Z
+VAR !c COLLECT ALL EQUI WITH (NAME EQ '/AIOS-SUITE-T3-Copy-of-EQ') FOR CE
+DO !e VALUES !c
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/copyof_unit restore: both Copy-of EQUI deleted'
+$P SUITE-T3-COPYOF-UNIT-RESTORE-DONE
+ALPHA LOG END

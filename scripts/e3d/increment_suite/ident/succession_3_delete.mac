@@ -1,0 +1,25 @@
+-- 登记: A01（变更类型 CT-S3、CT-S2；按名称案例 G-08 第三步、G-10） | 语义: 接替的第三步——删掉改了名的原件 BRAN-ROLD。跑完之后库里只有一条 BRAN-R：名字、成员名、内容都和接替之前一样，只是换了参考号
+-- expected_net: deleted | 三腿链 ident/succession 的第 3 腿；三腿并进同一个消费窗口，净效果与「单元删后同名重建、内容不变」（A-02）相同
+-- 预期 gen-model（按 refno）: 原件的管件行、管身行清掉；新支管不动（上一腿已经建好）。
+--   交付删除记录：原件的 refno 在第 1 腿已经记过 renamed，INSERT IGNORE 同一 refno 只留首次事件，这一窗不再新落 deleted。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SUCCESSION-3-DELETE-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+Q MEMB
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-ROLD') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  DELETE BRAN
+ENDDO
+/AIOS-SUITE-T3-PIPE
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/succession 3: the renamed original BRAN-ROLD deleted'
+$P SUITE-T3-SUCCESSION-3-DELETE-DONE
+ALPHA LOG END

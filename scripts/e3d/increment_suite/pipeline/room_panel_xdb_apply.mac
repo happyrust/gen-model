@@ -1,0 +1,16 @@
+-- 登记: G03（变更类型 CT-D8、CT-A3、CT-C3；联动分类表第 7 类） | 语义: 房间的地板轮廓整块挪走；房里的设备在另一个库、自己没被动过
+-- expected_net: modified | restore 搭档: pipeline/room_panel_xdb_restore.mac | 存盘只落在 7998
+-- 该有的行为: 7998 这一窗重算 R901 这间房——8000 里的 EQ-RM1 不再属于 R901（它的房间边没了），EQ-RM1 的几何不重建；
+--   8000 没有新会话；R902 和它里面的 EQ-RM2 一点不动（对照）。
+-- 位置写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-ROOM-PANEL-XDB-APPLY-ALIVE
+/AIOS-SUITE-T4-RM-R901-P1
+Q REF
+Q NAME
+Q POS
+POS E 50000 N 0 U 0
+Q POS
+SAVEWORK 'AIOS suite T4 pipeline/room_panel_xdb apply: R901 panel moved away'
+$P SUITE-T4-ROOM-PANEL-XDB-APPLY-DONE
+ALPHA LOG END

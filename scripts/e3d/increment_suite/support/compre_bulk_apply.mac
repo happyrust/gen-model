@@ -1,0 +1,58 @@
+-- 登记: gen-model #143（大窗：设计引用反查超点查预算；CT-C3 跨库远端 + CT-S2 复制 + CT-A6 + CT-W10 退化） | 语义: 同一次保存里
+-- 导入一大批管件（把管道区 /ZONE-PIPING-AREA01 复制两份，约 1470 个新元素）并给 /300-A-42/B1 换管径（PA300 → PA250）。
+-- 预期：250132 这一窗的变更元素多到反查一次都不发（回执带「判不了……超过预算 200000，一次都没发」），本库已发布的根
+-- 全部重算；但 COMPRE 那一类的表整张走一遍，别的库里的两只支撑件（/PS-01-00194.1、/PS-01-00195.1）**照常**点名、
+-- 照常交给 250104。
+-- expected_net: modified | restore 搭档: support/compre_bulk_restore.mac
+--
+-- 工程: APS（MDB /ALL），只在私有副本上跑。本宏不用世界锚点占位符：先走到管道库的 SITE，再 OWNER 上跳到 250132 的 WORLD。
+--
+-- 前提（不满足时这一条判「没跑」，不判「过」）：后端的 MDB 是完整的 /ALL。预算按
+--   变更元素数 × MDB 全部设计成员的反向表数 > 200000 算；/ALL 有 98 个设计库、约 271 张反向表，739 个变更元素到线。
+--   /ZONE-PIPING-AREA01 名下 737 个元素（47 PIPE / 91 BRAN / 599 管件），复制两份留出一倍余量。
+--
+-- 压舱放在本宏自己建的 SITE /AIOS-SUITE-T1-BULK 下（两个 ZONE：-1、-2），restore 整个删掉；复制件不带名字（E3D 的 COPY 不带名）。
+-- 生产元素只动一处：/300-A-42/B1 的 HSTU（绝对值，restore 写回）。幂等：先删同名 SITE 再建。
+-- ★ TTY 实测（2026-11-12，APS 私有副本）：250132 的会话 46→47，这一窗 1564 个变更元素（新建 1561、改 3）；
+--   一份 ZONE 的 COPY 带过来 780 个元素。副本里只有 aps250132 这一个库文件变大——COPY 带过来的支管
+--   （它们的 HREF / TREF 指着别的库里的管嘴）没有往别的库写。E3D 导出里支撑区变的仍是 194.1、195.1 两只。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-BULK-APPLY-ALIVE
+/SITE-PIPING-AREA01
+Q REF
+Q NAME
+Q TYPE
+OWNER
+!world = !!CE
+Q REF
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-BULK*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+!!CE = !world
+NEW SITE /AIOS-SUITE-T1-BULK
+!site = !!CE
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T1-BULK-1
+COPY /ZONE-PIPING-AREA01
+Q REF
+Q NAME
+!!CE = !site
+NEW ZONE /AIOS-SUITE-T1-BULK-2
+COPY /ZONE-PIPING-AREA01
+Q REF
+Q NAME
+$P SUITE-SUPPORT-COMPRE-BULK-APPLY-COPIED
+/300-A-42/B1
+Q REF
+Q NAME
+Q HSTU
+HSTU /A3B/PA250
+Q HSTU
+SAVEWORK 'AIOS suite support/compre_bulk apply: two zone copies + /300-A-42/B1 HSTU PA300 -> PA250'
+$P SUITE-SUPPORT-COMPRE-BULK-APPLY-DONE
+ALPHA LOG END

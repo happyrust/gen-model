@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "owner": "T1",
+  "topic": "cable-route",
+  "copy": "aps",
+  "mdb": "/ALL",
+  "sites": [],
+  "setup": null,
+  "teardown": null,
+  "description": "电缆经过的路由节点变了，电缆要跟着重算（联动分类表第 13 / 14 行，规则 E）。直接改生产元素（桥架库 250182 的一个路由节点），成对还原、写绝对值。",
+  "corpus": {
+    "/CWAY-AREA01-POWER_B7-RNODE-003": "RNODE =2013286726/310（250182），TAKE 型，ZDIS 10460，世界位置 W 310540 N 305750 U 105600；上一级是 RTFEAT 1 of CWBRAN /CWAY-AREA01-POWER_B7",
+    "/CWAY-AREA01-POWER_B7": "CWBRAN =2013286726/288；CLIST 四根电缆：/CBLP-LTG-101-01A、-01B、-01C、-01D",
+    "/ZONE-CABLES-AREA01": "ZONE =2013286726/197（**电缆和桥架在同一个库 250182**，不同的根），9 根电缆",
+    "电缆的两头": "ELCONN，在电气库里：/LT-103-B2-POWER =2013286696/4（250152），/LTG-101-01D-POWER =2013286700/33、/LTG-101-01C-POWER =2013286700/44（250156）"
+  },
+  "cases": [
+    {
+      "id": "D6-cable-rnode-move",
+      "situation": "电缆经过的桥架节点沿桥架挪了 500 mm，电缆自己没被动过",
+      "change_types": [
+        "CT-D6",
+        "CT-A4"
+      ],
+      "cascade_row": 13,
+      "name_case": null,
+      "tickets": [],
+      "apply": "cable/rnode_move_apply.mac",
+      "restore": "cable/rnode_move_restore.mac",
+      "db": 250182,
+      "touches_production": [
+        "/CWAY-AREA01-POWER_B7-RNODE-003"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250182": "有新会话"
+        },
+        "changed": [
+          "/CWAY-AREA01-POWER_B7-RNODE-003：ZDIS 10460 → 10960"
+        ],
+        "rebuild": [
+          "/CBLP-LTG-101-01B（经过这个节点的电缆；同库、另一个根，经规则 E 级联）",
+          "节点所在的桥架分支（按现行规则它自己重不重算都行）"
+        ],
+        "rebuild_may": [
+          "/CBLP-LTG-101-01A、-01C、-01D（同一条桥架分支上的别的电缆：被一起带进来算超集，可以）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/ZONE-CABLES-AREA01 下不经过这条分支的另外 5 根电缆",
+          "别的库：没有任务"
+        ],
+        "geometry": "以 E3D 为准：/CBLP-LTG-101-01B 的拐点跟着节点走（世界系包围盒 x 向长了 439.12），其余 8 根不变",
+        "geometry_e3d": "E3D 实测：电缆区 9 根里正好 1 根变了——/CBLP-LTG-101-01B；还原之后 9 根逐件相同。",
+        "why": "core EVALAT 规则 E（GATREF：路由节点变了，路过的电缆重算）；现行实现 src/data_interface/cable_endpoint.rs（变了的 HATTA / TATTA / RATTA / RNODE 直接触发，经 EXTGEO 的 STAREF / ENDREF 反查电缆），开关 model_cable_endpoint_cascade 现在默认开。联动分类表第 13、14 行写着语料里「只动路由、电缆不动」的自然窗口是 0——这两对宏就是造这种窗口的。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-060649-cable-rnode",
+      "layers": {
+        "tty": "pass（250182：14→15 apply，15→16 还原）",
+        "rvm_truth": "E3D 导出前后对拍过（电缆区 9 根里正好 1 根变）；套件格式的期望模型还没加",
+        "plan": "变更清单用旧探针核过（正好是节点的这几格）。电缆进没进重建名单：旧探针（11-08，早于规则 E 补齐附着点）里没有，不作数；现行程序没跑（等回放层）",
+        "full_gen": "备忘（不是票）：改前 9 根都在弦高之内；节点挪了之后 /CBLP-LTG-101-01B 的弯段与 E3D 差 0.594 mm（改前 0.094），其余 8 根在弦高之内。还原之后 9 根都在弦高之内。",
+        "replay": "没跑（回放层还不认 APS）",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "D6-cable-rnode-offs",
+      "situation": "电缆经过的桥架节点改成偏移型并给了偏移（XOFF 200、ZOFF 100），电缆自己没被动过",
+      "change_types": [
+        "CT-D6",
+        "CT-A4"
+      ],
+      "cascade_row": 13,
+      "name_case": null,
+      "tickets": [],
+      "apply": "cable/rnode_offs_apply.mac",
+      "restore": "cable/rnode_offs_restore.mac",
+      "db": 250182,
+      "touches_production": [
+        "/CWAY-AREA01-POWER_B7-RNODE-003"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250182": "有新会话"
+        },
+        "changed": [
+          "/CWAY-AREA01-POWER_B7-RNODE-003：RNTYPE TAKE → OFFS，XOFF 0 → 200，ZOFF 0 → 100"
+        ],
+        "rebuild": [
+          "/CBLP-LTG-101-01B（经过这个节点的电缆；同库、另一个根，经规则 E 级联）",
+          "节点所在的桥架分支（按现行规则它自己重不重算都行）"
+        ],
+        "rebuild_may": [
+          "/CBLP-LTG-101-01A、-01C、-01D（同一条桥架分支上的别的电缆：被一起带进来算超集，可以）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/ZONE-CABLES-AREA01 下不经过这条分支的另外 5 根电缆",
+          "别的库：没有任务"
+        ],
+        "geometry": "以 E3D 为准：/CBLP-LTG-101-01B 跟着偏移后的节点走（世界系 y -199.94、z +99.93），其余 8 根不变",
+        "geometry_e3d": "E3D 实测：电缆区 9 根里正好 1 根变了——/CBLP-LTG-101-01B；还原之后 9 根逐件相同。",
+        "why": "core EVALAT 规则 E（GATREF：路由节点变了，路过的电缆重算）；现行实现 src/data_interface/cable_endpoint.rs（变了的 HATTA / TATTA / RATTA / RNODE 直接触发，经 EXTGEO 的 STAREF / ENDREF 反查电缆），开关 model_cable_endpoint_cascade 现在默认开。联动分类表第 13、14 行写着语料里「只动路由、电缆不动」的自然窗口是 0——这两对宏就是造这种窗口的。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错），已有票 e3d-model#40：电缆穿过 OFFS 型节点时节点的偏移还没接进电缆路由，/CBLP-LTG-101-01B 整根生成不出来。增量这一半（电缆该被点名重算）不受影响，等回放层验。",
+      "evidence": "T1/20261112-060649-cable-rnode",
+      "layers": {
+        "tty": "pass（250182：16→17 apply，17→18 还原）",
+        "rvm_truth": "E3D 导出前后对拍过（电缆区 9 根里正好 1 根变）；套件格式的期望模型还没加",
+        "plan": "变更清单用旧探针核过（正好是节点的这几格）。电缆进没进重建名单：旧探针（11-08，早于规则 E 补齐附着点）里没有，不作数；现行程序没跑（等回放层）",
+        "full_gen": "已知缺口：这根电缆整根生成不出来（「RNODE 的伪属性 XOFF 现算失败：附着件偏移尚未接入电缆路由」），其余 8 根在弦高之内。",
+        "replay": "没跑（回放层还不认 APS）",
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [],
+  "probes": [
+    {
+      "macro": "cable/probe_aps_cable.mac",
+      "no_savework": true,
+      "purpose": "只读探针（带 ONERROR CONTINUE）：节点在不在、什么型；经过这条桥架分支的是哪几根电缆（CWBRAN 的 CLIST）、它们在哪个 ZONE、两头接在谁身上；节点改成 OFFS 再写回的写法。"
+    }
+  ],
+  "not_encoded": [
+    {
+      "id": "D6-cable-endpoint-move",
+      "why": "电缆端点所在的设备 / 接线件挪了（规则 F）。端点 ELCONN 在电气库 250152 / 250156，这两本库在私有副本里还没登记成可写——requests/T1-04。宏的写法已经清楚：挪 /LTG-101-01D（或它名下的 ELCONN），接在它上面的 /CBLP-LTG-101-01D、-01C 该重算（跨库：电气库 → 250182）。"
+    }
+  ],
+  "verified_syntax": {
+    "note": "2026-11-12 在 APS 私有副本里实测",
+    "list": [
+      "Q CLIST 要在 CWBRAN 上问（RNODE 上是 unset，RTFEAT 没有这个属性）；!!CE.CLIST 是引用数组，可以 !!CE = !cl[$!i] 逐个走过去",
+      "RNODE 的 ZDIS（沿桥架的距离）、RNTYPE（TAKE / OFFS）、XOFF / YOFF / ZOFF 都可以直接赋值；RNTYPE TAKE 加偏移写回 0 就是还原",
+      "电缆的 Q STAREF / Q ENDREF 给出两头的 ELCONN；!!CE = !!CE.STAREF 可以走过去"
+    ]
+  },
+  "full_gen": {
+    "plan": "agents/T1/geom/plan.json（cable-01 … cable-09）",
+    "result": "5 个时刻：3 个在弦高之内；挪节点之后差 0.594 mm（备忘）；改成 OFFS 之后那根电缆生成不出来（e3d-model#40）"
+  }
+}

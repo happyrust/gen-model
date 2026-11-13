@@ -1,0 +1,27 @@
+{
+  "name": "ams8000-catalogue-stamp-only",
+  "registry": [
+    "INC-E02"
+  ],
+  "_doc": "INC-E02（ADR-079，issues #61 #67）：三条入口（启动 / 周期 / /update/execute）对「库级目录落款落在旧目录上、却一根都没被命中」的设计库，排一条**只盖落款**的空名单任务（`catalogue_cascade.stamp_only`），跑完之后落款盖到当前目录会话，**下一拍对账安静**（不再点名、不再排）。\\n\\n前置状态只能这样造：库级落款（`dbnum_watermark:{dbnum}.model_catalogue_sessions`）是真跑过整库生成才有的东西，回放链只动一个 DESI 文件、造不出「目录文件前移了、落款还钉在旧会话上」。所以用例在 init 追平之后直接用 `seed`（对本次运行的 surreal 发 SurrealQL）把 8000 的落款钉到 `7000:273`——`ams7000_0001` 在影子工程里读出来的最新会话是 274，差一个会话，窗口只有 274 这一页，代价可控（2026-10-27 实测）。\\n\\n判据三件，缺一即红：① `/health.catalogue_reconcile.catalogue_cascade.stamp_only` 出现 8000（那是「只盖落款」的空任务，不是重算）；② 库里 `8000.model_catalogue_sessions` 的会话已被盖到 > 0（空任务真跑完并落账）；③ 下一拍 `at` 更新、`stale` 与 `stamp_only` 都空——盖完就该安静，反复排就是没盖住。\\n\\n这条用例不跑任何生成（`init` 只有 `to`），因为「无引用者」正是它的场景：库里没有任何已发布根引用 7000 那一窗的变动件，反查命中 0 根，于是走第 3 步——空任务。生成过的库要看「真排根」，那是 E01 侧 lib 用例与 `catalogue_cascade.enqueued` 的事。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-move-chain",
+  "start": 725,
+  "service_env": {
+    "AIOS_WATCH_RECONCILE_SECS": "2",
+    "AIOS_WATCH_MIN_SWEEP_GAP_SECS": "1",
+    "AIOS_WATCH_POLL_SECS": "1"
+  },
+  "seed": [
+    "UPSERT dbnum_watermark:8000 SET dbnum = 8000, model_catalogue_sessions = [{ dbnum: 7000, session: 273 }];"
+  ],
+  "init": {
+    "to": 725,
+    "expect_catalogue_stamp_only": [
+      8000
+    ],
+    "timeout_secs": 300
+  },
+  "steps": []
+}

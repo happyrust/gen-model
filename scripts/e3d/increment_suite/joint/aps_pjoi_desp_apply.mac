@@ -1,0 +1,60 @@
+-- 登记: D5-pjoi-desp-aps（CT-D5 结构关节 / CT-A4 几何；联动 #12 主关节级联）
+-- 语义: 只改主关节——把端板主关节的第 2 个设计参数（端板厚 / 让位高度）从 10 改成 20，柱与 PNOD 一个字不动
+-- expected_net: modified | restore 搭档: joint/aps_pjoi_desp_restore.mac | 库: aps7166（APS 副本，MDB /SDNF）
+-- 直接改生产元素（样本只在生产元素上）：=23550/379。restore 把六个参数整组写回。
+--
+-- 样本（只读探针 2026-11-12；E3D 取证 2026-11-11）：
+--   PJOI =23550/379（无名，E3D 里叫 PJOINT 1 of PNODE /SB3/PB1/4/N03）：SPRE /End-Plate（目录件 /Endplates-Column-JOINT），
+--   DESP 0 10 270 280 0 0，OPDI = CUTP = D，CUTB 10，CREF 指柱 /SB3/PB1/4/POR/C01（=23550/388），柱的 JOIE 指回它。
+--   目录件负体集里那只 NSEX（NAPP -1）高 DESP[2]、截面 DESP[3] x DESP[4]，从关节原点沿关节 Z 向下把柱顶削掉：
+--   E3D 导出的柱比库里两端点短 10 mm。
+-- 期望（机器可读的那份在 manifest.d/T2-pjoi-aps.json）：这一窗该重建 2 件——主关节自己（上卷到自己）、
+--   柱 C01（关节级联：关节要重建，JOIS / JOIE 指着它的梁一并重建）。柱脚那只主关节 =23550/385、柱上两只带规格的 SJOI、
+--   B01 / B02 都不该被点名。柱顶再短 10 mm（从短 10 变成短 20），端板加厚到 20。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-DESP-APPLY-ALIVE
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+Q CUTL
+=23550/379
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q SPRE
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+DESP 0 20 270 280 0 0
+Q DESP
+Q CUTB
+Q DELP
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+Q CUTL
+/SB3/PB1/4/N03
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_desp apply: end-plate PJOI DESP[2] 10 -> 20'
+$P SUITE-T2-JOINT-APS-PJOI-DESP-APPLY-DONE
+ALPHA LOG END

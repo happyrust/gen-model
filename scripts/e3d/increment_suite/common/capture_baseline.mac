@@ -1,0 +1,17 @@
+-- Read-only baseline capture. Replace {{TARGET_NAME}} and {{LOG_PATH}}.
+-- Keep this probe deliberately narrow: unsupported Q attributes can abort E3D
+-- before ALPHA LOG is flushed. Case-specific probes may add safe attributes.
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-INPLACE-BASELINE-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q TYPE
+Q OWNE
+Q POS WRT /*
+Q ORI WRT /*
+Q DESC
+Q PURP
+$P AMS-INPLACE-BASELINE-DONE
+ALPHA LOG END

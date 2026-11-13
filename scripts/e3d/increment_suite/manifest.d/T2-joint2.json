@@ -1,0 +1,1501 @@
+{
+  "version": 1,
+  "owner": "T2",
+  "topic": "section-joint-fixing-loose-joint",
+  "copy": "ams",
+  "sites": [
+    "/AIOS-SUITE-T2-JNT2"
+  ],
+  "setup": "joint/setup2.mac",
+  "teardown": "joint/teardown2.mac",
+  "corpus": {
+    "note": "setup2 从 AMS /ALL 里的管道支撑模板框架 COPY 五只到 db8000 的 SITE /AIOS-SUITE-T2-JNT2 下（只读地用模板库）。COPY 之后关节与梁互相指着副本里的对方（E3D 实测）。成员逐层按「属主名-<类型前两个字母><在属主里的序号>」起名。规格指到三本目录库：acp7001（型钢截面）、acp250701（GENSEC 截面）、acp7320（管道支撑的关节目录）。",
+    "/AIOS-SUITE-T2-J2-SJ": "/MDS/FT03H/5：横杆（SCTN）接在立杆（SCTN）的 SNOD → SJOI 上；SJOI 是带目录正体的端板（正体 7 件；负体一把让位盒 NAPP -1、两只螺栓孔 NAPP 7）",
+    "/AIOS-SUITE-T2-J2-FX": "/SUPPORT/FRAMES/BS/CT01/4：同一种支架的 GENSEC 版，立杆 → JLDATU → PLDATU → FIXING，FIXING 的 CREF 指横杆",
+    "/AIOS-SUITE-T2-J2-FE": "/SUPPORT/FRAMES/BS/FT61/1：GENSEC 端部基准（ENDATU）下的 FIXING（焊接底板），CREF 指的就是它挂着的那根 GENSEC",
+    "/AIOS-SUITE-T2-J2-LJ": "/MDS/FT54A/1：两根 SCTN 各被一只「自己不画、只出刀」的主关节认领（目录件没有正体集；一只出圆环刀、一只出圆柱刀）",
+    "/AIOS-SUITE-T2-J2-PJ": "/MDS/FT56/5：两根立杆各被一只螺栓底板主关节认领，另有一根不接关节的横杆",
+    "limit": "焊接底板、螺栓底板的正负体只在表现级 4–8 / 6–8，E3D 这份导出里不画也不出刀（D5-fixing-endatu、D5-pjoi-desp 两条因此没有几何判别力，只钉计划与「重建前后相同」）；要看得见的那一半换成 CP-AA 底板做（D5-pjoi-spre-cut、D5-fixing-endatu-spre）。"
+  },
+  "rvm_export_root": "/AIOS-SUITE-T2-JNT2",
+  "baseline_evidence": "T2/20261112-044920-joint2-setup",
+  "baseline_session": 1533,
+  "cases": [
+    {
+      "id": "D5-sjoi-spre",
+      "situation": "只改截面关节：给一只接着横杆的 SJOI 换规格（左下端板换成左上端板），宿主立杆、SNOD、横杆都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/sjoi_spre_apply.mac",
+      "restore": "joint/sjoi_spre_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-SU2-BO1",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~SJ-FR1-SC2 CACHID；~SJ-FR1-SC2-SN1-SJ1 SPAMAP,SPRE）",
+        "geometry": "三件都变：关节自己换成左上端板的图形；被接的横杆端头的刀口跟着变（面片 8 → 10 个多边形）；宿主立杆上按关节打的两个贯穿螺栓孔没了（4 个内环 → 0，面片 24 → 28 个多边形）。"
+      },
+      "status": "known_gap",
+      "known_gap": {
+        "now": "r6 回放实测（07:10，t2-j2-sjoi-spre-parity）：规划点名关节与横杆两件，宿主立杆不点名（候选里宿主只有 E3D 盖的 CACHID 戳，归 cache_stamp；规划里没有「SJOI → 挂着它的 SCTN」这条腿，GENSEC 那边有 datum_fixing_host_of）。这一窗后端回退成整根重算（kind=regen），所以链尾增量 = 整库全量是过的——少点名宿主只有在根走单元路（按点名的件重建）时才会让宿主上的螺栓孔停在旧处，这一窗没有照出来。",
+        "draft": "agents/T2/drafts/new-issue-sjoi-host-not-rebuilt.md",
+        "old_planner_reading": "11-08 那版不带元数据门的规划探针在这一窗点名 3 件（含宿主）——是靠那个戳碰上的，不是认得这条依赖。"
+      },
+      "evidence": "T2/20261112-045919-joint2-sj-a",
+      "replay_windows": {
+        "apply": [
+          1589,
+          1590
+        ],
+        "apply_tail": 1591,
+        "restore": [
+          1592,
+          1593
+        ],
+        "restore_tail": 1594
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~SJ-FR1-SC2: CACHID",
+          "SJOI ~SJ-FR1-SC2-SN1-SJ1: SPAMAP,SPRE"
+        ],
+        "restore": [
+          "SCTN ~SJ-FR1-SC2: CACHID",
+          "SJOI ~SJ-FR1-SC2-SN1-SJ1: SPAMAP,SPRE"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 3 组：/AIOS-SUITE-T2-J2-SJ-FR1-SC1（FacetGroup(253 字) → FacetGroup(329 字)）；/AIOS-SUITE-T2-J2-SJ-FR1-SC2（FacetGroup(865 字) → FacetGroup(1085 字)）；/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1（FacetGroup：包围盒差 26.10 mm、参数 / 顶点差 40.10）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 2,
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "r6：规划点名 2 件（关节、横杆；宿主只有戳、不点名）；整根重算后几何差 1 件（关节），行数 3 → 3；链尾增量 = 整库全量过（07:10 在自己的快照上、07:55 在 T0 的终稿上各跑一遍，数字相同）",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-sj-a-explore / t2-j2-sjoi-spre-parity",
+        "r6": "r6：规划点名 2 件（关节、横杆；宿主只有戳、不点名）；整根重算后几何差 1 件（关节），行数 3 → 3；链尾增量 = 整库全量过（07:10 在自己的快照上、07:55 在 T0 的终稿上各跑一遍，数字相同）"
+      }
+    },
+    {
+      "id": "D5-sjoi-beam",
+      "situation": "只改被截面关节接着的横杆：把横杆绕自己的轴转 90 度（BANG），SJOI、SNOD、宿主立杆都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/sjoi_beam_apply.mac",
+      "restore": "joint/sjoi_beam_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-SU2-BO1",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_fixings_of / beam_feeds_joint：要重建或已删除的梁，它 JOIS / JOIE 指着、CREF 回指它的关节一并重建（关节的目录件经 CREF 读这根梁的型材参数与端头轴向，标架的原点落在梁 JLIN 那条线上）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~SJ-FR1-SC1 BANG,CACHID）",
+        "geometry": "只有横杆自己变（转了 90 度，端头被关节切的样子也不同）；关节与宿主立杆逐字相同——关节随梁重建是保守的多建，重建前后几何相同。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-045919-joint2-sj-a",
+      "replay_windows": {
+        "apply": [
+          1595,
+          1596
+        ],
+        "apply_tail": 1597,
+        "restore": [
+          1598,
+          1599
+        ],
+        "restore_tail": 1600
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~SJ-FR1-SC1: BANG,CACHID"
+        ],
+        "restore": [
+          "SCTN ~SJ-FR1-SC1: BANG,CACHID"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 1 组：/AIOS-SUITE-T2-J2-SJ-FR1-SC1（FacetGroup(253 字) → FacetGroup(645 字)）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 2,
+        "cascades": 1,
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6）：候选 1、级联 1、点名 2 件（横杆、关节）——与期望相同；几何差 1 件（横杆），与 E3D 一致",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-sj-a-explore",
+        "verified": true,
+        "r6": "pass（r6）：候选 1、级联 1、点名 2 件（横杆、关节）——与期望相同；几何差 1 件（横杆），与 E3D 一致"
+      }
+    },
+    {
+      "id": "D7-sjoi-host",
+      "situation": "只挪宿主立杆：把挂着 SNOD / SJOI 的立杆整根朝横杆方向平移 30 mm（POSS、POSE 同挪），SNOD、SJOI、横杆自己的属性都不动",
+      "change_types": [
+        "CT-D7",
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/sjoi_host_apply.mac",
+      "restore": "joint/sjoi_host_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ-SU2-BO1",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs implicit_frame_host_of 的 SCTN 臂：SNOD 里挂着带目录正体关节的 SCTN 是现算标架宿主（SJOI 的标架随宿主的轴、SNOD 的 ZDIS 现算，目录件还经 OPAR 读宿主的型材参数），命中就把整棵宿主子树级联重建。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~SJ-FR1-SC2 CACHID,POSE,POSS；~SJ-FR1-SC2-SN1-SJ1 SPAMAP）",
+        "geometry": "三件都变：宿主立杆与关节朝东挪 30.00 mm；横杆自己的属性没动，端头的刀口变了（面片 253 字 → 485 字）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-045919-joint2-sj-a",
+      "replay_windows": {
+        "apply": [
+          1601,
+          1602
+        ],
+        "apply_tail": 1603,
+        "restore": [
+          1604,
+          1605
+        ],
+        "restore_tail": 1606
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~SJ-FR1-SC2: CACHID,POSE,POSS",
+          "SJOI ~SJ-FR1-SC2-SN1-SJ1: SPAMAP"
+        ],
+        "restore": [
+          "SCTN ~SJ-FR1-SC2: CACHID,POSE,POSS",
+          "SJOI ~SJ-FR1-SC2-SN1-SJ1: SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 4 组：/AIOS-SUITE-T2-J2-SJ-FR1-SC1（FacetGroup(253 字) → FacetGroup(485 字)）；/AIOS-SUITE-T2-J2-SJ-FR1-SC2（组原点挪 30.00 mm；FacetGroup：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1（Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1（组原点挪 30.00 mm；FacetGroup：位置差 30.00 mm）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 2,
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6）：候选 2（关节只跳了戳）、级联 2、点名 3 件（宿主、关节、横杆）——与期望相同；几何差 2 件",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-sj-a-explore",
+        "verified": true,
+        "r6": "pass（r6）：候选 2（关节只跳了戳）、级联 2、点名 3 件（宿主、关节、横杆）——与期望相同；几何差 2 件"
+      }
+    },
+    {
+      "id": "D7-snod-zdis",
+      "situation": "只挪截面节点：把 SNOD 沿宿主立杆下移 30 mm（ZDIS），立杆、SJOI、横杆自己的属性都不动",
+      "change_types": [
+        "CT-D7",
+        "CT-D5"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/snod_zdis_apply.mac",
+      "restore": "joint/snod_zdis_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ-SU2-BO1",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。（SNOD 不成单元，上卷到宿主立杆）e3d-model src/increment.rs implicit_frame_host_of 的 SCTN 臂：SNOD 里挂着带目录正体关节的 SCTN 是现算标架宿主（SJOI 的标架随宿主的轴、SNOD 的 ZDIS 现算，目录件还经 OPAR 读宿主的型材参数），命中就把整棵宿主子树级联重建。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~SJ-FR1-SC2 CACHID；~SJ-FR1-SC2-SN1 ZDIS）",
+        "geometry": "实体一件都不变：这只关节有梁认领，原点落在梁线上，不随 SNOD 的站位走（E3D 存盘前 Q POS WRT /* 也没动）；只有 SNOD 自己的三条线框记号下移 30。规则在这一窗重建 3 件是保守的多建，重建前后几何相同。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050257-joint2-sj-fx-b",
+      "replay_windows": {
+        "apply": [
+          1630,
+          1631
+        ],
+        "apply_tail": 1632,
+        "restore": [
+          1633,
+          1634
+        ],
+        "restore_tail": 1635
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~SJ-FR1-SC2: CACHID",
+          "SNOD ~SJ-FR1-SC2-SN1: ZDIS"
+        ],
+        "restore": [
+          "SCTN ~SJ-FR1-SC2: CACHID",
+          "SNOD ~SJ-FR1-SC2-SN1: ZDIS"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 1 组：/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1（Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 2,
+        "units": [
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-fixing-spre",
+      "situation": "只改 FIXING：给宿主 GENSEC 的 datum 下、接着横杆的那只 FIXING 换规格（左上端板换成左下端板），宿主、datum、横杆都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/fixing_spre_apply.mac",
+      "restore": "joint/fixing_spre_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 e3d-model src/increment.rs datum_fixing_host_of：要重建或已删除的 FIXING 挂在某根 GENSEC 自己的 datum 树里，那根构件一并重建（GENSEC 建模时扣它 datum 树里每只 FIXING 的螺栓孔与底板让位，elmodl::collect_host_fixing_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~FX-FR1-GE2 CACHID；~FX-FR1-GE2-JL1-PL1-FI1 SPAMAP,SPRE）",
+        "geometry": "三件都变：FIXING 换成左下端板的图形；被接的横杆端头刀口变（面片 277 字 → 491 字）；宿主立杆上的孔位变（865 字 → 785 字）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050257-joint2-sj-fx-b",
+      "replay_windows": {
+        "apply": [
+          1636,
+          1637
+        ],
+        "apply_tail": 1638,
+        "restore": [
+          1639,
+          1640
+        ],
+        "restore_tail": 1641
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FX-FR1-GE2: CACHID",
+          "FIXING ~FX-FR1-GE2-JL1-PL1-FI1: SPAMAP,SPRE"
+        ],
+        "restore": [
+          "GENSEC ~FX-FR1-GE2: CACHID",
+          "FIXING ~FX-FR1-GE2-JL1-PL1-FI1: SPAMAP,SPRE"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 3 组：/AIOS-SUITE-T2-J2-FX-FR1-GE1（FacetGroup(277 字) → FacetGroup(491 字)）；/AIOS-SUITE-T2-J2-FX-FR1-GE2（FacetGroup(865 字) → FacetGroup(785 字)）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1（FacetGroup：包围盒差 24.60 mm、参数 / 顶点差 48.60）",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 2,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-fixing-beam",
+      "situation": "只改被 FIXING 接着的横杆：把它脊线的末点外移 30 mm（POINSP 的 POS），FIXING、datum、宿主都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/fixing_beam_apply.mac",
+      "restore": "joint/fixing_beam_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。（POINSP 不成单元，上卷到横杆）e3d-model src/increment.rs joint_fixings_of / beam_feeds_joint：要重建或已删除的梁，它 JOIS / JOIE 指着、CREF 回指它的关节一并重建（关节的目录件经 CREF 读这根梁的型材参数与端头轴向，标架的原点落在梁 JLIN 那条线上）。 e3d-model src/increment.rs datum_fixing_host_of：要重建或已删除的 FIXING 挂在某根 GENSEC 自己的 datum 树里，那根构件一并重建（GENSEC 建模时扣它 datum 树里每只 FIXING 的螺栓孔与底板让位，elmodl::collect_host_fixing_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~FX-FR1-GE1 CACHID,SPAMAP；~FX-FR1-GE1-SP1-PO2 POS）",
+        "geometry": "只有横杆变（末端伸长 30.00 mm）；FIXING 与宿主逐字相同——随梁重建是保守的多建，重建前后几何相同。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050257-joint2-sj-fx-b",
+      "replay_windows": {
+        "apply": [
+          1642,
+          1643
+        ],
+        "apply_tail": 1644,
+        "restore": [
+          1645,
+          1646
+        ],
+        "restore_tail": 1647
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FX-FR1-GE1: CACHID,SPAMAP",
+          "POINSP ~FX-FR1-GE1-SP1-PO2: POS"
+        ],
+        "restore": [
+          "GENSEC ~FX-FR1-GE1: CACHID,SPAMAP",
+          "POINSP ~FX-FR1-GE1-SP1-PO2: POS"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 1 组：/AIOS-SUITE-T2-J2-FX-FR1-GE1（FacetGroup：包围盒差 30.00 mm、参数 / 顶点差 30.00）",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 3,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D7-gensec-host",
+      "situation": "只挪宿主 GENSEC：把 datum 下挂着 FIXING 的立杆整根朝横杆方向平移 30 mm（POS），datum、FIXING、横杆自己的属性都不动",
+      "change_types": [
+        "CT-D7",
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/gensec_host_apply.mac",
+      "restore": "joint/gensec_host_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs implicit_frame_host_of 的 GENSEC 臂：名下有 JLDATU / ENDATU 的 GENSEC 是现算标架宿主（宿主自己、它的 SPINE 路径、datum 的 ZDIS / PKDI / POSL），命中就把整棵宿主子树级联重建。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~FX-FR1-GE2 CACHID,POS；~FX-FR1-GE2-JL1-PL1-FI1 SPAMAP）",
+        "geometry": "三件都变：宿主立杆、FIXING 朝东挪 30.00 mm；横杆自己没动，端头刀口变了（277 字 → 485 字）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050735-joint2-fx-fe-c",
+      "replay_windows": {
+        "apply": [
+          1667,
+          1668
+        ],
+        "apply_tail": 1668,
+        "restore": [
+          1669,
+          1670
+        ],
+        "restore_tail": 1670
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FX-FR1-GE2: CACHID,POS",
+          "FIXING ~FX-FR1-GE2-JL1-PL1-FI1: SPAMAP"
+        ],
+        "restore": [
+          "GENSEC ~FX-FR1-GE2: CACHID,POS",
+          "FIXING ~FX-FR1-GE2-JL1-PL1-FI1: SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 6 组：/AIOS-SUITE-T2-J2-FX-FR1-GE1（FacetGroup(277 字) → FacetGroup(485 字)）；/AIOS-SUITE-T2-J2-FX-FR1-GE2（组原点挪 30.00 mm；FacetGroup：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1（组原点挪 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1（组原点挪 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1（组原点挪 30.00 mm；FacetGroup：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-SP2（组原点挪 30.00 mm）",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 3,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D7-jldatu-zdis",
+      "situation": "只挪 datum：把 JLDATU 沿宿主 GENSEC 挪 30 mm（ZDIS），宿主、FIXING、横杆自己的属性都不动",
+      "change_types": [
+        "CT-D7",
+        "CT-D5"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/jldatu_zdis_apply.mac",
+      "restore": "joint/jldatu_zdis_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。（JLDATU 不成单元，上卷到宿主）e3d-model src/increment.rs implicit_frame_host_of 的 GENSEC 臂：名下有 JLDATU / ENDATU 的 GENSEC 是现算标架宿主（宿主自己、它的 SPINE 路径、datum 的 ZDIS / PKDI / POSL），命中就把整棵宿主子树级联重建。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~FX-FR1-GE2 CACHID；~FX-FR1-GE2-JL1 ZDIS）",
+        "geometry": "三件都变：FIXING 沿宿主上移 30.00 mm；宿主立杆上的孔跟着移 30；横杆端头刀口变（277 字 → 301 字）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050735-joint2-fx-fe-c",
+      "replay_windows": {
+        "apply": [
+          1671,
+          1672
+        ],
+        "apply_tail": 1673,
+        "restore": [
+          1674,
+          1675
+        ],
+        "restore_tail": 1676
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FX-FR1-GE2: CACHID",
+          "JLDATU ~FX-FR1-GE2-JL1: ZDIS"
+        ],
+        "restore": [
+          "GENSEC ~FX-FR1-GE2: CACHID",
+          "JLDATU ~FX-FR1-GE2-JL1: ZDIS"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 5 组：/AIOS-SUITE-T2-J2-FX-FR1-GE1（FacetGroup(277 字) → FacetGroup(301 字)）；/AIOS-SUITE-T2-J2-FX-FR1-GE2（FacetGroup：参数 / 顶点差 30.00）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1（组原点挪 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1（组原点挪 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm；Line：位置差 30.00 mm）；/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1（组原点挪 30.00 mm；FacetGroup：位置差 30.00 mm）",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 3,
+        "cascades": 2,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FX-FR1-GE2-JL1-PL1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-fixing-endatu",
+      "situation": "只改端部 FIXING：把 GENSEC 端部基准（ENDATU）下那块焊接底板的厚度从 10 改成 25（DESP 第 3 个），GENSEC 自己不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A1"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/fixing_endatu_apply.mac",
+      "restore": "joint/fixing_endatu_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 e3d-model src/increment.rs datum_fixing_host_of：要重建或已删除的 FIXING 挂在某根 GENSEC 自己的 datum 树里，那根构件一并重建（GENSEC 建模时扣它 datum 树里每只 FIXING 的螺栓孔与底板让位，elmodl::collect_host_fixing_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~FE-FR1-GE2 CACHID；~FE-FR1-GE2-EN1-FI1 DESP,SPAMAP）",
+        "geometry": "导出口径下一件都不变：这块焊接底板的正体只在表现级 4–8 画、负体只在 6–8 出刀，E3D 这份导出里它是 0 个图元，GENSEC 也没被它削。规则重建 2 件，重建前后几何应当相同（表现级门要和 E3D 一致）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-050735-joint2-fx-fe-c",
+      "replay_windows": {
+        "apply": [
+          1677,
+          1678
+        ],
+        "apply_tail": 1679,
+        "restore": [
+          1680,
+          1681
+        ],
+        "restore_tail": 1682
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FE-FR1-GE2: CACHID",
+          "FIXING ~FE-FR1-GE2-EN1-FI1: DESP,SPAMAP"
+        ],
+        "restore": [
+          "GENSEC ~FE-FR1-GE2: CACHID",
+          "FIXING ~FE-FR1-GE2-EN1-FI1: DESP,SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 0 组（导出口径下没有任何变化）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 2,
+        "cascades": 1,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-pjoi-desp",
+      "situation": "只改主关节（带负体的那种）：把螺栓底板主关节的板厚从 10 改成 25（DESP 第 6 个），被它接的立杆与 PNOD 都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A1"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/pjoi_desp_apply.mac",
+      "restore": "joint/pjoi_desp_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN4-PJ1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC3",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~PJ-FR1-PN4 CACHID；~PJ-FR1-PN4-PJ1 DESP,UNIPAR）",
+        "geometry": "导出口径下一件都不变：螺栓底板的正体、负体都只在表现级 6–8，E3D 这份导出里主关节是 0 个图元，立杆也没被它削。规则重建 2 件，重建前后几何应当相同。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-051355-joint2-pj-lj-d",
+      "replay_windows": {
+        "apply": [
+          1711,
+          1712
+        ],
+        "apply_tail": 1713,
+        "restore": [
+          1714,
+          1715
+        ],
+        "restore_tail": 1716
+      },
+      "net_window": {
+        "apply": [
+          "PNOD ~PJ-FR1-PN4: CACHID",
+          "PJOI ~PJ-FR1-PN4-PJ1: DESP,UNIPAR"
+        ],
+        "restore": [
+          "PNOD ~PJ-FR1-PN4: CACHID",
+          "PJOI ~PJ-FR1-PN4-PJ1: DESP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 0 组（导出口径下没有任何变化）",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN4-PJ1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC2"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN4-PJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6）：候选 2（PNOD 只跳了戳）、级联 1、点名 2 件（主关节、立杆）——与期望相同；几何差 0/0/0、行数 3 → 3（导出口径下这块底板不画也不出刀，重建前后相同，与 E3D 一致）",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-pj-lj-d-explore",
+        "verified": true,
+        "r6": "pass（r6）：候选 2（PNOD 只跳了戳）、级联 1、点名 2 件（主关节、立杆）——与期望相同；几何差 0/0/0、行数 3 → 3（导出口径下这块底板不画也不出刀，重建前后相同，与 E3D 一致）"
+      }
+    },
+    {
+      "id": "D5-pjoi-spre-cut",
+      "situation": "只改主关节（换成带刀的规格）：把一只接着立杆的主关节从「导出口径下不画、不出刀」的螺栓底板换成画得出来、带一把让位刀的底板（CP-AA），立杆与 PNOD 都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/pjoi_spre_cut_apply.mac",
+      "restore": "joint/pjoi_spre_cut_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC3"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN4-PJ1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~PJ-FR1-PN5 CACHID；~PJ-FR1-PN5-PJ1 SPAMAP,SPRE）",
+        "geometry": "两件都变：主关节从 0 个图元变成 1 个（CP-AA 底板画出来了）；被它接的立杆端头被让位刀削过（面片变了）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-052135-joint2-lj-e",
+      "replay_windows": {
+        "apply": [
+          1757,
+          1758
+        ],
+        "apply_tail": 1759,
+        "restore": [
+          1760,
+          1761
+        ],
+        "restore_tail": 1762
+      },
+      "net_window": {
+        "apply": [
+          "PNOD ~PJ-FR1-PN5: CACHID",
+          "PJOI ~PJ-FR1-PN5-PJ1: SPAMAP,SPRE"
+        ],
+        "restore": [
+          "PNOD ~PJ-FR1-PN5: CACHID",
+          "PJOI ~PJ-FR1-PN5-PJ1: SPAMAP,SPRE"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 2 组：/AIOS-SUITE-T2-J2-PJ-FR1-SC3（FacetGroup：包围盒差 313.00 mm、参数 / 顶点差 328.50）；/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1（图元 0 条 → 1 条（无 → FacetGroup×1））",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC3"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-fixing-endatu-spre",
+      "situation": "只改端部 FIXING（换成带刀的规格）：把 GENSEC 端部基准下那块底板从「导出口径下不画」的焊接底板换成画得出来、带让位刀的底板（CP-AA），GENSEC 自己不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#34"
+      ],
+      "apply": "joint/fixing_endatu_spre_apply.mac",
+      "restore": "joint/fixing_endatu_spre_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-LJ",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头，elmodl::collect_joint_negatives）。 e3d-model src/increment.rs datum_fixing_host_of：要重建或已删除的 FIXING 挂在某根 GENSEC 自己的 datum 树里，那根构件一并重建（GENSEC 建模时扣它 datum 树里每只 FIXING 的螺栓孔与底板让位，elmodl::collect_host_fixing_negatives）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类。",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~FE-FR1-GE2 CACHID；~FE-FR1-GE2-EN1-FI1 SPAMAP,SPRE）",
+        "geometry": "两件都变：FIXING 从 0 个图元变成 1 个（CP-AA 底板画出来了）；挂着它、又被它认领的 GENSEC 端头被削（面片变了）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T2/20261112-052135-joint2-lj-e",
+      "replay_windows": {
+        "apply": [
+          1763,
+          1764
+        ],
+        "apply_tail": 1765,
+        "restore": [
+          1766,
+          1767
+        ],
+        "restore_tail": 1768
+      },
+      "net_window": {
+        "apply": [
+          "GENSEC ~FE-FR1-GE2: CACHID",
+          "FIXING ~FE-FR1-GE2-EN1-FI1: SPAMAP,SPRE"
+        ],
+        "restore": [
+          "GENSEC ~FE-FR1-GE2: CACHID",
+          "FIXING ~FE-FR1-GE2-EN1-FI1: SPAMAP,SPRE"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 2 组：/AIOS-SUITE-T2-J2-FE-FR1-GE2（FacetGroup：参数 / 顶点差 325.00）；/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1（图元 0 条 → 1 条（无 → FacetGroup×1））",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 2,
+        "cascades": 1,
+        "units": [
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2",
+          "/AIOS-SUITE-T2-J2-FE-FR1-GE2-EN1-FI1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-loosejoint-desp",
+      "situation": "只改「自己不画、只出刀」的主关节：把切杆端那把圆柱刀的直径、高度从 200、200 改成 120、100（DESP），被它切的型钢与 PNOD 都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A1"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#149",
+        "gen-model#148"
+      ],
+      "apply": "joint/loosejoint_desp_apply.mac",
+      "restore": "joint/loosejoint_desp_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC3"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "型钢建模时对 JOIS / JOIE 指的关节各取一次刀，不问那只关节自己画不画（e3d-model elmodl::collect_joint_negatives）；所以「自己不画、只出刀」的关节变了，被它切的型钢必须重建。现在的关节级联只从「要重建或已删除的单元」出发，不成单元的关节进不了那个集合。 草稿票：output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "plan_line": "units regen=1 remove=0（这一窗的候选：~LJ-FR1-PN4 CACHID；~LJ-FR1-PN4-PJ1 DESP,SPAMAP,UNIPAR）",
+        "geometry": "被切的型钢下端长出 50.00 mm（刀高 200 → 100，切掉的那一段从 100 变成 50）；主关节自己没有图元。"
+      },
+      "status": "known_gap",
+      "known_gap": {
+        "now": "r6 回放实测（07:45，t2-j2-pj-lj-d-explore）：一件都不点名（候选 2 全进 no_model）。含 #149 的版本上这一窗还没跑（同族的 -mixed、-become 已经与期望相同）。这只关节所在的生成根仍进重算名单、子计划是空的而整根重算——结果对，是靠回退，不是认得这条依赖；同根的另一根型钢会被白建一遍。",
+        "draft": "output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "draft_note": "这张票已经开出来：gen-model #149，修复 11-12 05:03 并进了主线（vendor e3d-model b53884ca7）。r6 和 05:03 之前编的程序都不含它——在那些版本上规划少点名；含 #149 的版本上规划点名应当与期望相同。结果层面，这些根在回放里都回退成整根重算，两边都对。"
+      },
+      "evidence": "T2/20261112-051355-joint2-pj-lj-d",
+      "replay_windows": {
+        "apply": [
+          1717,
+          1718
+        ],
+        "apply_tail": 1719,
+        "restore": [
+          1720,
+          1721
+        ],
+        "restore_tail": 1722
+      },
+      "net_window": {
+        "apply": [
+          "PNOD ~LJ-FR1-PN4: CACHID",
+          "PJOI ~LJ-FR1-PN4-PJ1: DESP,SPAMAP,UNIPAR"
+        ],
+        "restore": [
+          "PNOD ~LJ-FR1-PN4: CACHID",
+          "PJOI ~LJ-FR1-PN4-PJ1: DESP,SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 1 组：/AIOS-SUITE-T2-J2-LJ-FR1-SC3（FacetGroup：包围盒差 50.00 mm、参数 / 顶点差 50.00）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": []
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-PN4-PJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "r6（不含 #149）：规划一件都不点名（候选 2 全进 no_model）；整根回退重算后几何差 1 件（被切的型钢），结果对",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-pj-lj-d-explore / t2-j2-loose-desp-rvm",
+        "r6": "r6（不含 #149）：规划一件都不点名（候选 2 全进 no_model）；整根回退重算后几何差 1 件（被切的型钢），结果对"
+      }
+    },
+    {
+      "id": "D5-loosejoint-mixed",
+      "situation": "同一次存盘里两处改动：改「只出刀」主关节的刀（DESP），同时把同一个框架里另一根型钢转 90 度（BANG）——同根另有改动时子计划不空，靠不上整根回退",
+      "change_types": [
+        "CT-D5",
+        "CT-A1",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#149",
+        "gen-model#148"
+      ],
+      "apply": "joint/loosejoint_mixed_apply.mac",
+      "restore": "joint/loosejoint_mixed_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC3"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 型钢建模时对 JOIS / JOIE 指的关节各取一次刀，不问那只关节自己画不画（e3d-model elmodl::collect_joint_negatives）；所以「自己不画、只出刀」的关节变了，被它切的型钢必须重建。现在的关节级联只从「要重建或已删除的单元」出发，不成单元的关节进不了那个集合。 草稿票：output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "plan_line": "units regen=2 remove=0（这一窗的候选：~LJ-FR1-SC1 BANG,CACHID；~LJ-FR1-PN4 CACHID；~LJ-FR1-PN4-PJ1 DESP,SPAMAP）",
+        "geometry": "两根型钢都变：被转的那根（面片 329 字 → 469 字）；被刀切的那根下端长出 50.00 mm。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-051355-joint2-pj-lj-d",
+      "replay_windows": {
+        "apply": [
+          1723,
+          1724
+        ],
+        "apply_tail": 1725,
+        "restore": [
+          1726,
+          1727
+        ],
+        "restore_tail": 1728
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~LJ-FR1-SC1: BANG,CACHID",
+          "PNOD ~LJ-FR1-PN4: CACHID",
+          "PJOI ~LJ-FR1-PN4-PJ1: DESP,SPAMAP"
+        ],
+        "restore": [
+          "SCTN ~LJ-FR1-SC1: BANG,CACHID",
+          "PNOD ~LJ-FR1-PN4: CACHID",
+          "PJOI ~LJ-FR1-PN4-PJ1: DESP,SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 2 组：/AIOS-SUITE-T2-J2-LJ-FR1-SC1（FacetGroup(329 字) → FacetGroup(469 字)）；/AIOS-SUITE-T2-J2-LJ-FR1-SC3（FacetGroup：包围盒差 50.00 mm、参数 / 顶点差 50.00）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 2,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-PN4-PJ1",
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（含 #149 的缺省后端，主线 07:01 编的那一版）：候选 3、级联 1、点名 2 件（被转的型钢、被刀切的型钢）——与期望相同；几何变 2 件，链尾增量 = 整库全量过",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "replay": {
+        "case": "t2-j2-loose-mixed-parity",
+        "r6": "r6（不含 #149）：规划只点名 1 件（被转的型钢，级联 0）；这一窗后端回退成整根重算，几何差 2 件、链尾增量 = 整库全量过——少点名的后果没有照出来",
+        "main": "pass（含 #149 的缺省后端，主线 07:01 编的那一版）：候选 3、级联 1、点名 2 件（被转的型钢、被刀切的型钢）——与期望相同；几何变 2 件，链尾增量 = 整库全量过",
+        "fixed": "gen-model#149（11-12 05:03 并进主线；r6 不含）"
+      },
+      "fixed_by": "gen-model#149（11-12 05:03 并进主线；r6 不含）",
+      "was_known_gap": {
+        "now": "r6 回放实测（07:15，t2-j2-loose-mixed-parity）：规划只点名被转的那根型钢（候选 3、级联 0、点名 1 件），被刀切的那根不点名。但这一窗后端回退成整根重算（kind=regen），两根型钢的几何都变了、链尾增量 = 整库全量是过的。走单元路（按点名的件重建）时被切的那根会停在旧刀口（该长出的 50 mm 长不出来）——这一窗没有照出来。",
+        "draft": "output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "draft_note": "这张票已经开出来：gen-model #149，修复 11-12 05:03 并进了主线（vendor e3d-model b53884ca7）。r6 和 05:03 之前编的程序都不含它——在那些版本上规划少点名；含 #149 的版本上规划点名应当与期望相同。结果层面，这些根在回放里都回退成整根重算，两边都对。"
+      }
+    },
+    {
+      "id": "D5-loosejoint-pnod",
+      "situation": "只挪「只出刀」主关节的节点：把它的 PNOD 沿杆轴往里挪 30 mm（NPOS），主关节与被它切的型钢自己的属性都不动",
+      "change_types": [
+        "CT-D5",
+        "CT-D7"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#149",
+        "gen-model#148"
+      ],
+      "apply": "joint/loosejoint_pnod_apply.mac",
+      "restore": "joint/loosejoint_pnod_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC3"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-PJ"
+        ],
+        "why": "型钢建模时对 JOIS / JOIE 指的关节各取一次刀，不问那只关节自己画不画（e3d-model elmodl::collect_joint_negatives）；所以「自己不画、只出刀」的关节变了，被它切的型钢必须重建。现在的关节级联只从「要重建或已删除的单元」出发，不成单元的关节进不了那个集合。（主关节的站位 = PNOD 的 NPOS + 自己的 DELP，刀跟着节点走）草稿票：output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "plan_line": "units regen=1 remove=0（这一窗的候选：~LJ-FR1-PN4 CACHID,NPOS,SPAMAP；~LJ-FR1-PN4-PJ1 SPAMAP）",
+        "geometry": "被切的型钢下端缩短 30.00 mm（刀跟着节点上移 30）；主关节自己没有图元（组原点挪 30）。"
+      },
+      "status": "known_gap",
+      "known_gap": {
+        "now": "按现行规则推演（r6 上这一窗还没回放；含 #149 的版本上也还没跑）：一件都不点名（PNOD 名下没有带目录正体的主关节，不算现算标架宿主）。同上靠整根回退才对。",
+        "draft": "output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "draft_note": "这张票已经开出来：gen-model #149，修复 11-12 05:03 并进了主线（vendor e3d-model b53884ca7）。r6 和 05:03 之前编的程序都不含它——在那些版本上规划少点名；含 #149 的版本上规划点名应当与期望相同。结果层面，这些根在回放里都回退成整根重算，两边都对。"
+      },
+      "evidence": "T2/20261112-052135-joint2-lj-e",
+      "replay_windows": {
+        "apply": [
+          1751,
+          1752
+        ],
+        "apply_tail": 1753,
+        "restore": [
+          1754,
+          1755
+        ],
+        "restore_tail": 1756
+      },
+      "net_window": {
+        "apply": [
+          "PNOD ~LJ-FR1-PN4: CACHID,NPOS,SPAMAP",
+          "PJOI ~LJ-FR1-PN4-PJ1: SPAMAP"
+        ],
+        "restore": [
+          "PNOD ~LJ-FR1-PN4: CACHID,NPOS,SPAMAP",
+          "PJOI ~LJ-FR1-PN4-PJ1: SPAMAP"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "10 组里变了 2 组：/AIOS-SUITE-T2-J2-LJ-FR1-SC3（FacetGroup：包围盒差 30.00 mm、参数 / 顶点差 30.00）；/AIOS-SUITE-T2-J2-LJ-FR1-PN4-PJ1（组原点挪 30.00 mm）",
+        "restore": "与改前 10 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": []
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-LJ-FR1-PN4-PJ1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "draft（等回放配方）",
+        "l3": "没跑",
+        "rvm_truth": "没跑（要 r6 对改后的库生成）"
+      }
+    },
+    {
+      "id": "D5-loosejoint-become",
+      "situation": "同一次存盘里两处改动：把一只画得出来的主关节（前一腿先换成 CP-AA 底板）换成「只出刀」的规格（切杆端的圆柱刀），同时把同一个框架里不接关节的横杆转 90 度——关节从「画」变成「不画」",
+      "change_types": [
+        "CT-D5",
+        "CT-A6",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#149",
+        "gen-model#148",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/loosejoint_become_apply.mac",
+      "restore": "joint/loosejoint_become_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC3",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC2",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN4-PJ1",
+          "/AIOS-SUITE-T2-J2-SJ",
+          "/AIOS-SUITE-T2-J2-FX",
+          "/AIOS-SUITE-T2-J2-FE",
+          "/AIOS-SUITE-T2-J2-LJ"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）。 型钢建模时对 JOIS / JOIE 指的关节各取一次刀，不问那只关节自己画不画（e3d-model elmodl::collect_joint_negatives）；所以「自己不画、只出刀」的关节变了，被它切的型钢必须重建。现在的关节级联只从「要重建或已删除的单元」出发，不成单元的关节进不了那个集合。 关节自己从成单元变成不成单元时，它的旧几何要有人擦（重建它、结果是空的）。草稿票：output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "plan_line": "units regen=3 remove=0（这一窗的候选：~PJ-FR1-SC1 BANG,CACHID,SPAMAP；~PJ-FR1-PN5 CACHID；~PJ-FR1-PN5-PJ1 SPAMAP,SPRE）",
+        "geometry": "三件都变：主关节的图元没了（1 → 0）；被它接的立杆下端缩短 125.01 mm（换成直径 250、高 250 的圆柱刀）；被转的横杆变。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-052608-joint2-become-f",
+      "replay_windows": {
+        "apply": [
+          1787,
+          1788
+        ],
+        "apply_tail": 1789,
+        "restore": [
+          1790,
+          1791
+        ],
+        "restore_tail": 1792,
+        "pre": [
+          1784,
+          1785
+        ]
+      },
+      "net_window": {
+        "apply": [
+          "SCTN ~PJ-FR1-SC1: BANG,CACHID,SPAMAP",
+          "PNOD ~PJ-FR1-PN5: CACHID",
+          "PJOI ~PJ-FR1-PN5-PJ1: SPAMAP,SPRE"
+        ],
+        "restore": [
+          "SCTN ~PJ-FR1-SC1: BANG,CACHID,SPAMAP",
+          "PNOD ~PJ-FR1-PN5: CACHID",
+          "PJOI ~PJ-FR1-PN5-PJ1: SPAMAP,SPRE"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "11 组里变了 3 组：/AIOS-SUITE-T2-J2-PJ-FR1-SC1（FacetGroup：朝向差 1.0000）；/AIOS-SUITE-T2-J2-PJ-FR1-SC3（FacetGroup：包围盒差 125.01 mm、参数 / 顶点差 125.01）；/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1（图元 1 条 → 0 条（FacetGroup×1 → 无））",
+        "restore": "与改前 11 组逐字相同"
+      },
+      "rule_now": {
+        "note": "把 vendor main（r6 那一版）的规划规则套在这一窗上推演出来的点名（scratch 里的推演器，不是程序实测）",
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC1"
+        ]
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity：e3d-model 还没有 #43 与主关节级联，也不带元数据门）在这一窗上的结果",
+        "units_regen": 2,
+        "cascades": 0,
+        "units": [
+          "/AIOS-SUITE-T2-J2-PJ-FR1-PN5-PJ1",
+          "/AIOS-SUITE-T2-J2-PJ-FR1-SC1"
+        ]
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（含 #149 的缺省后端，主线 07:01 编的那一版）：候选 3、级联 1、点名 3 件（横杆、被接的立杆、主关节自己）——与期望相同；几何变 2 件、删 1 件、行数 4 → 3，链尾增量 = 整库全量过",
+        "l3": "没跑",
+        "rvm_truth": "被挡住：回放层的对拍工具在带布尔网格的型钢上报缺文件（requests/T2-06）"
+      },
+      "chain": "joint/loosejoint_become",
+      "replay": {
+        "case": "t2-j2-loose-become-parity",
+        "r6": "r6（不含 #149）：规划只点名 1 件（被转的横杆）；这一窗后端回退成整根重算，几何变 2 件、删 1 件（主关节的旧图形）、行数 4 → 3——结果对，少点名的后果没有照出来。链尾增量 = 整库全量过（07:36 那一趟链尾撞上 409，07:57 在 T0 的终稿上重跑通过）",
+        "main": "pass（含 #149 的缺省后端，主线 07:01 编的那一版）：候选 3、级联 1、点名 3 件（横杆、被接的立杆、主关节自己）——与期望相同；几何变 2 件、删 1 件、行数 4 → 3，链尾增量 = 整库全量过",
+        "fixed": "gen-model#149（11-12 05:03 并进主线；r6 不含）"
+      },
+      "fixed_by": "gen-model#149（11-12 05:03 并进主线；r6 不含）",
+      "was_known_gap": {
+        "now": "按现行规则推演（程序侧的实测等回放）：只点名被转的横杆。主关节在 target 端已经不成单元，上卷不到任何单元——它的旧图形没人擦；被它接的立杆不重建，停在旧刀口。",
+        "draft": "output/flow-next-20261111/comments/new-issue-joint-without-unit-cascade.md",
+        "draft_note": "这张票已经开出来：gen-model #149，修复 11-12 05:03 并进了主线（vendor e3d-model b53884ca7）。r6 和 05:03 之前编的程序都不含它——在那些版本上规划少点名；含 #149 的版本上规划点名应当与期望相同。结果层面，这些根在回放里都回退成整根重算，两边都对。"
+      }
+    }
+  ],
+  "chains": [
+    {
+      "id": "joint/loosejoint_become",
+      "note": "三腿：先把主关节换成画得出来的 CP-AA 底板（与 D5-pjoi-spre-cut 的 apply 是同一份宏），再做「画 → 不画」那一窗，最后一腿直接写回基线（螺栓底板、横杆转回去）。",
+      "legs": [
+        "joint/pjoi_spre_cut_apply.mac",
+        "joint/loosejoint_become_apply.mac",
+        "joint/loosejoint_become_restore.mac"
+      ]
+    }
+  ],
+  "probes": []
+}

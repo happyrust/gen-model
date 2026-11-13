@@ -1,0 +1,14 @@
+-- 登记: A06 | 语义: 把上一条留下的认领释放掉再保存 | apply 搭档: pipeline/stamp_claim_apply.mac
+-- 该有的行为: 同样一个单元都不该重算。UNCLAIM ALL：没有认领着的东西时也不报错（探针第 5 段）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-STAMP-CLAIM-RESTORE-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+Q LCLM
+Q USERC
+UNCLAIM ALL
+Q LCLM
+SAVEWORK 'AIOS suite T4 pipeline/stamp_claim restore: unclaim'
+$P SUITE-T4-STAMP-CLAIM-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,34 @@
+-- P83 restore：删掉整个 run-owned BRAN，再从生产支管重挂一份，并按 setup 同一规则补成员名。
+-- 删成员按 refno 不可逆，只能按几何/名称重建；BRAN 及成员 refno 会变，RVM 按名对拍。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P83-RESTORE-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}-PIPE
+VAR !old COLLECT ALL BRAN WITH (NAME EQ '{{TARGET_NAME}}') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  DELETE BRAN
+ENDDO
+{{TARGET_NAME}}-PIPE
+NEW BRAN {{TARGET_NAME}}
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '{{TARGET_NAME}}-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+{{TARGET_NAME}}
+Q MEMB
+SAVEWORK 'AMS round3 P83 restore primary list remove member'
+$P AMS-R3-P83-RESTORE-DONE
+ALPHA LOG END

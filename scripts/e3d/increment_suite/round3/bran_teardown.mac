@@ -1,0 +1,15 @@
+-- P82-P85 teardown：删掉 bran_setup 建的 run-owned SITE（含 ZONE / PIPE / BRAN）。
+-- 与 bran_setup 配对，保证案例不把测试站点留在 AMS 库里。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-BRAN-TEARDOWN-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'{{TARGET_NAME}}-SITE*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+SAVEWORK 'AMS round3 bran teardown'
+$P AMS-R3-BRAN-TEARDOWN-DONE
+ALPHA LOG END

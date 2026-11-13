@@ -1,0 +1,34 @@
+-- 登记: A01（管道）/ 变更类型 CT-A5 头尾连接 + CT-A6 单引用（对端回写）；联动分类表第 5 行 | 语义: 把支管头接到管嘴上——
+-- BRAN /AIOS-SUITE-T1-BRAN-C 做 CONN PH TO /AIOS-SUITE-T1-NZ1。基线已经对齐（头就在管嘴口上），所以这一窗只有引用在变：
+-- 支管的 HREF 指向管嘴，E3D 把管嘴的 CREF 回写成这根支管；位置、方向、口径都是原值再写。
+-- 预期：支管这个根进 regen（连接属性变了，路由要重算）；设备 /AIOS-SUITE-T1-EQ-NZ 重算与否都行，但两个根的几何都不变；
+-- 别的根一个都不碰。E3D 导出的 RVM 与接之前逐件相同。
+-- expected_net: modified | restore 搭档: pipeconn/bran_conn_nozz_restore.mac
+--
+-- 链: pipeconn/nozz_conn 的第 1 腿（六腿必须按序连续跑，见清单片段）。前置: pipeconn/setup_t1_8000.mac。
+-- 工程: AMS，db8000，自建语料，不动生产元素。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-CONN-APPLY-ALIVE
+/AIOS-SUITE-T1-NZ1
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q TYPE
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+CONN PH TO /AIOS-SUITE-T1-NZ1
+Q HREF
+Q HPOS WRT /*
+Q HDIR WRT /*
+Q HBOR
+Q HCON
+/AIOS-SUITE-T1-NZ1
+Q CREF
+SAVEWORK 'AIOS suite pipeconn/bran_conn_nozz apply: BRAN-C head connected to NZ1'
+$P SUITE-PIPECONN-CONN-APPLY-DONE
+ALPHA LOG END

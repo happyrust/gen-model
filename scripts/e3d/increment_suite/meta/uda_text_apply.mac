@@ -1,0 +1,18 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 B-02） | 语义: 只改设备 EQ-CP 的一个文本型自定义属性（:EQNA），尺寸、位置、成员都不动
+-- expected_net: modified | restore 搭档: meta/uda_text_restore.mac
+-- 预期 gen-model（按 refno，该有的行为）: 任务 succeeded、交付单元 0、模型行不变——这个属性不进几何（E3D 导出前后逐字相同）。
+-- ★ 现在的元数据门不放行自定义属性（它们没有字典里的设计变化码，按「不认识的一律保守触发」处理），EQ-CP 会整台重建一次：
+--   结果不错，但白算。清单里记成 known_gap，票草稿在 T3 的 drafts 目录。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-TEXT-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q :EQNA
+Q UDASET
+:EQNA 'AIOS T3 eqna changed'
+Q :EQNA
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_text apply: EQ-CP UDA EQNA changed'
+$P SUITE-T3-META-UDA-TEXT-APPLY-DONE
+ALPHA LOG END

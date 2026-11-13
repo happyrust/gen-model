@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "suite": "pml-increment-suite",
+  "owner": "T1",
+  "description": "支吊架这一组的对照用例 C2-compre-ctl-unref 在管道那一侧的 RVM 期望模型：导出根 /100-A-20（250132，PIPE；导出步要用 exportnp），9 件。给 Compare-SuiteRvmTruth.ps1 -Model 用。",
+  "pairing_rules": "apply 腿与它之前那份快照比；restore 腿与对应 apply 之前的那份比（equals_state_before）。",
+  "tolerances": { "aabb_mm": 1.0 },
+  "legs": {
+    "support/compre_ctl_unref_apply.mac": {
+      "resized": {
+        "100-D-20/B1/TUBE 1 of BRANCH /100-D-20/B1": [-320910.00, 310635.53, 99255.55, -318418.98, 310724.46, 99344.45]
+      },
+      "note": "2026-11-12 实测（250132 会话 45）。头段管身每侧缩 12.70（外径 114.3 → 88.9），改之前是 [-320910.00, 310622.83, 99242.85, -318418.98, 310737.15, 99357.15]；其余 8 件不动。"
+    },
+    "support/compre_ctl_unref_restore.mac": { "equals_state_before": "support/compre_ctl_unref_apply.mac" }
+  }
+}

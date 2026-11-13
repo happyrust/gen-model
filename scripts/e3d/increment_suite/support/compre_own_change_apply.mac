@@ -1,0 +1,32 @@
+-- 登记: gen-model #144、#143（变更类型 CT-D11，兼 CT-A4 几何） | 语义: 被级联点名的根，自己在同一窗里另有一处改动——
+-- 前置同 compre_samedb_pod：/PS-01-00194.1 托在同库的垫板上。同一次存盘里：
+--   ① 垫板 /PS-01-00168/PLAT.1 的 LSTU /A3B/PA40 → /A3B/PA50（级联的起因，点名根 /PS-01-00194——因为它名下的 /PS-01-00194.1）；
+--   ② 同一个根 /PS-01-00194 名下**另一件**——型钢 /PS-01-00194/STRU-V1——的 BANG 180 → 90（这个根自己的改动）。
+-- 预期：根 /PS-01-00194 整根重算——型钢转了 90 度，**支撑件 /PS-01-00194.1 也照新外径重算**。
+-- 要防的毛病（#144）：只重建这个根自己变了的那一件（型钢），被级联牵连的支撑件留在旧几何上。
+-- expected_net: modified | restore 搭档: support/compre_own_change_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，全部写绝对值，重跑幂等。不用世界锚点，按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-OWN-CHANGE-APPLY-ALIVE
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+/PS-01-00168/PLAT.1
+Q REF
+Q NAME
+Q LSTU
+LSTU /A3B/PA50
+Q LSTU
+/PS-01-00194/STRU-V1
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q BANG
+BANG 90
+Q BANG
+SAVEWORK 'AIOS suite support/compre_own_change apply: PLAT.1 LSTU PA40 -> PA50 and /PS-01-00194/STRU-V1 BANG 180 -> 90'
+$P SUITE-SUPPORT-COMPRE-OWN-CHANGE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: A09 | 语义: BOX-A1 的 XLEN 再按 2000 写一遍（与 apply 同一句） | expected_net: unchanged | restore 搭档: 本文件是 geom/xlen_same_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-XLENSAME-RESTORE-ALIVE
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q XLEN
+XLEN 2000
+Q XLEN
+SAVEWORK 'AIOS suite geom/xlen_same restore: BOX-A1 XLEN rewritten unchanged'
+$P SUITE-GEOM-XLENSAME-RESTORE-DONE
+ALPHA LOG END

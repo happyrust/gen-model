@@ -1,0 +1,15 @@
+-- 登记: A02 | 语义: 只改 CYLI-1 的 DIAM（1500 → 2100），HEIG 不动。预期 EQ-CYLI 重建，半径各外扩 300 | expected_net: modified | restore 搭档: geom/cyli_size_restore.mac
+-- 来源: common/setup_8000.mac 对这只圆柱写过 DIAM / HEIG；scripts/e3d/room_cyli_size_apply.mac 用同一句 DIAM 并 SAVEWORK
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-CYLISIZE-APPLY-ALIVE
+/AIOS-SUITE-CYLI-1
+Q REF
+Q NAME
+Q DIAM
+Q HEIG
+DIAM 2100
+Q DIAM
+Q HEIG
+SAVEWORK 'AIOS suite geom/cyli_size apply: CYLI-1 DIAM 2100'
+$P SUITE-GEOM-CYLISIZE-APPLY-DONE
+ALPHA LOG END

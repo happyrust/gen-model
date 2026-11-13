@@ -1,0 +1,36 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 F-03、F-02） | 语义: 把 PIPE-X 改回 PIPE、Z2-X 改回 Z2
+-- expected_net: modified | apply 搭档: meta/container_rename_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply，零重建、没有 datacenter_delete。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-CONTAINER-RENAME-RESTORE-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-Z2
+Q REF
+Q NAME
+/AIOS-SUITE-T3
+VAR !p COLLECT ALL PIPE WITH (NAME EQ '/AIOS-SUITE-T3-PIPE-X') FOR CE
+DO !x VALUES !p
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T3-PIPE
+  Q REF
+  Q NAME
+ENDDO
+/AIOS-SUITE-T3
+VAR !z COLLECT ALL ZONE WITH (NAME EQ '/AIOS-SUITE-T3-Z2-X') FOR CE
+DO !x VALUES !z
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T3-Z2
+  Q REF
+  Q NAME
+ENDDO
+/AIOS-SUITE-T3
+Q MEMB
+SAVEWORK 'AIOS suite T3 meta/container_rename restore: PIPE and ZONE Z2 renamed back'
+$P SUITE-T3-META-CONTAINER-RENAME-RESTORE-DONE
+ALPHA LOG END

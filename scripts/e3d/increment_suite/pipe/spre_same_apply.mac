@@ -1,0 +1,13 @@
+-- 登记: A09 | 语义: 把 BRAN-S-M2 的 SPRE 按 setup 之后的原引用再写一遍。预期元素引用同值早退，RVM 不变 | expected_net: unchanged | restore 搭档: pipe/spre_same_restore.mac
+-- 原引用 TBR:50 =13244/108844，与 pipe/spre_swap_restore.mac 写回的是同一个
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-SPRE-SAME-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S-M2
+Q REF
+Q NAME
+Q SPRE
+SPRE =13244/108844
+Q SPRE
+SAVEWORK 'AIOS suite pipe/spre_same apply: BEND M2 SPRE rewritten unchanged'
+$P SUITE-PIPE-SPRE-SAME-APPLY-DONE
+ALPHA LOG END

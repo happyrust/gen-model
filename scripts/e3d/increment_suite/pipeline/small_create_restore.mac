@@ -1,0 +1,15 @@
+-- 登记: A02 | 语义: 删掉 small_create_apply 建的那台设备 | apply 搭档: pipeline/small_create_apply.mac | 存盘只落在 7998
+-- 按名 COLLECT 再删，不在时只是空转。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-SMALL-CREATE-RESTORE-ALIVE
+/AIOS-SUITE-T4-X-BULKZ
+VAR !old COLLECT ALL EQUI WITH (NAME EQ '/AIOS-SUITE-T4-SM-EQ') FOR CE
+DO !e VALUES !old
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+SAVEWORK 'AIOS suite T4 pipeline/small_create restore: delete the one equipment'
+$P SUITE-T4-SMALL-CREATE-RESTORE-DONE
+ALPHA LOG END

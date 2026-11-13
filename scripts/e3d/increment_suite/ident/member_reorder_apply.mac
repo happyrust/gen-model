@@ -1,0 +1,25 @@
+-- 登记: A02（变更类型 CT-S6「纯重排」；按名称案例 B-05：有名成员的顺序变了） | 语义: 只把 EQ-M 的成员 BOX-M3 挪到 BOX-M1 前面，成员序从 M1, M2, M3 变成 M3, M1, M2；没有任何元素被删、被建、被改属性，refno 全不变
+-- expected_net: modified（只有属主设备的成员表变了） | restore 搭档: ident/member_reorder_restore.mac
+-- 预期 gen-model（按 refno）: 候选只有设备 EQ-M 一条（成员纯换序）。设备的基本体换序不改几何：窗后 EQ-M 的模型与整库重建逐条相等、行数与包围盒不变；EQ-U 不动。
+-- 写法: REORDER <成员> BEFORE|AFTER <成员>，CE 在属主上。2026-11-12 TTY 实测成立（ident/order_probe.mac：按名、按序号、按类型加序号三种写法都行）。
+--   connect/bran_reorder_probe.mac 当年试的 REORDER AFTER FTUB 3 之所以报语法错，是少写了「挪谁」。
+-- 两个名字都是 setup 建的、别的用例还原后也都在；宏里没有 ONERROR CONTINUE，哪一句报错整份宏不存盘。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-MEMBER-REORDER-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-T3-BOX-M3
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-M
+REORDER /AIOS-SUITE-T3-BOX-M3 BEFORE /AIOS-SUITE-T3-BOX-M1
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+/AIOS-SUITE-T3-BOX-M3
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite T3 ident/member_reorder apply: BOX-M3 moved before BOX-M1'
+$P SUITE-T3-MEMBER-REORDER-APPLY-DONE
+ALPHA LOG END

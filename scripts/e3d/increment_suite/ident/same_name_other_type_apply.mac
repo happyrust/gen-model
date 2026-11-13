@@ -1,0 +1,32 @@
+-- 登记: A01（变更类型 CT-S7、CT-S4；按名称案例 D-01） | 语义: 同名但类型不同——同一次保存里把设备 EQ-M 下面的有名 BOX-M3 删掉，在原位建一个同名的圆柱（CYLI，直径 300、高 500），名字还叫 BOX-M3
+-- expected_net: deleted（按 refno：旧 BOX 删除、新 CYLI 新建；按名：同一个名字，类型从 BOX 变成了 CYLI） | restore 搭档: ident/same_name_other_type_restore.mac
+-- 预期 gen-model（按 refno）: 设备 EQ-M 重建一次（少了一个 BOX、多了一个 CYLI）；增量结果与整库重建相等；没有 datacenter_delete（被删的是成员）；别的设备不动。
+-- E3D 不许把 BOX 原地改成 CYLI（2026-11-12 探针：(2,704)），所以这一种只能删了再建——参考号也跟着换。原地改类型的那一种见 ident/changetype_apply.mac。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SAME-NAME-OTHER-TYPE-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-T3-BOX-M3') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q TYPE
+  DELETE BOX
+ENDDO
+/AIOS-SUITE-T3-BOX-M2
+NEW CYLI
+DIAM 300
+HEIG 500
+NAME /AIOS-SUITE-T3-BOX-M3
+POS E 3000 N 0 U 0
+Q REF
+Q NAME
+Q TYPE
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/same_name_other_type apply: BOX-M3 deleted, a CYLI with the same name created in place'
+$P SUITE-T3-SAME-NAME-OTHER-TYPE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,17 @@
+-- T1 基线拆除（AMS，db8000）：删掉 SITE /AIOS-SUITE-T1-8000 整棵。按名字找，找不到就什么都不删。
+-- expected_net: deleted（基线拆除，不计入链） | 搭档: pipeconn/setup_t1_8000.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-TEARDOWN-ALIVE
+{{WORLD_ANCHOR}}
+Q REF
+Q NAME
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-8000*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+SAVEWORK 'AIOS suite T1: baseline teardown db8000'
+$P SUITE-PIPECONN-TEARDOWN-DONE
+ALPHA LOG END

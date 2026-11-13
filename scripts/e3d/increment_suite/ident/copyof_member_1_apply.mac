@@ -1,0 +1,34 @@
+-- 登记: A02（变更类型 CT-S1；按名称案例 C-07 第一步） | 语义: 三腿链的第 1 腿——在 EQ-CP 下面、BOX-CP1 之后新建一个名叫 /Copy-of-AIOS-SUITE-T3-BOX-CP1 的 BOX（E3D 复制工具带出来的那种自动命名）
+-- expected_net: cancelled（由链尾 ident/copyof_member_restore.mac 删掉） | restore 搭档: ident/copyof_member_restore.mac（链：1_apply → 2_apply → restore）
+-- 预期 gen-model（按 refno）: EQ-CP regen 一次，行数 +1；名字是不是 Copy-of 开头对它没有区别。
+-- ★ TTY 的 COPY 不带出 Copy-of 名（套件实测：COPY 进来的子件全部无名），所以这里显式起这个名字。
+--   TTY 是否保留 Copy 的大小写未验，ident/name_probe.mac 第 5 段先探；后两腿不按这个名字找它（见那两份宏的注）。
+-- 幂等：先清掉 EQ-CP 下除 BOX-CP1 之外的 BOX（上一次链没走完留下的）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-COPYOF-MEMBER-1-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+DO !b VALUES !mm
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BOX') THEN
+    !cn = !!CE.NAME
+    IF (NOT (!cn EQ '/AIOS-SUITE-T3-BOX-CP1')) THEN
+      DELETE BOX
+    ENDIF
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BOX-CP1
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /Copy-of-AIOS-SUITE-T3-BOX-CP1
+POS E 1500 N 0 U 0
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-T3-EQ-CP
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/copyof_member leg 1: add BOX named Copy-of under EQ-CP'
+$P SUITE-T3-COPYOF-MEMBER-1-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: A02 | 语义: NBOX-N1 的 POS 写回 E 0 N 0 U 0 | expected_net: cancelled | restore 搭档: 本文件是 geom/nbox_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXMOVE-RESTORE-ALIVE
+/AIOS-SUITE-NBOX-N1
+Q REF
+Q NAME
+Q POS
+POS E 0 N 0 U 0
+Q POS
+SAVEWORK 'AIOS suite geom/nbox_move restore: NBOX-N1 POS E 0'
+$P SUITE-GEOM-NBOXMOVE-RESTORE-DONE
+ALPHA LOG END

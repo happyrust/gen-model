@@ -1,0 +1,27 @@
+{
+  "name": "ams8000-catalogue-out-of-scope",
+  "registry": [
+    "INC-E03"
+  ],
+  "_doc": "INC-E03（GitHub #67）：监听限定（`watch_dbnums`）域外的设计库落款落后时，周期拍**不出声**，只在 `/health.catalogue_reconcile.behind_out_of_scope_libraries` 点名——本进程不为它收窗、反查、排工。\\n\\n用例把 7998（AMS 的真 DESI，不在本进程的 `watch_dbnums=[8000]` 里）的落款钉到 `7000:273`（文件最新 274），8000 自己不带落款、也没有生成，于是这一拍域内一个过期库都没有：`stale_catalogue_dbnums` 空、`catalogue_cascade` 没有排工、日志里也不该出现那句「但在监听限定（…）域外」。三件一起成立，才叫「周期拍不出声，/health 点名」。\\n\\n域外那一句横幅本身（文案、`watch_dbnums` / `--watch-dbnum` 点名、只在非周期或本就有 stale 时附一句）由 lib 用例 `catalogue_stamps_split_by_watch_scope_and_only_behind_outsiders_are_named` 与 `the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say` 钉着；这条补的是真进程端到端。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-move-chain",
+  "start": 725,
+  "service_env": {
+    "AIOS_WATCH_RECONCILE_SECS": "2",
+    "AIOS_WATCH_MIN_SWEEP_GAP_SECS": "1",
+    "AIOS_WATCH_POLL_SECS": "1"
+  },
+  "seed": [
+    "UPSERT dbnum_watermark:7998 SET dbnum = 7998, model_catalogue_sessions = [{ dbnum: 7000, session: 273 }];"
+  ],
+  "init": {
+    "to": 725,
+    "expect_catalogue_out_of_scope_behind": [
+      7998
+    ],
+    "timeout_secs": 300
+  },
+  "steps": []
+}

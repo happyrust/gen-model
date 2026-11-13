@@ -35,7 +35,7 @@
     "空 EQUI 不进 RVM（E3D 不写没有图元的组，K14 的 25 已实证）：EQ-B 的改名、EQ-A 删光子件后的删除，在真值里都没有痕迹。",
     "NOZZ 自建无 CATREF，没有几何：connect/nozz_move 两腿在 RVM 里不可见（aabb_blind）。",
     "负实体（NBOX）不进窄口径 RVM（2026-10-28 实测已定）：NBOX-N1 在库里确实存在（Ref =24384/27584、500×500×2500、POS 0,0,0），但它挂在 BOX-N 之下、不出现在 EQ-NBX 的 MEMBERS 里，RVM 导出的 148 个成员中也完全没有它。所以 geom/nbox_resize_apply 与 nbox_add_apply 的 union_shift 恒为 [0,0,0]、count_delta 恒为 0，这两条腿在 RVM 里**天然不可见**，只能靠 PML 侧 Q XLEN 断言（几何无痕，不是失败）。",
-    "PANE 确实进 RVM 且几何完整（2026-10-28 实测已定）：R201-P1 的 aabb_world_mm = [58000.00,3000.00,0,62000.00,7000.00,2000.00]，R202-P1 = [68000.00,3000.00,0,72000.00,7000.00,2000.00]，即 PANE 的包围盒就是四个 PAVE 顶点的并集、高度取 PLOO 的 HEIG 2000。所以 room/pane_move 与 pave_move 可以按并集变化真判，不再是 calibrate。",
+    "PANE 进窄口径 RVM。基线 R201-P1 是 [8803,10956,6570,9040,11179,6870]。PAVE 的 POS 是 PLOO 局部坐标。沿局部 W 外扩 200 后并集是 [8657,10820,6570,9040,11179,6870]（sesno 2166），写回局部 W 150 后回到 before。",
     "伙伴库 7998（锚点已解：WORLD 16190/0、元素前缀 24382，见 README「db7998 的锚点」）：h03/* 四条腿只改 7998，主库导出看不见；要用 Export-SuiteRvmTruth.ps1 -Mode state -Element /AIOS-SUITE-7998 -Dbnum 7998 -DbFile AvevaMarineSample\\ams000\\ams7998_0001 单独补导，Compare 时加 -Root /AIOS-SUITE-7998。create/cross_db_copy_* 同一 SAVEWORK 写两库，主库导出只覆盖 8000 这半边。",
     "BRAN 的 HPOS/TPOS 在 RVM 里不可见（2026-10-28 实测：HPOS U 2900→3100 后，BRAN-S 的 9 个管件 M1..M9 的 AABB 变化全部为 0.00）。HPOS 是分支拓扑属性，改它不重算管件几何，所以 pipe/bran_hpos 只能靠 PML 侧 Q Hposition 断言（2900→3100→2900），RVM 对拍该腿必为 aabb_blind。"
   ],
@@ -271,7 +271,7 @@
     "create/equi_copy_apply.mac": {
       "added": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-COPY/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-COPY": {
-          "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ",
+          "like": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX",
           "shift": [
             3000,
             0,
@@ -279,7 +279,7 @@
           ]
         }
       },
-      "note": "EQ-COPY = COPY EQ-NOZ 再 BY E 3000；复制出的 NOZZ 无几何。★ 若 COPY 产生的 BOX 缺省名序号不是 1，按 after 快照订正键名"
+      "note": "EQ-COPY = COPY EQ-NOZ 再 BY E 3000；复制出的 NOZZ 无几何。源 BOX 在 setup 里已命名为 /AIOS-SUITE-EQ-NOZ-BOX，复制件仍是缺省名 BOX 1。2026-11-04 整批实测：复制件相对源盒东移 3000，其余 125 件不动。"
     },
     "create/equi_copy_restore.mac": {
       "equals_state_before": "create/equi_copy_apply.mac"
@@ -294,7 +294,8 @@
       "note": "BRAN-NEW 是 BRAN-S 的原位副本（COPY 不带 BY），几何与 BRAN-S 重叠：并集同位、件数相同。★ 隐含管段容器的命名/计数待首轮观测"
     },
     "create/bran_copy_restore.mac": {
-      "equals_state_before": "create/bran_copy_apply.mac"
+      "equals_state_before": "create/bran_copy_apply.mac",
+      "note": "删掉 BRAN-NEW 之后，再按 setup 把 BRAN-S 整条重 COPY 并补名。只删副本时，改挂留下的末位隐含管对不上原名，这条 equals 不成立。"
     },
     "create/cross_db_copy_apply.mac": {
       "removed": [
@@ -305,16 +306,15 @@
     "create/cross_db_copy_restore.mac": {
       "added": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-A": [
-          39500,
+          39000,
           4500,
-          -500,
-          40500,
+          -250,
+          41000,
           5500,
-          500
+          250
         ]
       },
-      "calibrate": true,
-      "note": "★ COPY /AIOS-SUITE-EQ-X 带回来的 BOX 是无名复制件（名字不随 COPY 走），所以键是 E3D 缺省名而不是 /AIOS-SUITE-BOX-A1；EQ-A 重建在 POS E 40000 N 5000 U 0，AABB 应与基线 BOX-A1 相同。7998 半边（EQ-X 删除）另导。"
+      "note": "2026-11-04 干净 setup 实测（sesno 2095→2098）。COPY 不带名字，回来的 BOX 键是缺省名而不是 /AIOS-SUITE-BOX-A1。包围盒与基线 BOX-A1 相同（2000×1000×500，原先写的 1000³ 已作废）。7998 半边另导。这腿仍是 run_last：无名盒在，/AIOS-SUITE-BOX-A1 不在。"
     },
     "delete/box_apply.mac": {
       "removed": [
@@ -458,14 +458,17 @@
       "equals_state_before": "xform/rot_n_apply.mac"
     },
     "xform/compound_apply.mac": {
-      "moved": {
+      "resized": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
-          0,
-          300,
-          0
+          39500,
+          4300,
+          -250,
+          40500,
+          6300,
+          250
         ]
       },
-      "note": "BY N 300 可见，旋转分量不可见"
+      "note": "2026-11-04 整批实测。同一 SAVEWORK：BY N 300 WRT /* 再 ORI Y IS W AND Z IS U。BOX-A1 是 2000×1000×500，旋转后长边从 E 转到 N，不是纯平移。restore 回到 before。"
     },
     "xform/compound_restore.mac": {
       "equals_state_before": "xform/compound_apply.mac"
@@ -502,6 +505,22 @@
     "geom/resize_restore.mac": {
       "equals_state_before": "geom/resize_apply.mac"
     },
+    "geom/cyli_size_apply.mac": {
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-CYLI/AIOS-SUITE-CYLI-1": [
+          50950,
+          3950,
+          -1500,
+          53050,
+          6050,
+          1500
+        ]
+      },
+      "note": "2026-11-04 实测 sesno 1499。DIAM 1500→2100，HEIG 仍 3000。CYLI-1 从 [51250,4250,-1500,52750,5750,1500] 变成这条 AABB，半径方向各外扩 300，高度不变。restore（sesno 1503）Q DIAM 回到 1500，几何回到 apply 之前。"
+    },
+    "geom/cyli_size_restore.mac": {
+      "equals_state_before": "geom/cyli_size_apply.mac"
+    },
     "geom/nbox_resize_apply.mac": {
       "subtree": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
@@ -535,6 +554,23 @@
     },
     "geom/nbox_add_restore.mac": {
       "equals_state_before": "geom/nbox_add_apply.mac"
+    },
+    "geom/nbox_move_apply.mac": {
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "count_delta": 0,
+          "union_shift": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "note": "2026-11-04 实测 sesno 1507。NBOX-N1 的 Q POS 从 E 0 到 E 200（相对 BOX-N），孔仍在 2000 立方体内。窄口径 RVM 不导出 NBOX，EQ-NBX 件数不变、并集平移 [0,0,0]。restore（sesno 1511）Q POS 回到 E 0。",
+      "aabb_blind": true
+    },
+    "geom/nbox_move_restore.mac": {
+      "equals_state_before": "geom/nbox_move_apply.mac"
     },
     "connect/bran_add_member_apply.mac": {
       "subtree": {
@@ -584,7 +620,7 @@
     },
     "connect/bran_reparent_restore.mac": {
       "equals_state_before": "connect/bran_reparent_apply.mac",
-      "note": "树逆但序逆不了：FTUB 回到 BRAN-S 末位而非第 4 位，隐含管段序列不同——件数应回到原值，并集可能不同。这里不再挂 calibrate（挂了整腿不判红）；若首轮录制出现并集差异，按观测值改成显式 subtree 断言。"
+      "note": "2026-11-04 sesno 2140→2142。按名把 M5 INCLUDE 回 BRAN-S，Q OWNE 从 BRAN-NEW 回到 BRAN-S，RVM 与改挂前逐件吻合。成员表里 M5 在第 1 位；链的最后一步重 COPY BRAN-S，把顺序补回基线。"
     },
     "connect/nozz_move_apply.mac": {
       "aabb_blind": true,
@@ -655,19 +691,20 @@
         "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": {
           "count_delta": 0,
           "union_aabb": [
-            9022.70299260272,
-            11161.0155777307,
-            -4255.00073109288,
-            15514.4273132901,
-            17217.0311032096,
-            6869.99979731627
+            8657,
+            10820,
+            6570,
+            9040,
+            11179,
+            6870
           ]
         }
       },
-      "note": "改 PAVE 顶点 V2/V3 的 E 8803→9003（沿 E 外扩 200），属变形不是平移。★ 2026-10-28 语料改造后：房间是 ams 真实房间 /1RS-WF04-W-AB 裁到 1 面墙的副本，顶点用真实坐标。union_aabb 是实测值（pave-applied 1051），改前是 [9022.70, 11161.02, -4255.00, 15368.16, 17080.63, 6870.00]。★★ 重要订正：PANE 的 AABB 不是「四个 PAVE 顶点的并集」——实测 U 下界是 -4255（远低于顶点最低的 6430），说明 E3D 把墙体延伸/厚度也算进了 PANE 包围盒。旧 limits 里「PANE 的 AABB = 四顶点并集」的说法只对自造房间偶然成立，对真实房间不成立。"
+      "note": "2026-11-04 sesno 2164→2166。V2/V3 沿 PLOO 局部 W 外扩 200：Q POS 从 W 150 变成 W 350，N/U 不动。R201-P1 并集从 [8803.30,10956.42,6570,9039.75,11179.30,6870] 变成 [8657.03,10820.02,6570,9039.75,11179.30,6870]。restore（sesno 2168→2170）写回 W 150，回到 before。"
     },
     "room/pave_move_restore.mac": {
-      "equals_state_before": "room/pave_move_apply.mac"
+      "equals_state_before": "room/pave_move_apply.mac",
+      "note": "2026-11-04 sesno 2168→2170。V2/V3 写回局部 W 150 N 150 / S 150，Q POS 回到改前，板的包围盒回到 before。"
     },
     "room/frmw_rename_apply.mac": {
       "renamed": [
@@ -796,6 +833,125 @@
     },
     "pipe/spre_swap_restore.mac": {
       "equals_state_before": "pipe/spre_swap_apply.mac"
+    },
+    "xform/zone_move_apply.mac": {
+      "subtree": {
+        "AIOS-SUITE-ZONE-MV": {
+          "count_delta": 0,
+          "union_shift": [
+            500,
+            0,
+            0
+          ]
+        }
+      },
+      "note": "2026-11-04 实测 sesno 1515。ZONE-MV BY E 500 WRT /* 之后，Q POS WRT /* 里 ZONE 自己是 E 500，BOX-MV1 / BOX-MV2 从 E 80000 到 E 80500。子件跟着 ZONE 的世界矩阵走。基线并集约 [79500,19800,-100,80500,24200,100]，平移 [500,0,0]，两件都在。restore（sesno 1519）ZONE 回到 E 0，两件 BOX 回到 E 80000。"
+    },
+    "xform/zone_move_restore.mac": {
+      "equals_state_before": "xform/zone_move_apply.mac"
+    },
+    "geom/box_pos_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-PRIM/AIOS-SUITE-BOX-PRIM": [
+          400,
+          0,
+          0
+        ]
+      },
+      "note": "2026-11-04 实测 sesno 1523。BOX-PRIM 写成 POS E 400 N 0 U 0，Q POS WRT /* 从 E 86000 到 E 86400。EQ-PRIM 本身不动。RVM 平移 [400,0,0]（实测 400.002，容差 1 mm）。"
+    },
+    "geom/box_pos_restore.mac": {
+      "equals_state_before": "geom/box_pos_apply.mac"
+    },
+    "xform/pos_same_apply.mac": {
+      "aabb_blind": true,
+      "note": "2026-11-04 实测 sesno 1530。EQ-SAME 是空设备，不进窄口径 RVM。POS 按原值 E 90000 N 20000 U 0 再写，Q POS 前后相同，125 件几何逐一不变。生成侧 0 重建这次没对。"
+    },
+    "xform/pos_same_restore.mac": {
+      "equals_state_before": "xform/pos_same_apply.mac"
+    },
+    "geom/xlen_same_apply.mac": {
+      "subtree": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A": {
+          "count_delta": 0,
+          "union_shift": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "note": "2026-11-04 实测 sesno 1536。BOX-A1 的 XLEN 按基线 2000 再写，Q XLEN 前后都是 2000。EQ-A 并集不动、件数不变。生成侧 0 重建这次没对。"
+    },
+    "geom/xlen_same_restore.mac": {
+      "equals_state_before": "geom/xlen_same_apply.mac"
+    },
+    "attr/pose_reparent_apply.mac": {
+      "renamed": [
+        {
+          "from": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-PA/AIOS-SUITE-BOX-POSE",
+          "to": "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-PB/AIOS-SUITE-BOX-POSE"
+        }
+      ],
+      "resized": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-PA/AIOS-SUITE-BOX-POSE": [
+          93900,
+          24700,
+          -100,
+          94100,
+          25300,
+          100
+        ]
+      },
+      "note": "2026-11-04 实测 sesno 1543。BOX-POSE 从 EQ-PA（Y is N，E 94000 N 20000）INCLUDE 到 EQ-PB（Y is E，E 94000 N 25000），没有再写 BOX 的 POS。refno 仍是 24384/69443。Q POS WRT /* 从 E 94000 N 20000 到 E 94000 N 25000。改名前 AABB [93700,19900,-100,94300,20100,100]（600 沿 E）；改名后长边转到 N。restore（sesno 1547）挂回 EQ-PA，世界坐标回到 E 94000 N 20000。"
+    },
+    "attr/pose_reparent_restore.mac": {
+      "equals_state_before": "attr/pose_reparent_apply.mac"
+    },
+    "attr/desc_same_apply.mac": {
+      "aabb_blind": true,
+      "note": "2026-11-04 实测 sesno 1633→1634（+1）。EQ-DESC 是空设备，不进窄口径 RVM。Q DESC 前后都是 AIOS suite desc same。RVM 125 件不变。restore sesno 1636→1637（+1）。"
+    },
+    "attr/desc_same_restore.mac": {
+      "equals_state_before": "attr/desc_same_apply.mac"
+    },
+    "pipe/spre_same_apply.mac": {
+      "aabb_blind": true,
+      "note": "2026-11-04 实测 sesno 1639→1640（+1）。Q SPRE 前后都是 /ACP1000-Trough/ACP1000-TBR:50，宏写的是原引用 =13244/108844。RVM 逐件不变。restore sesno 1642→1643（+1）。"
+    },
+    "pipe/spre_same_restore.mac": {
+      "equals_state_before": "pipe/spre_same_apply.mac"
+    },
+    "xform/zone_ori_apply.mac": {
+      "resized": {
+        "AIOS-SUITE-ZONE-MV/AIOS-SUITE-EQ-MV1/AIOS-SUITE-BOX-MV1": [
+          -20200,
+          79500,
+          -100,
+          -19800,
+          80500,
+          100
+        ],
+        "AIOS-SUITE-ZONE-MV/AIOS-SUITE-EQ-MV2/AIOS-SUITE-BOX-MV2": [
+          -24200,
+          79500,
+          -100,
+          -23800,
+          80500,
+          100
+        ]
+      },
+      "note": "2026-11-04 锁定后重跑 sesno 1645→1647（+2），Compare pass。ZONE-MV 写成 ORI Y IS W AND Z IS U WRT /*，自身仍在原点；Q ORI 从 Y is N 变成 Y is W，Z 仍是 U。两件 BOX 的本地朝向不变，世界位置从 E 80000 N 20000 / N 24000 转到 W 20000 N 80000 / W 24000 N 80000。包围盒来自第一轮 sesno 1623 的实测，离线重比吻合后再重跑确认。这是绕世界原点的朝向，不是平移。restore sesno 1649→1651 回到 before。"
+    },
+    "xform/zone_ori_restore.mac": {
+      "equals_state_before": "xform/zone_ori_apply.mac"
+    },
+    "xform/ori_same_apply.mac": {
+      "aabb_blind": true,
+      "note": "2026-11-04 实测 sesno 2087→2088（+1）。EQ-PA 的 ORI 按 setup 原句 Y IS N AND Z IS U 再写，Q ORI 前后都是 Y is N、Z is U。方向数组的赋值函数本体没有旧值比较；sesno 只 +1 是实测。RVM 不变。restore sesno 2090→2091（+1）。"
+    },
+    "xform/ori_same_restore.mac": {
+      "equals_state_before": "xform/ori_same_apply.mac"
     }
   }
 }

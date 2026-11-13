@@ -1,0 +1,30 @@
+-- 登记: A02 | 语义: 再删一次 BOX-M2，在原位按基线尺寸（XLEN 400）建回同名的。这条腿自己就是「成员删后同名重建」，refno 又换一次
+-- expected_net: cancelled（按名回到基线；BOX-M2 的 refno 与基线、与 apply 之后都不同） | restore 搭档: 本文件是 ident/member_recreate_changed_apply.mac 的 restore
+-- 尺寸与 ident/setup_t3.mac 的 BOX-M2 同一组数。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-MEMBER-RECREATE-CHANGED-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-T3-BOX-M2') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q XLEN
+  DELETE BOX
+ENDDO
+/AIOS-SUITE-T3-BOX-M1
+NEW BOX XLEN 400 YLEN 400 ZLEN 600
+NAME /AIOS-SUITE-T3-BOX-M2
+POS E 1500 N 0 U 0
+Q REF
+Q NAME
+Q XLEN
+Q OWNE
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/member_recreate_changed restore: BOX-M2 recreated with XLEN 400'
+$P SUITE-T3-MEMBER-RECREATE-CHANGED-RESTORE-DONE
+ALPHA LOG END

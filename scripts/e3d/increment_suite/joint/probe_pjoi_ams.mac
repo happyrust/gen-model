@@ -1,0 +1,166 @@
+-- 只读探针（不 SAVEWORK，不进录制清单）：joint/ 下 AMS 用例动到的元素，在 E3D 里各问一遍身份与现值。
+-- 库: ams7999（MDB /ALL）。写腿都按 refno 导航；这里先确认这些 refno 在副本里就是期望的那几只。
+-- 每次导航后跟 handle：走不到就打一行 NAV-FAILED，后面几句查询的输出不算数。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-JOINT-PROBE-PJOI-AMS-ALIVE
+$P ==== E0361 BAR-1 ====
+=24383/87946
+handle any
+$P NAV-FAILED 24383/87946
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q BANG
+Q JOIS
+Q JOIE
+Q JLIN
+Q JUSL
+Q SPRE
+Q POSS WRT /*
+Q POSE WRT /*
+$P ==== E0361 PNOD ====
+=24383/87947
+handle any
+$P NAV-FAILED 24383/87947
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q NPOS
+Q NPOS WRT /*
+$P ==== E0361 PJOI ====
+=24383/87948
+handle any
+$P NAV-FAILED 24383/87948
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q SPRE
+Q CREF
+Q GTYP
+Q DELP
+Q OPDI
+Q CUTP
+Q CUTB
+Q BANG
+Q JFRE
+Q JLIN
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== SPCO JT1 / JT5 ====
+=21438/3354
+handle any
+$P NAV-FAILED 21438/3354
+endhandle
+Q REF
+Q NAME
+Q TYPE
+=21438/3356
+handle any
+$P NAV-FAILED 21438/3356
+endhandle
+Q REF
+Q NAME
+Q TYPE
+$P ==== E0549 V1 ====
+=24383/88837
+handle any
+$P NAV-FAILED 24383/88837
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q BANG
+Q JOIS
+Q JOIE
+$P ==== E0549 PNOD 2 ====
+=24383/88849
+handle any
+$P NAV-FAILED 24383/88849
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+Q MEMB
+$P ==== E0549 PJOI claimed ====
+=24383/88850
+handle any
+$P NAV-FAILED 24383/88850
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q BANG
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== E0549 PJOI unclaimed ====
+=24383/88851
+handle any
+$P NAV-FAILED 24383/88851
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q BANG
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== E0082 BAR-1 ====
+=24383/96589
+handle any
+$P NAV-FAILED 24383/96589
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+$P ==== E0082 unjointed SCTN ====
+=24383/96593
+handle any
+$P NAV-FAILED 24383/96593
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q POSS
+Q POSE
+Q BANG
+Q JOIS
+Q JOIE
+Q SPRE
+$P ==== E0082 PJOI of BAR-1 ====
+=24383/96595
+handle any
+$P NAV-FAILED 24383/96595
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+$P SUITE-JOINT-PROBE-PJOI-AMS-DONE
+ALPHA LOG END

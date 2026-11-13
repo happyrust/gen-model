@@ -1,0 +1,1329 @@
+{
+  "version": 1,
+  "owner": "T1",
+  "topic": "support-compre",
+  "copy": "aps",
+  "mdb": "/ALL",
+  "sites": [
+    "/AIOS-SUITE-T1-BULK",
+    "/AIOS-SUITE-T1-S7"
+  ],
+  "setup": null,
+  "teardown": null,
+  "description": "支吊架：被支撑的管件换规格 → 经 COMPRE 指着它的支撑件跟着重算（gen-model #143，联动分类表第 16 行），以及只改支撑件自己的 COMPRE（gen-model #132）。语料只在 APS 工程里（AMS 一条 COMPRE 边都没有），样本在生产元素上、搬不走，所以这一片直接改生产元素：每个用例的 restore 都按绝对值写回，改到的元素列在 touches_production 里。没有 setup；自建的只有大窗用例的压舱 SITE /AIOS-SUITE-T1-BULK（它自己的 restore 删掉）。",
+  "databases_note": "管道库 250132（SITE /SITE-PIPING-AREA01 → ZONE /ZONE-PIPING-AREA01 → 47 PIPE / 91 BRAN）；支撑库 250104（SITE /SITE-SUPPORTS-AREA01 → ZONE /ZONE-SUPPORTS-AREA01 → 77 SUPPO，生成根是 SUPPO）。两个库都在 /ALL 里。",
+  "corpus": {
+    "how_found": "只读探针读库文件（没有开 E3D）：APS /ALL 里 COMPRE 边 117 条（250102 的 27 条、250104 的 90 条；另 117 条在不属于 /ALL 的副本库 250564 / 250566 里）；同库 5 条，全在 250104。",
+    "pipe_spec": {
+      "/A3B/PA250": "=15192/229427 → 管子目录件 /AAPA1A0VV，PARA[2] = 273.05",
+      "/A3B/PA300": "=15192/229429 → /AAPA1A0WW，PARA[2] = 323.85",
+      "/A3B/PA40": "=15192/229413 → /AAPA1A0HH，PARA[2] = 48.26",
+      "/A3B/PA50": "=15192/229415 → /AAPA1A0JJ，PARA[2] = 60.33",
+      "/A1A/PA80": "=15192/235102 → /AAPA1A0LL，PARA[2] = 88.9",
+      "/A1A/PA100": "=15192/235104 → /AAPA1A0NN，PARA[2] = 114.3"
+    },
+    "elements": {
+      "/300-A-42/B1": "BRAN =2013286676/1941（250132），HSTU /A3B/PA300；名下只有一只三通 =2013286676/1942（LSTU /A3B/PA300）",
+      "/100-D-20/B1": "BRAN =2013286676/1774（250132），HSTU /A1A/PA100；它和名下 7 个管件都没有支撑件指着",
+      "/100-A-18/B1": "BRAN =2013286676/1757（250132），HSTU /A1A/PA100",
+      "/PS-01-00194.1": "ANCI =2013286648/1016，根 SUPPO /PS-01-00194 =2013286648/1014，COMPRE → /300-A-42/B1",
+      "/PS-01-00195.1": "ANCI =2013286648/1036，根 SUPPO /PS-01-00195 =2013286648/1034，COMPRE → /300-A-42/B1（与 194.1 同一个 SPRE）",
+      "/PS-01-00196.1": "ANCI =2013286648/1056，根 SUPPO /PS-01-00196 =2013286648/1054，COMPRE → 三通 =2013286676/1942",
+      "/PS-01-00197.1": "ANCI =2013286648/1076，根 SUPPO /PS-01-00197 =2013286648/1074，COMPRE → 三通 =2013286676/1942",
+      "/PS-01-00168/PLAT.1": "PLAT =2013286648/680，根 SUPPO /PS-01-00168 =2013286648/675，LSTU /A3B/PA40",
+      "/PS-01-00179.1": "ANCI =2013286648/844，根 SUPPO /PS-01-00179 =2013286648/842，COMPRE → /PS-01-00168/PLAT.1（同库、不同根）",
+      "/PS-01-00181.1": "ANCI =2013286648/873，根 SUPPO /PS-01-00181 =2013286648/871，COMPRE → /PS-01-00180/PLAT.1（对照，不动）"
+    }
+  },
+  "cases": [
+    {
+      "id": "C3-compre-hstu-xdb",
+      "situation": "把一根被支架托着的支管换了一档管径（HSTU PA300 → PA250），支架在另一个库里、自己没被动过",
+      "change_types": [
+        "CT-D11",
+        "CT-C3",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_hstu_xdb_apply.mac",
+      "restore": "support/compre_hstu_xdb_restore.mac",
+      "db": 250132,
+      "companion_dbnum": 250104,
+      "touches_production": [
+        "/300-A-42/B1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r6（含 #143）。r5 上支撑件不动，按期望判红是对的。",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话（支撑件自己没被动过：这是前提，也是断言）"
+        },
+        "changed": [
+          "/300-A-42/B1：HSTU"
+        ],
+        "rebuild": [
+          "/300-A-42/B1（250132 本窗）",
+          "/PS-01-00194（250104，经跨库交接）",
+          "/PS-01-00195（250104，经跨库交接）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00196、/PS-01-00197：它们指着的是三通，三通的 LSTU 没变——不点名、不重算",
+          "250104 其余 73 个 SUPPO 根",
+          "250132 其余根（/200-A-40/B1 的尾接在那只三通上，它自己没变）"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:2 changed/",
+            "2 个引用者在别的设计库里（{250104: 2}），交给跨库交接",
+            "cross-db handoff → dbnum=250104 (2 element(s)",
+            "queued as ModelOnly at session"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "not handed off",
+            "判不了"
+          ]
+        },
+        "handoff": {
+          "to": 250104,
+          "elements": [
+            "/PS-01-00194.1",
+            "/PS-01-00195.1"
+          ],
+          "task": "只带根名单的 ModelOnly，跑成"
+        },
+        "geometry": "两只支撑件（/PS-01-00194.1、/PS-01-00195.1）各自那一件：下沿跟着管底上抬 25.40 mm（(323.85 - 273.05) / 2），上沿上抬 34.70 mm，件高 +9.30——件的形状随外径变，不是整件平移；件数不变。件自己局部系里的 z：外径 323.85 时 [-261.925, -118.694]，273.05 时 [-236.525, -83.997]（下沿恒为 -(外径 / 2 + 100)，上沿另算）。以 E3D 导出为准，数锁在 support/rvm-truth.supports.json。",
+        "rvm_export_roots": [
+          "/PS-01-00194",
+          "/PS-01-00195",
+          "/PS-01-00196",
+          "/300-A-42"
+        ],
+        "why": "支管自己：HSTU 在生成器的读取集合里，头段管身的外径变了。两只支撑件：目录表达式的 ATTRIB POD 经 COMPRE 走到被支撑的支管、读它的 HSTU（e3d-io db_param_env.rs catalogue_component_trace；名单 reverse_reference.rs DESIGN_CASCADE_TARGET_READS）；HSTU 两端取值不同 → 触发；引用者在别的库 → 交给跨库交接（cross_db_handoff.rs）。出处：output/flow-next-20261111/DESIGN-143.md §4.2。",
+        "geometry_e3d": "E3D 实测（整个支撑区 234 个带图元的组前后对拍）：正好两只变了——/PS-01-00194.1 与 /PS-01-00195.1，各自那一个面片组的下沿上抬 25.40 mm、上沿上抬 34.70 mm（高度 144.13 → 153.42），不是纯平移：除了整件跟着管底走，件自己的形状也随外径变。其余 232 个组（含指着三通的 196.1、197.1）逐件相同。管道 /300-A-42：头段管身每侧缩 25.40（外径 323.85 → 273.05），三通与尾段不变。restore 之后全部回到改之前。",
+        "geometry_history": "写在实跑之前的期望是「支撑件各沿自己的 z 挪 (外径差 / 2)」，照的是设计文档和代码注释里的说法（reverse_reference.rs 里 DESIGN_CASCADE_TARGET_READS 的注释：「外径决定支撑件整件沿 z 的平移」）。2026-11-12 E3D 实测不是整件平移；同日用 gen_ams 全量生成核过，生成结果与 E3D 逐件相同——生成程序没有问题，是那句话不准。期望改成照实测写。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-035329-compre-hstu-xdb",
+      "layers": {
+        "tty": "pass（250132：40→41 apply，41→42 restore；250104 一直是 14，没有新会话）",
+        "rvm_truth": "pass（套件的标准对拍按期望模型判）：E3D 导出里变的正好是期望的两只支撑件和头段管身；对照不动；restore 回到原样",
+        "plan": "pass：含 #143 的规划器逐窗量过（flow-next 那份库单测程序里的量法测试，只读私有副本的库文件，设计成员 = 工程目录下全部设计库）——40→41 与 41→42 都是「regen=1，COMPRE 触发 2 / 不触发 0，跨库点名 2 只 → 250104 的 2 个根」。另用11-08 编的双规划器探针（不做设计引用反查，只看本窗自己的变更）核过变更清单：只有支管的 HSTU（E3D 没有顺手改 HBOR，也没有碰三通）",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@14 250132@41：194 件逐件相同；/300-A-42 在 250104@14 250132@41：3 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "管道库这一半 pass：只听 250132 的回放（agents/T1/replay/cases-aps/t1-compre-hstu-xdb-solo.json，40→42）在本地主线和 r6 上都过——回执里有 target_reads=[COMPRE→LSTU|HSTU:2 changed/0 unchanged]、2 个引用者在别的设计库里、cross-db handoff → dbnum=250104 (2 element(s)（250104 不在监听范围，所以以 not handed off 结尾）；**r5 上红在这几句上，按期望判红**。带伙伴库的那一半（交接过去的任务跑成、支撑件重算）起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6）：交接过去的任务跑没跑成、增量重算出来的是不是全量生成的那一份。全量生成的那一份与 E3D 已经对上（见 full_gen）"
+      }
+    },
+    {
+      "id": "A6-compre-lstu-samedb",
+      "situation": "被支撑的构件和支撑件在同一个库、不同的根：改了耳轴垫板的管径规格（LSTU PA40 → PA50）",
+      "change_types": [
+        "CT-D11",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_lstu_samedb_apply.mac",
+      "restore": "support/compre_lstu_samedb_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00168/PLAT.1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r6（含 #143）",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00168/PLAT.1：LSTU"
+        ],
+        "rebuild": [
+          "/PS-01-00168（板自己的根）",
+          "/PS-01-00179（级联带进来的）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00181：它指着的是另一块板 /PS-01-00180/PLAT.1，没动",
+          "250104 其余根；250132 没有任务"
+        ],
+        "receipt_contains": {
+          "250104": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:1 changed/0 unchanged]",
+            "referrer_roots=1"
+          ]
+        },
+        "receipt_not_contains": {
+          "250104": [
+            "交给跨库交接",
+            "cross-db handoff",
+            "判不了"
+          ]
+        },
+        "geometry": "这一对在 E3D 里几何不变（这只支撑件、这块板的目录表达式都没用到管外径）：整个支撑区改前改后逐件相同。所以只要求「级联把同库的引用者根带进重建名单、重建后的几何与 E3D 一致（即不变）」；看得见位移的同库用例是 D11-compre-samedb-pod。",
+        "rvm_export_roots": [
+          "/PS-01-00168",
+          "/PS-01-00179",
+          "/PS-01-00181"
+        ],
+        "why": "支撑件经 COMPRE 读这块板的 LSTU，两端取值不同；引用者在本库，根并进本窗（reverse_reference.rs from_edges_with）。出处：DESIGN-143.md §4.2 第 2 条。",
+        "geometry_e3d": "E3D 实测：整个支撑区 234 个组前后逐件相同——这一对在 E3D 里几何不变（这只支撑件、这块板的目录表达式都没用到管外径）。所以这一条验得到的是「级联把同库的引用者根带进重建名单、重建后几何不变」，验不到位移；要看得见位移的同库用例放第二批（把一只吃外径的支撑件改托到这块板上再换板的规格）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-040316-support-250104",
+      "layers": {
+        "tty": "pass（250104：14→15 apply，15→16 restore；250132 没有新会话）",
+        "rvm_truth": "pass（按实测登记）：apply 前后、restore 前后 E3D 导出逐件相同",
+        "plan": "pass：含 #143 的规划器逐窗量过（flow-next 那份库单测程序里的量法测试，只读私有副本的库文件，设计成员 = 工程目录下全部设计库）——14→15 与 15→16 都是「regen=2，COMPRE 触发 1 / 不触发 0，同库多拉 1 根，跨库点名 0」。11-08 编的双规划器探针（不做设计引用反查，只看本窗自己的变更）：变更清单只有板的 LSTU；板的根在，耳轴（路由容器）跟着重算派生管段",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@15 250132@42：194 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6）"
+      }
+    },
+    {
+      "id": "A3-compre-ctl-move",
+      "situation": "对照（不该多算）：同一根被支撑的支管只挪了位置（头点和名下的三通各上抬 100 mm），规格没换",
+      "change_types": [
+        "CT-D11",
+        "CT-A3",
+        "CT-A5"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_ctl_move_apply.mac",
+      "restore": "support/compre_ctl_move_restore.mac",
+      "db": 250132,
+      "companion_dbnum": 250104,
+      "touches_production": [
+        "/300-A-42/B1",
+        "/300-A-42/B1 的第 1 个成员（三通 =2013286676/1942，没有名字）"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r5 / r6 都该过（r5 根本不看 COMPRE；r6 看了但不触发）",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话"
+        },
+        "changed": [
+          "/300-A-42/B1：HPOS",
+          "三通 =2013286676/1942：POS"
+        ],
+        "rebuild": [
+          "/300-A-42/B1"
+        ],
+        "remove": [],
+        "untouched": [
+          "250104 全部根：没有新任务",
+          "四只支撑件（/PS-01-00194.1、195.1、196.1、197.1）的模型记录逐条不变"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:0 changed/4 unchanged]"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "交给跨库交接",
+            "cross-db handoff",
+            "判不了"
+          ]
+        },
+        "geometry": "支管这个根里：头段管身与三通跟着上抬 100；支撑件不动",
+        "rvm_export_roots": [
+          "/PS-01-00194",
+          "/PS-01-00196",
+          "/300-A-42"
+        ],
+        "why": "支撑件读的是被支撑构件的 LSTU / HSTU，不读位置：两端取值相同 → 不触发（DESIGN-143.md §4.2 第 1 条：只改位置、改名、改别的属性不触发）。E3D 里把管子挪开，支撑件也留在原地。",
+        "geometry_e3d": "E3D 实测：支撑区 234 个组逐件相同（四只支撑件都留在原地）。管道 /300-A-42：头段管身与三通各上移 100；三通到尾的那一段管身**不画了**——三通抬高之后与尾点不再对齐，E3D 不画没对齐的隐含管段。restore 之后三件齐、位置回原样。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-040514-compre-controls",
+      "layers": {
+        "tty": "pass（250132：42→43 apply，43→44 restore；250104 没有新会话）",
+        "rvm_truth": "pass（套件的标准对拍按期望模型判）：支撑件不动；管子挪了",
+        "plan": "pass：含 #143 的规划器逐窗量过（flow-next 那份库单测程序里的量法测试，只读私有副本的库文件，设计成员 = 工程目录下全部设计库）——42→43 与 43→44 都是「regen=1，COMPRE 触发 0 / 不触发 4，跨库点名 0」。11-08 编的双规划器探针（不做设计引用反查，只看本窗自己的变更）：变更清单是支管的 HPOS 与三通的 POS",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@18 250132@43：194 件逐件相同；/300-A-42 在 250104@18 250132@43：2 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "pass（r6）：t1-compre-250132-chain 的 42→43、43→44 两窗——target_reads=[COMPRE→LSTU|HSTU:0 changed/4 unchanged]，没有交接；重建的单元只有支管自己",
+        "l3": "没跑（等隔离后端）。「没对齐的那段管身不画」这一点全量生成已经与 E3D 对上（见 full_gen），剩下的是增量这一窗重算出来的是不是同一份"
+      }
+    },
+    {
+      "id": "C2-compre-ctl-unref",
+      "situation": "对照（不该多算）：给一根没有任何支撑件指着的支管换管径（HSTU PA100 → PA80）",
+      "change_types": [
+        "CT-D11",
+        "CT-C2",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_ctl_unref_apply.mac",
+      "restore": "support/compre_ctl_unref_restore.mac",
+      "db": 250132,
+      "companion_dbnum": 250104,
+      "touches_production": [
+        "/100-D-20/B1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r5 / r6 都该过",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话"
+        },
+        "changed": [
+          "/100-D-20/B1：HSTU"
+        ],
+        "rebuild": [
+          "/100-D-20/B1"
+        ],
+        "remove": [],
+        "untouched": [
+          "250104 全部根：没有新任务",
+          "250132 其余根（接在它那 6 只三通上的支管自己没变）"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "target_reads=",
+            "交给跨库交接",
+            "cross-db handoff"
+          ]
+        },
+        "geometry": "头段管身外径 114.3 → 88.9，件数不变",
+        "rvm_export_roots": [
+          "/100-A-20"
+        ],
+        "why": "这根支管和它名下的管件都不在任何 COMPRE 边的被指一端：反查一条 COMPRE 边都碰不到，回执那一行不出现 target_reads 这一段（reverse_reference.rs summary_line 只在 changed + unchanged > 0 时才写）。",
+        "geometry_e3d": "E3D 实测：支撑区 234 个组逐件相同。管道 /100-A-20：头段管身每侧缩 12.70（外径 114.3 → 88.9），其余 8 个组不变。restore 回到原样。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-040514-compre-controls",
+      "layers": {
+        "tty": "pass（250132：44→45 apply，45→46 restore；250104 没有新会话）",
+        "rvm_truth": "pass（套件的标准对拍按期望模型判）：只有这根支管的头段管身变细",
+        "plan": "pass：含 #143 的规划器逐窗量过（flow-next 那份库单测程序里的量法测试，只读私有副本的库文件，设计成员 = 工程目录下全部设计库）——44→45 与 45→46 这两窗的变更元素一条 COMPRE 边都没碰到（量法里不列出）。11-08 编的双规划器探针（不做设计引用反查，只看本窗自己的变更）：变更清单只有这根支管的 HSTU，重建的只有它",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@18 250132@45：194 件逐件相同；/100-A-20 在 250104@18 250132@45：9 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "pass（r6）：t1-compre-250132-chain 的 44→45、45→46 两窗——回执里没有 target_reads、没有交接；重建的单元只有 /100-D-20/B1",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "C3-compre-bulk",
+      "situation": "大窗：同一次保存里导入一大批管件（约 1470 个新元素），其中一根被支撑的支管换了管径——反查超了点查预算",
+      "change_types": [
+        "CT-D11",
+        "CT-C3",
+        "CT-S2",
+        "CT-A6",
+        "CT-W10"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_bulk_apply.mac",
+      "restore": "support/compre_bulk_restore.mac",
+      "db": 250132,
+      "companion_dbnum": 250104,
+      "touches_production": [
+        "/300-A-42/B1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r6（含 #143 的「超预算时整表走一遍」）",
+      "precondition": "后端的 MDB 是完整的 /ALL（98 个设计库、约 271 张反向表）：变更元素数 × 反向表总数 > 200000（reverse_reference.rs DESIGN_CASCADE_QUERY_BUDGET，常量）。回执里没有「判不了」这一句 = 没超预算 = 这一条没跑到点上，判「没跑」，不判「过」。",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话",
+          "别的库": "都没有新会话（COPY 带过来的支管不该往别的库写——首跑要看）"
+        },
+        "changed": [
+          "约 1470 个新建（压舱 SITE /AIOS-SUITE-T1-BULK 的子树）",
+          "/300-A-42/B1：HSTU"
+        ],
+        "rebuild": [
+          "250132 本库已发布的根全部重算（反查判不了时的老规矩），加上压舱里新建的根",
+          "/PS-01-00194、/PS-01-00195（250104，经跨库交接）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00196、/PS-01-00197（指着三通的那两只）",
+          "250104 其余根"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on",
+            "判不了：这一窗要发",
+            "超过预算 200000，一次都没发",
+            "张表整张走了一遍",
+            "别的库里的引用者照常交接",
+            "交给跨库交接",
+            "cross-db handoff → dbnum=250104"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "not handed off"
+          ]
+        },
+        "handoff": {
+          "to": 250104,
+          "elements": [
+            "/PS-01-00194.1",
+            "/PS-01-00195.1"
+          ],
+          "task": "只带根名单的 ModelOnly，跑成"
+        },
+        "geometry": "与 C3-compre-hstu-xdb 相同：两只支撑件下沿上抬 25.40、上沿上抬 34.70，不是整件平移。",
+        "rvm_export_roots": [
+          "/PS-01-00194",
+          "/PS-01-00195",
+          "/PS-01-00196"
+        ],
+        "why": "超预算时点查一次都不发，整窗「判不了」，本库靠全部重算盖住；但别的库里的支撑件没人兜底，所以 COMPRE 那一类的反向表整张走一遍、照常交接（DESIGN-143.md §4.2 第 7 条；reverse_reference.rs walk_target_read_tables）。",
+        "geometry_e3d": "E3D 实测：与 C3-compre-hstu-xdb 相同——支撑区只有 /PS-01-00194.1、/PS-01-00195.1 两只变（下沿 +25.40、上沿 +34.70），restore 回到原样。",
+        "geometry_history": "写在实跑之前的期望是「支撑件各沿自己的 z 挪 (外径差 / 2)」，照的是设计文档和代码注释里的说法（reverse_reference.rs 里 DESIGN_CASCADE_TARGET_READS 的注释：「外径决定支撑件整件沿 z 的平移」）。2026-11-12 E3D 实测不是整件平移；同日用 gen_ams 全量生成核过，生成结果与 E3D 逐件相同——生成程序没有问题，是那句话不准。期望改成照实测写。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-040744-compre-bulk",
+      "layers": {
+        "tty": "pass（250132：46→47 apply，47→48 restore；250104 没有新会话；副本里只有 aps250132 这一个库文件变大——COPY 带过来的支管没有往别的库写）",
+        "rvm_truth": "pass",
+        "plan": "pass：含 #143 的规划器逐窗量过（flow-next 那份库单测程序里的量法测试，只读私有副本的库文件，设计成员 = 工程目录下全部设计库）——46→47 是「regen=294，COMPRE 触发 2，跨库点名 2 只 → 250104 的 2 个根，反查判不了」，47→48（删掉压舱）是「regen=98，触发 2，点名 2 只，反查判不了」。这一窗 1564 个变更元素（新建 1561、改 3），乘 /ALL 的反向表数远过预算",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@18 250132@47：194 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "管道库这一半 pass（r6）：t1-compre-250132-chain 的 46→47、47→48 两窗——回执带「判不了」，同时 target_reads=[COMPRE→LSTU|HSTU:2 changed/、cross-db handoff → dbnum=250104 (2 element(s) 照常。46→47 的规划行：roots_T=294 touched=197 regen=294 advance=0（整库 294 个根都重算）。带伙伴库的那一半起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6；后端的 MDB 要是完整的 /ALL）"
+      }
+    },
+    {
+      "id": "A2-anci-compre",
+      "situation": "把一只支撑件改托到另一根管子上（只改它自己的 COMPRE：DN300 的支管 → DN100 的支管）",
+      "change_types": [
+        "CT-A2",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#132",
+        "V21"
+      ],
+      "apply": "support/anci_compre_apply.mac",
+      "restore": "support/anci_compre_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00194.1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r5 应当已含 #132（换后端方案把它列在 V21）；r6 也该过",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00194.1：COMPRE"
+        ],
+        "rebuild": [
+          "/PS-01-00194"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00195：同样指着 /300-A-42/B1，自己没动",
+          "250104 其余根；250132 没有任务"
+        ],
+        "receipt_contains": {
+          "250104": [
+            "design-reference cascade on"
+          ]
+        },
+        "receipt_not_contains": {
+          "250104": [
+            "target_reads=",
+            "交给跨库交接"
+          ]
+        },
+        "metadata_gate": "这只 ANCI 不在放行的候选里（修 #132 之前它记在 unread_attribute 一档）",
+        "geometry": "/PS-01-00194.1 那一件：下沿跟着管底上抬 104.775 mm（(323.85 - 114.3) / 2），上沿上抬 118.69 mm，件高 143.23 → 157.15——形状随外径变，不是整件平移；件数不变。件自己局部系里的 z：[-261.925, -118.694] → [-157.150, 0.000]。以 E3D 导出为准。",
+        "rvm_export_roots": [
+          "/PS-01-00194",
+          "/PS-01-00195"
+        ],
+        "why": "COMPRE 在字典上是「不重画」的一类（DCHC=0），但生成器经它取管外径：元数据门两票里「生成器不读」那一票不成立，不放行（model_impact.rs E3D_IO_DESIGN_SIDE_READS）。出处：output/flow-fix-20261111/impact/LIVE-CHECK.md「#132」。",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00194.1 的面片组下沿上抬 104.77 mm（(323.85 - 114.3) / 2 = 104.775）、上沿上抬 118.69 mm（高度 144.13 → 158.05）；/PS-01-00195.1 与其余 232 个组逐件相同。restore 回到原样。",
+        "geometry_history": "写在实跑之前的期望是「支撑件各沿自己的 z 挪 (外径差 / 2)」，照的是设计文档和代码注释里的说法（reverse_reference.rs 里 DESIGN_CASCADE_TARGET_READS 的注释：「外径决定支撑件整件沿 z 的平移」）。2026-11-12 E3D 实测不是整件平移；同日用 gen_ams 全量生成核过，生成结果与 E3D 逐件相同——生成程序没有问题，是那句话不准。期望改成照实测写。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-040316-support-250104",
+      "layers": {
+        "tty": "pass（250104：16→17 apply，17→18 restore；250132 没有新会话）",
+        "rvm_truth": "pass（套件的标准对拍按期望模型判）：只有改了 COMPRE 的那只支撑件变",
+        "plan": "pass（11-08 编的双规划器探针（不做设计引用反查，只看本窗自己的变更））：变更清单只有这只 ANCI 的 COMPRE；重建的是它和它的根 /PS-01-00194，/PS-01-00195 不在。元数据门那一格这只探针不看，要回放层 / L3",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@17 250132@42：194 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A2-anci-compre-samedb",
+      "situation": "把一只支撑件改托到同库的构件上（只改它自己的 COMPRE：管道库的 DN300 支管 → 同库的耳轴垫板，外径 48.26）",
+      "change_types": [
+        "CT-A2",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#132"
+      ],
+      "apply": "support/anci_compre_samedb_apply.mac",
+      "restore": "support/anci_compre_samedb_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00194.1"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00194.1：COMPRE"
+        ],
+        "rebuild": [
+          "/PS-01-00194"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00195 等其余 SUPPO 根",
+          "垫板所在的 /PS-01-00168（它没变）",
+          "管道库 250132"
+        ],
+        "metadata_gate": "COMPRE 在生成读的名单里（E3D_IO_DESIGN_SIDE_READS）：这一窗不能被当成纯元数据放过去",
+        "geometry": "/PS-01-00194.1 照外径 48.26 重算：件自己局部系里的 z 从 [-261.925, -118.694] 变成 [-124.130, 0.000]（下沿 = -(48.26 / 2 + 100)）；件数不变",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00194.1 下沿上抬 137.79、上沿上抬 118.69；其余 233 个组逐件相同。写回之后回到原样。",
+        "why": "同 A2-anci-compre（#132）：支撑件的目录表达式经 COMPRE 取外径，COMPRE 自己变了就得重算；这里被指的换成同库的构件（读它的 LSTU）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-051058-support2-samedb",
+      "layers": {
+        "tty": "pass（250104：18→19 apply，23→24 写回；250132 一直是 48）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：18→19、23→24 的变更清单只有 /PS-01-00194.1 的 COMPRE，重建名单里有 /PS-01-00194、没有 /PS-01-00195。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（这两窗不该碰到任何被引用件的读格变化），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@19 250132@48：194 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "D11-compre-samedb-pod",
+      "situation": "同库、看得见位移：一只吃外径的支撑件托在同库的垫板上，垫板换了规格（LSTU PA40 → PA50），支撑件自己没被动过",
+      "change_types": [
+        "CT-D11",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_samedb_pod_apply.mac",
+      "restore": "support/compre_samedb_pod_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00168/PLAT.1"
+      ],
+      "expected_net": "modified",
+      "precondition": "support/anci_compre_samedb_apply.mac（/PS-01-00194.1 改托到垫板；跑完整条链再写回）",
+      "needs_backend": "r6（含 #143）。r5 上支撑件不动，按期望判红是对的。",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00168/PLAT.1：LSTU"
+        ],
+        "rebuild": [
+          "/PS-01-00168（垫板自己的根）",
+          "/PS-01-00179（同库引用者 /PS-01-00179.1 的根，经级联）",
+          "/PS-01-00194（同库引用者 /PS-01-00194.1 的根，经级联）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00195 等其余 SUPPO 根",
+          "管道库 250132：没有窗口、没有任务"
+        ],
+        "receipt_contains": {
+          "250104": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:2 changed/"
+          ]
+        },
+        "receipt_not_contains": {
+          "250104": [
+            "cross-db handoff →",
+            "判不了"
+          ]
+        },
+        "handoff": "没有（引用者都在本库，根并进本窗的重建名单）",
+        "geometry": "/PS-01-00194.1 的下沿再往下 6.035 mm（(60.33 - 48.26) / 2），上沿不动：局部系 z [-124.130, 0.000] → [-130.165, 0.000]；/PS-01-00179.1 与垫板的形状不随管径变",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00194.1 下沿 -6.03、上沿不动；其余 233 个组（含 /PS-01-00179.1、垫板）逐件相同。还原窗反向同量，回到改之前。",
+        "why": "#143 的同库那一支（reverse_reference.rs DESIGN_CASCADE_TARGET_READS：同库引用者的根并进 touched）。第一批的 A6-compre-lstu-samedb 只验得到「根进名单」，因为原有的引用者不吃外径；这里多了一只吃外径的，位移看得见。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-051058-support2-samedb",
+      "layers": {
+        "tty": "pass（250104：19→20 apply，20→21 还原；前置 18→19 已做）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单只有垫板的 LSTU，垫板的根在重建名单里。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（触发 2 / 不触发 0，同库多拉 2 根，regen=3，不交接），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@20 250132@48：194 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6）：两个引用者的根有没有进名单、重算出来的是不是全量生成的那一份"
+      }
+    },
+    {
+      "id": "D11-compre-own-change",
+      "situation": "被级联点名的根自己在同一窗里另有一处改动：垫板换规格（点名根 /PS-01-00194），同一次存盘里这个根名下的型钢转了 90 度",
+      "change_types": [
+        "CT-D11",
+        "CT-A4",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#144",
+        "gen-model#143"
+      ],
+      "apply": "support/compre_own_change_apply.mac",
+      "restore": "support/compre_own_change_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00168/PLAT.1",
+        "/PS-01-00194/STRU-V1"
+      ],
+      "expected_net": "modified",
+      "precondition": "support/anci_compre_samedb_apply.mac",
+      "needs_backend": "r6（含 #143、#144 的保守修法）",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00168/PLAT.1：LSTU",
+          "/PS-01-00194/STRU-V1：BANG"
+        ],
+        "rebuild": [
+          "/PS-01-00168",
+          "/PS-01-00179（经级联）",
+          "/PS-01-00194（**整根**：既有自己的改动，又是级联目标）"
+        ],
+        "rebuild_scope": "/PS-01-00194 不能走单元级发布：型钢、型钢名下的 FIXING、以及**这一窗里没被动过的 /PS-01-00194.1** 都要是新几何",
+        "remove": [],
+        "untouched": [
+          "/PS-01-00195 等其余 SUPPO 根",
+          "管道库 250132"
+        ],
+        "receipt_contains": {
+          "250104": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:2 changed/"
+          ]
+        },
+        "geometry": "/PS-01-00194.1 下沿 -6.035（同 D11-compre-samedb-pod）；/PS-01-00194/STRU-V1 转 90 度（世界系里包围盒沿 y 挪 -24.60）",
+        "geometry_e3d": "E3D 实测：支撑区正好两件变了——/PS-01-00194.1 下沿 -6.03、上沿不动；/PS-01-00194/STRU-V1 平移 [0, -24.60, 0]。其余 232 个组逐件相同。还原窗反向同量。",
+        "why": "ADR-080 约束 13（#144）：plan.regen 里凡是级联目标的根不带单元级提示、整根重算——不然这根自己这一窗有改动时，执行体只重建子计划里那几件，被牵连的那一件留在旧几何上。#143 的同库引用者根算不算「级联目标」，这条用例就是来问的。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-051058-support2-samedb",
+      "layers": {
+        "tty": "pass（250104：21→22 apply，22→23 还原）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单是垫板的 LSTU 加型钢的 BANG；e3d-model 的计划里有垫板、型钢和型钢名下的 FIXING（标架的输入变了，级联重建宿主子树）。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（触发 2，同库多拉 1 根（/PS-01-00194 自己已经在名单里），regen=3），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@22 250132@48：194 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6）。**这条的要害只有这一层看得出来**：/PS-01-00194.1 有没有留在旧几何上"
+      }
+    },
+    {
+      "id": "D11-compre-respec-pipe",
+      "situation": "整条管线换一档管径：支管的 HSTU 和它名下三通的 LSTU 一起从 DN300 换成 DN250，四只支撑件在另一个库里、都没被动过",
+      "change_types": [
+        "CT-D11",
+        "CT-C3",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_respec_pipe_apply.mac",
+      "restore": "support/compre_respec_pipe_restore.mac",
+      "db": 250132,
+      "touches_production": [
+        "/300-A-42/B1",
+        "/300-A-42/B1 名下的三通"
+      ],
+      "expected_net": "modified",
+      "companion_dbnum": 250104,
+      "needs_backend": "r6（含 #143）",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话"
+        },
+        "changed": [
+          "/300-A-42/B1：HSTU",
+          "/300-A-42/B1 名下的三通：LSTU"
+        ],
+        "rebuild": [
+          "/300-A-42/B1（250132 本窗）",
+          "/PS-01-00194",
+          "/PS-01-00195",
+          "/PS-01-00196",
+          "/PS-01-00197（四个都在 250104，经跨库交接）"
+        ],
+        "remove": [],
+        "untouched": [
+          "250104 其余 SUPPO 根",
+          "250132 其余根"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:4 changed/",
+            "4 个引用者在别的设计库里（{250104: 4}），交给跨库交接",
+            "cross-db handoff → dbnum=250104 (4 element(s)",
+            "queued as ModelOnly at session"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "not handed off",
+            "判不了"
+          ]
+        },
+        "handoff": {
+          "to": 250104,
+          "elements": [
+            "/PS-01-00194.1",
+            "/PS-01-00195.1",
+            "/PS-01-00196.1",
+            "/PS-01-00197.1"
+          ],
+          "task": "只带根名单的 ModelOnly，跑成"
+        },
+        "geometry": "四只支撑件各自下沿 +25.40、上沿 +34.70（同 C3-compre-hstu-xdb；四只都是 AN02-300mm）；管线两段管身都变细",
+        "geometry_e3d": "E3D 实测：支撑区正好四只变了——/PS-01-00194.1、195.1、196.1、197.1 各自下沿 +25.40、上沿 +34.70；其余 230 个组逐件相同。管线 /300-A-42：两段管身每侧缩 25.40，三通本体不变。还原之后全部回到改之前。",
+        "why": "同 C3-compre-hstu-xdb，多一条「被指的是管件、读的是 LSTU」的边。只换支管时指着三通的两只是对照（不该动），这里它们也该动。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-052419-support2-respec",
+      "layers": {
+        "tty": "pass（250132：48→49 apply，49→50 还原；250104 一直是 24）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单正好是支管的 HSTU 和三通的 LSTU。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（触发 4，跨库点名 4 只 → 250104 的 4 个根），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@24 250132@49：194 件逐件相同；/300-A-42 在 250104@24 250132@49：3 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "没跑：窗口在 250132 的 48 之后，T0 的终稿盖到 58，够用；用例还没写（先交汇报）。管道库这一半可以照 t1-compre-250132-chain 的样子接上",
+        "l3": "没跑（等隔离后端与 r6）"
+      }
+    },
+    {
+      "id": "D11-compre-both-libs",
+      "situation": "一次存盘同时动了管道库和支撑库：管道库里支管换管径（要把两只支撑件交给支撑库重算），支撑库里垫板换规格（支撑库自己这一窗的改动）",
+      "change_types": [
+        "CT-D11",
+        "CT-C3",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_both_libs_apply.mac",
+      "restore": "support/compre_both_libs_restore.mac",
+      "db": [
+        250132,
+        250104
+      ],
+      "touches_production": [
+        "/300-A-42/B1",
+        "/PS-01-00168/PLAT.1"
+      ],
+      "expected_net": "modified",
+      "needs_backend": "r6（含 #143）",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "有新会话（同一次存盘）"
+        },
+        "changed": [
+          "250132：/300-A-42/B1 的 HSTU",
+          "250104：/PS-01-00168/PLAT.1 的 LSTU"
+        ],
+        "rebuild": [
+          "/300-A-42/B1（250132 本窗）",
+          "/PS-01-00194、/PS-01-00195（250104，经跨库交接）",
+          "/PS-01-00168、/PS-01-00179（250104 自己这一窗：垫板的根和同库引用者的根）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00196、/PS-01-00197（三通没变）",
+          "250104 其余根"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "target_reads=[COMPRE→LSTU|HSTU:2 changed/",
+            "cross-db handoff → dbnum=250104 (2 element(s)",
+            "queued as ModelOnly at session"
+          ],
+          "250104": [
+            "target_reads=[COMPRE→LSTU|HSTU:1 changed/"
+          ]
+        },
+        "receipt_not_contains": {
+          "250132": [
+            "not handed off",
+            "判不了"
+          ]
+        },
+        "ordering": "交接过来的任务排在支撑库自己这一次存盘的会话上或之后；两窗都做完之后 /PS-01-00194.1、/PS-01-00195.1 是新外径下的形状。不能因为支撑库自己也有窗口而把交接丢掉，也不能重算在旧会话上。",
+        "geometry": "/PS-01-00194.1、/PS-01-00195.1 各自下沿 +25.40、上沿 +34.70；垫板、/PS-01-00179.1 的形状不变",
+        "geometry_e3d": "E3D 实测：支撑区正好两只变了（/PS-01-00194.1、/PS-01-00195.1，下沿 +25.40、上沿 +34.70）；其余 232 个组逐件相同。还原之后回到改之前。",
+        "why": "#143 的跨库交接（cross_db_handoff.rs）遇上对端库自己同时有窗口的情形：两条路各走各的，结果要收敛到同一份。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-052419-support2-respec",
+      "layers": {
+        "tty": "pass（250132：50→51、51→52；250104：24→25、25→26——两个库同一步各前进一个会话）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：管道库那一窗只有支管的 HSTU，支撑库那一窗只有垫板的 LSTU。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（管道库：触发 2、点名 2 只；支撑库：触发 1、同库多拉 1 根），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@25 250132@51：194 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端与 r6）：两窗的先后与交接的落点只有这一层看得出来"
+      }
+    },
+    {
+      "id": "A1-compre-ctl-desc",
+      "situation": "对照：被支撑的支管只改了描述，另外把管径规格原样重写了一遍",
+      "change_types": [
+        "CT-A1",
+        "CT-A11",
+        "CT-D11"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_ctl_desc_apply.mac",
+      "restore": "support/compre_ctl_desc_restore.mac",
+      "db": 250132,
+      "touches_production": [
+        "/300-A-42/B1"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话"
+        },
+        "changed": [
+          "/300-A-42/B1：DESC（HSTU 是同值重写，E3D 没有把它记成改动）"
+        ],
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/300-A-42/B1 自己（只有元数据）",
+          "/PS-01-00194、/PS-01-00195、/PS-01-00196、/PS-01-00197",
+          "250104：没有任务"
+        ],
+        "receipt_not_contains": {
+          "250132": [
+            "cross-db handoff →",
+            "判不了"
+          ]
+        },
+        "receipt_note": "COMPRE 那两条边要么不查（元数据门在前），要么查到了记「0 changed/2 unchanged」——两种都对；不许出现 changed ≥ 1",
+        "geometry": "都不变",
+        "geometry_e3d": "E3D 实测：支撑区 234 个组逐件相同。",
+        "why": "被指件只改名 / 改描述不触发（09-04 清单第 16 行）；同值写不产生改动（CT-A11）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-053002-support2-target",
+      "layers": {
+        "tty": "pass（250132：52→53 apply，53→54 写回 DESC UNSET；250104 一直是 26）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单只有 DESC——同值重写的 HSTU 不在里面；gen-model 这一侧支管不进重建名单（e3d-model 的计划把它列成候选单元，是这只探针不带元数据门）。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（不许触发、不许交接），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "pass：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@26 250132@53：194 件逐件相同。还原之后的时刻逐件相同。",
+        "replay": "没跑：窗口在 250132 的 48 之后，T0 的终稿盖到 58，够用；用例还没写（先交汇报）。管道库这一半可以照 t1-compre-250132-chain 的样子接上",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "D11-compre-target-deleted",
+      "situation": "被支撑的支管被删了：支撑件在另一个库里、自己没被动过，它的引用变成悬空",
+      "change_types": [
+        "CT-D11",
+        "CT-S3",
+        "CT-C3"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_target_deleted_apply.mac",
+      "restore": null,
+      "db": 250132,
+      "touches_production": [
+        "/PS-01-00194.1（前置里改托到自建支管，收尾写回）"
+      ],
+      "expected_net": "deleted",
+      "chain": "support/compre_target_deleted",
+      "companion_dbnum": 250104,
+      "needs_backend": "r6（含 #143）",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "这一腿没有新会话"
+        },
+        "changed": [
+          "/AIOS-SUITE-T1-S7-B1（自建的支管）：删除"
+        ],
+        "rebuild": [
+          "/PS-01-00194（250104，经跨库交接）"
+        ],
+        "remove": [
+          "/AIOS-SUITE-T1-S7-B1 的模型"
+        ],
+        "untouched": [
+          "/PS-01-00195 等其余 SUPPO 根"
+        ],
+        "receipt_contains": {
+          "250132": [
+            "design-reference cascade on",
+            "target_reads=[COMPRE→LSTU|HSTU:1 changed/",
+            "cross-db handoff → dbnum=250104 (1 element(s)"
+          ]
+        },
+        "handoff": {
+          "to": 250104,
+          "elements": [
+            "/PS-01-00194.1"
+          ],
+          "task": "只带根名单的 ModelOnly，跑成"
+        },
+        "geometry": "以 E3D 为准：引用悬空之后这只件照 300 画——局部系 z [-250.000, -102.404]（改前 [-261.925, -118.694]）",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00194.1 下沿 +11.92、上沿 +16.29；其余 233 个组逐件相同。宏日志里 Q COMPRE 显示 Unknown Ref (=2013286676/4145)。",
+        "why": "被引用件的 HSTU 从有到没有，也是「窗口两端取值不同」（reverse_reference.rs DESIGN_CASCADE_TARGET_READS）；引用者在别的库 → 跨库交接。删除这一支设计文档没有单独写，照「该有的行为」写：E3D 里支撑件确实变了。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错）：COMPRE 为空 / 悬空时生成程序按管外径 0 画，E3D 不是——悬空时 E3D 按 300 画（下沿 -250.0），生成程序按 0 画（下沿 -100.0），差 150 mm。草稿票 agents/T1/drafts/新票草稿-支撑件COMPRE为空或悬空时管外径不该按0画.md。增量这一半（该不该重算、重算了谁）不受影响，等回放层验。",
+      "evidence": "T1/20261112-053002-support2-target",
+      "layers": {
+        "tty": "pass（250132：55→56；250104 停在 27。前置 54→55 / 26→27，收尾 57→58 / 27→28）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针的期望格式只写属性改动，新建 / 删除的这四窗没核。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（触发 1，跨库点名 1 只 → 250104 的 1 个根），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "已知缺口（照缺口的样子红着）：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@27 250132@56：194 件里 193 件相同，/PS-01-00194.1 差 150.0 mm。写回之后的时刻逐件相同。",
+        "replay": "没跑：窗口在 250132 的 48 之后，T0 的终稿盖到 58，够用；用例还没写（先交汇报）。管道库这一半可以照 t1-compre-250132-chain 的样子接上",
+        "l3": "没跑（等隔离后端与 r6）：删除这一支点不点名是增量这边要验的；几何那一半带着已知缺口"
+      }
+    },
+    {
+      "id": "S4-compre-target-recreated",
+      "situation": "对照：被删的支管同名重建——新的是另一个 refno，支撑件的引用仍然悬空",
+      "change_types": [
+        "CT-S4",
+        "CT-D11"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_target_recreated_apply.mac",
+      "restore": null,
+      "db": 250132,
+      "touches_production": [],
+      "expected_net": "modified",
+      "chain": "support/compre_target_deleted",
+      "companion_dbnum": 250104,
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "这一腿没有新会话"
+        },
+        "changed": [
+          "新建 /AIOS-SUITE-T1-S7-B1（=2013286676/4146；被删的那根是 /4145）"
+        ],
+        "rebuild": [
+          "新支管自己"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00194：COMPRE 记的是旧 refno，仍悬空，不该被点名",
+          "250104：没有任务"
+        ],
+        "receipt_not_contains": {
+          "250132": [
+            "cross-db handoff →"
+          ]
+        },
+        "geometry": "支撑区不变（/PS-01-00194.1 保持悬空时的形状）",
+        "geometry_e3d": "E3D 实测：支撑区 234 个组与上一步逐件相同；Q COMPRE 仍是 Unknown Ref (=2013286676/4145)。",
+        "why": "引用按 refno 记，不按名字；同名重建不唤醒悬空引用。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错）：COMPRE 为空 / 悬空时生成程序按管外径 0 画，E3D 不是——这一步之后支撑件仍是悬空时的形状，带着同一个缺口。草稿票 agents/T1/drafts/新票草稿-支撑件COMPRE为空或悬空时管外径不该按0画.md。增量这一半（该不该重算、重算了谁）不受影响，等回放层验。",
+      "evidence": "T1/20261112-053002-support2-target",
+      "layers": {
+        "tty": "pass（250132：56→57；250104 停在 27）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针没核（新建窗）。含 #143 的规划器：逐窗期望写在 agents/T1/chain/support2-20261112/measure-143-expect.json（不该碰到任何 COMPRE 边），**没跑**——第一批用的那份库单测程序 05:52 发现已被清掉（requests/T1-03）。",
+        "full_gen": "已知缺口（照缺口的样子红着）：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@27 250132@57：194 件里 193 件相同，/PS-01-00194.1 差 150.0 mm。写回之后的时刻逐件相同。",
+        "replay": "没跑：窗口在 250132 的 48 之后，T0 的终稿盖到 58，够用；用例还没写（先交汇报）。管道库这一半可以照 t1-compre-250132-chain 的样子接上",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A2-anci-compre-null",
+      "situation": "支撑件自己的 COMPRE 被清空（不再托着任何东西）",
+      "change_types": [
+        "CT-A2",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#132"
+      ],
+      "apply": "support/anci_compre_null_apply.mac",
+      "restore": "support/anci_compre_null_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00194.1"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00194.1：COMPRE（→ 空引用）"
+        ],
+        "rebuild": [
+          "/PS-01-00194"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00195 等其余 SUPPO 根"
+        ],
+        "metadata_gate": "同 A2-anci-compre：不能当成纯元数据放过去",
+        "geometry": "以 E3D 为准：没有被支撑件可问时这只件照 300 画——局部系 z [-250.000, -102.404]（和引用悬空时一样）",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00194.1 下沿 +11.92、上沿 +16.29；写回之后回到原样。",
+        "why": "#132：COMPRE 自己变了就得重算。空引用这一档以前没有样本（样例工程 234 只带 COMPRE 的支撑件没有一只是空的）。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错）：COMPRE 为空 / 悬空时生成程序按管外径 0 画，E3D 不是——清空时 E3D 按 300 画（下沿 -250.0），生成程序按 0 画（下沿 -100.0），差 150 mm。草稿票 agents/T1/drafts/新票草稿-支撑件COMPRE为空或悬空时管外径不该按0画.md。增量这一半（该不该重算、重算了谁）不受影响，等回放层验。",
+      "evidence": "T1/20261112-054310-support2-null",
+      "layers": {
+        "tty": "pass（250104：28→29 apply，29→30 写回）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单只有 /PS-01-00194.1 的 COMPRE，根 /PS-01-00194 在重建名单里。",
+        "full_gen": "已知缺口（照缺口的样子红着）：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@29 250132@58：194 件里 193 件相同，/PS-01-00194.1 差 150.0 mm。写回之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A2-anci-compre-null-bore",
+      "situation": "分辨用的一对：COMPRE 清空的同时把支撑件上一级 SUPC 的口径改掉（HBOR 300 → 250、TBOR 300 → 200）",
+      "change_types": [
+        "CT-A2",
+        "CT-A6",
+        "CT-A4"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#132"
+      ],
+      "apply": "support/anci_compre_null_bore_apply.mac",
+      "restore": "support/anci_compre_null_bore_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00194.1",
+        "/PS-01-00194/B1"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00194.1：COMPRE（→ 空引用）",
+          "/PS-01-00194/B1：HBOR、TBOR"
+        ],
+        "rebuild": [
+          "/PS-01-00194"
+        ],
+        "remove": [],
+        "untouched": [
+          "其余 SUPPO 根"
+        ],
+        "geometry": "以 E3D 为准：和只清空 COMPRE 完全一样（局部系 z [-250.000, -102.404]）——SUPC 的口径不起作用",
+        "geometry_e3d": "E3D 实测：/PS-01-00194.1 与「只清空」那一步逐点相同。这一步的用处是排除「E3D 的 300 取自上一级 SUPC 的口径」。",
+        "why": "给草稿票定位用：E3D 的兜底值不是 SUPC 的 HBOR / TBOR。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错）：COMPRE 为空 / 悬空时生成程序按管外径 0 画，E3D 不是——同 A2-anci-compre-null。草稿票 agents/T1/drafts/新票草稿-支撑件COMPRE为空或悬空时管外径不该按0画.md。增量这一半（该不该重算、重算了谁）不受影响，等回放层验。",
+      "evidence": "T1/20261112-054627-support2-bore",
+      "layers": {
+        "tty": "pass（250104：30→31 apply，31→32 写回）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单是 COMPRE 加 SUPC 的 HBOR、TBOR。",
+        "full_gen": "已知缺口（照缺口的样子红着）：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@31 250132@58：194 件里 193 件相同，/PS-01-00194.1 差 150.0 mm。写回之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A2-anci-compre-null-dn100",
+      "situation": "另一只、另一种型号的支撑件（DN100，GT06）COMPRE 被清空",
+      "change_types": [
+        "CT-A2",
+        "CT-A6"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#132"
+      ],
+      "apply": "support/anci_compre_null_dn100_apply.mac",
+      "restore": "support/anci_compre_null_dn100_restore.mac",
+      "db": 250104,
+      "touches_production": [
+        "/PS-01-00217.4"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250104": "有新会话",
+          "250132": "没有新会话"
+        },
+        "changed": [
+          "/PS-01-00217.4：COMPRE（→ 空引用）"
+        ],
+        "rebuild": [
+          "/PS-01-00217"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00194 等其余 SUPPO 根"
+        ],
+        "geometry": "以 E3D 为准：整件沿自己的 -z 挪 50.0（局部系 z [-20.000, 20.000] → [-69.998, -29.998]）",
+        "geometry_e3d": "E3D 实测：支撑区正好一只变了——/PS-01-00217.4；写回之后回到原样。",
+        "why": "同 A2-anci-compre-null；换一档口径、换一种型号，给草稿票多一个数据点（50 = 100 / 2）。"
+      },
+      "status": "known_gap",
+      "known_gap": "几何缺口，和增量无关（全量生成也错）：COMPRE 为空 / 悬空时生成程序按管外径 0 画，E3D 不是——清空时 E3D 把整件挪了 50.0，生成程序一点没动。草稿票 agents/T1/drafts/新票草稿-支撑件COMPRE为空或悬空时管外径不该按0画.md。增量这一半（该不该重算、重算了谁）不受影响，等回放层验。",
+      "evidence": "T1/20261112-054821-support2-dn100",
+      "layers": {
+        "tty": "pass（250104：32→33 apply，33→34 写回）",
+        "rvm_truth": "E3D 导出前后对拍过（数在 expect.geometry_e3d）；套件格式的期望模型这一批还没加",
+        "plan": "旧探针（11-08 编的双规划器，不做设计引用反查）pass：变更清单只有 /PS-01-00217.4 的 COMPRE，根 /PS-01-00217 在重建名单里。",
+        "full_gen": "已知缺口（照缺口的样子红着）：改之后的库文件上 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/ZONE-SUPPORTS-AREA01 在 250104@33 250132@58：194 件里 193 件相同，/PS-01-00217.4 差 50.0 mm。写回之后的时刻逐件相同。",
+        "replay": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "S2-bulk-copy-only",
+      "situation": "大窗的对照：管道库里只成批复制了一片（1561 个新元素），被支撑的支管没变",
+      "change_types": [
+        "CT-S2",
+        "CT-W10",
+        "CT-D11"
+      ],
+      "cascade_row": 16,
+      "name_case": null,
+      "tickets": [
+        "gen-model#143"
+      ],
+      "apply": "support/compre_bulk_copy_only_apply.mac",
+      "restore": "support/compre_bulk_copy_only_restore.mac",
+      "db": 250132,
+      "companion_dbnum": 250104,
+      "touches_production": [],
+      "expected_net": "modified",
+      "expect": {
+        "sessions": {
+          "250132": "有新会话",
+          "250104": "没有新会话"
+        },
+        "changed": [
+          "新建 /AIOS-SUITE-T1-BULK 及其下两份管道区的拷贝（1564 个元素）"
+        ],
+        "rebuild": [
+          "新建的那些管线自己"
+        ],
+        "remove": [],
+        "untouched": [
+          "/PS-01-00194、/PS-01-00195 等全部 SUPPO 根",
+          "250104：没有任务"
+        ],
+        "receipt_not_contains": {
+          "250132": [
+            "cross-db handoff →"
+          ]
+        },
+        "receipt_note": "窗口大到反查超预算时回执照实说判不了；带条件那一类的表整张走一遍之后该是「0 changed」。与 C3-compre-bulk 成对：那一条同样的大窗里多换了一处管径，要「2 changed、交接 2 只」。",
+        "geometry": "支撑区不变",
+        "geometry_e3d": "E3D 实测：复制之后导出的支撑区与基线逐件相同（全量生成 194 件也逐件相同）。",
+        "why": "给管线行为那一组（T4）当对照腿：同样大的窗，没有管径变化，不该有交接。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-060044-support2-copyonly",
+      "layers": {
+        "tty": "pass（250132：58→59 复制，59→60 删除；250104 一直是 34）",
+        "rvm_truth": "E3D 导出对拍过（支撑区不变）；套件格式的期望模型这一批还没加",
+        "plan": "没跑（旧探针的期望格式不写新建 / 删除；含 #143 的那份程序不在了，requests/T1-03）",
+        "full_gen": "pass：/ZONE-SUPPORTS-AREA01 在 250104@34 250132@59：194 件逐件相同",
+        "replay": "没跑：窗口在 250132 的 48 之后，T0 的终稿盖到 58，够用；用例还没写（先交汇报）。管道库这一半可以照 t1-compre-250132-chain 的样子接上",
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [
+    {
+      "id": "support/compre_target_deleted",
+      "note": "四腿按序连续跑：前置（自建支管 + 支撑件改托过去，两库同存）→ 删掉自建支管 → 同名重建 → 收尾（COMPRE 写回、删自建 SITE，两库同存）。整条链首尾 E3D 导出逐件相同。入口里前置和收尾两步要点名两个库（@250132+250104）。",
+      "legs": [
+        "support/compre_target_own_setup.mac",
+        "support/compre_target_deleted_apply.mac",
+        "support/compre_target_recreated_apply.mac",
+        "support/compre_target_own_teardown.mac"
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "macro": "support/probe_aps_compre.mac",
+      "purpose": "只读探针加三处试写（不存盘）：靶子都在不在、HSTU / LSTU / COMPRE 能不能按名字直接赋值、支撑件的世界位置与朝向。这一片的用例开跑之前先跑它。",
+      "no_savework": true
+    },
+    {
+      "macro": "support/probe_aps_batch2.mac",
+      "no_savework": true,
+      "purpose": "第二批开跑之前的只读探针（带 ONERROR CONTINUE，不存盘）：文本属性怎么写回没设、支撑件能不能改托到同库的垫板、型钢的 BANG、三通的 LSTU、在管道库里自建支管再删掉之后 COMPRE 显示成什么。"
+    }
+  ],
+  "not_encoded": [
+    {
+      "id": "C1-compre-catalogue",
+      "reason": "目录那一头（改管子目录件的 PARA[2]，启动目录复核多走一跳）要进 PARAGON 改目录库，重；真机步骤里也写着可以后做。",
+      "next": "第三批；做法照取证代理进 Paragon 的先例（des.exe 加 -module=81），要入口支持。"
+    }
+  ],
+  "verified_syntax": {
+    "note": "2026-11-12 在 APS 私有副本上实测（探针加六个用例实跑）。",
+    "list": [
+      "HSTU /规格件名、LSTU /规格件名、COMPRE /元素名：按名字直接赋值（HSTU 换了之后 E3D 不改 HBOR）",
+      "MDS 建的耳轴垫板（PLAT）没有锁，LSTU 可以直接改",
+      "按名字导航到别的库里的元素、到规格库里的规格件（/A3B/PA250）",
+      "TEE 1（支管成员按类型加序号导航）；成员 POS 写绝对值；HPOS 写绝对值（不带 WRT）",
+      "走到生产 SITE 再 OWNER 上跳到该库的 WORLD，在那里 NEW SITE（建进同一个库）",
+      "NEW ZONE 之后 COPY /整个 ZONE：780 个元素一次带过来，不往别的库写",
+      "APS 的库一次 SAVEWORK 只多一个会话（AMS 的 db8000 是两个：存盘加 QUIT 尾会话）；导出不记账",
+      "DESC UNSET 把文本属性写回「没设」（DESC '' 也行）；ANCI 没有 DESC 这个属性",
+      "COMPRE =0/0 清空引用（Q COMPRE 显示 Nulref）；被指的元素删掉之后 Q COMPRE 显示 Unknown Ref (=原 refno)，同名重建不会接回去",
+      "FIRST TEE 从支管走到它名下第一个三通；LSTU /规格件名 在管件上可以直接赋值",
+      "BANG <角度> 在 GENSEC 上可以直接赋值；HBOR / TBOR 在 SUPC 上可以直接赋值",
+      "同值重写（HSTU 写成它原来的值）E3D 不记成改动：那一窗的变更清单里没有它",
+      "APS 里一次 SAVEWORK 写两个库时两个库各前进一个会话（入口用 @250132+250104 点名）",
+      "PIPE / BRAN 当导出根要用 exportnp:（它们没有 POS，export: 会报错）"
+    ]
+  },
+  "rvm_truth": {
+    "models": {
+      "/ZONE-SUPPORTS-AREA01": "support/rvm-truth.supports.json",
+      "/300-A-42": "support/rvm-truth.pipe-300-a-42.json",
+      "/100-A-20": "support/rvm-truth.pipe-100-a-20.json"
+    },
+    "note": "支撑区整个 ZONE 一起导（250104，234 个带图元的组），这样「不该动的没动」才判得出来；管道那一侧按 PIPE 导（没有 POS，导出步用 exportnp）。Compare-SuiteRvmTruth.ps1 -Model <对应的模型> -Root <导出根> 逐腿判：apply 腿与它之前那份比，restore 腿与 apply 之前那份比。2026-11-12 六个用例 16 对都是 pass。"
+  },
+  "full_gen": {
+    "what": "全量生成层：链上每个有 E3D 导出的时刻，在那一时刻的库文件上把同一个根全量生成，与 E3D 的导出逐件对拍。不开 E3D、不起后端、不连库、不编译。",
+    "plan": "agents/T1/geom/plan.json",
+    "tool": "agents/T1/tools/geom_check_all.py（接在 Run-T1Checks.ps1 里）",
+    "program": "e3d-model 的 gen_ams + rvm_compare，2026-11-12 04:30 编出的一份（e3d-model 6ac8a12 加 2 个未提交文件；改动都在关节 / 标架上，支撑件建体代码没动）",
+    "result": "59 项全过：第一批 30 个时刻加 3 个交叉核对，第二批 26 个时刻（其中 5 个是已知缺口，照缺口的样子红着：COMPRE 为空 / 悬空）",
+    "answers": "生成程序照这份库文件全量算，算出来的和 E3D 一样不一样。答不了的：这一窗该不该重算、重算了谁——那是回放层和隔离后端的事。"
+  },
+  "plan_143": {
+    "batch1": "12 窗逐项与期望相同（agents/T1/chain/support-20261112/measure-143-last8.log）",
+    "batch2": "26 窗的期望已写（agents/T1/chain/support2-20261112/measure-143-expect.json），没跑：那份库单测程序被清掉了（requests/T1-03）"
+  },
+  "replay": {
+    "cases_dir": "agents/T1/replay/cases-aps",
+    "done": [
+      "t1-compre-hstu-xdb-solo（本地主线 / r6 过，r5 按期望红）",
+      "t1-compre-250132-chain（r6 过，八窗）"
+    ],
+    "blocked": "起不来：支撑库 250104 在回放的后端上基线失败（CATA 依赖闭包：单个目录元素 15512_5547 超出数据事务上限），requests/T1-05",
+    "evidence": [
+      "T1/replay-20261112-065158-hstu-solo-main2",
+      "T1/replay-20261112-065926-hstu-solo-r6",
+      "T1/replay-20261112-071122-hstu-solo-r5",
+      "T1/replay-20261112-071852-chain132-r6"
+    ]
+  }
+}

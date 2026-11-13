@@ -1,0 +1,21 @@
+-- 登记: gen-model #143（CT-D11） | 语义: support/compre_both_libs_apply.mac 的还原——支管 HSTU 写回 /A3B/PA300、垫板 LSTU 写回 /A3B/PA40。
+-- expected_net: modified | apply 搭档: support/compre_both_libs_apply.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，全部写绝对值，重跑幂等。不用世界锚点，按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-BOTH-LIBS-RESTORE-ALIVE
+/300-A-42/B1
+Q REF
+Q NAME
+Q HSTU
+HSTU /A3B/PA300
+Q HSTU
+/PS-01-00168/PLAT.1
+Q REF
+Q NAME
+Q LSTU
+LSTU /A3B/PA40
+Q LSTU
+SAVEWORK 'AIOS suite support/compre_both_libs restore: /300-A-42/B1 HSTU -> PA300 and PLAT.1 LSTU -> PA40 in one save'
+$P SUITE-SUPPORT-COMPRE-BOTH-LIBS-RESTORE-DONE
+ALPHA LOG END

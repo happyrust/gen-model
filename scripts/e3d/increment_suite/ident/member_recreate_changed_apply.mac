@@ -1,0 +1,31 @@
+-- 登记: A02（变更类型 CT-S4 + CT-A4；按名称案例 A-04） | 语义: 同一 SAVEWORK 里删掉 EQ-M 的 BOX-M2，在原位（M1 之后）建一个同名的，但 XLEN 从 400 改成 700；设备自己不动
+-- expected_net: modified（按 refno 是成员 deleted + added，根 EQ-M 重建；按名是 BOX-M2 的 XLEN 变了） | restore 搭档: ident/member_recreate_changed_restore.mac
+-- 预期 gen-model（按 refno）: EQ-M regen 一次（根 refno 不变），行数不变；没有 datacenter_delete（下属成员不记）；EQ-U 不动。
+-- 重建位置: 先导航到 BOX-M1 再 NEW，新 BOX 插在 M1 后面，成员序仍是 M1, M2, M3。前后 Q MEMB 留证。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-MEMBER-RECREATE-CHANGED-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-T3-BOX-M2') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q XLEN
+  DELETE BOX
+ENDDO
+/AIOS-SUITE-T3-BOX-M1
+NEW BOX XLEN 700 YLEN 400 ZLEN 600
+NAME /AIOS-SUITE-T3-BOX-M2
+POS E 1500 N 0 U 0
+Q REF
+Q NAME
+Q XLEN
+Q OWNE
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/member_recreate_changed apply: BOX-M2 recreated with XLEN 700'
+$P SUITE-T3-MEMBER-RECREATE-CHANGED-APPLY-DONE
+ALPHA LOG END

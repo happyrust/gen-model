@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "suite": "ams-increment-in-place",
+  "scope": "single-target",
+  "tolerance_mm": 1.0,
+  "restore_policy": "restored snapshot must match before snapshot by member name and AABB within tolerance",
+  "cases": {
+    "equi-move": {
+      "target": "/1-LNR-Q005-PJ",
+      "apply": { "kind": "moved", "delta_mm": [500, 0, 0], "unchanged_elsewhere": true },
+      "restore": { "kind": "equals_before" }
+    },
+    "pipe-whole": {
+      "target": "/1RX-345",
+      "apply": { "kind": "moved", "delta_mm": [500, 0, 0], "unchanged_elsewhere": true },
+      "restore": { "kind": "equals_before" }
+    }
+  },
+  "evidence": {
+    "required": [
+      "rvm-before.json",
+      "rvm-after.json",
+      "rvm-restored.json",
+      "summary.json"
+    ],
+    "identity": "compare member names; refno changes are allowed",
+    "blocked_on": [
+      "RVM export missing",
+      "rvm_verify import failure",
+      "restore snapshot differs beyond tolerance",
+      "unresolved recovery state"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+-- 登记: H03 | 语义: 两台设备各自落回原位（绝对值） | apply 搭档: pipeline/two_db_save_apply.mac | 一次存盘写两个库
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-TWO-DB-SAVE-RESTORE-ALIVE
+/AIOS-SUITE-T4-EQ-MV
+Q REF
+Q NAME
+POS E 125000 N 70000 U 0
+Q POS
+/AIOS-SUITE-T4-EQ-X
+Q REF
+Q NAME
+POS E 125000 N 75000 U 0
+Q POS
+SAVEWORK 'AIOS suite T4 pipeline/two_db_save restore: both back'
+$P SUITE-T4-TWO-DB-SAVE-RESTORE-DONE
+ALPHA LOG END

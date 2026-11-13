@@ -1,0 +1,32 @@
+-- 登记: D5-ctl-sctn-free-aps | 语义: 把斜梁 R01 的 BANG 写回 0
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/aps_ctl_sctn_free_apply.mac 的 restore | 库: aps7166（APS 副本，MDB /SDNF）
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：只重建 R01 一件。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-CTL-SCTN-FREE-RESTORE-ALIVE
+/SB3/PB1/4/POR/R01
+Q REF
+Q NAME
+Q TYPE
+Q BANG
+BANG 0
+Q BANG
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+=23550/379
+Q REF
+Q NAME
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/aps_ctl_sctn_free restore: rafter R01 BANG -> 0'
+$P SUITE-T2-JOINT-APS-CTL-SCTN-FREE-RESTORE-DONE
+ALPHA LOG END

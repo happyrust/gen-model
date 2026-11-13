@@ -1,0 +1,1309 @@
+{
+  "version": 1,
+  "owner": "T3",
+  "topic": "window",
+  "copy": "ams",
+  "sites": [
+    "/AIOS-SUITE-T3",
+    "/AIOS-SUITE-T3-S2"
+  ],
+  "setup": "ident/setup_t3.mac",
+  "teardown": "ident/teardown_t3.mac",
+  "description": "会话窗口的形状：存了但没改、只动元数据、改了又改回原样、同一窗里先建后删，以及把几条腿并进同一个消费窗口（一窗里多次保存）。前四个是 E3D 里要跑的宏用例（cases）；并窗的那些不用再开 E3D——同一条录下来的会话链，回放层取不同的起止会话就是不同形状的窗（replay_windows）。期望分两栏，口径同 manifest.d/T3-ident.json 的 expect_vocabulary。",
+  "setup_note": "T3 的语料是 db8000 里自己的两个 SITE，由 ident/setup_t3.mac 建：/AIOS-SUITE-T3（下面区域 /AIOS-SUITE-T3-Z 和第二批加的 /AIOS-SUITE-T3-Z2）、第二批加的 /AIOS-SUITE-T3-S2。幂等，先按名删自己的 SITE 再建；不依赖公共基线 /AIOS-SUITE-8000，只读地 COPY 一条生产支管。T3 的各份片段共用这一套语料。这一份里的用例只用到 /AIOS-SUITE-T3-Z 下面的元素；RVM 导出根是 /AIOS-SUITE-T3，成员键都以 AIOS-SUITE-T3-Z/ 开头。第二批改 setup 时没有动这些元素的建法和次序（只在区域末尾加了一台 EQ-SUB、给 EQ-CP 加了 FUNC / PURP / 两个自定义属性的基线值）。",
+  "cases": [
+    {
+      "id": "W3-save-nochange",
+      "situation": "用户进了会话，什么都没改，点了一次保存就退出。",
+      "change_types": [
+        "CT-W3"
+      ],
+      "name_case": "G02",
+      "name_keyed_cases": [
+        "G-02"
+      ],
+      "tickets": [],
+      "apply": "window/save_nochange.mac",
+      "restore": null,
+      "db": 8000,
+      "expected_net": "unchanged",
+      "registration": "A06",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "窗口里没有设计元素的改动：0 候选，无动作（increment-change-types.md CT-W3；回放层登录 / 尾会话的先例 ams8000-equi-move-chain 的 726、729、731 步，unit_count 0、未触根仍 AlreadyAvailable）。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "sessions": "会话号走几步以实测为准：同值写回的几条腿（A09-*）实测只 +1（退出时的尾会话），这里应相同。+0 也算过（没有新会话，后端什么都不该做）；+2 说明空存也写业务会话，那一会话里不该有任何设计元素的候选。",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md G-02（提资之后没有任何改动）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [],
+              "units_all": "unchanged，不换号",
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035251-window-1",
+      "rvm_truth": {
+        "window/save_nochange.mac": {
+          "aabb_blind": true,
+          "note": "什么都没改：按名快照与跑之前完全相等。"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "save_nochange.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/meta_only_apply.mac、window/attr_roundtrip_apply.mac 合在两次导出之间）"
+        ],
+        "plan_offline": [
+          "apply：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg4-merged → 1281：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-offset1 → 1281：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-offset2 → 1281：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-split → 1281：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A1-meta-only",
+      "situation": "用户只改了一台带几何的设备的描述，别的都没动，然后保存。",
+      "change_types": [
+        "CT-A1"
+      ],
+      "name_case": "B02",
+      "name_keyed_cases": [
+        "B-02"
+      ],
+      "tickets": [
+        "gen-model#76"
+      ],
+      "apply": "window/meta_only_apply.mac",
+      "restore": "window/meta_only_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A07",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U"
+        ],
+        "why": "只动 DESC：元数据门的 metadata_only 一档，记 no_model，不上卷不级联（src/data_interface/window_root_plan.rs 的 change_metadata_tier；先例 attr/desc）。 被改的设备自己的模型行不该动（gen-model #76 前一半）；名字没变，没有 datacenter_delete。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "metadata_only": 1,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          },
+          "restore": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 0,
+              "metadata_only": 1,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md B-02",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "DESC 'AIOS T3 baseline' → 'AIOS T3 meta changed'"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              },
+              "note": "名称、描述和全部用户自定义属性一律算实质内容，哪怕不影响模型：提资内容里要用到。按 refno 这一窗不重建模型，两栏在这里说的不是一回事——按名称口径省的是提资，不省也不多做模型生成。"
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035251-window-1",
+      "rvm_truth": {
+        "window/meta_only_apply.mac": {
+          "aabb_blind": true,
+          "note": "纯元数据。"
+        },
+        "window/meta_only_restore.mac": {
+          "equals_state_before": "window/meta_only_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "meta_only_apply.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/save_nochange.mac、window/attr_roundtrip_apply.mac 合在两次导出之间）",
+          "meta_only_restore.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/attr_roundtrip_restore.mac、window/create_delete_same_window.mac 合在两次导出之间）"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "restore 腿：t3-seg4-offset1 → 1290：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-offset2 → 1283：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "restore 腿：t3-seg4-offset2 → 1290：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-split → 1283：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "restore 腿：t3-seg4-split → 1290：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A4-attr-roundtrip",
+      "situation": "用户只改了设备下面一个有名 BOX 的长度并保存；后来又把它改回原来的长度并保存。",
+      "change_types": [
+        "CT-A4"
+      ],
+      "name_case": "B04",
+      "name_keyed_cases": [
+        "B-04",
+        "G-03"
+      ],
+      "tickets": [],
+      "apply": "window/attr_roundtrip_apply.mac",
+      "restore": "window/attr_roundtrip_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "registration": "A02",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-M"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "子件尺寸变：几何属性（DCHC=4），上卷到最近单元、根 EQ-M 重建（先例 B01-resize）。两腿分开看各重建一次。 两腿并成一窗的期望见 replay_windows 的 W2-attr-roundtrip-merged。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数不变（3），并集包围盒 E 方向下界外扩 150",
+            "plan_line": {
+              "inserted": 0,
+              "modified": 2,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "修改 2 条 = BOX-M1（XLEN）+ 属主设备 EQ-M（只有 CACHID 这个戳变了）。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          },
+          "restore": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 2,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "修改 2 条 = BOX-M1（XLEN）+ 属主设备 EQ-M（只有 CACHID 这个戳变了）。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md B-04（apply）；G-03（改过并提资、之后又改回原样）",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M1",
+                  "type": "BOX",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "XLEN 1000 → 1300"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "type": "EQUI",
+                  "category": "unchanged",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "restore": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-M1",
+                  "type": "BOX",
+                  "category": "modified",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-M",
+                  "summary": "XLEN 1300 → 1000"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "modified",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "premise": "apply 之后提资过一次（G-03）：基准是上一次提资，不是第一次",
+                "action": "resend",
+                "preview_column": "重发"
+              }
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-M",
+                  "category": "unchanged",
+                  "renumbered": false
+                }
+              ],
+              "delivery": {
+                "premise": "两次保存之间没有提资过",
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035251-window-1",
+      "rvm_truth": {
+        "window/attr_roundtrip_apply.mac": {
+          "resized": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-M/AIOS-SUITE-T3-BOX-M1": [
+              99350,
+              29800,
+              -100,
+              100650,
+              30200,
+              100
+            ]
+          },
+          "note": "BOX-M1 中心 (100000, 30000, 0)，基线 1000×400×200；XLEN 改 1300 后 E 方向各外扩 150。数值照坐标算出，没有实测过。"
+        },
+        "window/attr_roundtrip_restore.mac": {
+          "equals_state_before": "window/attr_roundtrip_apply.mac"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "attr_roundtrip_apply.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/save_nochange.mac、window/meta_only_apply.mac 合在两次导出之间）",
+          "attr_roundtrip_restore.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/meta_only_restore.mac、window/create_delete_same_window.mac 合在两次导出之间）"
+        ],
+        "plan_offline": [
+          "apply：过",
+          "restore：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "restore 腿：t3-seg4-offset1 → 1288：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 1、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-split → 1285：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 1、清掉 0、派生 0）",
+          "restore 腿：t3-seg4-split → 1288：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 1、清掉 0、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "W1-create-delete-unit",
+      "situation": "用户新建了一台设备，没保存就又把它整台删了，然后保存。",
+      "change_types": [
+        "CT-W1",
+        "CT-S1",
+        "CT-S3"
+      ],
+      "name_case": null,
+      "name_keyed_cases": [],
+      "tickets": [],
+      "apply": "window/create_delete_same_window.mac",
+      "restore": null,
+      "db": 8000,
+      "expected_net": "unchanged",
+      "registration": "A08",
+      "expect": {
+        "rebuild": [],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-U",
+          "/AIOS-SUITE-T3-BRAN-R"
+        ],
+        "why": "gen-model 只看两端净差：同窗内建了又删的元素在两端的索引里都不存在，一个候选都不产生（increment-change-types.md §0 与 CT-W1；P80 是子件一级的先例）。 ZONE 的成员表改了又改回：记录即使被重写，逐元素差分比下来内容没动，记 unchanged、不算改动（vendor/shared/e3d-model/src/increment.rs 的 IncrementReport.unchanged）。 这台设备的 refno 从没发布过，也不在净窗口里，不该有 datacenter_delete。",
+        "note": "rebuild / remove / untouched 说的是第一条腿（apply）。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里。",
+        "legs": {
+          "apply": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "never_seen": [
+              "/AIOS-SUITE-T3-EQ-TMP"
+            ],
+            "sessions": "E3D 这一存写不写业务会话以实测为准。写了的话，净窗口里 ZONE 的记录可能被重写，但成员表两端相同，应判 unchanged。",
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            }
+          }
+        },
+        "name_keyed": {
+          "source": "案例文档没有单列这一种；按「名称只在两侧都不存在就不出行」推",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [],
+              "absent_rows": [
+                "/AIOS-SUITE-T3-EQ-TMP",
+                "/AIOS-SUITE-T3-BOX-TMP"
+              ],
+              "units_all": "unchanged，不换号",
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              }
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-035251-window-1",
+      "rvm_truth": {
+        "window/create_delete_same_window.mac": {
+          "aabb_blind": true,
+          "note": "建了又删：按名快照与跑之前完全相等。"
+        }
+      },
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "create_delete_same_window.mac：逐字相同 31、变了 1；变的组：/AIOS-SUITE-T3-BOX-M1（与 window/attr_roundtrip_restore.mac、window/meta_only_restore.mac 合在两次导出之间）"
+        ],
+        "plan_offline": [
+          "apply：过"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "apply 腿：t3-seg4-merged → 1292：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-offset1 → 1292：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-offset2 → 1292：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）",
+          "apply 腿：t3-seg4-split → 1292：相符（根 touched=0 regen=0 delete=0；件 +0 ~1 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [],
+  "probes": [],
+  "replay_windows": {
+    "note": "下面每一条是一个消费窗口：from 是「这条腿跑之前」的会话，to 是「这条腿跑完（含它的尾会话）之后」的会话。腿在 ident / window 两个片段里。回放层对同一条录下来的会话链取不同的起止，不必再开 E3D。录制顺序与三条走法（逐腿、成对并窗、错位并窗）见本轮工作区 agents/T3/replay/README.md；验过之后生成的用例放进 tests/increment_replay/cases/（文件名带 t3- 前缀）。",
+    "windows": [
+      {
+        "id": "W2-attr-roundtrip-merged",
+        "shape": "改了又改回原样：两次保存并成一窗",
+        "from": "window/attr_roundtrip_apply.mac",
+        "to": "window/attr_roundtrip_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-A4"
+        ],
+        "name_keyed_cases": [
+          "G-03"
+        ],
+        "expect": {
+          "rebuild": [],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-M",
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "BOX-M1 的记录被写了两次，净窗口两端内容相同：索引说它「被重写过」，逐元素差分比下来一个字没动，记 unchanged、不上卷（increment.rs 模块头注：L1 只是候选，L2 才是判据）。EQ-M 不该重建。 对照：同样两条腿逐腿消费时各重建一次（A4-attr-roundtrip 的两腿）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "unchanged": 1,
+              "units_regen": 0,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "BOX-M1 的记录两端相同（没变 1）；属主设备 EQ-M 只有 CACHID 这个戳不同。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "premise": "两次保存之间没有提资过",
+              "action": "skip"
+            },
+            "note": "G-03 说的是另一种前提：两次保存之间提资过一次，那时基准是中间那一次，改回原样仍判修改、重发。同一个窗口，结果随「上一次提资在哪」而不同。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1283 → 1288",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg4-offset2 → 1288：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33601：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        },
+        "corrections": [
+          "2026-11-12 订正：实跑那一轮这里把属主根登记成了「不重建」（roots_no_rebuild），理由是它的记录两端只有 CACHID 这个戳不同。后来读代码（src/data_interface/window_root_plan.rs 的 metadata_only_change_seeds_no_root）：只有戳跳了的候选不上卷、不级联，但照旧做祖先闭包的种子，它所在的根整根重算一次，重算出来的结果与不重算逐字相同——戳是「引用者的图形被重建过」的唯一信号，级联关着时只有它能把引用者的根留在重建名单里（2026-09-17 的拍板）。所以这个根现在重建一次是设计如此，不是缺口；改登记为 roots_rebuild_optional，unit_count 相应地是 0 或 1。规划层离线核对的那个程序不带这一步，看不到根这一层；回放层跑出来是哪一种照实登记。"
+        ]
+      },
+      {
+        "id": "W2-two-saves-meta-geom",
+        "shape": "一窗里多次保存：一次只动元数据，一次改几何",
+        "from": "window/meta_only_apply.mac",
+        "to": "window/attr_roundtrip_apply.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-A1",
+          "CT-A4"
+        ],
+        "name_keyed_cases": [
+          "B-02",
+          "B-04"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "两次保存并成一窗：设备自己的 DESC 变（元数据门放行，不上卷），BOX-M1 的 XLEN 变（上卷，根 EQ-M 重建）。根只该重建一次，不因为多存了一次而多做。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "modified": 2,
+              "metadata_only": 1,
+              "units_regen": 1,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "type": "EQUI",
+                "category": "modified",
+                "summary": "DESC 变了"
+              },
+              {
+                "name": "/AIOS-SUITE-T3-BOX-M1",
+                "type": "BOX",
+                "category": "modified",
+                "summary": "XLEN 1000 → 1300"
+              }
+            ],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "category": "modified",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "action": "resend"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1281 → 1285",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg4-offset1 → 1285：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=1 cache_stamp=0 cascades=0，单元重建 1、清掉 0、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-all-back",
+        "shape": "一窗里四次保存，全部改回原样",
+        "from": "window/meta_only_apply.mac",
+        "to": "window/meta_only_restore.mac",
+        "change_types": [
+          "CT-W2"
+        ],
+        "name_keyed_cases": [
+          "G-02"
+        ],
+        "requires_order": [
+          "window/meta_only_apply.mac",
+          "window/attr_roundtrip_apply.mac",
+          "window/attr_roundtrip_restore.mac",
+          "window/meta_only_restore.mac"
+        ],
+        "expect": {
+          "rebuild": [],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-M",
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "设备和 BOX-M1 的记录各被写了两次，两端内容相同：都记 unchanged，什么都不重建。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "unchanged": 1,
+              "units_regen": 0,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "BOX-M1 的记录两端相同（没变 1）；设备 EQ-M 的 DESC 改回了，但 CACHID 被盖过戳、回不去，所以它算「只有戳变了」，不算没变。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [],
+            "units_all": "unchanged，不换号",
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1281 → 1290",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg4-merged → 1290：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33601：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        },
+        "corrections": [
+          "2026-11-12 订正：实跑那一轮这里把属主根登记成了「不重建」（roots_no_rebuild），理由是它的记录两端只有 CACHID 这个戳不同。后来读代码（src/data_interface/window_root_plan.rs 的 metadata_only_change_seeds_no_root）：只有戳跳了的候选不上卷、不级联，但照旧做祖先闭包的种子，它所在的根整根重算一次，重算出来的结果与不重算逐字相同——戳是「引用者的图形被重建过」的唯一信号，级联关着时只有它能把引用者的根留在重建名单里（2026-09-17 的拍板）。所以这个根现在重建一次是设计如此，不是缺口；改登记为 roots_rebuild_optional，unit_count 相应地是 0 或 1。规划层离线核对的那个程序不带这一步，看不到根这一层；回放层跑出来是哪一种照实登记。"
+        ]
+      },
+      {
+        "id": "W2-rename-there-and-back",
+        "shape": "改名又改回：两次保存并成一窗",
+        "from": "ident/rename_case_apply.mac",
+        "to": "ident/rename_case_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-A1"
+        ],
+        "name_keyed_cases": [
+          "A-01",
+          "D-04"
+        ],
+        "expect": {
+          "rebuild": [],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-CASE",
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "why": "净窗口两端名字相同：记录 unchanged，没有改名事件可记——所以这一窗**不落** renamed 记录。 对照：同样两条腿逐腿消费时，apply 那一窗落一条 renamed（A1-rename-case-only）。同一段历史，后端每次保存都跟上和攒两次再跟上，删除记录表不一样；这是「只看净窗口」的设计后果，写在这里当事实钉住，不是缺陷。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-EQ-CASE"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "unchanged": 1,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-CASE",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1242 → 1247",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg2-merged → 1247：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-member-recreate-merged",
+        "shape": "成员删后同名重建两次并成一窗：净效果是内容不变、只换号（A-03）",
+        "from": "ident/member_recreate_changed_apply.mac",
+        "to": "ident/member_recreate_changed_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-S4"
+        ],
+        "name_keyed_cases": [
+          "A-03"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "净窗口：基线的 BOX-M2 删除、最后那个 BOX-M2 新建、设备成员表变。中间的 BOX 在两端都不存在（Cancelled）。按 refno 根 EQ-M 照样重建一次——内容没变也重建，这是现行口径（ADR-098 D4：省的是提资，不省模型生成）。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "geometry": "根 EQ-M 的行数与并集包围盒都不变；按 refno 少一件（基线的 BOX-M2）、多一件（最后建的 BOX-M2）。中间那个 XLEN 700 的 BOX 建了又删，净窗口里不存在。",
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [
+              {
+                "name": "/AIOS-SUITE-T3-BOX-M2",
+                "type": "BOX",
+                "category": "unchanged",
+                "renumbered": true
+              },
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "type": "EQUI",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1221 → 1226",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg1-merged → 1226：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-member-moved-merged",
+        "shape": "成员重建到别的位置、再重建回原位，并成一窗：净效果是只换号（A-03）",
+        "from": "ident/member_recreate_moved_apply.mac",
+        "to": "ident/member_recreate_moved_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-S4"
+        ],
+        "name_keyed_cases": [
+          "A-03"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "同 W2-member-recreate-merged。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "inserted": 1,
+              "modified": 1,
+              "deleted": 1,
+              "units_regen": 1,
+              "units_remove": 1
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [
+              {
+                "name": "/AIOS-SUITE-T3-BOX-M3",
+                "type": "BOX",
+                "category": "unchanged",
+                "renumbered": true
+              },
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "type": "EQUI",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1248 → 1253",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg2-merged → 1253：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-unit-recreate-changed-merged",
+        "shape": "单元重建时改了内容、随后改回，并成一窗：净效果是单元换号、内容不变（A-02）",
+        "from": "ident/unit_recreate_changed_apply.mac",
+        "to": "ident/unit_recreate_changed_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-S4"
+        ],
+        "name_keyed_cases": [
+          "A-02"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-BRAN-R"
+          ],
+          "remove": [
+            "/AIOS-SUITE-T3-BRAN-R"
+          ],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "why": "净窗口与 S4-unit-recreate-bran 相同：旧支管删除、新支管新建（新支管的 M2 两端看到的都是原规格）。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ]
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "category": "unchanged",
+                "renumbered": true
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1227 → 1232",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg1-merged → 1232：相符（根 touched=2 regen=1 delete=1；件 +10 ~2 -10，metadata_only=0 cache_stamp=0 cascades=0，单元重建 9、清掉 9、派生 2）"
+          ]
+        }
+      },
+      {
+        "id": "W2-recreate-renamed-merged",
+        "shape": "删掉重建换了名、随后又删掉按原名重建，并成一窗：净效果是单元删后同名重建（A-02），中间那个名字从没出现过",
+        "from": "ident/recreate_renamed_apply.mac",
+        "to": "ident/recreate_renamed_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-S4",
+          "CT-W1"
+        ],
+        "name_keyed_cases": [
+          "A-02"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-EQ-RN"
+          ],
+          "remove": [
+            "/AIOS-SUITE-T3-EQ-RN"
+          ],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "why": "中间的 EQ-RN2 建了又删，净窗口里不存在：不该有它的模型行，也不该有它的删除记录。其余同 S4-unit-recreate-equi。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-RN@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-RN@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-RN@before",
+                "name": "/AIOS-SUITE-T3-EQ-RN",
+                "type": "EQUI",
+                "reason": "deleted"
+              }
+            ],
+            "never_seen": [
+              "/AIOS-SUITE-T3-EQ-RN2"
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-RN@after"
+            ]
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-RN",
+                "type": "EQUI",
+                "category": "unchanged",
+                "renumbered": true
+              }
+            ],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-RN",
+                "category": "unchanged",
+                "renumbered": true
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1233 → 1238",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg1-merged → 1238：相符（根 touched=2 regen=1 delete=1；件 +2 ~2 -2，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-copyof-chain-merged",
+        "shape": "建一个成员、改它、再删它，三次保存并成一窗：净效果为零",
+        "from": "ident/copyof_member_1_apply.mac",
+        "to": "ident/copyof_member_restore.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-W1"
+        ],
+        "name_keyed_cases": [
+          "C-07"
+        ],
+        "expect": {
+          "rebuild": [],
+          "remove": [],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-CP",
+            "/AIOS-SUITE-T3-EQ-M"
+          ],
+          "why": "那个 BOX 在两端都不存在；EQ-CP 的成员表两端相同，记录被重写但内容没动，记 unchanged。EQ-CP 不该重建。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "unchanged": 0,
+              "units_regen": 0,
+              "units_remove": 0,
+              "cache_stamp": 1
+            },
+            "plan_line_note": "那个 BOX 两端都不存在；设备 EQ-CP 的成员表两端相同，但 CACHID 被盖过三次戳，所以它算「只有戳变了」，不算没变。E3D 改一个成员的属性时，会顺手给它所在的顶层元素（设备、支管）的 CACHID 加一：这条记录只有戳变了，是纯元数据（cache_stamp 一档），不该让谁重建。2026-11-12 离线规划核对实测。"
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "rows": [],
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-CP",
+                "category": "unchanged",
+                "renumbered": false
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1259 → 1267",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg3-merged → 1267：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/33581：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        },
+        "corrections": [
+          "2026-11-12 订正：实跑那一轮这里把属主根登记成了「不重建」（roots_no_rebuild），理由是它的记录两端只有 CACHID 这个戳不同。后来读代码（src/data_interface/window_root_plan.rs 的 metadata_only_change_seeds_no_root）：只有戳跳了的候选不上卷、不级联，但照旧做祖先闭包的种子，它所在的根整根重算一次，重算出来的结果与不重算逐字相同——戳是「引用者的图形被重建过」的唯一信号，级联关着时只有它能把引用者的根留在重建名单里（2026-09-17 的拍板）。所以这个根现在重建一次是设计如此，不是缺口；改登记为 roots_rebuild_optional，unit_count 相应地是 0 或 1。规划层离线核对的那个程序不带这一步，看不到根这一层；回放层跑出来是哪一种照实登记。"
+        ]
+      },
+      {
+        "id": "W2-two-unit-recreates",
+        "shape": "一窗里两次保存，各重建了一个单元",
+        "from": "ident/unit_recreate_equi_apply.mac",
+        "to": "ident/unit_recreate_bran_apply.mac",
+        "change_types": [
+          "CT-W2",
+          "CT-S4"
+        ],
+        "name_keyed_cases": [
+          "A-02"
+        ],
+        "expect": {
+          "rebuild": [
+            "/AIOS-SUITE-T3-EQ-M",
+            "/AIOS-SUITE-T3-BRAN-R"
+          ],
+          "remove": [
+            "/AIOS-SUITE-T3-EQ-M",
+            "/AIOS-SUITE-T3-BRAN-R"
+          ],
+          "untouched": [
+            "/AIOS-SUITE-T3-EQ-U"
+          ],
+          "why": "两条腿各自的效果互不相干，并成一窗就是两者的并集：两个旧根清掉、两个新根各重建一次，互不串。删除记录各带自己那一次保存的会话号（increment_pipeline.rs：每条记录的 sesno 是变化所在的会话，不是窗口右端）。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M@after",
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-M@before",
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count": 2,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-M@before",
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "type": "EQUI",
+                "reason": "deleted"
+              },
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M@after",
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ]
+          },
+          "name_keyed": {
+            "asserted_now": false,
+            "units": [
+              {
+                "name": "/AIOS-SUITE-T3-EQ-M",
+                "category": "unchanged",
+                "renumbered": true
+              },
+              {
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "category": "unchanged",
+                "renumbered": true
+              }
+            ],
+            "delivery": {
+              "action": "skip"
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1215 → 1220",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3-seg1-merged → 1220：相符（根 touched=4 regen=2 delete=2；件 +14 ~3 -14，metadata_only=0 cache_stamp=0 cascades=0，单元重建 12、清掉 12、派生 2）"
+          ]
+        }
+      }
+    ]
+  }
+}

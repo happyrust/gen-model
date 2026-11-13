@@ -1,0 +1,34 @@
+-- 登记: A02（变更类型 CT-S5、CT-D10、CT-S6；按名称案例 F-01 的改挂版） | 语义: 把区域 Z2 整个挪回 SITE /AIOS-SUITE-T3，并放回成员表里原来的位置（区域 Z 后面）
+-- expected_net: modified | apply 搭档: ident/zone_resite_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply——设备 EQ-Z2 重建一次（回到原来的世界坐标）；两个 SITE 里别的设备不动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-ZONE-RESITE-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-Z2
+Q REF
+Q NAME
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-EQ-S2
+Q REF
+Q NAME
+Q POS WRT /*
+/AIOS-SUITE-T3-Z2
+Q REF
+Q NAME
+Q OWNER
+/AIOS-SUITE-T3
+Q REF
+Q NAME
+INCLUDE /AIOS-SUITE-T3-Z2
+REORDER /AIOS-SUITE-T3-Z2 AFTER /AIOS-SUITE-T3-Z
+Q MEMB
+/AIOS-SUITE-T3-Z2
+Q OWNER
+/AIOS-SUITE-T3-EQ-Z2
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-S2
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/zone_resite restore: ZONE Z2 moved back to SITE T3 after ZONE Z'
+$P SUITE-T3-ZONE-RESITE-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,21 @@
+-- P84：run-owned BRAN 的第一个 BEND，SPRE 从非空值直接清空为 0/0。
+-- qualifier 从 1 个清空到 0 个：组合键从「属性+qualifier」切到「属性+空」，覆盖 qualifier 清空分支。
+-- ★ `SPRE =0/0` 的清空语义未在 TTY 验证；若 E3D 把它当成普通值而不是移除 qualifier，
+--   本案例就没有命中 1→0 分支，必须据实降级，不能按静态预期记通过。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P84-APPLY-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q MEMB
+BEND 1
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+SPRE =0/0
+Q SPRE
+SAVEWORK 'AMS round3 P84 qualifier cleared'
+$P AMS-R3-P84-APPLY-DONE
+ALPHA LOG END

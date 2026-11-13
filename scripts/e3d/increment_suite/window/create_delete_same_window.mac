@@ -1,0 +1,41 @@
+-- 登记: A02（变更类型 CT-W1；会话窗口形状「同一窗里先建后删」，单元一级） | 语义: 同一 SAVEWORK 里在 T3 ZONE 末尾新建一台设备 EQ-TMP（带一个 BOX），随即整台删掉
+-- expected_net: unchanged（净窗口里这台设备从头到尾不存在） | restore 搭档: 无
+-- 预期 gen-model: 交付单元 0；没有哪个根被重建或清理；没有 datacenter_delete（从没发布过的 refno 不记）；EQ-M 等根仍是 AlreadyAvailable。
+-- 与 round3/p80_apply.mac（P80）的区别：P80 删的是新建设备下面的子件、设备留着；这里连设备一起删，窗口两端按名、按 refno 都相等。
+-- ★ E3D 这一存写不写业务会话未知：ZONE 的成员表被改了又改回，记录可能被重写、也可能没有。会话号走几步以实测为准。
+-- 落位：导航到 PIPE 再 NEW EQUIPMENT，新设备接在 ZONE 成员表末尾，不搅动其余成员的顺序。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-CREATE-DELETE-ALIVE
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q MEMB
+VAR !left COLLECT ALL EQUIPMENT WITH (NAME EQ '/AIOS-SUITE-T3-EQ-TMP') FOR CE
+DO !e VALUES !left
+  !!CE = !e.dbref()
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-PIPE
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-TMP
+POS E 100000 N 44000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 400 YLEN 400 ZLEN 400
+NAME /AIOS-SUITE-T3-BOX-TMP
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-T3-Z
+Q MEMB
+VAR !tmp COLLECT ALL EQUIPMENT WITH (NAME EQ '/AIOS-SUITE-T3-EQ-TMP') FOR CE
+DO !e VALUES !tmp
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 window/create_delete_same_window: EQ-TMP created and deleted in one save'
+$P SUITE-T3-WINDOW-CREATE-DELETE-DONE
+ALPHA LOG END

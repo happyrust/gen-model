@@ -1,0 +1,276 @@
+-- T2「关节」主题第二批的基线，落在 db8000：SITE /AIOS-SUITE-T2-JNT2 下一个 ZONE、五只 STRU。幂等（先删自己的 SITE 再建）。
+-- teardown 搭档: joint/teardown2.mac。与第一批的 SITE /AIOS-SUITE-T2-PJOI 互不相干（各删各的）。
+--
+-- 语料全部 COPY 自 AMS 的管道支撑模板库（MDB /ALL 里的 MDS 模板框架，只读地用它们，不改生产元素）：
+--   J2-SJ <- /MDS/FT03H/5：横杆 BAR（SCTN）接在立杆 V1（SCTN）的截面关节上。V1 -> SNOD -> SJOI（带目录正体的端板，
+--            正体 7 件、负体 3 把），SJOI 的 CREF 指横杆、横杆的 JOIS 指回 SJOI。「SJOI <-> SCTN」级联的四种窗在它上面做。
+--   J2-FX <- /SUPPORT/FRAMES/BS/CT01/4：同一种支架的 GENSEC 版。V1（GENSEC）-> JLDATU -> PLDATU -> FIXING（端板），
+--            FIXING 的 CREF 指横杆（GENSEC）、横杆的 JOIS 指回 FIXING。「FIXING <-> GENSEC」级联的四种窗在它上面做。
+--   J2-FE <- /SUPPORT/FRAMES/BS/FT61/1：GENSEC 端部基准（ENDATU）下的 FIXING（焊接底板，正体一块板、负体一把），
+--            CREF 指的就是它挂着的那根 GENSEC。
+--   J2-LJ <- /MDS/FT54A/1：两根 SCTN 各被一只「自己不画、只出刀」的主关节认领（目录件没有正体集，负体集里一把刀）。
+--            已知缺口「不成模型单元的关节变了，被它切的型钢不重算」在它上面钉。
+--   J2-PJ <- /MDS/FT56/5：两根立杆各被一只带正体又带负体的主关节（螺栓底板）认领，另有一根不接关节的横杆。
+--            AMS 里「改主关节 -> 梁真的变」的样本（第一批 AMS 的主关节目录件都没有负体）。
+--
+-- 命名（COPY 进来的成员全是无名的）：逐层按「属主名-<类型前两个字母><在属主里的序号>」起名，
+--   例如 /AIOS-SUITE-T2-J2-SJ-FR1-SC2-SN1-SJ1 = J2-SJ 的第 1 个成员（FRMW）的第 2 个成员（SCTN）的第 1 个成员（SNOD）的第 1 个成员（SJOI）。
+--   写腿只用这些名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT2-SETUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T2-JNT2*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-T2-JNT2
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T2-JNT2-Z
+!zone = !!CE
+Q REF
+Q NAME
+NEW STRU /AIOS-SUITE-T2-J2-SJ
+COPY /MDS/FT03H/5
+POS E 120000 N 44000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-J2-FX
+COPY /SUPPORT/FRAMES/BS/CT01/4
+POS E 124000 N 44000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-J2-FE
+COPY /SUPPORT/FRAMES/BS/FT61/1
+POS E 128000 N 44000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-J2-LJ
+COPY /MDS/FT54A/1
+POS E 132000 N 44000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-J2-PJ
+COPY /MDS/FT56/5
+POS E 136000 N 44000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+-- 补名：五层，逐层「属主名-<类型前两个字母><序号>」
+!!CE = !zone
+!l0 = !!CE.MEMBERS
+DO !e0 VALUES !l0
+  !!CE = !e0
+  !n0 = !!CE.NAME
+  !l1 = !!CE.MEMBERS
+  !i1 = 0
+  DO !e1 VALUES !l1
+    !!CE = !e1
+    !i1 = !i1 + 1
+    !t1 = !!CE.TYPE
+    !c1 = !t1.Substring(1,2)
+    !n1 = '$!n0-$!c1$!i1'
+    NAME $!n1
+    !l2 = !!CE.MEMBERS
+    !i2 = 0
+    DO !e2 VALUES !l2
+      !!CE = !e2
+      !i2 = !i2 + 1
+      !t2 = !!CE.TYPE
+      !c2 = !t2.Substring(1,2)
+      !n2 = '$!n1-$!c2$!i2'
+      NAME $!n2
+      !l3 = !!CE.MEMBERS
+      !i3 = 0
+      DO !e3 VALUES !l3
+        !!CE = !e3
+        !i3 = !i3 + 1
+        !t3 = !!CE.TYPE
+        !c3 = !t3.Substring(1,2)
+        !n3 = '$!n2-$!c3$!i3'
+        NAME $!n3
+        !l4 = !!CE.MEMBERS
+        !i4 = 0
+        DO !e4 VALUES !l4
+          !!CE = !e4
+          !i4 = !i4 + 1
+          !t4 = !!CE.TYPE
+          !c4 = !t4.Substring(1,2)
+          !n4 = '$!n3-$!c4$!i4'
+          NAME $!n4
+          !l5 = !!CE.MEMBERS
+          !i5 = 0
+          DO !e5 VALUES !l5
+            !!CE = !e5
+            !i5 = !i5 + 1
+            !t5 = !!CE.TYPE
+            !c5 = !t5.Substring(1,2)
+            !n5 = '$!n4-$!c5$!i5'
+            NAME $!n5
+          ENDDO
+        ENDDO
+      ENDDO
+    ENDDO
+  ENDDO
+ENDDO
+-- 回读：写腿要用的每一只，身份、连接与 E3D 现算的位置（COPY 之后关节与梁是不是互相指着副本里的对方）
+$P ==== FRMW ====
+!!CE = !zone
+VAR !all COLLECT ALL FRMW FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+ENDDO
+$P ==== SCTN ====
+!!CE = !zone
+VAR !all COLLECT ALL SCTN FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q POSS
+  Q POSE
+  Q BANG
+  Q JOIS
+  Q JOIE
+  Q CUTL
+ENDDO
+$P ==== GENSEC ====
+!!CE = !zone
+VAR !all COLLECT ALL GENSEC FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q POS
+  Q BANG
+  Q JOIS
+  Q JOIE
+  Q CUTL
+ENDDO
+$P ==== SNOD ====
+!!CE = !zone
+VAR !all COLLECT ALL SNOD FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q ZDIS
+ENDDO
+$P ==== SJOI ====
+!!CE = !zone
+VAR !all COLLECT ALL SJOI FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q CREF
+  Q BANG
+  Q CUTB
+  Q POS WRT /*
+  Q ORI WRT /*
+ENDDO
+$P ==== PNOD ====
+!!CE = !zone
+VAR !all COLLECT ALL PNOD FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q NPOS
+ENDDO
+$P ==== PJOI ====
+!!CE = !zone
+VAR !all COLLECT ALL PJOI FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q CREF
+  Q BANG
+  Q DESP
+  Q DELP
+  Q POS WRT /*
+  Q ORI WRT /*
+ENDDO
+$P ==== JLDATU ====
+!!CE = !zone
+VAR !all COLLECT ALL JLDATU FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q ZDIS
+ENDDO
+$P ==== PLDATU ====
+!!CE = !zone
+VAR !all COLLECT ALL PLDATU FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+ENDDO
+$P ==== ENDATU ====
+!!CE = !zone
+VAR !all COLLECT ALL ENDATU FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+ENDDO
+$P ==== FIXING ====
+!!CE = !zone
+VAR !all COLLECT ALL FIXING FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q CREF
+  Q BANG
+  Q DESP
+  Q POS
+  Q POS WRT /*
+  Q ORI WRT /*
+ENDDO
+$P ==== SPINE ====
+!!CE = !zone
+VAR !all COLLECT ALL SPINE FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+ENDDO
+$P ==== POINSP ====
+!!CE = !zone
+VAR !all COLLECT ALL POINSP FOR CE
+DO !x VALUES !all
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q POS
+ENDDO
+SAVEWORK 'AIOS suite T2 joint: baseline setup 2 (db8000)'
+$P SUITE-T2-JOINT2-SETUP-DONE
+ALPHA LOG END

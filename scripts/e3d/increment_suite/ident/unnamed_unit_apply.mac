@@ -1,0 +1,28 @@
+-- 登记: A02（变更类型 CT-A4；按名称案例 C-05、C-06） | 语义: 没有名字的单元——一台没有名字的设备，下面一个有名 BOX-NN 和一个无名 BOX。同一次保存里把无名 BOX 的长度从 600 改成 800、把 BOX-NN 的长度从 400 改成 650
+-- expected_net: modified | restore 搭档: ident/unnamed_unit_restore.mac
+-- 预期 gen-model（按 refno）: 这台无名设备重建一次（按 refno 认身份，有没有名字不影响生成）；别的设备不动；没有 datacenter_delete。
+-- 无名设备按它下面的有名 BOX 上跳来找（/AIOS-SUITE-T3-BOX-NN 再 OWNER）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNNAMED-UNIT-APPLY-ALIVE
+/AIOS-SUITE-T3-BOX-NN
+Q REF
+Q NAME
+Q XLEN
+XLEN 650
+Q XLEN
+OWNER
+$P T3-ALIAS UNNAMED-EQUI
+Q REF
+Q TYPE
+Q MEMB
+!mm = !!CE.MEMBERS
+!!CE = !mm[2]
+$P T3-ALIAS UNNAMED-EQUI-BOX2
+Q REF
+Q TYPE
+Q XLEN
+XLEN 800
+Q XLEN
+SAVEWORK 'AIOS suite T3 ident/unnamed_unit apply: named BOX-NN and the unnamed BOX of the unnamed EQUI resized'
+$P SUITE-T3-UNNAMED-UNIT-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,29 @@
+-- 登记: A02（变更类型 CT-A4；按名称案例 C-07 第二步） | 语义: 三腿链的第 2 腿——把第 1 腿建的自动命名 BOX 的 XLEN 从 300 改成 600，别的不动
+-- expected_net: modified | restore 搭档: ident/copyof_member_restore.mac（链：1_apply → 2_apply → restore）
+-- 预期 gen-model（按 refno）: EQ-CP regen 一次，行数不变、那一件的包围盒变。
+-- 找它的办法: 遍历 EQ-CP 的成员，取不叫 BOX-CP1 的那个 BOX——不按 /Copy-of-… 这个名字导航，
+--   这样第 1 腿没跑、或者 E3D 把名字的大小写折了，这条腿都只是空转，不会因为导航到不存在的元素而崩溃。
+-- 写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-COPYOF-MEMBER-2-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+DO !b VALUES !mm
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BOX') THEN
+    !cn = !!CE.NAME
+    IF (NOT (!cn EQ '/AIOS-SUITE-T3-BOX-CP1')) THEN
+      Q REF
+      Q NAME
+      Q XLEN
+      XLEN 600
+      Q XLEN
+    ENDIF
+  ENDIF
+ENDDO
+SAVEWORK 'AIOS suite T3 ident/copyof_member leg 2: Copy-of BOX XLEN 300 -> 600'
+$P SUITE-T3-COPYOF-MEMBER-2-APPLY-DONE
+ALPHA LOG END

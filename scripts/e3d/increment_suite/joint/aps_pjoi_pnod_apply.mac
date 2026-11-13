@@ -1,0 +1,53 @@
+-- 登记: D5-pjoi-pnod-aps（CT-D5 结构关节 / CT-D7 现算标架；联动 #12 主关节级联）
+-- 语义: 只挪 PNOD——把端板主关节所在的主节点 /SB3/PB1/4/N03 上抬 5 mm（NPOS U 6197.883 -> U 6202.883），主关节与柱一个字不动
+-- expected_net: modified | restore 搭档: joint/aps_pjoi_pnod_restore.mac | 库: aps7166（APS 副本，MDB /SDNF）
+-- 直接改生产元素（样本只在生产元素上）：/SB3/PB1/4/N03。restore 把 NPOS 按绝对值写回。
+--
+-- 样本（只读探针 2026-11-12；E3D 取证 2026-11-11）：
+--   PNOD /SB3/PB1/4/N03（=23550/378）：NPOS E 0 N 18000 U 6197.883（属主系），就是柱 /SB3/PB1/4/POR/C01 的顶端。
+--   名下 PJOI =23550/379（端板，DESP 0 10 270 280 0 0，OPDI = CUTP = D，DELP 0），CREF 指柱 C01（=23550/388）。
+-- 期望：这一窗该重建 2 件——端板主关节（现算标架宿主：SBFR 名下、带着目录正体主关节的 PNOD）、
+--   柱 C01（关节级联：由主关节带出）。PNOD 自己不是模型单元、上方也没有单元，接上之前这种窗什么都不重建。
+--   端板的站位是 NPOS + DELP：端板上抬 5；端板让位的那只 NSEX 从关节原点向下 10，只剩 5 mm 落在柱里——
+--   柱顶从短 10 mm 变成短 5 mm。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-PNOD-APPLY-ALIVE
+=23550/379
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/SB3/PB1/4/N03
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+NPOS E 0 N 18000 U 6202.883
+Q NPOS
+=23550/379
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_pnod apply: PNOD N03 NPOS up 5'
+$P SUITE-T2-JOINT-APS-PJOI-PNOD-APPLY-DONE
+ALPHA LOG END

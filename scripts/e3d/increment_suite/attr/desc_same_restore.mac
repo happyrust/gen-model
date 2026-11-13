@@ -1,0 +1,12 @@
+-- 登记: A09 | 语义: 再写同一句 DESC。apply 已经是同值，restore 同样不改几何 | expected_net: unchanged | restore 搭档: 本文件是 attr/desc_same_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-DESC-SAME-RESTORE-ALIVE
+/AIOS-SUITE-EQ-DESC
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS suite desc same'
+Q DESC
+SAVEWORK 'AIOS suite attr/desc_same restore: EQ-DESC DESC rewritten unchanged'
+$P SUITE-ATTR-DESC-SAME-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,31 @@
+-- 登记: D5-pjoi-pnod | 语义: 把主节点的 NPOS 写回 E 63 N 0 D 42.3
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/pjoi_pnod_apply.mac 的 restore | 库: db8000
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：重建主关节与梁 S1 两件，主关节回到原来的原点。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-PJOI-PNOD-RESTORE-ALIVE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q POS WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+NPOS E 63 N 0 U -42.3
+Q NPOS
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/pjoi_pnod restore: PNOD NPOS -> E 63'
+$P SUITE-T2-JOINT-PJOI-PNOD-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,13 @@
+-- Read-only baseline capture for a non-positional root (SITE / BRAN / PIPE container).
+-- Replace {{TARGET_NAME}} and {{LOG_PATH}}.
+-- Deliberately omits POS/ORI/DESC/PURP: unsupported Q attributes can abort E3D before the log flushes.
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-INPLACE-ROOT-BASELINE-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q TYPE
+Q OWNE
+$P AMS-INPLACE-ROOT-BASELINE-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: A07 | 语义: 把 EQ-CLM 的描述写回基线 | apply 搭档: pipeline/touch_8000_apply.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-TOUCH-8000-RESTORE-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS T4 claim target'
+Q DESC
+SAVEWORK 'AIOS suite T4 pipeline/touch_8000 restore: EQ-CLM DESC back'
+$P SUITE-T4-TOUCH-8000-RESTORE-DONE
+ALPHA LOG END

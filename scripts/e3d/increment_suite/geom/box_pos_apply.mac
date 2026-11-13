@@ -1,0 +1,17 @@
+-- 登记: A02 | 语义: 只动 BOX 自己的 POS，属主 EQ-PRIM 不动。预期重建该设备根，不是整根 transform | expected_net: modified | restore 搭档: geom/box_pos_restore.mac
+-- 来源: setup 里 BOX 不写 POS 即缺省原点；本腿写成属主坐标 E 400
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-BOX-POS-APPLY-ALIVE
+/AIOS-SUITE-EQ-PRIM
+Q REF
+Q NAME
+Q POS WRT /*
+/AIOS-SUITE-BOX-PRIM
+Q REF
+Q NAME
+Q POS WRT /*
+POS E 400 N 0 U 0
+Q POS WRT /*
+SAVEWORK 'AIOS suite geom/box_pos apply: BOX-PRIM POS E 400'
+$P SUITE-GEOM-BOX-POS-APPLY-DONE
+ALPHA LOG END

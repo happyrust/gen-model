@@ -1,0 +1,34 @@
+-- 登记: D5-pjoi-beam | 语义: 把梁的起点写回 E 63 N 0 D 42.3
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/pjoi_beam_apply.mac 的 restore | 库: db8000
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：重建梁 S1 与主关节两件，主关节回到原来的原点。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-PJOI-BEAM-RESTORE-ALIVE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q POS WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+POSS E 63 N 0 U -42.3
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/pjoi_beam restore: beam POSS -> N 0'
+$P SUITE-T2-JOINT-PJOI-BEAM-RESTORE-DONE
+ALPHA LOG END

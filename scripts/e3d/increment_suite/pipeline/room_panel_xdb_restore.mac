@@ -1,0 +1,13 @@
+-- 登记: G03 | 语义: 把 R901 的地板轮廓挪回原位（绝对值） | apply 搭档: pipeline/room_panel_xdb_apply.mac | 存盘只落在 7998
+-- 该有的行为: R901 重算，8000 里的 EQ-RM1 又属于 R901；别的不动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-ROOM-PANEL-XDB-RESTORE-ALIVE
+/AIOS-SUITE-T4-RM-R901-P1
+Q REF
+Q NAME
+Q POS
+POS E 0 N 0 U 0
+Q POS
+SAVEWORK 'AIOS suite T4 pipeline/room_panel_xdb restore: R901 panel back'
+$P SUITE-T4-ROOM-PANEL-XDB-RESTORE-DONE
+ALPHA LOG END

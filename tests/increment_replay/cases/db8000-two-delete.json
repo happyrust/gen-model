@@ -1,7 +1,8 @@
 {
   "name": "db8000-two-delete",
-  "registry": ["INC-B01", "INC-I01", "INC-I02", "INC-I04", "INC-I05"],
+  "registry": ["INC-B01", "INC-I01", "INC-I02", "INC-I04", "INC-I05", "INC-J01", "INC-J02"],
   "budget_gate": true,
+  "probe_execute": true,
   "_doc": "issue-019 的真实 db8000 会话链（跨会话父子删除）走一遍真监听器：24 基线 → 25 删 BOX 子件（EQUI 根重算）→ 26 删 EQUI（根消失，库上行清空）。第一条 L2 用例，语料已在仓内。",
   "dbnum": 8000,
   "db_file": "AvevaMarineSample/ams000/ams8000_0001",
@@ -13,6 +14,6 @@
   "init": { "to": 24, "records_present": ["24384/24778"] },
   "steps": [
     { "to": 25, "unit_kinds": { "24384/24778": "regen" }, "task_state": "succeeded", "records_absent": ["24384/24778"] },
-    { "to": 26, "task_state": "succeeded", "records_absent": ["24384/24778"] }
+    { "to": 26, "task_state": "succeeded", "records_absent": ["24384/24778"], "log_must_not_contain": ["[模型目标核对]"] }
   ]
 }

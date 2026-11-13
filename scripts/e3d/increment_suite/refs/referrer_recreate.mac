@@ -1,0 +1,54 @@
+-- 登记: A01（变更类型 CT-S4、CT-A6；按名称案例 E-01 反过来的一面、A-02） | 语义: 支管 BRAN-R 的头接着管口 NOZZ-1。同一次保存里把管口所在的设备 EQ-NZ 整台删掉、按原样同名重建（BOX、管口都起回原名）、再把支管头接回去——支管的 HREF 跟着换成新管口的参考号
+-- expected_net: deleted（按 refno：旧设备删除、新设备新建、支管的 HREF 换了值；按名：终态与跑之前相同） | restore 搭档: 无（终态按名即跑之前，重跑幂等）
+-- 预期 gen-model（按 refno）: 旧设备的模型行清掉，新设备重建一次；支管的 HREF 变了，支管重建一次；旧设备记一条 datacenter_delete reason=deleted（已发布时）；别的设备不动。
+-- 前置: 支管头接着管口（refs/href_connect.mac 或 refs/target_recreate.mac 之后）。重建的句式与 ident/setup_t3.mac 里 EQ-NZ 那一段逐句相同；
+--   导航到 PIPE 再 NEW EQUIPMENT，新设备回到 ZONE 成员表里 PIPE 后面的原位。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-REFS-REFERRER-RECREATE-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q HREF
+/AIOS-SUITE-T3-BOX-NZ
+Q REF
+Q NAME
+/AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+Q CREF
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL EQUI WITH (NAME EQ '/AIOS-SUITE-T3-EQ-NZ') FOR CE
+DO !e VALUES !old
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+Q HREF
+/AIOS-SUITE-T3-PIPE
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-NZ
+POS E 100000 N 42000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 400 YLEN 400 ZLEN 400
+NAME /AIOS-SUITE-T3-BOX-NZ
+Q REF
+Q NAME
+NEW NOZZ /AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+/AIOS-SUITE-T3-BRAN-R
+HREF /AIOS-SUITE-T3-NOZZ-1
+Q HREF
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 refs/referrer_recreate: EQ-NZ deleted, rebuilt identical and BRAN-R reconnected'
+$P SUITE-T3-REFS-REFERRER-RECREATE-DONE
+ALPHA LOG END

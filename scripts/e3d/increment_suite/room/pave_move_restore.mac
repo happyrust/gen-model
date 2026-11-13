@@ -1,8 +1,6 @@
--- 登记: G03 | 语义: 两个顶点写回 ams 真实坐标 E 8803 | expected_net: cancelled
+-- 登记: G03 | 语义: V2/V3 写回 PLOO 局部坐标 W 150 | expected_net: cancelled
 -- restore 搭档: 本文件是 room/pave_move_apply.mac 的 restore
---
--- ★ 2026-10-28 语料改造：顶点换成 ams 真实坐标（V2/V3 在 E 8803），
---   写回真实值而不是自造房间的 E 62000。按名导航，不按下标。
+-- 改前实测：V2 是 W 150mm N 150mm U 0mm，V3 是 W 150mm S 150mm U 0mm。
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-ROOM-PAVE-RESTORE-ALIVE
 /AIOS-SUITE-RM-R201-P1
@@ -11,13 +9,13 @@ Q NAME
 /AIOS-SUITE-RM-R201-P1-V2
 Q REF
 Q POS
-POS E 8803 N 10975 U 6570
+POS E -150 N 150 U 0
 Q POS
 /AIOS-SUITE-RM-R201-P1-V3
 Q REF
 Q POS
-POS E 8803 N 10975 U 6870
+POS E -150 N -150 U 0
 Q POS
-SAVEWORK 'AIOS suite room/pave_move restore: R201-P1 east edge back to E 8803'
+SAVEWORK 'AIOS suite room/pave_move restore: R201-P1 V2/V3 local W 150'
 $P SUITE-ROOM-PAVE-RESTORE-DONE
 ALPHA LOG END

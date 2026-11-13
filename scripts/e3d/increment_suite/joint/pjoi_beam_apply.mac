@@ -1,0 +1,53 @@
+-- 登记: D5-pjoi-beam（CT-D5 结构关节 / CT-A4 几何；联动 #12 主关节级联）
+-- 语义: 只改梁——把 PJ-A 那根梁的起点横移 20 mm（POSS N 0 -> N 20），主关节与 PNOD 一个字不动
+-- expected_net: modified | restore 搭档: joint/pjoi_beam_restore.mac | 前置: joint/setup.mac | 库: db8000
+--
+-- 样本（setup 从 ams7999 /1RX02-LSUP-E0361 COPY 来）：
+--   SCTN /AIOS-SUITE-T2-PJ-A-F1-S1：POSS E 63 N 0 D 42.3，POSE W 68 N 0 D 42.05（属主系），JOIS 指主关节，JOIE 空，名下无成员。
+--   PJOI /AIOS-SUITE-T2-PJ-A-F1-N1-J1：CREF 回指这根梁，OPDI = CUTP = W（关节 Z 沿梁轴），CUTB 0，DELP 0；
+--   PNOD 的 NPOS 就是梁的起点。
+-- 期望：这一窗该重建 2 件——梁 S1 自己（上卷到自己）、主关节（反向关节级联：梁要重建，它认领的、CREF 回指它的
+--   带目录正体主关节一并重建）。主关节的原点落在「梁线」与「过站位、法向为关节 Z 的平面」的交点上：
+--   梁起点横移 20，主关节原点同样横移 20（世界系 N 向，STRU 不转）。PJ-B、PJ-C 一件都不该动。
+--   存盘前后各问一次主关节的 POS WRT /*，日志里就是 E3D 自己的答案。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-PJOI-BEAM-APPLY-ALIVE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q NPOS
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+POSS E 63 N 20 U -42.3
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/pjoi_beam apply: beam POSS N 0 -> N 20'
+$P SUITE-T2-JOINT-PJOI-BEAM-APPLY-DONE
+ALPHA LOG END

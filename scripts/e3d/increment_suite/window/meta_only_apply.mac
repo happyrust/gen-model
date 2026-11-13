@@ -1,0 +1,16 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 B-02；会话窗口形状「只动元数据」） | 语义: 只改设备 EQ-M 的描述（DESC），尺寸、位置、成员都不动
+-- expected_net: modified | restore 搭档: window/meta_only_restore.mac
+-- 预期 gen-model（按 refno）: 与 attr/desc 相同——任务 succeeded、交付单元 0、模型行不变、没有 datacenter_delete（元数据门的 metadata_only 一档）。
+-- 与 attr/desc_apply.mac 的区别：那条打在只有一个 BOX 的 EQ-A 上；这条打在 T3 自己的 EQ-M 上，
+--   好和 window/attr_roundtrip_apply.mac 并进同一个消费窗口（「一窗里多次保存」：一条只动元数据、一条改几何，EQ-M 只该重建一次）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-META-ONLY-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS T3 meta changed'
+Q DESC
+SAVEWORK 'AIOS suite T3 window/meta_only apply: EQ-M DESC changed'
+$P SUITE-T3-WINDOW-META-ONLY-APPLY-DONE
+ALPHA LOG END

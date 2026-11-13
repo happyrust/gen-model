@@ -1,0 +1,140 @@
+-- 探针（AMS，db8000）：管嘴与管线连接这一组要用的写法，逐句试。
+-- 本文件**无 SAVEWORK**：建出来的 /AIOS-SUITE-T1-PROBE 不落库，会话由 wrapper QUIT 丢弃；不进录制清单。
+-- ONERROR CONTINUE：哪一句不成立就在日志里留一行错，后面的照试。
+-- 自己建的元素一律用变量回到它（!!CE = !var），不按名字导航：前面哪一句 NEW 没成，按名字导航会让 E3D 直接崩、日志全空。
+--
+-- ═══ 实测结论（2026-11-12，私有副本，两轮）═══
+--   第一轮（管嘴 =13246/396429，口径 787；支管没有管道规格）：
+--     CATREF =refno 成立；管嘴口 P1 就在管嘴原点，方向是管嘴自己的 -X（缺省朝向下是 W）。
+--     CONN PH TO /管嘴 **连上了**（HREF、HPOS、HDIR、HBOR、HCON 都写了，管嘴的 CREF 回写成这根支管），
+--       但同时报一行 `(7,27) HSTUB not selected - SPEC undefined`——写步里有报错行会让会话崩，不能这样用。
+--     !!CE.HPOS / !!CE.HDIR 取成对象、.Offset(方向, 距离)、.Opposite()、TPOS $!var、TDIR $!var 都成立。
+--     设备挪开之后支管的 HPOS **不跟**（仍是旧值），HREF 还指着管嘴；再 CONN 一次 HPOS 才跟到新位置。
+--     HREF =0/0 清空引用成立，管嘴的 CREF 跟着清；HREF /管嘴 直接赋值也成立（CREF 同样回写，HPOS 不动）。
+--   第二轮（本文件现在的样子）：管嘴换成口径 50 的 /NOZZ-BW/ACZW200JJ（=13246/396437），PIPE 带管道规格 /VMB1：
+--     CONN PH TO **不再报错**，一共写了 HREF、HPOS、HDIR、HBOR 50、HCON BWD、LHEA true，并按口径从规格里选出
+--       HSTU /VMB1/CPP00102:P,50；管嘴的 CREF 回写。再 CONN 一次只把 HPOS 跟到新位置，TPOS 不动（尾要自己放）。
+--     这只管嘴：P1 在管嘴原点、朝自己的 -X；P2 在 +X 方向 HEIG 处（HEIG 300 → 450 时 P2 跟着走，P1 不动）。
+--     HPOS / TPOS 写绝对值（WRT /*）成立，写了之后 HREF 不掉。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-PROBE-ALIVE
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-T1-PROBE
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T1-PROBE-Z
+!zone = !!CE
+NEW EQUIPMENT /AIOS-SUITE-T1-PROBE-EQ
+!eq = !!CE
+POS E 100000 N 40000 U 0
+NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+!!CE = !eq
+
+$P SUITE-PIPECONN-PROBE-NOZZ
+NEW NOZZ /AIOS-SUITE-T1-PROBE-NZ
+!nz = !!CE
+CATREF =13246/396437
+HEIG 300
+POS W 500 N 0 U 0
+Q REF
+Q NAME
+Q TYPE
+Q CATREF
+Q HEIG
+Q POS WRT /*
+Q ORI WRT /*
+Q P1
+Q P1 POS WRT /*
+Q P1 DIR WRT /*
+Q P1 BORE
+Q P2
+Q CREF
+
+$P SUITE-PIPECONN-PROBE-BRAN
+!!CE = !zone
+NEW PIPE /AIOS-SUITE-T1-PROBE-PIPE
+PSPE =13245/846025
+Q PSPE
+NEW BRAN /AIOS-SUITE-T1-PROBE-BRAN
+!br = !!CE
+Q REF
+Q NAME
+Q TYPE
+Q PSPE
+Q HSTU
+Q HBOR
+Q HCON
+Q LHEA
+Q LTAI
+Q HPOS WRT /*
+Q HREF
+
+$P SUITE-PIPECONN-PROBE-CONN
+CONN PH TO /AIOS-SUITE-T1-PROBE-NZ
+Q HREF
+Q HPOS WRT /*
+Q HDIR WRT /*
+Q HBOR
+Q HCON
+Q HSTU
+Q LHEA
+!!CE = !nz
+Q CREF
+!!CE = !br
+
+$P SUITE-PIPECONN-PROBE-TAIL
+!hp = !!CE.HPOS
+!hd = !!CE.HDIR
+!tp = !hp.Offset(!hd, 3000)
+!td = !hd.Opposite()
+TPOS $!tp
+TDIR $!td
+TBOR 50
+TCON OPEN
+Q TPOS WRT /*
+Q TDIR WRT /*
+Q TBOR
+Q TCON
+Q HSTU
+
+$P SUITE-PIPECONN-PROBE-MOVE
+!!CE = !eq
+BY N 300
+Q POS WRT /*
+!!CE = !nz
+Q P1 POS WRT /*
+!!CE = !br
+Q HREF
+Q HPOS WRT /*
+
+$P SUITE-PIPECONN-PROBE-RECONN
+CONN PH TO /AIOS-SUITE-T1-PROBE-NZ
+Q HREF
+Q HPOS WRT /*
+Q HDIR WRT /*
+Q TPOS WRT /*
+
+$P SUITE-PIPECONN-PROBE-ABS
+HPOS E 99500 N 40000 U 0 WRT /*
+TPOS E 96500 N 40000 U 0 WRT /*
+Q HPOS WRT /*
+Q TPOS WRT /*
+Q HREF
+
+$P SUITE-PIPECONN-PROBE-DISC
+HREF =0/0
+Q HREF
+!!CE = !nz
+Q CREF
+!!CE = !br
+
+$P SUITE-PIPECONN-PROBE-NOZZ-RESIZE
+!!CE = !nz
+HEIG 450
+Q HEIG
+Q P1 POS WRT /*
+Q P2
+
+$P SUITE-PIPECONN-PROBE-DONE
+ALPHA LOG END

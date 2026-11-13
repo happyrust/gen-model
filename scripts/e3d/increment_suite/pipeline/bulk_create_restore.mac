@@ -1,0 +1,17 @@
+-- 登记: A04 | 语义: 把 bulk_create_apply 建的 20 台设备一次删掉 | apply 搭档: pipeline/bulk_create_apply.mac | 存盘只落在 7998
+-- 这一窗同样是大窗：删掉的元素占索引的一多半，照样该退化；删完之后这 20 个根的记录都清空，别的根与整库重建相等。
+-- 按名 COLLECT 再删，不在时只是空转。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-BULK-CREATE-RESTORE-ALIVE
+/AIOS-SUITE-T4-X-BULKZ
+VAR !old COLLECT ALL EQUI WITH (MATCHWILD(NAME,'/AIOS-SUITE-T4-BK-EQ*')) FOR CE
+DO !e VALUES !old
+  !!CE = !e.dbref()
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T4-X-BULKZ
+Q MEMB
+SAVEWORK 'AIOS suite T4 pipeline/bulk_create restore: delete the 20 equipment'
+$P SUITE-T4-BULK-CREATE-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,13 @@
+-- 登记: A09 | 语义: 把 EQ-SAME 的 POS 按 setup 的原值再写一遍再 SAVEWORK。预期同值早退，0 重建、RVM 不变 | expected_net: unchanged | restore 搭档: xform/pos_same_restore.mac
+-- 数值与 common/setup_8000.mac 里 NEW EQUIPMENT /AIOS-SUITE-EQ-SAME 的 POS 同一句
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-POS-SAME-APPLY-ALIVE
+/AIOS-SUITE-EQ-SAME
+Q REF
+Q NAME
+Q POS WRT /*
+POS E 90000 N 20000 U 0
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/pos_same apply: EQ-SAME POS rewritten unchanged'
+$P SUITE-XFORM-POS-SAME-APPLY-DONE
+ALPHA LOG END

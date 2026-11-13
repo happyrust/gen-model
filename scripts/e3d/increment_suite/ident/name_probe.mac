@@ -1,0 +1,91 @@
+-- 探针（只探不存）之一：名称这一组用例要先在 E3D 里坐实的写法和前提。
+-- 本文件**无 SAVEWORK**：所有改动随 wrapper 的 QUIT 丢弃，库不变；所以它过不了录制纪律检查，设计上不进用例清单，单走探针通道。
+-- 前置：ident/setup_t3.mac 已跑。
+-- 纪律：不按任何「可能不存在」的名字导航（那会让 E3D 访问违例崩溃、日志为空）；ONERROR CONTINUE 让报错只留一行、继续往下探。
+-- 探针拆成四份（name / order / refs / risky），一份崩了不连累别的：E3D 崩溃时 ALPHA LOG 不落盘。
+-- 每段开头一行 $P T3-PROBE-<n>-…，读日志时按它分段。
+--
+--  1  PML 字符串 EQ 分不分大小写（ident/rename_case_restore.mac 的判断靠它）
+--  2  NAME 改成只差大小写的名字：Q NAME 回读的是不是小写（按名称案例 D-04）
+--  3  同一个属主下再建一个只差大小写的名字：能不能并存（D-04）
+--  4  同库重名：NAME 写一个已经被占用的名字，E3D 拒不拒（D-02 的前提）
+--  5  同名再写：对自己写自己现在的名字，报不报错（同值写入 NAME）
+--  6  /Copy-of-… 这种名字：TTY 保不保留 Copy 的大小写（C-07～C-09）
+--  7  只动元数据的属性：FUNC、PURP 的赋值句（B-03）
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-NAME-PROBE-ALIVE
+
+$P T3-PROBE-1-STRING-EQ-CASE
+!a = 'abc'
+!t1 = (!a EQ 'ABC')
+Q VAR !t1
+!t2 = (!a EQ 'abc')
+Q VAR !t2
+
+$P T3-PROBE-2-RENAME-CASE-ONLY
+/AIOS-SUITE-T3-BOX-CASE
+OWNER
+Q REF
+Q NAME
+NAME /aios-suite-t3-eq-case
+Q REF
+Q NAME
+!cn = !!CE.NAME
+Q VAR !cn
+NAME /AIOS-SUITE-T3-EQ-CASE
+Q NAME
+
+$P T3-PROBE-3-CASE-COEXIST
+/AIOS-SUITE-T3-BOX-CP1
+Q REF
+Q NAME
+NEW BOX XLEN 100 YLEN 100 ZLEN 100
+Q REF
+NAME /aios-suite-t3-box-cp1
+Q NAME
+/AIOS-SUITE-T3-EQ-CP
+Q MEMB
+
+$P T3-PROBE-4-DUPLICATE-NAME-SAME-DB
+/AIOS-SUITE-T3-EQ-CP
+NEW BOX XLEN 110 YLEN 110 ZLEN 110
+Q REF
+NAME /AIOS-SUITE-T3-BOX-M1
+Q NAME
+/AIOS-SUITE-T3-EQ-CP
+Q MEMB
+
+$P T3-PROBE-5-SAME-NAME-REWRITE
+/AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+NAME /AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+
+$P T3-PROBE-6-COPY-OF-NAME
+/AIOS-SUITE-T3-EQ-CP
+NEW BOX XLEN 120 YLEN 120 ZLEN 120
+Q REF
+NAME /Copy-of-AIOS-SUITE-T3-BOX-CP1
+Q NAME
+!cn = !!CE.NAME
+Q VAR !cn
+!hit = (MATCHWILD(!cn,'/Copy-of-*'))
+Q VAR !hit
+
+$P T3-PROBE-7-METADATA-ATTRS
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q DESC
+Q FUNC
+FUNC 'AIOS T3 probe'
+Q FUNC
+Q PURP
+PURP EQUI
+Q PURP
+
+$P SUITE-T3-NAME-PROBE-DONE
+ALPHA LOG END

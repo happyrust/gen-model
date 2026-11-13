@@ -1,0 +1,34 @@
+-- 登记: A08（变更类型 CT-W1、CT-W2；会话窗口形状「同一个 E3D 会话里存两次」） | 语义: 用户在同一个 E3D 会话里先建一台设备 EQ-SV1、保存；不退出，接着再建一台 EQ-SV2、再保存
+-- expected_net: cancelled | restore 搭档: window/two_saves_restore.mac
+-- 预期 gen-model（按 refno）: 两台新设备各重建一次（分两个窗口消费或并成一个窗口消费，结果相同）；别的设备不动；没有 datacenter_delete。
+-- 这份宏里有两个 SAVEWORK，入口要带 -AllowMultiSave。两次存盘各建一个名字不同的元素，好从会话里分清哪一次存了什么；
+--   两次存盘各占一个会话还是并成一个，以实测为准，照实登记。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-TWO-SAVES-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-SUB
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-SV1
+POS E 102000 N 44000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-SV1
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite T3 window/two_saves apply: first save, EQ-SV1 created'
+$P SUITE-T3-WINDOW-TWO-SAVES-FIRST-SAVED
+/AIOS-SUITE-T3-EQ-SV1
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-SV2
+POS E 104000 N 44000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-SV2
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 window/two_saves apply: second save, EQ-SV2 created'
+$P SUITE-T3-WINDOW-TWO-SAVES-APPLY-DONE
+ALPHA LOG END

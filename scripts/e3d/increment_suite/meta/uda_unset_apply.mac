@@ -1,0 +1,19 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 B-02） | 语义: 把设备 EQ-CP 的自定义属性 :EQNA 清空（写空串，E3D 把它记成「没设」，UDASET 里不再有它）
+-- expected_net: modified | restore 搭档: meta/uda_text_restore.mac（把它重新设回基线值：自定义属性从无到有）
+-- 预期 gen-model（按 refno，该有的行为）: 零重建，理由同 meta/uda_text_apply.mac；另一个自定义属性 :WEIGHT 不动，当对照。
+-- 与 uda_text 的区别：那条是「值变了」，这条是「这个属性没了 / 又有了」——差分里走的是另外两格（少了一个自定义属性、多了一个）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-UNSET-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q :EQNA
+Q :WEIGHT
+Q UDASET
+:EQNA ''
+Q :EQNA
+Q :WEIGHT
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_unset apply: EQ-CP UDA EQNA unset'
+$P SUITE-T3-META-UDA-UNSET-APPLY-DONE
+ALPHA LOG END

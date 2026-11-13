@@ -1,0 +1,38 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 F-03、F-02） | 语义: 只给两个容器改名——支管 BRAN-R 所属的管线 PIPE 改成 PIPE-X，设备 EQ-Z2 所在的区域 Z2 改成 Z2-X；下面的单元一个字没动
+-- expected_net: modified | restore 搭档: meta/container_rename_restore.mac
+-- 预期 gen-model（按 refno）: 任务 succeeded、交付单元 0、模型行不变（两个容器各记 metadata_only，不上卷、不级联）；
+--   没有 datacenter_delete——PIPE、ZONE 是容器，不是交付单元。下面的 BRAN-R、EQ-Z2 连候选都不该有。
+-- 现有的容器改名用例 G04-frmw-rename 打在房间容器上（房间语义盖过了它）；这条是普通容器。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-CONTAINER-RENAME-APPLY-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-Z2
+Q REF
+Q NAME
+/AIOS-SUITE-T3
+VAR !p COLLECT ALL PIPE WITH (NAME EQ '/AIOS-SUITE-T3-PIPE') FOR CE
+DO !x VALUES !p
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T3-PIPE-X
+  Q REF
+  Q NAME
+ENDDO
+/AIOS-SUITE-T3
+VAR !z COLLECT ALL ZONE WITH (NAME EQ '/AIOS-SUITE-T3-Z2') FOR CE
+DO !x VALUES !z
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T3-Z2-X
+  Q REF
+  Q NAME
+ENDDO
+/AIOS-SUITE-T3
+Q MEMB
+SAVEWORK 'AIOS suite T3 meta/container_rename apply: PIPE and ZONE Z2 renamed'
+$P SUITE-T3-META-CONTAINER-RENAME-APPLY-DONE
+ALPHA LOG END

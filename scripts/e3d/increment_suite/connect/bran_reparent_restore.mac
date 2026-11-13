@@ -1,24 +1,31 @@
--- 登记: A01 / A02 | 语义: 把改挂过去的 FTUB INCLUDE 回 BRAN-S。
--- 它在 BRAN-NEW 里是末位成员（BRAN-NEW 是 BRAN-S 的副本：7 FTUB + 改挂进来的 1 个）。
--- FTUB LAST 已 TTY 实测成立（step5：/AIOS-SUITE-BRAN-S + FTUB LAST → Ref =17496/161709），
--- 故用 FTUB LAST 而不是硬编码 FTUB 8——成员数变化时不会指错。
--- expected_net: cancelled（树逆；它回到 BRAN-S 末位而非第 4 位，几何序列变。
---   要严格几何还原，再跟一条 connect/bran_del_member_restore.mac 整条重 COPY）
--- restore 搭档: 本文件是 connect/bran_reparent_apply.mac 的 restore
+-- 登记: A01 / A02 | 语义: 把改挂过去的 M5 按名 INCLUDE 回 BRAN-S。
+-- INCLUDE 在 CE 是新属主时把元素插成第 1 个成员。2026-11-04 日志：M5 在 BRAN-NEW 里是 FTUB 1，
+-- 不是末位。FTUB LAST 取到的是副本自己的管，搬回去会把 M5 留在 BRAN-NEW。
+-- 按名 /AIOS-SUITE-BRAN-S-M5 取。M5 回到 BRAN-S 的第 1 位，不是原来的第 5 位。
+-- 链的最后一步再整条重 COPY BRAN-S，把成员顺序补回基线。
+-- expected_net: cancelled（属主回到 BRAN-S） | restore 搭档: 本文件是 connect/bran_reparent_apply.mac 的 restore
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-CONN-REPARENT-RESTORE-ALIVE
 /AIOS-SUITE-BRAN-NEW
 Q REF
 Q NAME
 Q MEMB
-FTUB LAST
+/AIOS-SUITE-BRAN-S-M5
 Q REF
+Q NAME
+Q OWNE
 !ftub = !!CE
 /AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
 INCLUDE $!ftub
 $!ftub
 Q REF
 Q OWNE
-SAVEWORK 'AIOS suite connect/bran_reparent restore'
+/AIOS-SUITE-BRAN-NEW
+Q MEMB
+/AIOS-SUITE-BRAN-S
+Q MEMB
+SAVEWORK 'AIOS suite connect/bran_reparent restore: M5 back to BRAN-S'
 $P SUITE-CONN-REPARENT-RESTORE-DONE
 ALPHA LOG END

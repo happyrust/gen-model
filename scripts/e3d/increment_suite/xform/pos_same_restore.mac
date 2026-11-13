@@ -1,0 +1,12 @@
+-- 登记: A09 | 语义: 再写同一句 POS。apply 已经是同值，restore 同样不改几何 | expected_net: unchanged | restore 搭档: 本文件是 xform/pos_same_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-POS-SAME-RESTORE-ALIVE
+/AIOS-SUITE-EQ-SAME
+Q REF
+Q NAME
+Q POS WRT /*
+POS E 90000 N 20000 U 0
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/pos_same restore: EQ-SAME POS rewritten unchanged'
+$P SUITE-XFORM-POS-SAME-RESTORE-DONE
+ALPHA LOG END

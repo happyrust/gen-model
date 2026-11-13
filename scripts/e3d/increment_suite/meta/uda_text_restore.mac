@@ -1,0 +1,16 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 B-02） | 语义: 把 EQ-CP 的自定义属性 :EQNA 写回基线值
+-- expected_net: modified | apply 搭档: meta/uda_text_apply.mac（也是 meta/uda_unset_apply.mac 的还原腿）
+-- 预期 gen-model（按 refno，该有的行为）: 同 apply，零重建。现在会整台重建一次（known_gap，同 apply）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-TEXT-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q :EQNA
+Q UDASET
+:EQNA 'AIOS T3 eqna base'
+Q :EQNA
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_text restore: EQ-CP UDA EQNA back to base'
+$P SUITE-T3-META-UDA-TEXT-RESTORE-DONE
+ALPHA LOG END

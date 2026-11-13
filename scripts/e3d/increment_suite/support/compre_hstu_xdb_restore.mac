@@ -1,0 +1,22 @@
+-- 登记: gen-model #143 | 语义: 把 /300-A-42/B1 的 HSTU 写回 /A3B/PA300（=15192/229429）。预期：同一条级联再走一遍，
+-- 两只支撑件回到改之前的位置。
+-- expected_net: cancelled | restore 搭档: 本文件是 support/compre_hstu_xdb_apply.mac 的 restore
+--
+-- 工程: APS（MDB /ALL），只在私有副本上跑。写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-HSTU-XDB-RESTORE-ALIVE
+/300-A-42/B1
+Q REF
+Q NAME
+Q HSTU
+HSTU /A3B/PA300
+Q HSTU
+Q HBOR
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+Q POS WRT /*
+SAVEWORK 'AIOS suite support/compre_hstu_xdb restore: /300-A-42/B1 HSTU -> PA300'
+$P SUITE-SUPPORT-COMPRE-HSTU-XDB-RESTORE-DONE
+ALPHA LOG END

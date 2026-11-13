@@ -1,0 +1,391 @@
+{
+  "version": 1,
+  "owner": "T2",
+  "topic": "primary-joint-aps",
+  "copy": "aps",
+  "mdb": "/SDNF",
+  "sites": [],
+  "setup": null,
+  "teardown": null,
+  "corpus": {
+    "note": "直接改 aps7166 /SB3 的生产元素（样本只在生产元素上：端板主关节的目录件 /Endplates-Column-JOINT 带负体，一只 NSEX 把被接的柱削短 DESP[2]）。restore 把每个改过的属性按绝对值写回；四个用例改后都导了 E3D 的 RVM，还原后与改前逐字相同。",
+    "e3d_baseline": "E3D 导出的 /SB3 基准（改前）已有，文件名 aps7166_23550_2.rvm（基准集合 aps-zones-20261111）。"
+  },
+  "cases": [
+    {
+      "id": "D5-pjoi-desp-aps",
+      "situation": "只改主关节：把端板主关节的第 2 个设计参数（端板厚）从 10 改成 20，被接的柱该再短 10 mm",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/aps_pjoi_desp_apply.mac",
+      "restore": "joint/aps_pjoi_desp_restore.mac",
+      "db": 7166,
+      "touches_production": [
+        "PJOINT 1 of PNODE /SB3/PB1/4/N03（=23550/379）"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "PJOINT 1 of PNODE /SB3/PB1/4/N03（=23550/379）",
+          "/SB3/PB1/4/POR/C01"
+        ],
+        "remove": [],
+        "untouched": [
+          "PJOINT 1 of PNODE /SB3/PB1/4/N02（=23550/385，柱脚那只）",
+          "/SB3/PB1/4/POR/B01",
+          "/SB3/PB1/4/POR/B02",
+          "/SB3/PB1/4/POR/C02",
+          "/SB3/PB1/4/POR/R01"
+        ],
+        "why": "e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头）。 被接的柱建模时从这只主关节的目录负体集取那只 NSEX（NAPP -1，高 DESP[2]）削柱顶。docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=3 … no_model=2（MNUM 的 MAPEXS、PNOD 只跳了 CACHID）… cascades=1 units regen=2 remove=0",
+        "geometry": "柱 C01 的世界包围盒上界降 10（从比两端点短 10 变成短 20）；端板的下界降 10（加厚到 20）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-040404-aps-pjoi-desp-pnod",
+      "rvm_export_root": "/SB3/PB1/4",
+      "replay_windows": {
+        "apply": [
+          7,
+          8
+        ],
+        "restore": [
+          8,
+          9
+        ]
+      },
+      "net_window": {
+        "apply": [
+          "PJOI =23550/379: DESP（另 SPAMAP 戳）",
+          "PNOD =23550/378: 只有 CACHID 戳",
+          "MNUM =15358/1: MAPEXS（记账）"
+        ],
+        "note": "柱没有被 E3D 顺手改写：这一窗验得出级联"
+      },
+      "e3d_truth": {
+        "apply": "60 组里变了 2 组：端板 [0, 0, -10, 0, 0, 0]；柱 C01 [0, 0, 0, 0, 0, -10]（柱顶再短 10 mm）。其余 58 组逐字相同",
+        "restore": "与改前 60 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 0,
+        "cascades": 0,
+        "reading": "SBFR 下的主关节那时不成单元，这一窗一件都不重建（E3D 里柱短了 10 mm、端板厚了 10 mm）"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6，T0 06:04 跑的：计划各数、交付单元、几何差与预先写的期望相同；本地主线也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：这一批的导出是 04:50 之前的，没有 ATT；要对拍得把四对宏在 APS 副本上再走一遍"
+      },
+      "replay": {
+        "windows": [
+          8,
+          9
+        ],
+        "r6": "过：级联 1、点名 2 件；几何变 2 件（端板主关节与柱 C01）；交付单元是三级嵌套的根（STRU、FRMW、SBFR）",
+        "case": "aps7166-t2-pjoi（agents/T2/replay/，T0 加了 project 一节与终稿）",
+        "parity": "过：链尾（还原之后）整库全量重建，逐条相等",
+        "r5": "同一条链在 r5 上第一窗（7 → 8，改端板参数）就红：候选 3 全进 no_model、点名 0 件，SBFR 根的几何差 0/0/0（该动端板与柱两件）——r5 没有 e3d-model #43，SBFR 下的主关节不成单元。一条红了后面的窗没有走到",
+        "evidence": "runs/T0/replay-20261112-055308-aps-r6-r6（r6）、runs/T0/replay-20261112-054405-aps-1（本地主线）、runs/T0/replay-20261112-060420-aps-r5（r5）"
+      }
+    },
+    {
+      "id": "D5-pjoi-beam-aps",
+      "situation": "只改被接的柱：把柱 C03 整根东移 40 mm，端板主关节与主节点不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/aps_pjoi_beam_apply.mac",
+      "restore": "joint/aps_pjoi_beam_restore.mac",
+      "db": 7166,
+      "touches_production": [
+        "/SB3/PANEL/1/COL/C03"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/SB3/PANEL/1/COL/C03",
+          "PJOINT 1 of PNODE 4 of SBFRAMEWORK /SB3/PANEL/1/COL（=23550/1066）"
+        ],
+        "remove": [],
+        "untouched": [
+          "/SB3/PANEL/1/COL/C01",
+          "/SB3/PANEL/1/COL/C02",
+          "/SB3/PANEL/1/COL/C04",
+          "/SB3/PANEL/1/ELV4.2/B02",
+          "/SB3/PANEL/1/ELV4.2/B03"
+        ],
+        "why": "e3d-model src/increment.rs joint_fixings_of / beam_feeds_joint：要重建或已删除的梁，它 JOIS / JOIE 指着、CREF 回指它的带目录正体关节一并重建（主关节的原点落在梁 JLIN 那条线上，datum::primary_joint_world 的 gjtorg_beam_line_shift）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=2 … no_model=1（MNUM 的 MAPEXS）… cascades=1 units regen=2 remove=0",
+        "geometry": "柱 C03 与端板的世界包围盒各东移 40；柱顶仍比两端点短 10 mm（让位的 NSEX 跟着端板走）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-040550-aps-ctl-beam",
+      "rvm_export_root": "/SB3/PANEL/1",
+      "replay_windows": {
+        "apply": [
+          13,
+          14
+        ],
+        "restore": [
+          14,
+          15
+        ]
+      },
+      "net_window": {
+        "apply": [
+          "SCTN =23550/1079: POSS、POSE（另 CACHID 戳）",
+          "MNUM =15358/1: MAPEXS（记账）"
+        ],
+        "note": "端板主关节与主节点一个字没动，连戳都没跳"
+      },
+      "e3d_truth": {
+        "apply": "96 组里变了 8 组：柱 C03 与端板各东移 40.01 mm（带图元）；柱名下三只 SNOD 的线框记号跟着挪；另三只不画的关节（空组）只是组原点挪了 40 mm",
+        "restore": "与改前 96 组逐字相同",
+        "note": "E3D 给不画的关节也写一只带平移的空组、给 SNOD 画三条线的记号；这两样都不是模型单元，对拍时要按「没有图元 / 线框记号」分开看。"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "只重建柱，端板停在旧位置（E3D 里它跟着柱挪了 40 mm）"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6，T0 06:04 跑的：计划各数、交付单元、几何差与预先写的期望相同；本地主线也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：这一批的导出是 04:50 之前的，没有 ATT；要对拍得把四对宏在 APS 副本上再走一遍"
+      },
+      "replay": {
+        "windows": [
+          14,
+          15
+        ],
+        "r6": "过：级联 1、点名 2 件；几何变 2 件（柱 C03 与端板）",
+        "case": "aps7166-t2-pjoi（agents/T2/replay/，T0 加了 project 一节与终稿）",
+        "parity": "过：链尾（还原之后）整库全量重建，逐条相等",
+        "r5": "同一条链在 r5 上第一窗（7 → 8，改端板参数）就红：候选 3 全进 no_model、点名 0 件，SBFR 根的几何差 0/0/0（该动端板与柱两件）——r5 没有 e3d-model #43，SBFR 下的主关节不成单元。一条红了后面的窗没有走到",
+        "evidence": "runs/T0/replay-20261112-055308-aps-r6-r6（r6）、runs/T0/replay-20261112-054405-aps-1（本地主线）、runs/T0/replay-20261112-060420-aps-r5（r5）"
+      }
+    },
+    {
+      "id": "D5-pjoi-pnod-aps",
+      "situation": "只挪主节点：把端板主关节所在的 PNOD 上抬 5 mm，被接的柱该从短 10 mm 变成短 5 mm",
+      "change_types": [
+        "CT-D5",
+        "CT-D7"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/aps_pjoi_pnod_apply.mac",
+      "restore": "joint/aps_pjoi_pnod_restore.mac",
+      "db": 7166,
+      "touches_production": [
+        "/SB3/PB1/4/N03"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "PJOINT 1 of PNODE /SB3/PB1/4/N03（=23550/379）",
+          "/SB3/PB1/4/POR/C01"
+        ],
+        "remove": [],
+        "untouched": [
+          "PJOINT 1 of PNODE /SB3/PB1/4/N02（=23550/385）",
+          "/SB3/PB1/4/POR/B01",
+          "/SB3/PB1/4/POR/B02",
+          "/SB3/PB1/4/POR/C02",
+          "/SB3/PB1/4/POR/R01"
+        ],
+        "why": "e3d-model src/increment.rs implicit_frame_host_of 的 PNOD 臂：FRMW / SBFR 名下、带着目录正体主关节的 PNOD 是现算标架宿主（主关节的站位 = PNOD 的 NPOS + 自己的 DELP），改它就把名下的主关节收进计划；被主关节接的梁再由关节级联带出来。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=3 … no_model=2（MNUM 的 MAPEXS、主关节只跳了 SPAMAP）… cascades=2 units regen=2 remove=0",
+        "geometry": "端板的世界包围盒上抬 5；柱 C01 的上界升 5（让位的 NSEX 只剩 5 mm 落在柱里：从短 10 变成短 5）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-040404-aps-pjoi-desp-pnod",
+      "rvm_export_root": "/SB3/PB1/4",
+      "replay_windows": {
+        "apply": [
+          9,
+          10
+        ],
+        "restore": [
+          10,
+          11
+        ]
+      },
+      "net_window": {
+        "apply": [
+          "PNOD =23550/378: NPOS（另 CACHID、SPAMAP 戳）",
+          "PJOI =23550/379: 只有 SPAMAP 戳",
+          "MNUM =15358/1: MAPEXS（记账）"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "60 组里变了 2 组：端板组原点挪 5.00 mm、包围盒 [0, 0, +5]；柱 C01 [0, 0, 0, 0, 0, +5]。其余 58 组逐字相同",
+        "restore": "与改前 60 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 0,
+        "cascades": 0,
+        "reading": "一件都不重建（E3D 里端板抬了 5 mm、柱长了 5 mm）"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6，T0 06:04 跑的：计划各数、交付单元、几何差与预先写的期望相同；本地主线也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：这一批的导出是 04:50 之前的，没有 ATT；要对拍得把四对宏在 APS 副本上再走一遍"
+      },
+      "replay": {
+        "windows": [
+          10,
+          11
+        ],
+        "r6": "过：级联 2、点名 2 件；几何变 2 件（端板主关节与柱 C01）",
+        "case": "aps7166-t2-pjoi（agents/T2/replay/，T0 加了 project 一节与终稿）",
+        "parity": "过：链尾（还原之后）整库全量重建，逐条相等",
+        "r5": "同一条链在 r5 上第一窗（7 → 8，改端板参数）就红：候选 3 全进 no_model、点名 0 件，SBFR 根的几何差 0/0/0（该动端板与柱两件）——r5 没有 e3d-model #43，SBFR 下的主关节不成单元。一条红了后面的窗没有走到",
+        "evidence": "runs/T0/replay-20261112-055308-aps-r6-r6（r6）、runs/T0/replay-20261112-054405-aps-1（本地主线）、runs/T0/replay-20261112-060420-aps-r5（r5）"
+      }
+    },
+    {
+      "id": "D5-ctl-sctn-free-aps",
+      "situation": "对照：改一根没有主关节认领的型钢（斜梁 R01 的 BANG 0 改成 90），一只主关节都不该点名",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/aps_ctl_sctn_free_apply.mac",
+      "restore": "joint/aps_ctl_sctn_free_restore.mac",
+      "db": 7166,
+      "touches_production": [
+        "/SB3/PB1/4/POR/R01"
+      ],
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/SB3/PB1/4/POR/R01"
+        ],
+        "remove": [],
+        "untouched": [
+          "PJOINT 1 of PNODE /SB3/PB1/4/N03（=23550/379）",
+          "PJOINT 1 of PNODE /SB3/PB1/4/N01（=23550/383）",
+          "PJOINT 1 of PNODE /SB3/PB1/4/N02（=23550/385）",
+          "/SB3/PB1/4/POR/C01",
+          "/SB3/PB1/4/POR/C02",
+          "/SB3/PB1/4/POR/B01",
+          "/SB3/PB1/4/POR/B02"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）；没有级联的腿命中时只重建它自己。 斜梁两端接的是没有规格的 SJOI，不成模型单元，joint_fixings_of 不收。docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=2 … no_model=1（MNUM 的 MAPEXS）… cascades=0 units regen=1 remove=0",
+        "geometry": "只有 R01 的图形变（型材绕自己的轴转 90 度）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-040550-aps-ctl-beam",
+      "rvm_export_root": "/SB3/PB1/4",
+      "replay_windows": {
+        "apply": [
+          11,
+          12
+        ],
+        "restore": [
+          12,
+          13
+        ]
+      },
+      "net_window": {
+        "apply": [
+          "SCTN =23550/412: BANG（另 CACHID、SPAMAP 戳）",
+          "MNUM =15358/1: MAPEXS（记账）"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "60 组里变了 3 组：R01 自己（带图元）；它两端那两只不画的 SJOI 是空组，只是组原点挪了 85.5 mm。没有一只主关节的组变",
+        "restore": "与改前 60 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "与期望相同"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6，T0 06:04 跑的：计划各数、交付单元、几何差与预先写的期望相同；本地主线也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：这一批的导出是 04:50 之前的，没有 ATT；要对拍得把四对宏在 APS 副本上再走一遍"
+      },
+      "replay": {
+        "windows": [
+          12,
+          13
+        ],
+        "r6": "过：级联 0、点名 1 件；几何变 1 件（斜梁 R01）",
+        "case": "aps7166-t2-pjoi（agents/T2/replay/，T0 加了 project 一节与终稿）",
+        "parity": "过：链尾（还原之后）整库全量重建，逐条相等",
+        "r5": "同一条链在 r5 上第一窗（7 → 8，改端板参数）就红：候选 3 全进 no_model、点名 0 件，SBFR 根的几何差 0/0/0（该动端板与柱两件）——r5 没有 e3d-model #43，SBFR 下的主关节不成单元。一条红了后面的窗没有走到",
+        "evidence": "runs/T0/replay-20261112-055308-aps-r6-r6（r6）、runs/T0/replay-20261112-054405-aps-1（本地主线）、runs/T0/replay-20261112-060420-aps-r5（r5）"
+      }
+    }
+  ],
+  "chains": [],
+  "probes": [
+    {
+      "macro": "joint/probe_pjoi_aps.mac",
+      "purpose": "只读探针：aps7166 /SB3 里这组用例动到的元素的身份、连接与现值",
+      "no_savework": true
+    },
+    {
+      "macro": "joint/probe_aps7166_writable.mac",
+      "purpose": "探针：aps7166 在 /SDNF 的会话里能不能写（改一格再改回，不存盘）",
+      "no_savework": true
+    }
+  ]
+}

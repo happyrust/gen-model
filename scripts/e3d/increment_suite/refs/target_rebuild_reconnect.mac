@@ -1,0 +1,44 @@
+-- 登记: A02（变更类型 CT-S1、CT-A6；按名称案例 E-07 ③：引用从空变成有目标；与 refs/target_delete.mac 并成一窗就是 E-01） | 语义: 支管 BRAN-R 已被删掉、管口的 CREF 是空的。按原样同名重建支管（成员起回原名），再把头接回管口 NOZZ-1
+-- expected_net: modified | 这条是 refs/target_delete.mac 的还原腿；两条并进同一个消费窗口，净效果与 refs/target_recreate.mac 相同（旧支管删除、新支管新建、管口的 CREF 换了值）
+-- 预期 gen-model（按 refno）: 新支管重建一次；管口的 CREF 从空变有，所在的设备 EQ-NZ 重建一次；没有 datacenter_delete（新 refno 没有版本记录）；别的设备不动。
+-- 前置: refs/target_delete.mac 已跑（BRAN-R 不在）。句式与 ident/setup_t3.mac 里 BRAN-R 那一段逐句相同。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-REFS-TARGET-REBUILD-RECONNECT-ALIVE
+/AIOS-SUITE-T3-EQ-NZ
+Q REF
+Q NAME
+/AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+Q CREF
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+Q MEMB
+NEW BRAN /AIOS-SUITE-T3-BRAN-R
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+BY U 6000 WRT /*
+Q HPOS
+/AIOS-SUITE-T3-BRAN-R
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-T3-BRAN-R-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+HREF /AIOS-SUITE-T3-NOZZ-1
+Q HREF
+Q MEMB
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+SAVEWORK 'AIOS suite T3 refs/target_rebuild_reconnect: BRAN-R recopied identical and reconnected to NOZZ-1'
+$P SUITE-T3-REFS-TARGET-REBUILD-RECONNECT-DONE
+ALPHA LOG END

@@ -1,0 +1,24 @@
+-- 登记: C06 / CT-A3 | 语义: 设备 /AIOS-SUITE-T1-EQ-NZ 向南挪回 300 mm。此时支管（上一腿重接过）停在挪过之后的位置，
+-- 这一窗同样只动设备、不动支管——是「接头动了、管线不跟」的反方向再来一次。
+-- expected_net: cancelled | restore 搭档: 本文件是 pipeconn/nozz_conn_move_apply.mac 的 restore
+--
+-- 链: pipeconn/nozz_conn 的第 4 腿。反向增量（同 binade 加减精确可逆，xform/move_restore.mac 同款）；
+-- 不要脱离链单跑：先看日志里的 Q POS，基线是 N 30000，apply 之后是 N 30300。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-NOZZMOVE-RESTORE-ALIVE
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q HREF
+Q HPOS WRT /*
+/AIOS-SUITE-T1-EQ-NZ
+Q REF
+Q NAME
+Q POS WRT /*
+BY S 300
+Q POS WRT /*
+/AIOS-SUITE-T1-BRAN-C
+Q HPOS WRT /*
+SAVEWORK 'AIOS suite pipeconn/nozz_conn_move restore: EQ-NZ BY S 300, connected branch untouched'
+$P SUITE-PIPECONN-NOZZMOVE-RESTORE-DONE
+ALPHA LOG END

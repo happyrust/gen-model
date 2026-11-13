@@ -1,0 +1,36 @@
+-- 登记: gen-model #143（联动分类表第 16 行；变更类型 CT-D11，兼 CT-A6 + CT-C3 跨库远端） | 语义: 整条管线换一档管径——
+-- 管道库 250132 的支管 /300-A-42/B1 的 HSTU、它名下三通的 LSTU 一起从 /A3B/PA300 换成 /A3B/PA250。
+-- 支撑库 250104 里指着支管的 /PS-01-00194.1、/PS-01-00195.1 和指着三通的 /PS-01-00196.1、/PS-01-00197.1 四只都该被点名。
+-- 预期：250132 这一窗「4 changed」、交接 4 只 → 250104 的 4 个根；支撑库没有新会话。
+-- （只换支管的那一个用例 C3-compre-hstu-xdb 里，指着三通的两只是对照；这里它们也该动。）
+-- expected_net: modified | restore 搭档: support/compre_respec_pipe_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，全部写绝对值，重跑幂等。不用世界锚点，按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-RESPEC-PIPE-APPLY-ALIVE
+/PS-01-00196.1
+Q REF
+Q NAME
+Q COMPRE
+Q SPRE
+/PS-01-00197.1
+Q REF
+Q NAME
+Q COMPRE
+Q SPRE
+/300-A-42/B1
+Q REF
+Q NAME
+Q HSTU
+Q HBOR
+HSTU /A3B/PA250
+Q HSTU
+FIRST TEE
+Q REF
+Q NAME
+Q LSTU
+LSTU /A3B/PA250
+Q LSTU
+SAVEWORK 'AIOS suite support/compre_respec_pipe apply: /300-A-42/B1 HSTU and its TEE LSTU PA300 -> PA250'
+$P SUITE-SUPPORT-COMPRE-RESPEC-PIPE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,35 @@
+-- 登记: 联动分类表第 13 / 14 行（规则 E；e3d-model #40 的情形；变更类型 CT-D6，兼 CT-A4） | 语义: 电缆经过的桥架节点改成偏移型并给了偏移——
+-- 桥架库 250182 的路由节点 /CWAY-AREA01-POWER_B7-RNODE-003：RNTYPE TAKE -> OFFS，XOFF 0 -> 200，ZOFF 0 -> 100
+-- （取证代理在另一份沙箱里量过：节点的世界位置从 N 305750 U 105600 变成 N 305550 U 105700，有电缆经过）。
+-- 预期：250182 这一窗变的只有这个节点；经过它的电缆跟着重算，别的电缆不动。
+-- 重算出来的电缆与 E3D 对不对得上另有一张开着的票（e3d-model #40：电缆穿过 OFFS 型节点）。
+-- expected_net: modified | restore 搭档: cable/rnode_offs_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CABLE-RNODE-OFFS-APPLY-ALIVE
+/CBLP-LTG-101-01D
+Q REF
+Q NAME
+Q STAREF
+Q ENDREF
+/CWAY-AREA01-POWER_B7-RNODE-003
+Q REF
+Q NAME
+Q TYPE
+Q RNTYPE
+Q XOFF
+Q YOFF
+Q ZOFF
+Q ZDIS
+Q POS WRT /*
+RNTYPE OFFS
+XOFF 200
+ZOFF 100
+Q RNTYPE
+Q XOFF
+Q ZOFF
+Q POS WRT /*
+SAVEWORK 'AIOS suite cable/rnode_offs apply: RNODE-003 RNTYPE TAKE -> OFFS, XOFF 200, ZOFF 100'
+$P SUITE-CABLE-RNODE-OFFS-APPLY-DONE
+ALPHA LOG END

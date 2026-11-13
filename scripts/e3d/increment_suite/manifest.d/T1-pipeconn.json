@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "owner": "T1",
+  "topic": "pipe-conn",
+  "copy": "ams",
+  "mdb": "/ALL",
+  "sites": [
+    "/AIOS-SUITE-T1-8000"
+  ],
+  "setup": "pipeconn/setup_t1_8000.mac",
+  "teardown": "pipeconn/teardown_t1_8000.mac",
+  "description": "管嘴与管线的连接：把支管头接到管嘴上、接了管的设备挪位（管线不该跟）、重新接管（管线跟过去）。AMS db8000，自建语料，不动生产元素、不碰公共基线。六腿是一条强制链。",
+  "setup_note": "setup 建 EQUI /AIOS-SUITE-T1-EQ-NZ（1000 见方的 BOX 加一只口径 50 的对焊管嘴 /AIOS-SUITE-T1-NZ1，目录件 /NOZZ-BW/ACZW200JJ）和 PIPE /AIOS-SUITE-T1-PIPE（规格 /VMB1）下的空支管 /AIOS-SUITE-T1-BRAN-C：头落在管嘴口上（E 99200 N 30000 U 0，朝 W），尾在轴线上 3000 mm 处，一根 DN50 直管；对齐了但没有接。E3D 导出的基线是三件：BOX、管嘴的面片、支管的一段圆柱。",
+  "cases": [
+    {
+      "id": "A5-bran-conn-nozz",
+      "situation": "把一根支管的头接到设备的管嘴上（位置本来就对齐，只是建立连接）；之后断开",
+      "change_types": [
+        "CT-A5",
+        "CT-A6"
+      ],
+      "cascade_row": 5,
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeconn/bran_conn_nozz_apply.mac",
+      "restore": "pipeconn/bran_conn_nozz_restore.mac",
+      "chain": "pipeconn/nozz_conn",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "changed": [
+          "/AIOS-SUITE-T1-BRAN-C：HREF",
+          "/AIOS-SUITE-T1-NZ1：CREF（E3D 回写）"
+        ],
+        "rebuild": [
+          "/AIOS-SUITE-T1-BRAN-C"
+        ],
+        "rebuild_optional": [
+          "/AIOS-SUITE-T1-EQ-NZ"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T1-EQ-NZ-BOX（几何）",
+          "公共基线 /AIOS-SUITE-8000 整棵与生产元素"
+        ],
+        "geometry": "两个根的几何都不变：E3D 导出与接之前逐件相同",
+        "why": "HREF 是头尾连接属性（变更类型 CT-A5），支管是路由容器、进派生集重算隐含管段；管嘴的 CREF 按名字在生成器的读取集合里（model_impact.rs DEPENDENCY_CASCADE_ATTR_NAMES），设备会被保守地重算——管嘴的几何并不读它，重算与否都不算错，要求的是几何不变。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-033604-pipeconn-chain",
+      "layers": {
+        "tty": "pass（apply 8000 1193→1195，restore 1208→1210）",
+        "rvm_truth": "pass（套件的标准对拍按 pipeconn/rvm-truth.json 判）：apply 前后、restore 前后 E3D 导出逐件相同（3 件）",
+        "plan": "pass（离线，11-08 编的规划器探针）：变更清单正好是 BRAN 的 HREF 与 NOZZ 的 CREF；e3d-model 计划 = 支管（派生）+ 管嘴（重建）；gen-model 根 = 支管 + 设备",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/AIOS-SUITE-T1-8000 在 8000@1195：3 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "没跑（等 READY-replay；草稿 agents/T1/replay/ams8000-pipe-nozz-conn.json）",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A3-nozz-conn-move",
+      "situation": "把一台接着管线的设备挪了 300 mm，没有去动管线",
+      "change_types": [
+        "CT-A3"
+      ],
+      "cascade_row": 5,
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeconn/nozz_conn_move_apply.mac",
+      "restore": "pipeconn/nozz_conn_move_restore.mac",
+      "chain": "pipeconn/nozz_conn",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "changed": [
+          "/AIOS-SUITE-T1-EQ-NZ：POS"
+        ],
+        "rebuild": [
+          "/AIOS-SUITE-T1-EQ-NZ"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T1-BRAN-C（不在交付单元里，模型记录逐条不变）",
+          "公共基线与生产元素"
+        ],
+        "geometry": "设备整根平移 [0, 300, 0]（restore 腿 [0, -300, 0]），件数不变；支管的管身不动",
+        "why": "支管头的位置（HPOS）是存在支管记录里的值，不是按 HREF 现算的；设备挪了、E3D 没有回写支管，E3D 自己也照旧位置画——画的与存的是同一版（联动分类表第 5 行、第 2.9 节）。所以管线不该跟，也不该被重算。语料里从来没有过这种窗口（292 个设计库 0 个），这里拿宏坐实。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-033604-pipeconn-chain",
+      "layers": {
+        "tty": "pass（apply 8000 1196→1198，restore 1202→1204）",
+        "rvm_truth": "pass（套件的标准对拍按 pipeconn/rvm-truth.json 判）：E3D 导出里 BOX 与管嘴平移 [0, 300, 0]，支管的管身逐件相同——E3D 自己也不让管子跟",
+        "plan": "pass（离线）：变更清单只有设备的 POS；e3d-model 计划 = BOX + 管嘴；gen-model 根 = 设备；支管不在任何一侧",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/AIOS-SUITE-T1-8000 在 8000@1198：3 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "没跑（等 READY-replay）",
+        "l3": "没跑（等隔离后端）"
+      }
+    },
+    {
+      "id": "A5-bran-reconn",
+      "situation": "设备挪开之后把管线重新接到管嘴上（E3D 把管嘴口的新位置写进支管）",
+      "change_types": [
+        "CT-A5"
+      ],
+      "cascade_row": 5,
+      "name_case": null,
+      "tickets": [],
+      "apply": "pipeconn/bran_reconn_apply.mac",
+      "restore": "pipeconn/bran_reconn_restore.mac",
+      "chain": "pipeconn/nozz_conn",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "changed": [
+          "/AIOS-SUITE-T1-BRAN-C：HPOS、TPOS"
+        ],
+        "rebuild": [
+          "/AIOS-SUITE-T1-BRAN-C"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T1-EQ-NZ（管嘴的 CREF 本来就指着这根支管，这一窗没有变化）",
+          "公共基线与生产元素"
+        ],
+        "geometry": "支管的管身平移 [0, 300, 0]（restore 腿 [0, -300, 0]），件数不变",
+        "why": "接头动了、E3D 回写了支管 → 支管自己是变更元素 → 照常重算（联动分类表第 2.9 节的另一半）。"
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T1/20261112-033604-pipeconn-chain",
+      "layers": {
+        "tty": "pass（apply 8000 1199→1201，restore 1205→1207）",
+        "rvm_truth": "pass（套件的标准对拍按 pipeconn/rvm-truth.json 判）：E3D 导出里支管的管身平移 [0, 300, 0]，BOX 与管嘴逐件相同；restore 反过来",
+        "plan": "pass（离线）：变更清单只有支管的 HPOS、TPOS；两侧都只有支管",
+        "full_gen": "pass：改之后的库文件上用 e3d-model 的 gen_ams 全量生成、rvm_compare 与 E3D 导出对拍——/AIOS-SUITE-T1-8000 在 8000@1201：3 件逐件相同（差 0.0000 mm，没有只在一侧的件）；改之前、还原之后的各个时刻同样逐件相同。清单 agents/T1/geom/plan.json，全套 33 项都过。",
+        "replay": "没跑（等 READY-replay）",
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [
+    {
+      "id": "pipeconn/nozz_conn",
+      "note": "六腿必须按序连续跑：第 2 腿要第 1 腿接好的管，第 3 腿要第 2 腿挪开的设备，后三腿依次收回去。前置：pipeconn/setup_t1_8000.mac。整条链首尾：E3D 导出逐件相同，库里净变化为零（1193→1210 的净窗口没有一个模型元素变）。",
+      "legs": [
+        "pipeconn/bran_conn_nozz_apply.mac",
+        "pipeconn/nozz_conn_move_apply.mac",
+        "pipeconn/bran_reconn_apply.mac",
+        "pipeconn/nozz_conn_move_restore.mac",
+        "pipeconn/bran_reconn_restore.mac",
+        "pipeconn/bran_conn_nozz_restore.mac"
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "macro": "pipeconn/probe_t1_conn.mac",
+      "purpose": "语法探针（不存盘）：CATREF 赋目录件、CONN PH TO /管嘴、!!CE.HPOS 取对象与 Offset / Opposite、TPOS $!var、HREF =0/0 清引用、设备挪开后 HPOS 跟不跟。结论写在宏的文件头。",
+      "no_savework": true
+    }
+  ],
+  "verified_syntax": {
+    "note": "2026-11-12 在私有副本上实测（探针两轮加六腿实跑）。",
+    "list": [
+      "CATREF =refno 给 NOZZ 赋目录件",
+      "PSPE =refno 给 PIPE 赋管道规格（其下新建的 BRAN 继承）",
+      "CONN PH TO /管嘴：PIPE 带了 PSPE 时不报错，写 HREF、HPOS、HDIR、HBOR、HCON、LHEA，并按口径选出 HSTU；管嘴的 CREF 回写",
+      "CONN PH TO 在支管没有管道规格时照样连上，但报 (7,27) HSTUB not selected - SPEC undefined——写步里不能有报错行",
+      "!var = !!CE.HPOS / !!CE.HDIR（POSITION / DIRECTION 对象）；POSITION.Offset(DIRECTION, REAL)；DIRECTION.Opposite()",
+      "TPOS $!var、TDIR $!var（对象展开成命令参数）；TBOR 50；TCON OPEN",
+      "HPOS / TPOS E .. N .. U .. WRT /* 写绝对值，写了之后 HREF 不掉",
+      "HREF =0/0 清空引用，管嘴的 CREF 跟着清；HREF /管嘴 直接赋值也成立（CREF 回写，HPOS 不动）",
+      "Q P1 / Q P1 POS WRT /* / Q P1 DIR WRT /* / Q P1 BORE（查管嘴口）；Q PH / Q PT",
+      "设备 BY 之后，接在它管嘴上的支管 HPOS 不跟（存储值）；再 CONN 一次才跟"
+    ]
+  },
+  "rvm_truth": {
+    "export_root": "/AIOS-SUITE-T1-8000",
+    "model": "pipeconn/rvm-truth.json",
+    "note": "每条写腿之后整棵 /AIOS-SUITE-T1-8000 导一份（3 件：BOX、管嘴、支管的管身）；Compare-SuiteRvmTruth.ps1 -Model pipeconn/rvm-truth.json -Root /AIOS-SUITE-T1-8000 逐腿判。链里每条腿与紧挨着的上一份快照比，最后一腿与链头比。2026-11-12 六腿都是 pass。"
+  },
+  "full_gen": {
+    "what": "全量生成层：链上每个有 E3D 导出的时刻，在那一时刻的库文件上把同一个根全量生成，与 E3D 的导出逐件对拍。不开 E3D、不起后端、不连库、不编译。",
+    "plan": "agents/T1/geom/plan.json",
+    "result": "链上 7 个时刻（基线、接上、设备挪开、重接、设备挪回、重接回、断开）各 3 件（BOX、管嘴、直管段）逐件相同",
+    "note": "AMS 要显式点名 ams000 下的 ams7000_0001 当目录库：库 7000 在 ams000 与 acp000 各有一份主文件，目录扫描分不出正身、整组不用；不点名的话管嘴生成不出来、直管段退成按公称通径画（外径差 5 mm 的假差异）。"
+  }
+}

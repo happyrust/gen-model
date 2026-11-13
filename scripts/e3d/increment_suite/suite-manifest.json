@@ -10,7 +10,7 @@
     "model": "rvm-truth.json",
     "export": "Export-SuiteRvmTruth.ps1",
     "compare": "Compare-SuiteRvmTruth.ps1",
-    "note": "每条写腿之后整棵 /AIOS-SUITE-8000 只读导出一份 RVM → rvm-truth/<sesno>.json（K 组同一约定）；每条腿应有的几何变化、AABB 看不见的腿、待校准项都在 rvm-truth.json，流程见 README「RVM 真值」节。截至 2026-10-28 还没有导过任何一份。"
+    "note": "每条写腿之后整棵 /AIOS-SUITE-8000 只读导出一份 RVM → rvm-truth/<sesno>.json（K 组同一约定）；每条腿应有的几何变化、AABB 看不见的腿、待校准项都在 rvm-truth.json，流程见 README「RVM 真值」节。截至 2026-11-03 只导过 E04-spre-swap 一份（隔离副本，前 / 后 / 还原三份 RVM，Compare 通过），其余用例都还没导。"
   },
   "world_anchor": {
     "db8000": {
@@ -65,7 +65,7 @@
     },
     {
       "macro": "connect/bran_reorder_probe.mac",
-      "purpose": "语法探针：REORDER 是否成立（仓内零命中，未证）。成立才补正式腿。",
+      "purpose": "反例探针：`REORDER AFTER FTUB 3` 少写了「挪谁」，报 CP: Syntax error。2026-11-12 订正：REORDER 成立，完整句式是 `REORDER <成员> BEFORE|AFTER <成员>`（CE 在属主上），见 manifest.d/T3-ident.json 的 S6-member-reorder / S6-unnamed-reorder。",
       "no_savework": true
     }
   ],
@@ -116,35 +116,36 @@
       "apply": "create/cross_db_copy_apply.mac",
       "restore": "create/cross_db_copy_restore.mac",
       "expected_net": "cancelled",
-      "registration": "F03"
+      "registration": "A02",
+      "db": [8000, 7998]
     },
     {
       "id": "A01-delete-box",
       "apply": "delete/box_apply.mac",
       "restore": "delete/box_restore.mac",
       "expected_net": "deleted",
-      "registration": "A01"
+      "registration": "A02"
     },
     {
       "id": "A01-delete-keep",
       "apply": "delete/container_keep_child_apply.mac",
       "restore": "delete/container_keep_child_restore.mac",
       "expected_net": "deleted",
-      "registration": "A01"
+      "registration": "A02"
     },
     {
       "id": "A01-recreate-same",
       "apply": "delete/recreate_same_name_apply.mac",
       "restore": null,
       "expected_net": "deleted",
-      "registration": "A01"
+      "registration": "A02"
     },
     {
       "id": "A01-child-parent",
       "apply": "delete/child_then_parent_1_apply.mac",
       "restore": "delete/child_then_parent_restore.mac",
       "expected_net": "deleted",
-      "registration": "A01",
+      "registration": "B01",
       "chain": [
         "delete/child_then_parent_1_apply.mac",
         "delete/child_then_parent_2_apply.mac",
@@ -170,42 +171,42 @@
       "apply": "attr/owner_apply.mac",
       "restore": "attr/owner_restore.mac",
       "expected_net": "modified",
-      "registration": "A07"
+      "registration": "A02"
     },
     {
       "id": "C01-move",
       "apply": "xform/move_apply.mac",
       "restore": "xform/move_restore.mac",
       "expected_net": "modified",
-      "registration": "C01"
+      "registration": "C03"
     },
     {
       "id": "C01-rot-u",
       "apply": "xform/rot_u_apply.mac",
       "restore": "xform/rot_u_restore.mac",
       "expected_net": "modified",
-      "registration": "C01"
+      "registration": "C08"
     },
     {
       "id": "C01-rot-e",
       "apply": "xform/rot_e_apply.mac",
       "restore": "xform/rot_e_restore.mac",
       "expected_net": "modified",
-      "registration": "C01"
+      "registration": "C08"
     },
     {
       "id": "C01-rot-n",
       "apply": "xform/rot_n_apply.mac",
       "restore": "xform/rot_n_restore.mac",
       "expected_net": "modified",
-      "registration": "C01"
+      "registration": "C08"
     },
     {
       "id": "C01-compound",
       "apply": "xform/compound_apply.mac",
       "restore": "xform/compound_restore.mac",
       "expected_net": "modified",
-      "registration": "C01"
+      "registration": "C08"
     },
     {
       "id": "C06-noz-move",
@@ -219,21 +220,37 @@
       "apply": "geom/resize_apply.mac",
       "restore": "geom/resize_restore.mac",
       "expected_net": "modified",
-      "registration": "B01"
+      "registration": "A02"
+    },
+    {
+      "id": "B01-cyli-size",
+      "apply": "geom/cyli_size_apply.mac",
+      "restore": "geom/cyli_size_restore.mac",
+      "expected_net": "modified",
+      "registration": "A02",
+      "tty_status": "passed (2026-11-04, sesno 1499/1503, DIAM 1500→2100→1500, Compare pass)"
     },
     {
       "id": "B02-nbox-resize",
       "apply": "geom/nbox_resize_apply.mac",
       "restore": "geom/nbox_resize_restore.mac",
       "expected_net": "modified",
-      "registration": "B02"
+      "registration": "A02"
     },
     {
       "id": "B02-nbox-add",
       "apply": "geom/nbox_add_apply.mac",
       "restore": "geom/nbox_add_restore.mac",
       "expected_net": "cancelled",
-      "registration": "B02"
+      "registration": "A02"
+    },
+    {
+      "id": "B02-nbox-move",
+      "apply": "geom/nbox_move_apply.mac",
+      "restore": "geom/nbox_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "A02",
+      "tty_status": "passed (2026-11-04, sesno 1507/1511, Q POS E 0→E 200→E 0, RVM 无痕)"
     },
     {
       "id": "A01-bran-add-member",
@@ -286,14 +303,14 @@
       "apply": "room/member_move_apply.mac",
       "restore": "room/member_move_restore.mac",
       "expected_net": "modified",
-      "registration": "G01"
+      "registration": "G02"
     },
     {
       "id": "G02-pane-move",
       "apply": "room/pane_move_apply.mac",
       "restore": "room/pane_move_restore.mac",
       "expected_net": "modified",
-      "registration": "G02"
+      "registration": "G03"
     },
     {
       "id": "G03-pave-move",
@@ -307,21 +324,21 @@
       "apply": "room/frmw_rename_apply.mac",
       "restore": "room/frmw_rename_restore.mac",
       "expected_net": "modified",
-      "registration": "G04"
+      "registration": "G03"
     },
     {
       "id": "A01-compound-rename",
       "apply": "compound/rename_move_add_apply.mac",
       "restore": "compound/rename_move_add_restore.mac",
       "expected_net": "modified",
-      "registration": "A01"
+      "registration": "A08"
     },
     {
       "id": "A01-two-roots",
       "apply": "compound/two_roots_apply.mac",
       "restore": "compound/two_roots_restore.mac",
       "expected_net": "modified",
-      "registration": "A01"
+      "registration": "A08"
     },
     {
       "id": "H03-companion-move",
@@ -336,17 +353,89 @@
       "apply": "pipe/spre_swap_apply.mac",
       "restore": "pipe/spre_swap_restore.mac",
       "expected_net": "modified",
-      "registration": "E04",
+      "registration": "A01",
       "corpus": "BEND M2 的 SPRE 从 TBR:50 (=13244/108844) 换成 TBR90:50X150 (=13244/108852)，同 bore 50 的 90 度弯头；13244 = ams5052 库",
       "tty_status": "passed (2026-10-28, RVM 几何 122->124->122, Compare pass)"
+    },
+    {
+      "id": "D06-zone-move",
+      "apply": "xform/zone_move_apply.mac",
+      "restore": "xform/zone_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "D06",
+      "tty_status": "passed (2026-11-04, sesno 1515/1519, 子件世界坐标各 +500 E, Compare pass)"
+    },
+    {
+      "id": "A02-box-pos",
+      "apply": "geom/box_pos_apply.mac",
+      "restore": "geom/box_pos_restore.mac",
+      "expected_net": "modified",
+      "registration": "A02",
+      "tty_status": "passed (2026-11-04, sesno 1523/1527, BOX-PRIM 世界平移 [400,0,0], Compare pass)"
+    },
+    {
+      "id": "A09-pos-same",
+      "apply": "xform/pos_same_apply.mac",
+      "restore": "xform/pos_same_restore.mac",
+      "expected_net": "unchanged",
+      "registration": "A09",
+      "tty_status": "passed (2026-11-04, sesno 1530/1533, 空设备 POS 原值再写, RVM 不变)"
+    },
+    {
+      "id": "A09-xlen-same",
+      "apply": "geom/xlen_same_apply.mac",
+      "restore": "geom/xlen_same_restore.mac",
+      "expected_net": "unchanged",
+      "registration": "A09",
+      "tty_status": "passed (2026-11-04, sesno 1536/1539, XLEN 2000 再写, EQ-A 并集不动)"
+    },
+    {
+      "id": "A02-pose-reparent",
+      "apply": "attr/pose_reparent_apply.mac",
+      "restore": "attr/pose_reparent_restore.mac",
+      "expected_net": "modified",
+      "registration": "A02",
+      "tty_status": "passed (2026-11-04, sesno 1543/1547, 改挂后 AABB 按实测锁定, Compare pass)"
+    },
+    {
+      "id": "A09-desc-same",
+      "apply": "attr/desc_same_apply.mac",
+      "restore": "attr/desc_same_restore.mac",
+      "expected_net": "unchanged",
+      "registration": "A09",
+      "tty_status": "passed (2026-11-04, sesno 1634/1637, DESC 原句再写, RVM 不变)"
+    },
+    {
+      "id": "A09-spre-same",
+      "apply": "pipe/spre_same_apply.mac",
+      "restore": "pipe/spre_same_restore.mac",
+      "expected_net": "unchanged",
+      "registration": "A09",
+      "tty_status": "passed (2026-11-04, sesno 1640/1643, SPRE TBR:50 再写, RVM 不变)"
+    },
+    {
+      "id": "D06-zone-ori",
+      "apply": "xform/zone_ori_apply.mac",
+      "restore": "xform/zone_ori_restore.mac",
+      "expected_net": "modified",
+      "registration": "D06",
+      "tty_status": "passed (2026-11-04, sesno 1647/1651, Y is W 后两件 BOX AABB 按实测锁定, Compare pass)"
+    },
+    {
+      "id": "A09-ori-same",
+      "apply": "xform/ori_same_apply.mac",
+      "restore": "xform/ori_same_restore.mac",
+      "expected_net": "unchanged",
+      "registration": "A09",
+      "tty_status": "passed (2026-11-04, sesno 2088/2091, ORI Y is N 再写, sesno +1, RVM 不变)"
     }
   ],
   "not_encoded": [
     {
       "id": "C0x-bran-reorder",
-      "reason": "REORDER 语法仓内零命中，无已证替代，不能写进正式套件",
+      "reason": "2026-11-12 订正：REORDER 成立（`REORDER <成员> BEFORE|AFTER <成员>`），当年报语法错是少写了「挪谁」。设备基本体上的纯换序已有用例（manifest.d/T3-ident.json：S6-member-reorder、S6-unnamed-reorder）；支管成员上的换序（会改走向、要重算隐含管段）还没有人试，所以这一条留在这里",
       "probe": "connect/bran_reorder_probe.mac",
-      "next": "探针证成后补 connect/bran_reorder_apply.mac + restore；证不成则移到 (c) 类「PML 触发不了」"
+      "next": "在支管成员上试 `REORDER`，成立就补 connect/bran_reorder_apply.mac + restore；不属于「PML 触发不了」"
     },
     {
       "id": "C0x-spre-swap",
@@ -391,7 +480,7 @@
   "unverified_syntax": {
     "note": "★ TTY 实测后仍未通过或未覆盖的。",
     "list": [
-      "REORDER — TTY 实测 `CP: Syntax error`，确认不存在。已改探针。",
+      "REORDER — 2026-11-12 订正：成立，句式 `REORDER <成员> BEFORE|AFTER <成员>`（按名、按序号、按类型加序号都行，CE 在属主上）。当年的 `CP: Syntax error` 是少写了「挪谁」。支管成员上未实测。",
       "HPOS BY — TTY 实测 `CP: Syntax error`，确认不存在。已改成绝对值。",
       "COPY $!var — 未单独实测；bran_add_member_apply 两腿 completed 说明该形式可用",
       "跨库 COPY — 未实测，阻塞在 7998 锚点",
@@ -439,9 +528,76 @@
       }
     ],
     "known_limitations": [
-      "connect/bran_reorder：REORDER 语法 TTY 实测 CP: Syntax error，确认不存在，仍在 not_encoded",
+      "connect/bran_reorder：2026-11-12 订正，REORDER 成立；支管成员上的换序未实测，仍在 not_encoded",
       "C0x-spre-swap：卡 db 13244 语料，仍在 not_encoded",
       "db7998 extent 2 为何能在单文件库写成功：未验证（只观察到能写、文件变长、无 _0002 兄弟文件）"
-    ]
+    ],
+    "follow_up_2026_11_04": {
+      "date": "2026-11-04",
+      "stamp": "20261104-112724",
+      "truth_dir": "output/increment-suite-rvm-truth/20261104-112724",
+      "cases": [
+        "B01-cyli-size",
+        "B02-nbox-move",
+        "D06-zone-move",
+        "A02-box-pos",
+        "A09-pos-same",
+        "A09-xlen-same",
+        "A02-pose-reparent"
+      ],
+      "note": "只跑这 7 对：先 common/setup_8000.mac（sesno 1493→1495），再 14 条写腿。setup 加了 ZONE-MV 等元素，原先 34 对没有在这份新 setup 上重跑，不并进上面的 34/34。当时 4 条 apply 腿是 calibrate，随后按实测改成断言，再对同一份快照重跑 Compare，14 条都是 pass。",
+      "zone_cascade": "ZONE-MV BY E 500 WRT /* 之后，Q POS WRT /* 显示 BOX-MV1 / BOX-MV2 世界坐标各 +500 E。子件跟着 ZONE 的世界矩阵走。",
+      "compare_after_lock": "pass 14 / fail 0"
+    },
+    "follow_up_2026_11_04_three": {
+      "date": "2026-11-04",
+      "stamp": "20261104-140106",
+      "truth_dir": "output/increment-suite-rvm-truth/20261104-140106",
+      "cases": [
+        "A09-desc-same",
+        "A09-spre-same",
+        "D06-zone-ori"
+      ],
+      "setup_sesno": "1629 -> 1631 (+2)",
+      "sesno": {
+        "A09-desc-same": "apply 1633 -> 1634 (+1), restore 1636 -> 1637 (+1)",
+        "A09-spre-same": "apply 1639 -> 1640 (+1), restore 1642 -> 1643 (+1)",
+        "D06-zone-ori": "apply 1645 -> 1647 (+2), restore 1649 -> 1651 (+2)"
+      },
+      "note": "只跑这 3 对。setup 在主 ZONE 下加了空设备 EQ-DESC（DESC 'AIOS suite desc same'）。同值四条 sesno 都是 +1，RVM 不变。旋转第一轮 stamp 20261104-135530（apply sesno 1621→1623）是 calibrate；按两件 BOX 的实测 AABB 改成 resized 后，对那份快照离线重比 pass，再带 -RunSetup 重跑。这次 6 条对拍 pass，calibrate 0，fail 0。不并进 2026-10-28 的 34/34，也不并进上面那 7 对。",
+      "compare": "pass 6 / calibrate 0 / fail 0"
+    },
+    "follow_up_2026_11_04_coverage": {
+      "date": "2026-11-04",
+      "stamps": [
+        "20261104-145550",
+        "20261104-164831",
+        "20261104-171733"
+      ],
+      "note": "旧套件在这份 setup 上重跑。145550 写到 E04 前：对拍 pass 62 / fail 6，随后 E04 因 BRAN-S 成员没补名而崩溃。补名之后 164831 过滤跑：写腿 37，pass 31 / calibrate 1 / fail 4。四条失败的收口：设备复制的源盒键改为已命名的 EQ-NOZ-BOX；复合变换按旋转后的绝对盒锁定；改挂 restore 的件数 +1 和顶点 restore 的大盒是按写错的宏量的，见 follow_up_2026_11_04_macro_fix；跨库 restore 的无名盒锁定为基线 [39000,4500,-250,41000,5500,250]。链的最后一步改为删掉 BRAN-NEW 后再重 COPY 并补名 BRAN-S。171733 带 -RunSetup 只跑 A01-bran-copy 与 A01-bran-del-member：对拍 pass 6 / fail 0。ORI 同值 A09-ori-same 在 164831 里 sesno 2088/2091，RVM 不变。不并进 2026-10-28 的 34/34。",
+      "compare_171733": "pass 6 / calibrate 0 / fail 0"
+    },
+    "follow_up_2026_11_04_macro_fix": {
+      "date": "2026-11-04",
+      "stamp": "20261104-174530",
+      "truth_dir": "output/increment-suite-rvm-truth/20261104-174530",
+      "cases": [
+        "G02-pane-move",
+        "G03-pave-move",
+        "A01-bran-copy",
+        "A01-bran-del-member",
+        "E04-spre-swap"
+      ],
+      "sesno": {
+        "setup": "2128 -> 2130 (+2)",
+        "connect/bran_reparent_restore.mac": "2140 -> 2142 (+2)",
+        "room/pave_move_apply.mac": "2164 -> 2166 (+2)",
+        "room/pave_move_restore.mac": "2168 -> 2170 (+2)"
+      },
+      "note": "改挂还原改为按名取 /AIOS-SUITE-BRAN-S-M5 再 INCLUDE 回 BRAN-S。Q OWNE 回到 BRAN-S，RVM 与改挂前逐件吻合。M5 在成员表里是第 1 位，链尾重 COPY 把顺序补回基线。顶点改为 PLOO 局部坐标：V2/V3 从 W 150 写成 W 350，R201-P1 并集 [8657.03,10820.02,6570,9039.75,11179.30,6870]；写回 W 150 后回到 before。写腿 13，对拍 pass 12 / calibrate 0 / fail 0。去掉 calibrate 后再跑 20261104-175546，同样 pass 12 / fail 0。",
+      "compare": "pass 12 / calibrate 0 / fail 0",
+      "confirm_stamp": "20261104-175546",
+      "confirm_compare": "pass 12 / calibrate 0 / fail 0"
+    }
   }
 }

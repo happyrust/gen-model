@@ -1,0 +1,22 @@
+-- 登记: A09 | 语义: 把 EQ-PA 的 ORI 按 setup 的原句再写一遍再 SAVEWORK。ORI 走方向数组，函数本体没有同值比较 | expected_net: unchanged | restore 搭档: xform/ori_same_restore.mac
+-- 句式与 common/setup_8000.mac 里 NEW EQUIPMENT /AIOS-SUITE-EQ-PA 的 ORI Y IS N AND Z IS U 同一句
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ORI-SAME-APPLY-ALIVE
+/AIOS-SUITE-EQ-PA
+Q REF
+Q NAME
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-POSE
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-EQ-PA
+ORI Y IS N AND Z IS U
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-POSE
+Q ORI
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/ori_same apply: EQ-PA ORI rewritten unchanged'
+$P SUITE-XFORM-ORI-SAME-APPLY-DONE
+ALPHA LOG END

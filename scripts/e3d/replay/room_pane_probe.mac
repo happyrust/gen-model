@@ -1,0 +1,28 @@
+-- L2 回放链 ams8000-room-pane-chain 的**只读**探针（INC-G03）：房间定义元素（PANE / FRMW）变之前先看清现状。
+-- 候选是 codex_room_probe.mac 记过的那一对：FRMW 24381/35842 = /1RX-RM05-R512，面板 PANE 24381/35844 在它的面板表里。
+-- 这里不改任何属性、不 SAVEWORK：跑完把日志发回来，确认要动的是哪一个、动多少。
+-- 注意：每个 "--" 必须在行首自成一行（PML 把 "--" 当注释开头，写在 $P 后面会让整个宏失败）。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/room_pane_probe.log" OVER
+$P PANE-PROBE-BEGIN
+$P SECTION_FRMW_24381_35842
+=24381/35842
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+Q MEMB
+$P SECTION_PANE_24381_35844
+=24381/35844
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+Q MEMB
+$P SECTION_ROOM_INVESTIGATE
+=24381/35842
+Q XMEMBER /1RX-RM05-R512
+$P PANE-PROBE-DONE
+ALPHA LOG END

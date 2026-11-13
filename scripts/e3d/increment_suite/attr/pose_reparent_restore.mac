@@ -1,0 +1,19 @@
+-- 登记: A02 | 语义: BOX-POSE INCLUDE 回 EQ-PA | expected_net: cancelled | restore 搭档: 本文件是 attr/pose_reparent_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-POSE-REPARENT-RESTORE-ALIVE
+/AIOS-SUITE-BOX-POSE
+!box = !!CE
+Q REF
+Q NAME
+Q OWNE
+Q POS WRT /*
+/AIOS-SUITE-EQ-PA
+INCLUDE $!box
+/AIOS-SUITE-BOX-POSE
+Q REF
+Q NAME
+Q OWNE
+Q POS WRT /*
+SAVEWORK 'AIOS suite attr/pose_reparent restore: BOX-POSE PB -> PA'
+$P SUITE-ATTR-POSE-REPARENT-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,18 @@
+-- 登记: G03（变更类型 CT-D8、CT-A1；联动分类表第 7 类） | 语义: 房间容器改名，改完不再是一间房；房里的设备在另一个库
+-- expected_net: modified | restore 搭档: pipeline/room_rename_xdb_restore.mac | 存盘只落在 7998
+-- 该有的行为: R901 这间房没了——8000 里的 EQ-RM1 的房间边没了，几何不重建；8000 没有新会话；R902 / EQ-RM2 不动（对照）。
+-- 按名 COLLECT 再改：已经改过名时只是空转，不导航到不存在的名字。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-ROOM-RENAME-XDB-APPLY-ALIVE
+/AIOS-SUITE-T4-X-STRU
+VAR !f COLLECT ALL FRMW WITH (NAME EQ '/AIOS-SUITE-T4-RM-R901') FOR CE
+DO !x VALUES !f
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T4-NOT-A-ROOM
+  Q NAME
+ENDDO
+SAVEWORK 'AIOS suite T4 pipeline/room_rename_xdb apply: R901 renamed to not-a-room'
+$P SUITE-T4-ROOM-RENAME-XDB-APPLY-DONE
+ALPHA LOG END

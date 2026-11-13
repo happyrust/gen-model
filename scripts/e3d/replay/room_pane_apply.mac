@@ -1,0 +1,19 @@
+-- L2 回放链 ams8000-room-pane-chain：把房间定义元素 PANE 24381/35844（FRMW /1RX-RM05-R512 的面板）
+-- 整块下移 200 mm —— 房间边界因此改变，期望服务排出**一条** room_rebuild 整间重算任务（INC-G03）。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后、QUIT 之前拷一份库文件（真快照 → 字节补丁）。
+-- 前置：先跑 room_pane_probe.mac 并核对 Q TYPE 回的确实是 PANE；不是就别跑这个宏。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/room_pane_apply.log" OVER
+$P PANE-APPLY-ALIVE
+=24381/35844
+Q TYPE
+Q NAME
+Q REF
+Q POS
+BY D 200mm
+Q POS
+SAVEWORK 'replay chain ams8000-room-pane-chain: PANE =24381/35844 down 200mm'
+$P PANE-APPLY-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-pane\ams8000_0001.after-apply-save"'
+$P PANE-APPLY-DONE
+ALPHA LOG END

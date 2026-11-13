@@ -1,0 +1,14 @@
+-- T2「关节」主题的收尾：删掉自己的 SITE /AIOS-SUITE-T2-PJOI（连同名下全部），幂等。setup 搭档: joint/setup.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-TEARDOWN-ALIVE
+{{WORLD_ANCHOR}}
+VAR !sites COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T2-PJOI*')) FOR CE
+DO !s VALUES !sites
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+SAVEWORK 'AIOS suite T2 joint: teardown (db8000)'
+$P SUITE-T2-JOINT-TEARDOWN-DONE
+ALPHA LOG END

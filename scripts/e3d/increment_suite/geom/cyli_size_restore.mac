@@ -1,0 +1,12 @@
+-- 登记: A02 | 语义: CYLI-1 的 DIAM 写回 1500 | expected_net: cancelled | restore 搭档: 本文件是 geom/cyli_size_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-CYLISIZE-RESTORE-ALIVE
+/AIOS-SUITE-CYLI-1
+Q REF
+Q NAME
+Q DIAM
+DIAM 1500
+Q DIAM
+SAVEWORK 'AIOS suite geom/cyli_size restore: CYLI-1 DIAM 1500'
+$P SUITE-GEOM-CYLISIZE-RESTORE-DONE
+ALPHA LOG END

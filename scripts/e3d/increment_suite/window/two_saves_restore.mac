@@ -1,0 +1,20 @@
+-- 登记: A01（变更类型 CT-S3） | 语义: 把 window/two_saves_apply.mac 建的两台设备 EQ-SV1、EQ-SV2 整台删掉
+-- expected_net: cancelled | apply 搭档: window/two_saves_apply.mac
+-- 预期 gen-model（按 refno）: 两台设备的模型行清掉；各记一条 datacenter_delete reason=deleted（已发布时）；别的设备不动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-TWO-SAVES-RESTORE-ALIVE
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+VAR !a COLLECT ALL EQUI WITH (MATCHWILD(NAME,'/AIOS-SUITE-T3-EQ-SV*')) FOR CE
+DO !e VALUES !a
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 window/two_saves restore: EQ-SV1 and EQ-SV2 deleted'
+$P SUITE-T3-WINDOW-TWO-SAVES-RESTORE-DONE
+ALPHA LOG END

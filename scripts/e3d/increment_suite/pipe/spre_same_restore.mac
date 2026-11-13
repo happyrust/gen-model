@@ -1,0 +1,12 @@
+-- 登记: A09 | 语义: 再写同一个 SPRE 引用。apply 已经是同值，restore 同样不改几何 | expected_net: unchanged | restore 搭档: 本文件是 pipe/spre_same_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-SPRE-SAME-RESTORE-ALIVE
+/AIOS-SUITE-BRAN-S-M2
+Q REF
+Q NAME
+Q SPRE
+SPRE =13244/108844
+Q SPRE
+SAVEWORK 'AIOS suite pipe/spre_same restore: BEND M2 SPRE rewritten unchanged'
+$P SUITE-PIPE-SPRE-SAME-RESTORE-DONE
+ALPHA LOG END

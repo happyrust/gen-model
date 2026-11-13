@@ -1,0 +1,53 @@
+-- 登记: A01（变更类型 CT-S4 + CT-A6；按名称案例 A-05） | 语义: 同一 SAVEWORK 里把整条支管 BRAN-R 删掉后同名重建、成员补回原名，但重建时把有名成员 M2（BEND）的规格从 TBR:50 换成 TBR90:50X150
+-- expected_net: modified（按 refno 是旧支管删除 + 新支管新建；按名是 M2 的 SPRE 变了） | restore 搭档: ident/unit_recreate_changed_restore.mac
+-- 预期 gen-model（按 refno）: 与 ident/unit_recreate_bran_apply.mac 相同（旧根清掉、新根 regen、旧 refno 一条 datacenter_delete reason=deleted）——按 refno 分不出内容变没变。
+-- 规格件语料同 pipe/spre_swap_apply.mac：TBR:50 = =13244/108844（COPY 带来的原值），TBR90:50X150 = =13244/108852。
+-- M2 用 COLLECT 取，不直接按名导航：补名循环万一没生效，按名导航会让 E3D 崩溃且日志为空。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNIT-RECREATE-CHANGED-APPLY-ALIVE
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  DELETE BRAN
+ENDDO
+/AIOS-SUITE-T3-PIPE
+NEW BRAN /AIOS-SUITE-T3-BRAN-R
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+BY U 6000 WRT /*
+Q HPOS
+/AIOS-SUITE-T3-BRAN-R
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-T3-BRAN-R-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+Q MEMB
+VAR !m2 COLLECT ALL BEND WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R-M2') FOR CE
+DO !x VALUES !m2
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q TYPE
+  Q SPRE
+  SPRE =13244/108852
+  Q SPRE
+ENDDO
+SAVEWORK 'AIOS suite T3 ident/unit_recreate_changed apply: BRAN-R recopied, M2 SPRE -> TBR90:50X150'
+$P SUITE-T3-UNIT-RECREATE-CHANGED-APPLY-DONE
+ALPHA LOG END

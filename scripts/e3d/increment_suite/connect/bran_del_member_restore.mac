@@ -12,6 +12,22 @@ COPY /C-OR-1R345-C
 Q REF
 Q NAME
 Q MEMB
+-- COPY 不带名字。后面的用例按 /AIOS-SUITE-BRAN-S-M<n> 导航，不补名会在不存在的元素上崩掉。
+-- 句式与 common/setup_8000.mac 里 BRAN-S 的补名循环相同。
+/AIOS-SUITE-BRAN-S
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-BRAN-S-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-BRAN-S
+Q MEMB
 SAVEWORK 'AIOS suite connect/bran_del_member restore: recopy BRAN-S'
 $P SUITE-CONN-DELMEM-RESTORE-DONE
 ALPHA LOG END

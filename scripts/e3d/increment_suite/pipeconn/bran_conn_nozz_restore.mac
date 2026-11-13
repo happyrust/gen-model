@@ -1,0 +1,25 @@
+-- 登记: A01（管道）/ CT-A5 + CT-A6 | 语义: 断开——把 BRAN /AIOS-SUITE-T1-BRAN-C 的 HREF 清空，管嘴的 CREF 由 E3D 跟着清。
+-- 位置不动（HPOS 是存下来的值）。回到基线：对齐、没有接。
+-- expected_net: cancelled | restore 搭档: 本文件是 pipeconn/bran_conn_nozz_apply.mac 的 restore
+--
+-- 链: pipeconn/nozz_conn 的第 6 腿。写绝对值（空引用），重跑幂等。
+-- `=0/0` 清引用的写法在套件里验过（round3/p84_apply.mac：SPRE =0/0 → Nulref）；用在 HREF 上 2026-11-12 实测成立，
+-- 管嘴的 CREF 跟着清成 Nulref。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-CONN-RESTORE-ALIVE
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q HREF
+Q HPOS WRT /*
+HREF =0/0
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+/AIOS-SUITE-T1-NZ1
+Q REF
+Q NAME
+Q CREF
+SAVEWORK 'AIOS suite pipeconn/bran_conn_nozz restore: BRAN-C head disconnected'
+$P SUITE-PIPECONN-CONN-RESTORE-DONE
+ALPHA LOG END

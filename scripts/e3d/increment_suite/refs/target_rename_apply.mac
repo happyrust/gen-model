@@ -1,0 +1,32 @@
+-- 登记: A07（变更类型 CT-A1、CT-A6；按名称案例 E-03、A-01） | 语义: 管口 NOZZ-1 接着支管 BRAN-R。只把支管自己改名为 BRAN-RX（成员不改名），管口没动，它的 CREF 里还是同一个参考号
+-- expected_net: modified | restore 搭档: refs/target_rename_restore.mac
+-- 预期 gen-model（按 refno）: 任务 succeeded、交付单元 0、模型行不变（支管只动了 NAME，metadata_only）；支管是交付单元，自身改名记一条 datacenter_delete reason=renamed（已发布时）；
+--   管口和它所在的设备 EQ-NZ 的记录没有被写过，连候选都不该有。
+-- 按名称口径这一窗管口要判修改（它引用的目标换了名字）、设备要重发；按 refno 看不出来——这正是案例文档 E-03 说的那种差别，这条腿把它实测出来。
+-- 前置: 支管头接着管口。按 COLLECT 找旧名再改。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-REFS-TARGET-RENAME-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-NZ
+Q REF
+Q NAME
+/AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+Q CREF
+/AIOS-SUITE-T3-PIPE
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q HREF
+  NAME /AIOS-SUITE-T3-BRAN-RX
+  Q REF
+  Q NAME
+  Q MEMB
+ENDDO
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+SAVEWORK 'AIOS suite T3 refs/target_rename apply: BRAN-R renamed to BRAN-RX while NOZZ-1 is connected to it'
+$P SUITE-T3-REFS-TARGET-RENAME-APPLY-DONE
+ALPHA LOG END

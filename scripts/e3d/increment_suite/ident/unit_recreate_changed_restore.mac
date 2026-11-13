@@ -1,0 +1,22 @@
+-- 登记: A01 | 语义: 把 BRAN-R 的 M2 的 SPRE 写回 TBR:50（=13244/108844）。属性级真逆：支管和成员的 refno 保持 apply 之后的值
+-- expected_net: cancelled（按名回到基线） | restore 搭档: 本文件是 ident/unit_recreate_changed_apply.mac 的 restore
+-- 写绝对值，重跑幂等（pipe/spre_swap_restore.mac 同款）。M2 用 COLLECT 取，理由同 apply。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNIT-RECREATE-CHANGED-RESTORE-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q MEMB
+VAR !m2 COLLECT ALL BEND WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R-M2') FOR CE
+DO !x VALUES !m2
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q TYPE
+  Q SPRE
+  SPRE =13244/108844
+  Q SPRE
+ENDDO
+SAVEWORK 'AIOS suite T3 ident/unit_recreate_changed restore: M2 SPRE -> TBR:50'
+$P SUITE-T3-UNIT-RECREATE-CHANGED-RESTORE-DONE
+ALPHA LOG END

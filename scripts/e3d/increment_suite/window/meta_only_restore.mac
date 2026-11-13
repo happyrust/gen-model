@@ -1,0 +1,13 @@
+-- 登记: A07 | 语义: 把 EQ-M 的 DESC 写回基线值（ident/setup_t3.mac 里的那一句）
+-- expected_net: cancelled | restore 搭档: 本文件是 window/meta_only_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-META-ONLY-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS T3 baseline'
+Q DESC
+SAVEWORK 'AIOS suite T3 window/meta_only restore: EQ-M DESC back to baseline'
+$P SUITE-T3-WINDOW-META-ONLY-RESTORE-DONE
+ALPHA LOG END

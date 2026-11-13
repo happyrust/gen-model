@@ -1,0 +1,28 @@
+-- 登记: gen-model #143（大窗） | 语义: 删掉压舱的 SITE /AIOS-SUITE-T1-BULK，把 /300-A-42/B1 的 HSTU 写回 /A3B/PA300。
+-- 这一窗同样是大窗（删掉约 1470 个元素），同样该把两只支撑件交给 250104，位移反过来。
+-- expected_net: cancelled | restore 搭档: 本文件是 support/compre_bulk_apply.mac 的 restore
+--
+-- 工程: APS（MDB /ALL），只在私有副本上跑。按名字找压舱的 SITE，找不到就什么都不删；HSTU 写绝对值。重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-BULK-RESTORE-ALIVE
+/SITE-PIPING-AREA01
+Q REF
+Q NAME
+OWNER
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-BULK*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+$P SUITE-SUPPORT-COMPRE-BULK-RESTORE-DELETED
+/300-A-42/B1
+Q REF
+Q NAME
+Q HSTU
+HSTU /A3B/PA300
+Q HSTU
+SAVEWORK 'AIOS suite support/compre_bulk restore: zone copies deleted + /300-A-42/B1 HSTU -> PA300'
+$P SUITE-SUPPORT-COMPRE-BULK-RESTORE-DONE
+ALPHA LOG END

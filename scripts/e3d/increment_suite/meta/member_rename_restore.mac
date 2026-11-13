@@ -1,0 +1,23 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 A-01 的成员一级） | 语义: 把 BOX-CP1X 改回 BOX-CP1
+-- expected_net: modified | apply 搭档: meta/member_rename_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply，零重建、没有 datacenter_delete。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-MEMBER-RENAME-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q MEMB
+VAR !hit COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-T3-BOX-CP1X') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  NAME /AIOS-SUITE-T3-BOX-CP1
+  Q REF
+  Q NAME
+ENDDO
+/AIOS-SUITE-T3-EQ-CP
+Q MEMB
+SAVEWORK 'AIOS suite T3 meta/member_rename restore: BOX-CP1X renamed back to BOX-CP1'
+$P SUITE-T3-META-MEMBER-RENAME-RESTORE-DONE
+ALPHA LOG END

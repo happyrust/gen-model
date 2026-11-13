@@ -1,0 +1,35 @@
+-- 登记: D5-pjoi-desp-aps | 语义: 把端板主关节的设计参数写回 0 10 270 280 0 0
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/aps_pjoi_desp_apply.mac 的 restore | 库: aps7166（APS 副本，MDB /SDNF）
+-- 六个参数整组写回，重跑幂等。期望与 apply 对称：重建主关节与柱 C01 两件，柱顶回到短 10 mm。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-DESP-RESTORE-ALIVE
+=23550/379
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q DESP
+DESP 0 10 270 280 0 0
+Q DESP
+Q CUTB
+Q DELP
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+Q CUTL
+/SB3/PB1/4/N03
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_desp restore: end-plate PJOI DESP[2] -> 10'
+$P SUITE-T2-JOINT-APS-PJOI-DESP-RESTORE-DONE
+ALPHA LOG END

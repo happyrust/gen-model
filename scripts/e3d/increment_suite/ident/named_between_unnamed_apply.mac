@@ -1,0 +1,27 @@
+-- 登记: A02（变更类型 CT-S5；按名称案例 B-07） | 语义: 有名构件在无名层级之间挪——设备 EQ-SUB 下面有两个没有名字的子设备（SUBE），把有名的 BOX-SUB 从第 1 个挪到第 2 个。它最近的有名祖先始终是 EQ-SUB，世界位置也没变
+-- expected_net: modified | restore 搭档: ident/named_between_unnamed_restore.mac
+-- 预期 gen-model（按 refno）: BOX-SUB 是 Reparented，两端都上卷到设备 EQ-SUB，EQ-SUB 重建一次；别的设备不动；没有 datacenter_delete。
+-- 2026-11-12 探针实测（ident/succ_probe.mac 第 7 段）：SUBE <序号> 能导航；INCLUDE 能把有名 BOX 在两个无名 SUBE 之间挪。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-NAMED-BETWEEN-UNNAMED-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-SUB
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-T3-BOX-SUB
+Q REF
+Q NAME
+Q OWNER
+Q POS WRT /*
+/AIOS-SUITE-T3-EQ-SUB
+SUBE 2
+Q REF
+Q TYPE
+INCLUDE /AIOS-SUITE-T3-BOX-SUB
+Q MEMB
+/AIOS-SUITE-T3-BOX-SUB
+Q OWNER
+Q POS WRT /*
+SAVEWORK 'AIOS suite T3 ident/named_between_unnamed apply: BOX-SUB moved from unnamed SUBE 1 to unnamed SUBE 2'
+$P SUITE-T3-NAMED-BETWEEN-UNNAMED-APPLY-DONE
+ALPHA LOG END

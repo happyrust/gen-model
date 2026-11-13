@@ -1,0 +1,216 @@
+-- dblist 工具：导出当前项目的库清单，并按清单创建 / 修改数据库。
+--
+-- 用法（E3D 的 Design 或 Admin 模块，SYSTEM 用户）：
+--   $M D:/work/plant-code/old/gen-model/scripts/e3d/dblist.mac
+--   或 `$M .../dblist.mac EXPORT` / `$M .../dblist.mac PLAN`
+--
+-- 三种模式由文件头的 `!mode` 决定，默认 EXPORT（只读）：
+--   EXPORT  只导出清单到 CSV，不碰库
+--   PLAN    导出 + 打印将要执行的建库命令，**不执行**
+--   APPLY   导出 + 执行建库命令（危险，需显式改 !mode）
+--
+-- 数据源是 PML 内置集合 DBS，与 Database List 窗体同源：
+--   PMLLIB/common/functions/dblistinit.pmlfnc:33  `!dbs = DBS`
+--   PMLLIB/common/objects/dblistobj.pmlobj:185   `.updateLocal()` 里 `!this.listOfDbs = DBS`
+--
+-- 输出：
+--   output/dblist.csv          清单（每库一行）
+--   output/dblist.log          PLAN / APPLY 的执行日志
+--
+-- 建库 / 改库的权威命令（都在 PMLLIB 里有出处，不是猜的）：
+--   CREATE DB <team>/<name> <TYPE> ACCESS <access> [CLAIM <claim>] [DBNO <n>] [IN AREA <a>] [WITH <TYPE> /<elem>]
+--       出处 admin/forms/admdb.pmlfrm:576-580（三种分支：普通 / NSEQ / 完整）
+--       完整例 admin/objects/admengineeringdatabases.pmlobj:1008
+--   CREATE EXTRACT <team>/<name> FROM <owner> CLAIM IMPLICIT [DBNO <n>] [REFBLOCKS <n>]
+--       出处 admin/objects/admengineeringdatabases.pmlobj:1045、admin/forms/admextract.pmlfrm:382-384
+--   CREATE MDB /<NAME> DESCRIPTION |...|
+--       出处 admin/objects/admengineeringdatabases.pmlobj:2107、admin/functions/installcadc.pmlfnc:401
+--   ADD <team>/<name> <序号>           把库加进当前 MDB（先 SET MDB /<NAME>）
+--       出处 admin/objects/admengineeringdatabases.pmlobj:2047-2049
+--   SET MDB /<NAME>                    切换当前 MDB
+--       出处 admin/objects/admengineeringdatabases.pmlobj:2041
+--   DELETE DB <team>/<name>            删库
+--       出处 admin/forms/adminelem.pmlfrm:712（`DELETE DB TRANSACTION/<id>`）
+--
+-- 三条已踩过的教训，写在这里免得再踩：
+--   1. ALPHA LOG 的内容到 `ALPHA LOG END` 才落盘，中途任一语句报错整段日志都没有
+--      （scripts/e3d/db8000_zone_members_probe.mac 头注）。所以主输出走 FILE 对象，
+--      每收集完一个库就重写一次盘。
+--   2. 一个库取属性失败不能带走其它库：每库独立 handle any ... endhandle。
+--   3. 按 refno 导航（=24384/24776）在部分会话里不成立，只能按名字导航
+--      （scripts/e3d/ams7997_geom_crosscheck.mac 头注）。本脚本不按 refno 导航。
+--
+-- 只读保证：默认 EXPORT 模式不执行任何建库 / 删库命令，不 SAVEWORK。
+
+-- ===== 模式：EXPORT（只读） / PLAN（只算不执行） / APPLY（执行） =====
+!mode = 'EXPORT'
+
+!out = 'D:/work/plant-code/old/gen-model/output'
+!csv = !out + '/dblist.csv'
+!planLog = !out + '/dblist.log'
+!lines = ARRAY()
+
+-- 表头。列顺序固定，下游按列名读，不按位置。
+!lines.append('dbnum,dbname,refno,dbtype,mdb,team,foreign,size,extract')
+!log = object FILE(!csv)
+!log.writeFile('OVERWRITE', !lines)
+
+!dbs = DBS
+!total = !dbs.size()
+!written = 0
+!failed = ARRAY()
+
+-- 建库计划：PLAN / APPLY 用。每项一条命令文本。
+!plan = ARRAY()
+
+do !i indices !dbs
+
+  !db = !dbs[!i]
+
+  -- dbnum：DBNO。DB 对象上叫 `.number`
+  -- （dblistobj.pmlobj:551 `!dbNumb = !db.number`）。
+  !dbnum = ''
+  handle any
+    !dbnum = !db.number.string()
+  elsehandle none
+  endhandle
+
+  -- 库名：`.name` 带前导 `/`；`.after(|/|)` 去掉它
+  -- （mdbsetlist.pmlfnc:100 同款用法）。
+  !dbname = ''
+  handle any
+    !dbname = !db.name
+  elsehandle none
+  endhandle
+
+  -- refno：DBREF。`.string()` 给 `dbname/refno` 形式。
+  !refno = ''
+  handle any
+    !refno = !db.refno.string()
+  elsehandle none
+  endhandle
+
+  !dbtype = ''
+  handle any
+    !dbtype = !db.type.trim()
+  elsehandle none
+  endhandle
+
+  -- MDB 名单：一个库可属多个 MDB。`.mdbList()` 返回 MDB 数组，
+  -- 元素 `.name` 形如 `/MDBNAME`（dblistobj.pmlobj:739-747）。多值用 `|` 连接。
+  !mdb = ''
+  handle any
+    !mdbs = !db.mdbList()
+    do !j indices !mdbs
+      if (!mdb.empty()) then
+        !mdb = !mdb + '|'
+      endif
+      !mdb = !mdb + !mdbs[!j].name.after(|/|)
+    enddo
+  elsehandle none
+  endhandle
+
+  !team = ''
+  handle any
+    !team = !db.team.name.trim()
+  elsehandle none
+  endhandle
+
+  -- 本地 / 外部库。影子工程根只该接本地库。
+  !foreign = ''
+  handle any
+    !foreign = !db.foreign.trim()
+  elsehandle none
+  endhandle
+
+  !size = ''
+  handle any
+    !size = !db.size().string()
+  elsehandle none
+  endhandle
+
+  -- 是否抽提库：`.extals` 多于一说明有 master 在上游
+  -- （dblistobj.pmlobj:779-784 同一用法）。
+  !extract = ''
+  handle any
+    if (!db.refno.dbref().extals.size() gt 1) then
+      !extract = 'extract'
+    else
+      !extract = 'master'
+    endif
+  elsehandle none
+  endhandle
+
+  if (!dbname.empty()) then
+    !lines.append(!dbnum & ',' & !dbname & ',' & !refno & ',' & !dbtype & ',' & !mdb & ',' & !team & ',' & !foreign & ',' & !size & ',' & !extract)
+    !written = !written + 1
+
+    -- 计划：缺 DBNO 的库要点出来。DBNO 由 NXTDBN 自动分配
+    -- （admengineeringdatabases.pmlobj:2605），一旦重跑就可能变号，
+    -- 而 gen-model 按文件头 +0x08 的 db_no 认库（db_file_header.rs:156），
+    -- 号一变，水位、登记路径、MDB 声明全部对不上。
+    if (!dbnum.empty().not()) then
+      !plan.append('# WARN 库 ' + !dbname + ' 没有 DBNO：重跑可能变号，先 CREATE DB ... DBNO <n> 固定住')
+    endif
+  else
+    !failed.append('index ' + !i.string() + ' : name unreadable')
+  endif
+
+  -- 每库落一次盘。库数是几十的量级，换来的是中途死掉不丢已收集部分。
+  !log.writeFile('OVERWRITE', !lines)
+
+enddo
+
+!lines.append('# total=' + !total.string() + ' written=' + !written.string() + ' failed=' + !failed.size().string())
+do !f values !failed
+  !lines.append('# failed ' + !f)
+enddo
+!log.writeFile('OVERWRITE', !lines)
+
+$P AIOS-DBLIST EXPORTED mode=$!mode total=$!total written=$!written file=$!csv
+
+-- ===== PLAN / APPLY =====
+if (!mode eq 'EXPORT') then
+
+  !planLogLines = ARRAY()
+  !planLogLines.append('# mode=' + !mode)
+  do !p values !plan
+    !planLogLines.append(!p)
+  enddo
+  !plog = object FILE(!planLog)
+  !plog.writeFile('OVERWRITE', !planLogLines)
+
+  if (!plan.size() eq 0) then
+    $P AIOS-DBLIST PLAN empty
+  elseif (!mode eq 'PLAN') then
+    $P AIOS-DBLIST PLAN lines=$!plan.size() file=$!planLog
+    do !p values !plan
+      $P AIOS-DBLIST PLAN-ITEM $!p
+    enddo
+  else
+    -- APPLY：逐条执行，一条失败不带走其它条。命令以 `#` 开头的是注释，跳过。
+    !okCount = 0
+    !failCount = 0
+    do !p values !plan
+      if (!p.matchWild('#*').not()) then
+        $!p
+        handle any
+          !failCount = !failCount + 1
+          $P AIOS-DBLIST APPLY-FAIL $!p :: $!!error.text
+        elsehandle none
+          !okCount = !okCount + 1
+        endhandle
+      endif
+    enddo
+    $P AIOS-DBLIST APPLIED ok=$!okCount fail=$!failCount
+  endif
+
+endif
+
+-- ===== 需真机验证的语句（仓内无证据，别当已确认） =====
+--   1. `!db.number` 在 DBNO 未分配时是否抛异常；
+--   2. `!db.refno.dbref().extals` 对非抽提库是否返回 1 个元素（返回 0 会误判成 master）；
+--   3. `!db.team.name` 与 `!db.foreign` 在 DB 对象上的属性名（本脚本照 dblistobj.pmlobj
+--      :551-556 的 `!db.team` / `!db.foreign` 写，但那处是 `.getDbDetails` 内部，未经本脚本验证）；
+--   4. `!p.matchWild('#*')` —— 已确认 PML 有 `.matchWild()`（mining/objects/mmmconveyormain.pmlobj:1991
+--      等多处），但「模式里 `#` 当字面量」这件事未经本脚本验证。

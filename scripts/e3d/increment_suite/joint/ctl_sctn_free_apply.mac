@@ -1,0 +1,51 @@
+-- 登记: D5-ctl-sctn-free（CT-D5 结构关节的对照 / CT-A4 几何；联动 #12 主关节级联）
+-- 语义: 改一根没有主关节认领的型钢（把它拉长 100 mm，POSE W 175 -> W 275）——一只主关节都不该点名
+-- expected_net: modified | restore 搭档: joint/ctl_sctn_free_restore.mac | 前置: joint/setup.mac | 库: db8000
+--
+-- 样本（setup 从 ams7999 /1RB06-MSUP-E0082 COPY 来）：FRMW /AIOS-SUITE-T2-PJ-C-F1 名下四根 BAR（S1 ~ S4）各被一只
+--   带目录正体的主关节（JT3，E3D 画）认领；另有一根 /AIOS-SUITE-T2-PJ-C-SFREE，JOIS / JOIE 都是空的、名下没有成员，
+--   位置与 S1 重合（POSS E 185 N 0 D 40.3，POSE W 175 N 0 D 40）。本宏改的是这一根。
+-- 期望：这一窗只重建 SFREE 一件。同一个 FRMW 里的四只主关节和四根 BAR 都不该被点名；PJ-A、PJ-B 一件都不该动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-CTL-SCTN-FREE-APPLY-ALIVE
+/AIOS-SUITE-T2-PJ-C-F1-S1
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-C-F1-N1-J1
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-C-SFREE
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+Q SPRE
+POSE E -275 N 0 U -40
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-C-F1-S1
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-C-F1-N1-J1
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'AIOS suite T2 joint/ctl_sctn_free apply: unjointed SCTN POSE W 175 -> W 275'
+$P SUITE-T2-JOINT-CTL-SCTN-FREE-APPLY-DONE
+ALPHA LOG END

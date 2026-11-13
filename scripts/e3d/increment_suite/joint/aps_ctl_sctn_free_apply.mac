@@ -1,0 +1,53 @@
+-- 登记: D5-ctl-sctn-free-aps（CT-D5 结构关节的对照 / CT-A4 几何；联动 #12 主关节级联）
+-- 语义: 改一根没有主关节认领的型钢（斜梁 R01 的 BANG 0 -> 90）——一只主关节都不该点名
+-- expected_net: modified | restore 搭档: joint/aps_ctl_sctn_free_restore.mac | 库: aps7166（APS 副本，MDB /SDNF）
+-- 直接改生产元素（样本只在生产元素上）：/SB3/PB1/4/POR/R01。restore 把 BANG 写回 0。
+--
+-- 样本（只读探针，2026-11-12）：SBFR /SB3/PB1/4/POR，就是端板主关节 =23550/379 所在的那一榀门架。
+--   SCTN /SB3/PB1/4/POR/R01（=23550/412）：BANG 0，JUSL TOS，两端接的是柱 C01 / C02 上没有规格的 SJOI
+--   （=23550/392、=23550/403，不成模型单元），名下没有成员。同一个 SBFR 里有三只带目录正体的主关节
+--   （=23550/379、/383、/385），都不接这根斜梁。
+-- 期望：这一窗只重建 R01 一件。三只主关节、两根柱、B01 / B02 都不该被点名。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-CTL-SCTN-FREE-APPLY-ALIVE
+=23550/379
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/SB3/PB1/4/POR/R01
+Q REF
+Q NAME
+Q TYPE
+Q BANG
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+BANG 90
+Q BANG
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+=23550/379
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/aps_ctl_sctn_free apply: rafter R01 BANG 0 -> 90'
+$P SUITE-T2-JOINT-APS-CTL-SCTN-FREE-APPLY-DONE
+ALPHA LOG END

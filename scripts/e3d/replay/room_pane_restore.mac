@@ -1,0 +1,17 @@
+-- L2 回放链 ams8000-room-pane-chain：PANE 24381/35844 复位（上移 200 mm），链尾把工程还原。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/room_pane_restore.log" OVER
+$P PANE-RESTORE-ALIVE
+=24381/35844
+Q TYPE
+Q NAME
+Q REF
+Q POS
+BY U 200mm
+Q POS
+SAVEWORK 'replay chain ams8000-room-pane-chain: PANE =24381/35844 up 200mm (restore)'
+$P PANE-RESTORE-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-pane\ams8000_0001.after-restore-save"'
+$P PANE-RESTORE-DONE
+ALPHA LOG END

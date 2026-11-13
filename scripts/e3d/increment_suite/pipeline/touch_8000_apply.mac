@@ -1,0 +1,16 @@
+-- 登记: A07（变更类型 CT-A1） | 语义: 只改主库里一台不相干的设备（EQ-CLM）的描述——让 8000 这个库有一次自己的任务
+-- expected_net: modified | restore 搭档: pipeline/touch_8000_restore.mac
+-- 用在哪: 房间在 7998、设备在 8000 的那组用例。7998 的墙板改了之后，8000 里成员的房间归属是停放给 8000 的，
+--   要 8000 自己下一次有任务才接上。这条腿就是那「下一次任务」：改的是别的设备、只动元数据，EQ-RM1 自己没被碰。
+-- 该有的行为: 这一窗零单元（元数据门）；做完之后 EQ-RM1 的房间边是新的。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-TOUCH-8000-APPLY-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS T4 claim target touched'
+Q DESC
+SAVEWORK 'AIOS suite T4 pipeline/touch_8000 apply: EQ-CLM DESC changed'
+$P SUITE-T4-TOUCH-8000-APPLY-DONE
+ALPHA LOG END

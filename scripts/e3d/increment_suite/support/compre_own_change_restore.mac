@@ -1,0 +1,21 @@
+-- 登记: gen-model #144、#143 | 语义: support/compre_own_change_apply.mac 的还原——垫板 LSTU 写回 /A3B/PA40、型钢 BANG 写回 180（绝对值）。
+-- expected_net: modified | apply 搭档: support/compre_own_change_apply.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，全部写绝对值，重跑幂等。不用世界锚点，按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-OWN-CHANGE-RESTORE-ALIVE
+/PS-01-00168/PLAT.1
+Q REF
+Q NAME
+Q LSTU
+LSTU /A3B/PA40
+Q LSTU
+/PS-01-00194/STRU-V1
+Q REF
+Q NAME
+Q BANG
+BANG 180
+Q BANG
+SAVEWORK 'AIOS suite support/compre_own_change restore: PLAT.1 LSTU PA50 -> PA40 and /PS-01-00194/STRU-V1 BANG 90 -> 180'
+$P SUITE-SUPPORT-COMPRE-OWN-CHANGE-RESTORE-DONE
+ALPHA LOG END

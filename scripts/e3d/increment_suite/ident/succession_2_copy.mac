@@ -1,0 +1,28 @@
+-- 登记: A02（变更类型 CT-S2；按名称案例 G-08 第二步） | 语义: 接替的第二步——把让出名字的原件 BRAN-ROLD 复制一份，复制的同时把成员名字的前缀换回 BRAN-R，再给新支管起回原名 BRAN-R。原件还在
+-- expected_net: modified | 三腿链 ident/succession 的第 2 腿
+-- 预期 gen-model（按 refno）: 新支管（新 refno）重建一次；原件 BRAN-ROLD 不动；没有 datacenter_delete（新 refno 没有版本记录）。
+-- 写法 2026-11-12 探针实测（ident/succ_probe.mac 第 2、4 段）：NEW BRAN COPY <原件> RENAME <旧前缀> <新前缀> 只给成员换名，新支管自己没有名字，要另写一句 NAME。
+-- 按 COLLECT 找原件；CE 在原件上 NEW，新支管接在它后面（第 3 腿删掉原件之后，新支管回到 PIPE 的第 1 位）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SUCCESSION-2-COPY-ALIVE
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-ROLD') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q HPOS
+  NEW BRAN COPY /AIOS-SUITE-T3-BRAN-ROLD RENAME /AIOS-SUITE-T3-BRAN-ROLD /AIOS-SUITE-T3-BRAN-R
+  NAME /AIOS-SUITE-T3-BRAN-R
+  Q REF
+  Q NAME
+  Q HPOS
+  Q MEMB
+ENDDO
+/AIOS-SUITE-T3-PIPE
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/succession 2: BRAN-ROLD copied back under the original name BRAN-R'
+$P SUITE-T3-SUCCESSION-2-COPY-DONE
+ALPHA LOG END

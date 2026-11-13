@@ -1,0 +1,59 @@
+-- 探针（只探不存）之三：引用目标这一组用例的前提（按名称案例 D-03、E-01、E-03、E-07）。
+-- 本文件**无 SAVEWORK**，改动随 wrapper 的 QUIT 丢弃。前置：ident/setup_t3.mac 已跑；
+-- 第 9 段要伙伴库 7998 的 ZONE（h03/setup_7998.mac），没有就自己跳过（先 COLLECT 判存在，不直接导航）。
+--
+--   9   别的库里起同名：在 7998 的 ZONE 下建一个与 8000 里同名的设备，E3D 拒不拒（D-03 的前提）
+--  11   支管头接管口：HREF /<管口> 之后，管口的 CREF 有没有被 E3D 回写成这条支管
+--  11C  解开：HREF =0/0 之后两端各是什么（引用为空，E-07）
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-REFS-PROBE-ALIVE
+
+$P T3-PROBE-9-DUPLICATE-NAME-OTHER-DB
+=16190/0
+Q REF
+VAR !z COLLECT ALL ZONE WITH (NAME EQ '/AIOS-SUITE-7998-Z') FOR CE
+Q VAR !z
+!nz = 0
+IF (!z.SET()) THEN
+  !nz = !z.SIZE()
+ENDIF
+IF (!nz GT 0) THEN
+  !z1 = !z[1]
+  !!CE = !z1.dbref()
+  Q REF
+  Q NAME
+  NEW EQUIPMENT /AIOS-SUITE-T3-EQ-CP
+  Q REF
+  Q NAME
+  Q OWNE
+ELSE
+  $P T3-PROBE-9-NO-7998-ZONE
+ENDIF
+
+$P T3-PROBE-11-HREF-TO-NOZZLE
+/AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+Q CREF
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q HREF
+Q TREF
+Q HPOS
+HREF /AIOS-SUITE-T3-NOZZ-1
+Q HREF
+Q HPOS
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+
+$P T3-PROBE-11C-HREF-UNSET
+/AIOS-SUITE-T3-BRAN-R
+HREF =0/0
+Q HREF
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+
+$P SUITE-T3-REFS-PROBE-DONE
+ALPHA LOG END

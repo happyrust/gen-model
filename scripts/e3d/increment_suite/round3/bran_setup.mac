@@ -1,0 +1,40 @@
+-- AMS 原地第三轮：P82-P85 的 run-owned PIPE/BRAN 副本。
+-- COPY /C-OR-1R345-C 带 7 FTUB + 2 BEND；成员补稳定名，供 RVM 按名对拍。
+-- 由 Export 在 baseline 之前执行；{{TARGET_NAME}} 必须是 /AIOS-INC-<run-id>-P8x-BRAN。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-BRAN-SETUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'{{TARGET_NAME}}-SITE')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE {{TARGET_NAME}}-SITE
+NEW ZONE {{TARGET_NAME}}-SITE-Z
+{{TARGET_NAME}}-SITE-Z
+NEW PIPE {{TARGET_NAME}}-PIPE
+NEW BRAN {{TARGET_NAME}}
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+Q MEMB
+{{TARGET_NAME}}
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '{{TARGET_NAME}}-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+{{TARGET_NAME}}
+Q MEMB
+SAVEWORK 'AMS round3 bran setup'
+$P AMS-R3-BRAN-SETUP-DONE
+ALPHA LOG END

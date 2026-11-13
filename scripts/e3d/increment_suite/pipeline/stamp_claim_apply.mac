@@ -1,0 +1,15 @@
+-- 登记: A06（变更类型 CT-W3；管线行为「只留下盖戳的保存」） | 语义: 认领一台设备后保存，认领留着；设备的属性一个没改
+-- expected_net: unchanged | restore 搭档: pipeline/stamp_claim_restore.mac
+-- 该有的行为: 这一窗一个单元都不该重算，水位照推。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-STAMP-CLAIM-APPLY-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+Q LCLM
+CLAIM CE
+Q LCLM
+Q USERC
+SAVEWORK 'AIOS suite T4 pipeline/stamp_claim apply: claim kept across the save'
+$P SUITE-T4-STAMP-CLAIM-APPLY-DONE
+ALPHA LOG END

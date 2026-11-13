@@ -1,0 +1,27 @@
+-- 登记: 联动分类表第 13 / 14 行（规则 E） | 语义: cable/rnode_move_apply.mac 的还原——节点的 ZDIS 写回 10460（绝对值）。
+-- expected_net: modified | apply 搭档: cable/rnode_move_apply.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CABLE-RNODE-MOVE-RESTORE-ALIVE
+/CBLP-LTG-101-01D
+Q REF
+Q NAME
+Q STAREF
+Q ENDREF
+/CWAY-AREA01-POWER_B7-RNODE-003
+Q REF
+Q NAME
+Q TYPE
+Q RNTYPE
+Q XOFF
+Q YOFF
+Q ZOFF
+Q ZDIS
+Q POS WRT /*
+ZDIS 10460
+Q ZDIS
+Q POS WRT /*
+SAVEWORK 'AIOS suite cable/rnode_move restore: RNODE-003 ZDIS 10960 -> 10460'
+$P SUITE-CABLE-RNODE-MOVE-RESTORE-DONE
+ALPHA LOG END

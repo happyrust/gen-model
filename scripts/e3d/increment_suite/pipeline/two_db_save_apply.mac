@@ -1,0 +1,21 @@
+-- 登记: H03（变更类型 CT-W9、CT-A3；换后端方案 V18） | 语义: 一次保存里同时挪了两台设备，一台在主库 8000，一台在伙伴库 7998
+-- expected_net: modified | restore 搭档: pipeline/two_db_save_restore.mac | 一次存盘写两个库
+-- 该有的行为: 两个库各开一窗、各重算自己那一台，互不拖累；给其中一个库注入数据批次失败时，另一个库照常做完（V18）。
+-- 位置写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-TWO-DB-SAVE-APPLY-ALIVE
+/AIOS-SUITE-T4-EQ-MV
+Q REF
+Q NAME
+Q POS
+POS E 125000 N 70000 U 300
+Q POS
+/AIOS-SUITE-T4-EQ-X
+Q REF
+Q NAME
+Q POS
+POS E 125000 N 75000 U 300
+Q POS
+SAVEWORK 'AIOS suite T4 pipeline/two_db_save apply: EQ-MV (8000) and EQ-X (7998) up 300'
+$P SUITE-T4-TWO-DB-SAVE-APPLY-DONE
+ALPHA LOG END

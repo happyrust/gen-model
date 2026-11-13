@@ -1,0 +1,15 @@
+-- 登记: A06（变更类型 CT-W3「只记账会话」的近亲；会话窗口形状「存了但没改」） | 语义: 进会话、只查询、SAVEWORK、退出——什么都没改就存了一次
+-- expected_net: unchanged | restore 搭档: 无（没有可还原的东西）
+-- 预期 gen-model: 这条腿落下的会话里没有设计元素的改动——交付单元 0，EQ-M 等根仍是 AlreadyAvailable，没有 datacenter_delete。
+-- ★ 要看的还有会话号走了几步：同值写回的几条腿（A09-*）实测是 +1（只有退出时的尾会话），这里应当相同；
+--   如果是 +0，说明「存了但没改」连会话都不产生，这一形状在文件里不存在，用例据实改成只在回放层断言「没有新会话」。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-SAVE-NOCHANGE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q DESC
+Q MEMB
+SAVEWORK 'AIOS suite T3 window/save_nochange: SAVEWORK without any change'
+$P SUITE-T3-WINDOW-SAVE-NOCHANGE-DONE
+ALPHA LOG END

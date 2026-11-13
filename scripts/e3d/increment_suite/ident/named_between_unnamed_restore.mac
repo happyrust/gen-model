@@ -1,0 +1,26 @@
+-- 登记: A02（变更类型 CT-S5；按名称案例 B-07） | 语义: 把 BOX-SUB 从第 2 个无名子设备挪回第 1 个
+-- expected_net: modified | apply 搭档: ident/named_between_unnamed_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply——设备 EQ-SUB 重建一次。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-NAMED-BETWEEN-UNNAMED-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-SUB
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-T3-BOX-SUB
+Q REF
+Q NAME
+Q OWNER
+Q POS WRT /*
+/AIOS-SUITE-T3-EQ-SUB
+SUBE 1
+Q REF
+Q TYPE
+INCLUDE /AIOS-SUITE-T3-BOX-SUB
+Q MEMB
+/AIOS-SUITE-T3-BOX-SUB
+Q OWNER
+Q POS WRT /*
+SAVEWORK 'AIOS suite T3 ident/named_between_unnamed restore: BOX-SUB moved back to unnamed SUBE 1'
+$P SUITE-T3-NAMED-BETWEEN-UNNAMED-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,2270 @@
+{
+  "version": 1,
+  "suite": "ams-increment-in-place",
+  "default": {
+    "dbnum": 8000,
+    "companion_dbnum": 7998,
+    "rvm_tolerance_mm": 1.0,
+    "world_anchor": [
+      "/1RX03-EQUI",
+      "OWNER"
+    ],
+    "rvm_export_macro": "rvm-export.mac"
+  },
+  "aliases": {
+    "equi-move": {
+      "case": "C01-move",
+      "target": "/1-LNR-Q005-PJ",
+      "status": "ready",
+      "expected_change": {
+        "moved": {
+          "all": [
+            500,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "A02-box-add",
+      "action_macro": "create/box_apply.mac",
+      "restore_macro": "create/box_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A02-subtree-add",
+      "action_macro": "create/subtree_apply.mac",
+      "restore_macro": "create/subtree_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A02-equi-copy",
+      "action_macro": "create/equi_copy_apply.mac",
+      "restore_macro": "create/equi_copy_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-bran-copy",
+      "action_macro": "create/bran_copy_apply.mac",
+      "restore_macro": "create/bran_copy_restore.mac",
+      "chain": [
+        "create/bran_copy_apply.mac",
+        "connect/bran_reparent_apply.mac",
+        "connect/bran_reparent_restore.mac",
+        "create/bran_copy_restore.mac"
+      ],
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "F03-cross-db-copy",
+      "dbnum": 8000,
+      "companion_dbnum": 7998,
+      "action_macro": "create/cross_db_copy_apply.mac",
+      "restore_macro": "create/cross_db_copy_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-delete-box",
+      "action_macro": "delete/box_apply.mac",
+      "restore_macro": "delete/box_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-delete-keep",
+      "action_macro": "delete/container_keep_child_apply.mac",
+      "restore_macro": "delete/container_keep_child_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "owner_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-recreate-same",
+      "action_macro": "delete/recreate_same_name_apply.mac",
+      "restore_macro": null,
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE-no-restore"
+    },
+    {
+      "id": "A01-child-parent",
+      "action_macro": "delete/child_then_parent_1_apply.mac",
+      "restore_macro": "delete/child_then_parent_restore.mac",
+      "chain": [
+        "delete/child_then_parent_1_apply.mac",
+        "delete/child_then_parent_2_apply.mac",
+        "delete/child_then_parent_restore.mac"
+      ],
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A07-rename",
+      "action_macro": "attr/rename_apply.mac",
+      "restore_macro": "attr/rename_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A07-desc",
+      "action_macro": "attr/desc_apply.mac",
+      "restore_macro": "attr/desc_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A07-owner",
+      "action_macro": "attr/owner_apply.mac",
+      "restore_macro": "attr/owner_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "owner_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C01-move",
+      "action_macro": "xform/move_apply.mac",
+      "restore_macro": "xform/move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C01-rot-u",
+      "action_macro": "xform/rot_u_apply.mac",
+      "restore_macro": "xform/rot_u_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C01-rot-e",
+      "action_macro": "xform/rot_e_apply.mac",
+      "restore_macro": "xform/rot_e_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C01-rot-n",
+      "action_macro": "xform/rot_n_apply.mac",
+      "restore_macro": "xform/rot_n_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C01-compound",
+      "action_macro": "xform/compound_apply.mac",
+      "restore_macro": "xform/compound_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C06-noz-move",
+      "action_macro": "xform/noz_move_apply.mac",
+      "restore_macro": "xform/noz_move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C05-pipe-whole",
+      "dbnum": 8000,
+      "target": "/1RX-345",
+      "action_macro": null,
+      "restore_macro": null,
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {
+          "all": [
+            500,
+            0,
+            0
+          ]
+        }
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "ready"
+    },
+    {
+      "id": "B01-resize",
+      "action_macro": "geom/resize_apply.mac",
+      "restore_macro": "geom/resize_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "resized": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "B02-nbox-resize",
+      "action_macro": "geom/nbox_resize_apply.mac",
+      "restore_macro": "geom/nbox_resize_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "resized": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "B02-nbox-add",
+      "action_macro": "geom/nbox_add_apply.mac",
+      "restore_macro": "geom/nbox_add_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-bran-add-member",
+      "action_macro": "connect/bran_add_member_apply.mac",
+      "restore_macro": "connect/bran_add_member_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-bran-del-member",
+      "action_macro": "connect/bran_del_member_apply.mac",
+      "restore_macro": "connect/bran_del_member_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-bran-reparent",
+      "action_macro": "connect/bran_reparent_apply.mac",
+      "restore_macro": "connect/bran_reparent_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "C06-nozz-move",
+      "action_macro": "connect/nozz_move_apply.mac",
+      "restore_macro": "connect/nozz_move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-bran-hpos",
+      "action_macro": "pipe/bran_hpos_apply.mac",
+      "restore_macro": "pipe/bran_hpos_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "G01-room-member",
+      "action_macro": "room/member_move_apply.mac",
+      "restore_macro": "room/member_move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "G02-pane-move",
+      "action_macro": "room/pane_move_apply.mac",
+      "restore_macro": "room/pane_move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "G03-pave-move",
+      "action_macro": "room/pave_move_apply.mac",
+      "restore_macro": "room/pave_move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "G04-frmw-rename",
+      "action_macro": "room/frmw_rename_apply.mac",
+      "restore_macro": "room/frmw_rename_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-compound-rename",
+      "action_macro": "compound/rename_move_add_apply.mac",
+      "restore_macro": "compound/rename_move_add_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": {},
+        "moved": {},
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "A01-two-roots",
+      "action_macro": "compound/two_roots_apply.mac",
+      "restore_macro": "compound/two_roots_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "H03-companion-move",
+      "dbnum": 7998,
+      "companion_dbnum": 7998,
+      "action_macro": "h03/move_apply.mac",
+      "restore_macro": "h03/move_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "blocked",
+      "blocked_reason": "requires-7998-world-bootstrap-and-name-navigation"
+    },
+    {
+      "id": "E04-spre-swap",
+      "action_macro": "pipe/spre_swap_apply.mac",
+      "restore_macro": "pipe/spre_swap_restore.mac",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "resized": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "blocked",
+      "blocked_reason": "legacy-macro-targets-AIOS-SUITE"
+    },
+    {
+      "id": "P01-refresh-view",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX03-EQUI",
+      "rvm_root": "/1RX03-EQUI",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {},
+        "resized": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-refresh",
+      "status": "calibrate",
+      "blocked_reason": "requires-tty-view-refresh-observation"
+    },
+    {
+      "id": "P02-refresh-after-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {},
+        "resized": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-tty-delete-refresh-observation"
+    },
+    {
+      "id": "P03-repeat-change-dedupe",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1-LNR-Q005-PJ",
+      "rvm_root": "/1-LNR-Q005-PJ",
+      "expected_change": {
+        "moved": {
+          "all": [
+            1000,
+            0,
+            0
+          ]
+        }
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-session-pending-count"
+    },
+    {
+      "id": "P04-new-then-change",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [
+          "/AIOS-INC-<run-id>"
+        ],
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-tty-created-object-chain"
+    },
+    {
+      "id": "P05-new-then-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-pending-cancel-observation"
+    },
+    {
+      "id": "P06-recreate-same-name",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-name-recreate-rvm"
+    },
+    {
+      "id": "P07-created-owner-include",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-created-include-chain"
+    },
+    {
+      "id": "P08-existing-reparent",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-two-owner-ams-fixture"
+    },
+    {
+      "id": "P09-existing-reorder",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "reorder-syntax-and-ams-member-fixture-unverified"
+    },
+    {
+      "id": "P10-attribute-plain",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1-LNR-Q005-PJ",
+      "rvm_root": "/1-LNR-Q005-PJ",
+      "expected_change": {
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-plain-attribute-tty-observation"
+    },
+    {
+      "id": "P11-attribute-qualified",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "resized": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-qualified-attribute-corpus"
+    },
+    {
+      "id": "P12-xgeom-descendant",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1-LNR-Q005-PJ",
+      "rvm_root": "/1-LNR-Q005-PJ",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-gate",
+      "status": "calibrate",
+      "blocked_reason": "requires-xgeom-descendant-corpus"
+    },
+    {
+      "id": "P13-negative-member-change",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-NBOX",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-negative-member-corpus"
+    },
+    {
+      "id": "P14-negative-member-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-NBOX",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-state-5-erase-observation"
+    },
+    {
+      "id": "P15-significant-owner-boundary",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-owner-boundary-comparison"
+    },
+    {
+      "id": "P16-ancestor-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-ancestor-delete-chain"
+    },
+    {
+      "id": "P17-absent-primitive",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-idlist-member-gap"
+    },
+    {
+      "id": "P18-multi-event-combine",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-single-window-multi-event-tty"
+    },
+    {
+      "id": "P19-update-off-on",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-updateon-pml-hook"
+    },
+    {
+      "id": "P20-non-desi-gate",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX03-EQUI",
+      "rvm_root": "/1RX03-EQUI",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-gate",
+      "status": "calibrate",
+      "blocked_reason": "requires-non-desi-db-fixture"
+    },
+    {
+      "id": "P21-cross-db-same-window",
+      "dbnum": 8000,
+      "companion_dbnum": 7998,
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-two-db-tty-session"
+    },
+    {
+      "id": "P22-failure-retry",
+      "dbnum": 8000,
+      "companion_dbnum": 7998,
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-controlled-tty-failure-and-retry"
+    },
+    {
+      "id": "P23-changed-since-between",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-session-range",
+      "status": "calibrate",
+      "blocked_reason": "requires-two-session-history-and-range-query"
+    },
+    {
+      "id": "P24-dependent-attribute-cascade",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "moved": {},
+        "resized": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-dependency-attribute-corpus"
+    },
+    {
+      "id": "P25-qualifier-map-replay",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "resized": {},
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-qualified-attribute-history"
+    },
+    {
+      "id": "P26-candidate-model-erase",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-candidate-model-rvm"
+    },
+    {
+      "id": "P27-unknown-model-erase",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-unknown-model-rvm"
+    },
+    {
+      "id": "P28-cps-session-flag",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-multi-session-cps-fixture"
+    },
+    {
+      "id": "P29-load-sheet-context",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX03-EQUI",
+      "rvm_root": "/1RX03-EQUI",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-two-view-tty-context"
+    },
+    {
+      "id": "P30-erase-significant-first",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-significant-model-candidate-fixture"
+    },
+    {
+      "id": "P31-erase-candidate-fallback",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-state-2-candidate-fixture"
+    },
+    {
+      "id": "P32-erase-unknown-fallback",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-unknown-cps-fixture"
+    },
+    {
+      "id": "P33-draw-finish-command",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-pupdes-and-finish-log-observation"
+    },
+    {
+      "id": "P34-exists-cps-or-idlist",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-cps-and-idlist-presence-fixture"
+    },
+    {
+      "id": "P35-no-current-cps",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-empty-current-view-cps"
+    },
+    {
+      "id": "P36-descendant-present",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-pending-ancestor-descendant-chain"
+    },
+    {
+      "id": "P37-invalid-idlist",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-invalid-element-idlist-fixture"
+    },
+    {
+      "id": "P38-mute-new-notify",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-mute-unmute-pml-hook"
+    },
+    {
+      "id": "P39-set-view-vs-forced",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX03-EQUI",
+      "rvm_root": "/1RX03-EQUI",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-shee-picorf-and-view-fixture"
+    },
+    {
+      "id": "P40-reset-view",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX03-EQUI",
+      "rvm_root": "/1RX03-EQUI",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-reset-view-tty-observation"
+    },
+    {
+      "id": "P41-add-idlist-writeback",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-valid-idlist-writeback-fixture"
+    },
+    {
+      "id": "P42-delete-state-gates",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-state-2-state-3-pending-fixture"
+    },
+    {
+      "id": "P43-dump-before-after",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-diagnostics",
+      "status": "calibrate",
+      "blocked_reason": "requires-dump-before-after-log"
+    },
+    {
+      "id": "P44-significant-classification",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1-LNR-Q005-PJ",
+      "rvm_root": "/1-LNR-Q005-PJ",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-classification",
+      "status": "calibrate",
+      "blocked_reason": "requires-managed-significant-boundary-fixture"
+    },
+    {
+      "id": "P45-change-after-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-delete-then-change-window"
+    },
+    {
+      "id": "P46-new-after-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-delete-then-new-window"
+    },
+    {
+      "id": "P47-delete-after-change",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-change-then-delete-window"
+    },
+    {
+      "id": "P48-change-while-new-pending",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-new-pending-change-window"
+    },
+    {
+      "id": "P49-change-under-ancestor-delete",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-ancestor-delete-change-window"
+    },
+    {
+      "id": "P50-repeated-delete-state4",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-state-4-delete-window"
+    },
+    {
+      "id": "P51-session-range-noop",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {},
+        "resized": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-session-range",
+      "status": "calibrate",
+      "blocked_reason": "requires-empty-session-range"
+    },
+    {
+      "id": "P52-session-range-delete-only",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-delete-only-session-range"
+    },
+    {
+      "id": "P53-session-range-insert-only",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-insert-only-session-range"
+    },
+    {
+      "id": "P54-attribute-member-special",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-att-memb-attribute-event"
+    },
+    {
+      "id": "P55-created-delete-with-includes",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-created-logical-include-delete"
+    },
+    {
+      "id": "P56-existing-delete-multiple-includes",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "removed": [],
+        "owner_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-destructive-delete",
+      "status": "blocked",
+      "blocked_reason": "existing-object-destructive-delete-without-project-backup"
+    },
+    {
+      "id": "P57-leaf-delete-no-includes",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-leaf-delete-no-include"
+    },
+    {
+      "id": "P58-include-same-session",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-same-session-reparent-fixture"
+    },
+    {
+      "id": "P59-include-cross-session",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-cross-session-reparent-fixture"
+    },
+    {
+      "id": "P60-include-created-child",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-created-child-include-fixture"
+    },
+    {
+      "id": "P61-reorder-created-member",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-BRAN",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-created-member-reorder-fixture"
+    },
+    {
+      "id": "P62-attribute-created-element",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-created-attribute-event"
+    },
+    {
+      "id": "P63-attribute-reentrant-guard",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/1RX-345",
+      "rvm_root": "/1RX-345",
+      "expected_change": {
+        "added": [],
+        "removed": [],
+        "moved": {},
+        "resized": {},
+        "renamed": {},
+        "owner_changes": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-reentrant-event",
+      "status": "calibrate",
+      "blocked_reason": "requires-reentrant-attribute-callback"
+    },
+    {
+      "id": "P64-attribute-dependency-fanout",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "moved": {},
+        "resized": {},
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-attribute-dependency-fanout-corpus"
+    },
+    {
+      "id": "P65-attribute-multi-qualifier",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/C-OR-1R345-C",
+      "rvm_root": "/C-OR-1R345-C",
+      "expected_change": {
+        "resized": {},
+        "renamed": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "existing-object-baseline-restore",
+      "status": "calibrate",
+      "blocked_reason": "requires-multi-qualifier-attribute-corpus"
+    },
+    {
+      "id": "P66-pending-invalid-state",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-state-gate",
+      "status": "calibrate",
+      "blocked_reason": "requires-invalid-model-state-probe"
+    },
+    {
+      "id": "P67-granularity-primitive-members",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-NBOX",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {},
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-primitive-with-negative-members"
+    },
+    {
+      "id": "P68-granularity-primitive-empty-members",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-EQ",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "moved": {}
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-primitive-without-member-list"
+    },
+    {
+      "id": "P69-granularity-delete-direct",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-EQ",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-direct-state3-granularity-path"
+    },
+    {
+      "id": "P70-granularity-absent-cleanup",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-EQ",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-absent-primitive-cleanup-path"
+    },
+    {
+      "id": "P71-cps-no-picture",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-no-current-picture-context"
+    },
+    {
+      "id": "P72-cps-empty-segment",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-view-context",
+      "status": "calibrate",
+      "blocked_reason": "requires-empty-desi-segment-context"
+    },
+    {
+      "id": "P73-cps-current-only",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-current-cps-search-mode"
+    },
+    {
+      "id": "P74-cps-all-segments",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-multi-cps-search-mode"
+    },
+    {
+      "id": "P75-update-precondition-noop",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "read-only-update-gate",
+      "status": "calibrate",
+      "blocked_reason": "requires-empty-invalid-root-and-busy-update-probes"
+    },
+    {
+      "id": "P76-finish-delete-attachment",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "removed": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-finish-state3-attachment-cleanup"
+    },
+    {
+      "id": "P77-new-idlist-owner-dedupe",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "added": [],
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-new-model-idlist-owner-dedupe"
+    },
+    {
+      "id": "P78-members-search-modes",
+      "action_macro": null,
+      "restore_macro": null,
+      "target": "/AIOS-INC-<run-id>-BRAN",
+      "rvm_root": "/AIOS-INC-<run-id>",
+      "expected_change": {
+        "member_changes": []
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-significant-primitive-negative-member-modes"
+    },
+    {
+      "id": "P79-created-ancestor-dedupe",
+      "action_macro": "round3/p79_apply.mac",
+      "restore_macro": "round3/site_restore.mac",
+      "setup_macro": "round3/site_setup.mac",
+      "teardown_macro": "round3/site_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P79",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P79",
+      "expected_change": {
+        "added": [
+          "/AIOS-INC-<run-id>-P79-OWNER"
+        ],
+        "removed": [],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P79-OWNER"
+        ],
+        "dc_events": [
+          "created:/AIOS-INC-<run-id>-P79-OWNER:new-root",
+          "created:/AIOS-INC-<run-id>-P79-CHILD:deduped-into-created-ancestor"
+        ],
+        "forbidden": [
+          "created:/AIOS-INC-<run-id>-P79-CHILD:second-owner-record"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation"
+    },
+    {
+      "id": "P80-created-ancestor-delete",
+      "action_macro": "round3/p80_apply.mac",
+      "restore_macro": "round3/site_restore.mac",
+      "setup_macro": "round3/site_setup.mac",
+      "teardown_macro": "round3/site_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P80",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P80",
+      "expected_change": {
+        "added": [
+          "/AIOS-INC-<run-id>-P80-OWNER"
+        ],
+        "removed": [],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P80-OWNER"
+        ],
+        "dc_events": [
+          "created:/AIOS-INC-<run-id>-P80-OWNER:new-root",
+          "created:/AIOS-INC-<run-id>-P80-CHILD:deduped-into-created-ancestor",
+          "deleted:/AIOS-INC-<run-id>-P80-CHILD:created-branch-no-production-delete"
+        ],
+        "forbidden": [
+          "deleted:/AIOS-INC-<run-id>-P80-CHILD:production-delete-row"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation;rvm-omits-empty-containers"
+    },
+    {
+      "id": "P81-created-ancestor-attribute",
+      "action_macro": "round3/p81_apply.mac",
+      "restore_macro": "round3/site_restore.mac",
+      "setup_macro": "round3/site_setup.mac",
+      "teardown_macro": "round3/site_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P81",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P81",
+      "expected_change": {
+        "added": [
+          "/AIOS-INC-<run-id>-P81-OWNER"
+        ],
+        "renamed": {
+          "/AIOS-INC-<run-id>-P81-CHILD": "/AIOS-INC-<run-id>-P81-CHILD-RENAMED"
+        },
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P81-OWNER"
+        ],
+        "dc_events": [
+          "created:/AIOS-INC-<run-id>-P81-OWNER:new-root",
+          "created:/AIOS-INC-<run-id>-P81-CHILD:deduped-into-created-ancestor",
+          "attribute_modified:/AIOS-INC-<run-id>-P81-CHILD:NAME:created-branch-no-qualifier-map"
+        ],
+        "forbidden": [
+          "attribute_modified:/AIOS-INC-<run-id>-P81-CHILD:NAME:normal-qualifier-map"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation"
+    },
+    {
+      "id": "P82-primary-list-add-member",
+      "action_macro": "round3/p82_apply.mac",
+      "restore_macro": "round3/bran_add_restore.mac",
+      "setup_macro": "round3/bran_setup.mac",
+      "teardown_macro": "round3/bran_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P82-BRAN",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P82-BRAN-SITE",
+      "expected_change": {
+        "added": [
+          "/AIOS-INC-<run-id>-P82-BRAN-FTUB-ADD"
+        ],
+        "member_changes": [
+          {
+            "owner": "/AIOS-INC-<run-id>-P82-BRAN",
+            "added": [
+              "/AIOS-INC-<run-id>-P82-BRAN-FTUB-ADD"
+            ]
+          }
+        ],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P82-BRAN"
+        ],
+        "dc_events": [
+          "created:/AIOS-INC-<run-id>-P82-BRAN-FTUB-ADD:new-member",
+          "attribute_modified:/AIOS-INC-<run-id>-P82-BRAN:ATT_MEMB:add-member"
+        ],
+        "forbidden": [
+          "element_reordered:/AIOS-INC-<run-id>-P82-BRAN:add-member"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation",
+      "rvm_no_pos_query": true
+    },
+    {
+      "id": "P83-primary-list-remove-member",
+      "action_macro": "round3/p83_apply.mac",
+      "restore_macro": "round3/p83_restore.mac",
+      "setup_macro": "round3/bran_setup.mac",
+      "teardown_macro": "round3/bran_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P83-BRAN",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P83-BRAN-SITE",
+      "expected_change": {
+        "removed": [
+          "/AIOS-INC-<run-id>-P83-BRAN-M1"
+        ],
+        "member_changes": [
+          {
+            "owner": "/AIOS-INC-<run-id>-P83-BRAN",
+            "removed": [
+              "/AIOS-INC-<run-id>-P83-BRAN-M1"
+            ]
+          }
+        ],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P83-BRAN"
+        ],
+        "dc_events": [
+          "deleted:/AIOS-INC-<run-id>-P83-BRAN-M1:member-element-delete",
+          "attribute_modified:/AIOS-INC-<run-id>-P83-BRAN:ATT_MEMB:remove-member"
+        ],
+        "forbidden": [
+          "element_reordered:/AIOS-INC-<run-id>-P83-BRAN:remove-member"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation",
+      "rvm_no_pos_query": true
+    },
+    {
+      "id": "P84-qualifier-cleared",
+      "action_macro": "round3/p84_apply.mac",
+      "restore_macro": "round3/p84_restore.mac",
+      "setup_macro": "round3/bran_setup.mac",
+      "teardown_macro": "round3/bran_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P84-BRAN",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P84-BRAN-SITE",
+      "expected_change": {
+        "resized": [
+          "/AIOS-INC-<run-id>-P84-BRAN-M2"
+        ],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P84-BRAN"
+        ],
+        "dc_events": [
+          "attribute_modified:/AIOS-INC-<run-id>-P84-BRAN-M2:SPRE:qualifier-one-to-zero-final-null"
+        ],
+        "forbidden": [
+          "attribute_modified:/AIOS-INC-<run-id>-P84-BRAN-M2:SPRE:stale-qualifier-13244-108852"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation",
+      "rvm_no_pos_query": true
+    },
+    {
+      "id": "P85-combine-qualifier-merge",
+      "action_macro": "round3/p85_apply.mac",
+      "restore_macro": "round3/p85_restore.mac",
+      "setup_macro": "round3/bran_setup.mac",
+      "teardown_macro": "round3/bran_teardown.mac",
+      "target": "/AIOS-INC-<run-id>-P85-BRAN",
+      "baseline_mode": "root",
+      "rvm_root": "/AIOS-INC-<run-id>-P85-BRAN-SITE",
+      "expected_change": {
+        "resized": [
+          "/AIOS-INC-<run-id>-P85-BRAN-M2"
+        ],
+        "regen_roots": [
+          "/AIOS-INC-<run-id>-P85-BRAN"
+        ],
+        "dc_events": [
+          "attribute_modified:/AIOS-INC-<run-id>-P85-BRAN-M2:SPRE:same-key-last-write-wins-final-13244-108851"
+        ],
+        "forbidden": [
+          "attribute_modified:/AIOS-INC-<run-id>-P85-BRAN-M2:SPRE:duplicate-conflicting-entry"
+        ]
+      },
+      "restore_expectation": {
+        "equals_before": true,
+        "refno_may_change": true
+      },
+      "destructive_policy": "run-owned-only",
+      "status": "calibrate",
+      "blocked_reason": "requires-db-userchanges-event-observation",
+      "rvm_no_pos_query": true
+    }
+  ]
+}

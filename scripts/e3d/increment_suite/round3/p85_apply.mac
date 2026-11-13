@@ -1,0 +1,23 @@
+-- P85：同一个 BEND 在同一个窗口内把 SPRE 依次写成两个不同的非空值。
+-- 预期 combine 对同元素 qualifier map 的同一键合并为一项，最后一次写入生效，不留下两条冲突记录。
+-- ★ 若 TTY 显示两次写只产生一次 attributeModified，则本案例只验证最终值，
+--   不构成 combine 覆盖；必须据实降级，不能把静态预期当成通过证据。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P85-APPLY-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q MEMB
+BEND 1
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+SPRE =13244/108852
+Q SPRE
+SPRE =13244/108851
+Q SPRE
+SAVEWORK 'AMS round3 P85 combine qualifier merge'
+$P AMS-R3-P85-APPLY-DONE
+ALPHA LOG END

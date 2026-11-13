@@ -1,0 +1,28 @@
+-- 登记: D06 | 语义: 改 run-owned ZONE 的朝向（下挂 EQ-MV1 / EQ-MV2）。预期子件世界包围盒跟着转，不是平移 | expected_net: modified | restore 搭档: xform/zone_ori_restore.mac
+-- 句式与 setup 里 EQ-PB 的 ORI Y IS E AND Z IS U 同类，这里用已证实的 Y IS W AND Z IS U WRT /*
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ZONE-ORI-APPLY-ALIVE
+/AIOS-SUITE-ZONE-MV
+Q REF
+Q NAME
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-ZONE-MV
+ORI Y IS W AND Z IS U WRT /*
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q ORI
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/zone_ori apply: ZONE-MV ORI Y IS W AND Z IS U'
+$P SUITE-XFORM-ZONE-ORI-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,20 @@
+-- 登记: A02（变更类型 CT-S1；对照） | 语义: 在伙伴库的 BULKZ 下面只建一台带一个盒子的设备
+-- expected_net: cancelled | restore 搭档: pipeline/small_create_restore.mac | 存盘只落在 7998
+-- 这是 pipeline/bulk_create 的对照：变更元素只有两三个，占这个库索引的比例远不到 30%，
+--   这一窗不该退化：只生成新建的这一个根，库里别的根（EQ-X、两间房）不重算。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-SMALL-CREATE-APPLY-ALIVE
+/AIOS-SUITE-T4-X-BULKZ
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T4-SM-EQ
+POS E 140000 N 58000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 600 YLEN 600 ZLEN 600
+NAME /AIOS-SUITE-T4-SM-BOX
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite T4 pipeline/small_create apply: one equipment in BULKZ'
+$P SUITE-T4-SMALL-CREATE-APPLY-DONE
+ALPHA LOG END

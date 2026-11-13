@@ -1,0 +1,12 @@
+-- 登记: A02 | 语义: BOX-PRIM 的 POS 写回缺省原点 | expected_net: cancelled | restore 搭档: 本文件是 geom/box_pos_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-BOX-POS-RESTORE-ALIVE
+/AIOS-SUITE-BOX-PRIM
+Q REF
+Q NAME
+Q POS WRT /*
+POS E 0 N 0 U 0
+Q POS WRT /*
+SAVEWORK 'AIOS suite geom/box_pos restore: BOX-PRIM POS E 0'
+$P SUITE-GEOM-BOX-POS-RESTORE-DONE
+ALPHA LOG END

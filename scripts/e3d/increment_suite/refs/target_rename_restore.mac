@@ -1,0 +1,29 @@
+-- 登记: A07（变更类型 CT-A1、CT-A6；按名称案例 E-03、A-01） | 语义: 把 BRAN-RX 改回 BRAN-R
+-- expected_net: modified | apply 搭档: refs/target_rename_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply，零重建。交付删除记录按 INSERT IGNORE 同一 refno 只留首次事件：apply 那一窗已经记过 renamed，这一窗不再新落。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-REFS-TARGET-RENAME-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-NZ
+Q REF
+Q NAME
+/AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+Q CREF
+/AIOS-SUITE-T3-PIPE
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-RX') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q HREF
+  NAME /AIOS-SUITE-T3-BRAN-R
+  Q REF
+  Q NAME
+  Q MEMB
+ENDDO
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+SAVEWORK 'AIOS suite T3 refs/target_rename restore: BRAN-RX renamed back to BRAN-R'
+$P SUITE-T3-REFS-TARGET-RENAME-RESTORE-DONE
+ALPHA LOG END

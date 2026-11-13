@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "suite": "pml-increment-suite",
+  "owner": "T1",
+  "description": "支吊架这一组（清单片段 manifest.d/T1-support.json）在支撑区那一侧的 RVM 期望模型，格式同套件根下的 rvm-truth.json，给 Compare-SuiteRvmTruth.ps1 -Model 用。导出根是整个支撑区 /ZONE-SUPPORTS-AREA01（250104，234 个带图元的组）：整区一起导，「不该动的没动」才判得出来。",
+  "pairing_rules": "apply 腿与它之前那份快照比；restore 腿与对应 apply 之前的那份比（equals_state_before）。",
+  "tolerances": { "aabb_mm": 1.0 },
+  "legs": {
+    "support/compre_hstu_xdb_apply.mac": {
+      "resized": {
+        "PS-01-00194/PS-01-00194/B1/PS-01-00194.1": [-321011.19, 309997.48, 106424.68, -320811.12, 310202.48, 106578.10],
+        "PS-01-00195/PS-01-00195/B1/PS-01-00195.1": [-315821.18, 309997.48, 106398.73, -315621.12, 310202.48, 106552.15]
+      },
+      "note": "2026-11-12 实测（250132 会话 41）。被支撑的支管 HSTU PA300 → PA250：整区正好这两只变，下沿上抬 25.40、上沿上抬 34.70（高度 144.13 → 153.42）——不是纯平移。改之前是 [-321011.31, 309997.48, 106399.28, -320811.24, 310202.48, 106543.41] 与 [-315821.31, 309997.48, 106373.33, -315621.24, 310202.48, 106517.46]。其余 232 件（含指着三通的 /PS-01-00196.1、/PS-01-00197.1）落在「其余成员逐一吻合」里。"
+    },
+    "support/compre_hstu_xdb_restore.mac": { "equals_state_before": "support/compre_hstu_xdb_apply.mac" },
+    "support/compre_lstu_samedb_apply.mac": {
+      "note": "2026-11-12 实测（250104 会话 15）。耳轴垫板 LSTU PA40 → PA50：E3D 里整区 234 件逐一不动——这一对的几何不吃这块板的管外径。"
+    },
+    "support/compre_lstu_samedb_restore.mac": { "equals_state_before": "support/compre_lstu_samedb_apply.mac" },
+    "support/compre_ctl_move_apply.mac": {
+      "note": "对照：被支撑的支管只挪位置，整区 234 件逐一不动。"
+    },
+    "support/compre_ctl_move_restore.mac": { "equals_state_before": "support/compre_ctl_move_apply.mac" },
+    "support/compre_ctl_unref_apply.mac": {
+      "note": "对照：没被支撑的支管换管径，整区 234 件逐一不动。"
+    },
+    "support/compre_ctl_unref_restore.mac": { "equals_state_before": "support/compre_ctl_unref_apply.mac" },
+    "support/compre_bulk_apply.mac": {
+      "resized": {
+        "PS-01-00194/PS-01-00194/B1/PS-01-00194.1": [-321011.19, 309997.48, 106424.68, -320811.12, 310202.48, 106578.10],
+        "PS-01-00195/PS-01-00195/B1/PS-01-00195.1": [-315821.18, 309997.48, 106398.73, -315621.12, 310202.48, 106552.15]
+      },
+      "note": "2026-11-12 实测（250132 会话 47）。大窗里换的是同一根支管的同一档管径，支撑区的变化与 support/compre_hstu_xdb_apply.mac 相同。"
+    },
+    "support/compre_bulk_restore.mac": { "equals_state_before": "support/compre_bulk_apply.mac" },
+    "support/anci_compre_apply.mac": {
+      "resized": {
+        "PS-01-00194/PS-01-00194/B1/PS-01-00194.1": [-321010.79, 309997.48, 106504.05, -320810.72, 310202.48, 106662.10]
+      },
+      "note": "2026-11-12 实测（250104 会话 17）。/PS-01-00194.1 的 COMPRE 改指 DN100 的支管：只有它变，下沿上抬 104.77、上沿上抬 118.69（高度 144.13 → 158.05）；/PS-01-00195.1 与其余 232 件不动。"
+    },
+    "support/anci_compre_restore.mac": { "equals_state_before": "support/anci_compre_apply.mac" }
+  }
+}

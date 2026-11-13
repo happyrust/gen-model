@@ -1,0 +1,22 @@
+-- 登记: A09（变更类型 CT-A11；按名称案例 G-02） | 语义: 同值写回——给设备 EQ-CP 把名字、一个文本自定义属性、一个实数自定义属性各按原值再写一遍，然后保存
+-- expected_net: unchanged | restore 搭档: 无（什么都没变）
+-- 预期 gen-model（按 refno）: 没有任何单元重建。E3D 对同值写可能根本不落记录（会话只多一个尾会话），也可能落一条内容相同的记录
+--   （那样逐元素差分应当判「没变」）。两种都算过；会话号走几步以实测为准。
+-- 现有的同值写用例（A09-* 五个）没有 NAME 和自定义属性这两种。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-SAME-VALUE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q :EQNA
+Q :WEIGHT
+NAME /AIOS-SUITE-T3-EQ-CP
+:EQNA 'AIOS T3 eqna base'
+:WEIGHT 100
+Q REF
+Q NAME
+Q :EQNA
+Q :WEIGHT
+SAVEWORK 'AIOS suite T3 meta/same_value: EQ-CP NAME and two UDAs rewritten with same values'
+$P SUITE-T3-META-SAME-VALUE-DONE
+ALPHA LOG END

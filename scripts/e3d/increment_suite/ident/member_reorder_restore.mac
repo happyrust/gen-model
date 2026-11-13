@@ -1,0 +1,18 @@
+-- 登记: A02 | 语义: 把 BOX-M3 挪回 BOX-M2 后面，成员序回到 M1, M2, M3（refno 都不变，真逆）
+-- expected_net: cancelled | restore 搭档: 本文件是 ident/member_reorder_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-MEMBER-REORDER-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-T3-BOX-M3
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-M
+REORDER /AIOS-SUITE-T3-BOX-M3 AFTER /AIOS-SUITE-T3-BOX-M2
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/member_reorder restore: BOX-M3 moved back after BOX-M2'
+$P SUITE-T3-MEMBER-REORDER-RESTORE-DONE
+ALPHA LOG END

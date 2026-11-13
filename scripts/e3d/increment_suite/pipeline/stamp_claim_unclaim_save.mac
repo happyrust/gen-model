@@ -1,0 +1,18 @@
+-- 登记: A06（变更类型 CT-W3；管线行为「只留下盖戳的保存」；结构连接级联真机步骤的验 4） | 语义: 认领一台设备、马上释放、保存；设备的属性一个没改
+-- expected_net: unchanged | 没有 restore（库里按名、按属性都没有变化）
+-- 写法出处: pipeline/claim_probe.mac 2026-11-12 实测——CLAIM CE / UNCLAIM CE 成立，8000 是 MULTIWRITE、隐式认领。
+-- 该有的行为: 这一窗一个单元都不该重算，水位照推，EQ-CLM 的回执不过期。
+--   现在的行为待首跑：缺省配置（结构连接级联关着）下「只推回执」那条优化不生效，被盖戳的根可能整根重算一遍——结果相同，是白算。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-STAMP-CLAIM-UNCLAIM-SAVE-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+Q LCLM
+CLAIM CE
+Q LCLM
+UNCLAIM CE
+Q LCLM
+SAVEWORK 'AIOS suite T4 pipeline/stamp_claim_unclaim_save: claim then unclaim, nothing else'
+$P SUITE-T4-STAMP-CLAIM-UNCLAIM-SAVE-DONE
+ALPHA LOG END

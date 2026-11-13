@@ -1,0 +1,21 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 F-02） | 语义: 把区域 Z 的两个自定义属性都清掉，回到 setup 之后的样子
+-- expected_net: modified | 四腿链 meta/uda_zone 的还原腿
+-- 预期 gen-model（按 refno，该有的行为）: 交付单元 0，区域下面的单元一个都不该重建。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-ZONE-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q UDASET
+:G_ICS ''
+:FABTARGET ''
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_zone restore: ZONE Z UDAs unset'
+$P SUITE-T3-META-UDA-ZONE-RESTORE-DONE
+ALPHA LOG END

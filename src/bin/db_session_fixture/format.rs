@@ -22,7 +22,9 @@ use std::path::{Component, Path};
 use std::str::FromStr;
 
 pub const FORMAT: &str = "aios-session-fixture-v1";
-pub const MAX_ARCHIVE_BYTES: u64 = 6 * 1024 * 1024;
+/// 夹具 zip 的上限。2026-11-12 从 6 MiB 放到 16 MiB（10-25 计划 D2 批过的数）：`ams8000_0001` 已经长到 54 MB，
+/// 压出来 6.9 MB，6 MiB 装不下了。已有夹具的清单里记的还是它们打包时的 6 MiB，复验按各自清单里的数判，不受影响。
+pub const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 pub const COMPRESSION: &str = "zip-deflate-level-9";
 
 /// 窗口净变化的合法取值，对应 `manual_update::NetOp` 的 snake_case 序列化。

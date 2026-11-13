@@ -1,0 +1,25 @@
+-- 登记: gen-model #143 的对照 | 语义: 把 /300-A-42/B1 的头点和它名下那只三通的位置按原值写回。
+-- expected_net: cancelled | restore 搭档: 本文件是 support/compre_ctl_move_apply.mac 的 restore
+--
+-- 工程: APS（MDB /ALL），只在私有副本上跑。写绝对值，重跑幂等：
+--   支管 HPOS = W 321869.83 N 310099.991 U 106666.5
+--   三通 POS  = W 312662.167 N 310099.991 U 106620.458
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-COMPRE-CTL-MOVE-RESTORE-ALIVE
+/300-A-42/B1
+Q REF
+Q NAME
+Q HPOS
+HPOS W 321869.83 N 310099.991 U 106666.5
+Q HPOS
+Q TPOS
+Q HSTU
+TEE 1
+Q REF
+Q TYPE
+Q POS
+POS W 312662.167 N 310099.991 U 106620.458
+Q POS
+SAVEWORK 'AIOS suite support/compre_ctl_move restore: /300-A-42/B1 head and its tee back to baseline'
+$P SUITE-SUPPORT-COMPRE-CTL-MOVE-RESTORE-DONE
+ALPHA LOG END

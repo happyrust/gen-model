@@ -1,0 +1,20 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 D-04，同一个 refno 改名的那一支） | 语义: 只把设备名从 /AIOS-SUITE-T3-EQ-CASE 改成只差大小写的 /aios-suite-t3-eq-case，别的不动
+-- expected_net: modified（只动 NAME） | restore 搭档: ident/rename_case_restore.mac
+-- 预期 gen-model（按 refno）: 与 attr/rename 相同——任务 succeeded、交付单元 0、模型行不变；datacenter_delete 一条 reason=renamed、位号是旧名（已发布时）。
+-- ★ TTY 是否保留小写未验：ident/name_probe.mac 的第 1 段先探。Q NAME 回读的就是 E3D 存下的原文；
+--   如果 E3D 把名字折成大写，这条腿等于同值写回（交付单元 0、没有 renamed 记录），用例要据实改判，不能按这里的预期记通过。
+-- 导航走子件 BOX-CASE 再 OWNER：不管设备现在叫哪个名字都到得了（按一个不存在的名字导航会让 E3D 崩溃）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-RENAME-CASE-APPLY-ALIVE
+/AIOS-SUITE-T3-BOX-CASE
+Q REF
+Q NAME
+OWNER
+Q REF
+Q NAME
+NAME /aios-suite-t3-eq-case
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite T3 ident/rename_case apply: EQ-CASE renamed to lower case'
+$P SUITE-T3-RENAME-CASE-APPLY-DONE
+ALPHA LOG END

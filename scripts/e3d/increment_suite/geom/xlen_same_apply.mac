@@ -1,0 +1,13 @@
+-- 登记: A09 | 语义: BOX-A1 的 XLEN 按基线 2000 再写一遍，YLEN/ZLEN 不动。预期值不变、0 重建、RVM 不变 | expected_net: unchanged | restore 搭档: geom/xlen_same_restore.mac
+-- 来源: geom/resize_restore.mac 的 `XLEN 2000`（基线尺寸）。与 xform/pos_same 对照：那边是空设备的位姿，这边是有几何的 DCHC=4 属性
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-XLENSAME-APPLY-ALIVE
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q XLEN
+XLEN 2000
+Q XLEN
+SAVEWORK 'AIOS suite geom/xlen_same apply: BOX-A1 XLEN rewritten unchanged'
+$P SUITE-GEOM-XLENSAME-APPLY-DONE
+ALPHA LOG END

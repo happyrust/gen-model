@@ -1,0 +1,24 @@
+-- P82：向 run-owned BRAN 末尾增加一个带 SPRE 的 FTUB 成员（COPY 自现有成员）。
+-- primary-list 分支：成员比较结果不是 3，只补 ATT_MEMB changed，不调用 elementReordered。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P82-APPLY-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q MEMB
+FTUB 1
+!src = !!CE
+Q REF
+Q SPRE
+OWNER
+NEW FTUB {{TARGET_NAME}}-FTUB-ADD
+COPY $!src
+Q REF
+Q NAME
+Q SPRE
+{{TARGET_NAME}}
+Q MEMB
+SAVEWORK 'AMS round3 P82 primary list add member'
+$P AMS-R3-P82-APPLY-DONE
+ALPHA LOG END

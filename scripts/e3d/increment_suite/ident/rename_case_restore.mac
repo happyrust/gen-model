@@ -1,0 +1,20 @@
+-- 登记: A07 | 语义: 把设备名改回 /AIOS-SUITE-T3-EQ-CASE（refno 不变，E3D 层真逆；gen-model 层的 renamed 记录仍在，INSERT IGNORE 保留首次事件）
+-- expected_net: cancelled | restore 搭档: 本文件是 ident/rename_case_apply.mac 的 restore
+-- 已经是原名时不再写（apply 没跑，或 E3D 把小写折成了大写）：同名再写 NAME 会不会报错未验，先判再写。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-RENAME-CASE-RESTORE-ALIVE
+/AIOS-SUITE-T3-BOX-CASE
+Q REF
+Q NAME
+OWNER
+Q REF
+Q NAME
+!cn = !!CE.NAME
+IF (NOT (!cn EQ '/AIOS-SUITE-T3-EQ-CASE')) THEN
+  NAME /AIOS-SUITE-T3-EQ-CASE
+ENDIF
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite T3 ident/rename_case restore: EQ-CASE name back to upper case'
+$P SUITE-T3-RENAME-CASE-RESTORE-DONE
+ALPHA LOG END

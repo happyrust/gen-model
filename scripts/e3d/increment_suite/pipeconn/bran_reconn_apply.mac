@@ -1,0 +1,29 @@
+-- 登记: A01（管道）/ 变更类型 CT-A5 头尾连接；联动分类表第 5 行 | 语义: 设备挪开之后重新接管——
+-- BRAN /AIOS-SUITE-T1-BRAN-C 再做一次 CONN PH TO /AIOS-SUITE-T1-NZ1，E3D 把管嘴口的新位置回写进支管的 HPOS；
+-- 尾端按新的头位置与方向放回轴线上 3000 mm 处（整根直管跟着平移 [0, 300, 0]）。设备与管嘴一个字不改。
+-- 预期：支管这个根进 regen，管身平移 [0, 300, 0]；设备的根不碰（管嘴的 CREF 本来就指着这根支管，没有变化）。
+-- expected_net: modified | restore 搭档: pipeconn/bran_reconn_restore.mac
+--
+-- 链: pipeconn/nozz_conn 的第 3 腿（前一腿把设备向北挪了 300）。
+-- 这正是「接头动了 → E3D 回写了 BRAN → BRAN 自己是变更元素 → 照常重算」的那一半（联动分类表第 2.9 节）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-RECONN-APPLY-ALIVE
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+CONN PH TO /AIOS-SUITE-T1-NZ1
+!hp = !!CE.HPOS
+!hd = !!CE.HDIR
+!tp = !hp.Offset(!hd, 3000)
+!td = !hd.Opposite()
+TPOS $!tp
+TDIR $!td
+Q HREF
+Q HPOS WRT /*
+Q TPOS WRT /*
+SAVEWORK 'AIOS suite pipeconn/bran_reconn apply: BRAN-C reconnected, follows the moved nozzle'
+$P SUITE-PIPECONN-RECONN-APPLY-DONE
+ALPHA LOG END

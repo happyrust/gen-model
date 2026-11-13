@@ -51,6 +51,22 @@ impl Half {
     }
 }
 
+/// 就地覆写已有文件时对硬链接的态度。
+///
+/// 影子工程根里凡是没列进 `-Replayed` 的库都是到真工程原件的硬链接（`scripts/replay/New-ShadowProjectRoot.ps1`）；
+/// 就地覆写一个有多个链接的文件，就是把真工程的原件改掉。缺省拒绝；明确知道自己要写穿才 `Allow`（`--allow-hardlink`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardLinks {
+    Refuse,
+    Allow,
+}
+
+impl HardLinks {
+    pub fn from_flag(allow: bool) -> Self {
+        if allow { Self::Allow } else { Self::Refuse }
+    }
+}
+
 /// 台账里一个有真快照的 sesno：真文件的长度 + 字节补丁。
 #[derive(Debug, Clone)]
 pub struct Faithful {
@@ -186,8 +202,14 @@ pub fn load_final(fixture: Option<&Path>, source: Option<&Path>) -> anyhow::Resu
     }
 }
 
-/// 从终稿切出会话 `to`（+ 补丁）写成工作文件（已存在则就地覆写——init 就是重置，文件身份不变）。
-pub fn replay_init(final_: &Final, to: u32, out: &Path) -> anyhow::Result<ReplayReport> {
+/// 从终稿切出会话 `to`（+ 补丁）写成工作文件（已存在则就地覆写——init 就是重置，文件身份不变；
+/// 已存在的文件若还有别的硬链接，按 `hard_links` 拒绝或放行）。
+pub fn replay_init(
+    final_: &Final,
+    to: u32,
+    out: &Path,
+    hard_links: HardLinks,
+) -> anyhow::Result<ReplayReport> {
     let chain = final_.chain()?;
     let (snapshot, patched_bytes) = final_.faithful(&chain, to)?;
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -195,7 +217,7 @@ pub fn replay_init(final_: &Final, to: u32, out: &Path) -> anyhow::Result<Replay
     }
     let bytes_before = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     if out.exists() {
-        overwrite_in_place(out, &snapshot)?;
+        overwrite_in_place(out, &snapshot, hard_links)?;
     } else {
         fs::write(out, &snapshot).with_context(|| format!("write {}", out.display()))?;
     }
@@ -229,6 +251,7 @@ pub fn replay_step(
     to: u32,
     half: Option<Half>,
     rollback: bool,
+    hard_links: HardLinks,
 ) -> anyhow::Result<ReplayReport> {
     let chain = final_.chain()?;
     let (target, patched_bytes) = final_.faithful(&chain, to)?;
@@ -293,12 +316,12 @@ pub fn replay_step(
 
     let bytes_before = current.len() as u64;
     match half {
-        None => overwrite_in_place(work, &target)?,
+        None => overwrite_in_place(work, &target, hard_links)?,
         Some(Half::Pages) => {
             // 页到位，头还是旧的（头已经先改过的话就是补齐，留着那个头）。
             let mut staged = target.clone();
             staged[..PAGE_SIZE].copy_from_slice(&current[..PAGE_SIZE]);
-            overwrite_in_place(work, &staged)?;
+            overwrite_in_place(work, &staged, hard_links)?;
         }
         Some(Half::Header) => {
             // 头先改，页还没到：只写第一页，长度不动（页已到位的话就是补齐，等于完整步）。
@@ -308,7 +331,7 @@ pub fn replay_step(
             );
             let mut staged = current.clone();
             staged[..PAGE_SIZE].copy_from_slice(&target[..PAGE_SIZE]);
-            overwrite_in_place(work, &staged)?;
+            overwrite_in_place(work, &staged, hard_links)?;
         }
     }
     let after = fs::read(work)?;
@@ -337,8 +360,40 @@ fn header_sesno(bytes: &[u8]) -> u32 {
     session_chain(bytes).map(|c| c.latest_sesno).unwrap_or(0)
 }
 
+/// 文件的硬链接数：Windows 读 `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks`（`windows_by_handle`，与 lib 的 `FrozenSource` 同一个特性门），
+/// 其它平台读 `st_nlink`。
+fn hard_link_count(path: &Path) -> anyhow::Result<u64> {
+    let metadata = fs::metadata(path).with_context(|| format!("metadata {}", path.display()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Ok(u64::from(metadata.number_of_links().unwrap_or(1)))
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(metadata.nlink())
+    }
+}
+
+/// 就地覆写前的护栏：文件还有别的硬链接就拒绝（除非 `HardLinks::Allow`）。
+/// 影子工程根里漏列进 `-Replayed` 的库正是这种文件，写下去就是改真工程的原件。
+fn ensure_overwritable(path: &Path, hard_links: HardLinks) -> anyhow::Result<()> {
+    if hard_links == HardLinks::Allow {
+        return Ok(());
+    }
+    let links = hard_link_count(path)?;
+    ensure!(
+        links <= 1,
+        "{} 有 {links} 个硬链接：就地覆写会写穿到其它路径（多半是真工程的原件）。先删掉这一个链接再写；确认就是要写穿才加 --allow-hardlink",
+        path.display()
+    );
+    Ok(())
+}
+
 /// 同一个文件就地覆写：不删、不换、不走临时文件 + rename。卷号 / 文件索引不变。
-fn overwrite_in_place(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+fn overwrite_in_place(path: &Path, bytes: &[u8], hard_links: HardLinks) -> anyhow::Result<()> {
+    ensure_overwritable(path, hard_links)?;
     let mut file = OpenOptions::new()
         .write(true)
         .open(path)
@@ -398,14 +453,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("ams8000_0001");
 
-        let init = replay_init(&final_, 7, &work).unwrap();
+        let init = replay_init(&final_, 7, &work, HardLinks::Refuse).unwrap();
         assert_eq!(init.header_sesno_after, 7);
         assert_eq!(init.bytes_after as usize, PAGE_SIZE * 2);
         assert_eq!(init.patched_bytes, 0);
         #[cfg(windows)]
         let identity = file_identity(&work);
 
-        let step = replay_step(&final_, &work, 8, None, false).unwrap();
+        let step = replay_step(&final_, &work, 8, None, false, HardLinks::Refuse).unwrap();
         assert_eq!((step.from_sesno, step.to_sesno), (Some(7), 8));
         assert_eq!(step.header_sesno_after, 8);
         assert_eq!(step.bytes_after as usize, PAGE_SIZE * 4);
@@ -414,7 +469,7 @@ mod tests {
         write_snapshot(&final_bytes, chain.cut_for(8).unwrap(), &expected).unwrap();
         assert_eq!(fs::read(&work).unwrap(), fs::read(&expected).unwrap());
 
-        let step = replay_step(&final_, &work, 9, None, false).unwrap();
+        let step = replay_step(&final_, &work, 9, None, false, HardLinks::Refuse).unwrap();
         assert_eq!(step.header_sesno_after, 9);
         assert_eq!(fs::read(&work).unwrap(), final_bytes);
         #[cfg(windows)]
@@ -427,30 +482,62 @@ mod tests {
         let final_ = plain(final_bytes.clone());
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("db");
-        replay_init(&final_, 7, &work).unwrap();
+        replay_init(&final_, 7, &work, HardLinks::Refuse).unwrap();
 
         // 页先到：长度是 8 的，头还说 7。
-        let pages = replay_step(&final_, &work, 8, Some(Half::Pages), false).unwrap();
+        let pages = replay_step(
+            &final_,
+            &work,
+            8,
+            Some(Half::Pages),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(pages.header_sesno_after, 7);
         assert_eq!(pages.bytes_after as usize, PAGE_SIZE * 4);
         assert_eq!(pages.half, Some("pages"));
         // 补齐：同一个 to 补另一半（只改头）。
-        let done = replay_step(&final_, &work, 8, Some(Half::Header), false).unwrap();
+        let done = replay_step(
+            &final_,
+            &work,
+            8,
+            Some(Half::Header),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(done.header_sesno_after, 8);
         let chain = session_chain(&final_bytes).unwrap();
         let expected = dir.path().join("expected-8");
         write_snapshot(&final_bytes, chain.cut_for(8).unwrap(), &expected).unwrap();
         assert_eq!(fs::read(&work).unwrap(), fs::read(&expected).unwrap());
         // 已经在 8 了，再来是错。
-        assert!(replay_step(&final_, &work, 8, None, false).is_err());
+        assert!(replay_step(&final_, &work, 8, None, false, HardLinks::Refuse).is_err());
 
         // 头先改：长度还是 8 的，头指向文件尾之外，链读不出来。
-        let header = replay_step(&final_, &work, 9, Some(Half::Header), false).unwrap();
+        let header = replay_step(
+            &final_,
+            &work,
+            9,
+            Some(Half::Header),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(header.bytes_after as usize, PAGE_SIZE * 4);
         assert_eq!(header.header_sesno_after, 0);
         assert!(session_chain(&fs::read(&work).unwrap()).is_err());
         // 补齐：只补页（头已经是 9 的，页按长度认出是 8 的）。
-        let done = replay_step(&final_, &work, 9, Some(Half::Pages), false).unwrap();
+        let done = replay_step(
+            &final_,
+            &work,
+            9,
+            Some(Half::Pages),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(done.from_sesno, Some(8));
         assert_eq!(done.header_sesno_after, 9);
         assert_eq!(fs::read(&work).unwrap(), final_bytes);
@@ -461,21 +548,21 @@ mod tests {
         let final_ = plain(synthetic_three_sessions());
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("db");
-        replay_init(&final_, 9, &work).unwrap();
+        replay_init(&final_, 9, &work, HardLinks::Refuse).unwrap();
 
-        let refused = replay_step(&final_, &work, 7, None, false).unwrap_err();
+        let refused = replay_step(&final_, &work, 7, None, false, HardLinks::Refuse).unwrap_err();
         assert!(refused.to_string().contains("--rollback"), "{refused}");
-        let rolled = replay_step(&final_, &work, 7, None, true).unwrap();
+        let rolled = replay_step(&final_, &work, 7, None, true, HardLinks::Refuse).unwrap();
         assert_eq!(rolled.header_sesno_after, 7);
         assert_eq!(rolled.bytes_after as usize, PAGE_SIZE * 2);
         assert!(rolled.rollback);
 
         // 同一会话再推一次是错；不是这份终稿的工作文件也是错。
-        assert!(replay_step(&final_, &work, 7, None, false).is_err());
+        assert!(replay_step(&final_, &work, 7, None, false, HardLinks::Refuse).is_err());
         let mut foreign = fs::read(&work).unwrap();
         foreign[PAGE_SIZE + 100] ^= 0xFF;
         fs::write(&work, &foreign).unwrap();
-        let refused = replay_step(&final_, &work, 8, None, false).unwrap_err();
+        let refused = replay_step(&final_, &work, 8, None, false, HardLinks::Refuse).unwrap_err();
         assert!(refused.to_string().contains("前缀"), "{refused}");
     }
 
@@ -501,7 +588,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("db");
 
-        let init = replay_init(&final_, 8, &work).unwrap();
+        let init = replay_init(&final_, 8, &work, HardLinks::Refuse).unwrap();
         assert_eq!(init.patched_bytes, 1);
         let on_disk = fs::read(&work).unwrap();
         assert_eq!(on_disk[3 * PAGE_SIZE + 0x17], 0x02);
@@ -509,12 +596,28 @@ mod tests {
         assert_eq!(session_chain(&on_disk).unwrap().latest_sesno, 8);
 
         // 页半截到 9：8 的页回到终稿样子（anchor 已变），头还是 8。
-        let pages = replay_step(&final_, &work, 9, Some(Half::Pages), false).unwrap();
+        let pages = replay_step(
+            &final_,
+            &work,
+            9,
+            Some(Half::Pages),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(pages.from_sesno, Some(8));
         assert_eq!(pages.header_sesno_after, 8);
         let on_disk = fs::read(&work).unwrap();
         assert_eq!(on_disk[3 * PAGE_SIZE + 0x17], 0x03);
-        let done = replay_step(&final_, &work, 9, Some(Half::Header), false).unwrap();
+        let done = replay_step(
+            &final_,
+            &work,
+            9,
+            Some(Half::Header),
+            false,
+            HardLinks::Refuse,
+        )
+        .unwrap();
         assert_eq!(done.header_sesno_after, 9);
         assert_eq!(fs::read(&work).unwrap(), final_bytes);
 
@@ -526,8 +629,8 @@ mod tests {
                 patches: Vec::new(),
             },
         );
-        replay_init(&final_, 8, &work).unwrap();
-        let short = replay_step(&final_, &work, 9, None, false).unwrap();
+        replay_init(&final_, 8, &work, HardLinks::Refuse).unwrap();
+        let short = replay_step(&final_, &work, 9, None, false, HardLinks::Refuse).unwrap();
         assert_eq!(short.bytes_after as usize, PAGE_SIZE * 6);
         assert_eq!(short.header_sesno_after, 9);
         assert_eq!(
@@ -535,14 +638,14 @@ mod tests {
             &final_bytes[PAGE_SIZE..PAGE_SIZE * 6]
         );
         assert!(
-            replay_step(&final_, &work, 9, None, false).is_err(),
+            replay_step(&final_, &work, 9, None, false, HardLinks::Refuse).is_err(),
             "已经在 9"
         );
         final_.snapshots.remove(&9);
 
         // 补丁的 final_hex 与终稿不符就拒绝（终稿换了、补丁还是老的）。
         final_.snapshots.get_mut(&8).unwrap().patches[0].final_hex = "ff".into();
-        let refused = replay_init(&final_, 8, &work).unwrap_err();
+        let refused = replay_init(&final_, 8, &work, HardLinks::Refuse).unwrap_err();
         assert!(format!("{refused:#}").contains("final_hex"), "{refused:#}");
     }
 
@@ -556,5 +659,51 @@ mod tests {
         let loaded = load_final(None, Some(&a)).unwrap();
         assert_eq!(loaded.bytes, b"x");
         assert!(loaded.snapshots.is_empty());
+    }
+
+    /// 影子工程根里漏列进 `-Replayed` 的库是到真工程原件的硬链接：init / step 都不得就地覆写它，原件一个字节不动；
+    /// 删掉链接后写出的独立文件照常；明确 `Allow` 才写穿。
+    #[test]
+    fn overwriting_a_hard_linked_file_is_refused_unless_allowed() {
+        let final_ = plain(synthetic_three_sessions());
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        fs::write(&original, b"the real project file").unwrap();
+        let link = dir.path().join("ams8000_0001");
+        fs::hard_link(&original, &link).unwrap();
+
+        let refused = replay_init(&final_, 7, &link, HardLinks::Refuse).unwrap_err();
+        assert!(refused.to_string().contains("硬链接"), "{refused}");
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            b"the real project file",
+            "原件一个字节都不能动"
+        );
+
+        // 链接删掉（原件还在），init 写出独立文件，再 step 照常。
+        fs::remove_file(&link).unwrap();
+        replay_init(&final_, 7, &link, HardLinks::Refuse).unwrap();
+        replay_step(&final_, &link, 8, None, false, HardLinks::Refuse).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"the real project file");
+
+        // 工作文件被别人挂了第二个链接：step 也拒绝；明确放行才写，且两条路看到同一份字节。
+        let second = dir.path().join("second-link");
+        fs::hard_link(&link, &second).unwrap();
+        let refused = replay_step(&final_, &link, 9, None, false, HardLinks::Refuse).unwrap_err();
+        assert!(refused.to_string().contains("硬链接"), "{refused}");
+        assert_eq!(
+            session_chain(&fs::read(&link).unwrap())
+                .unwrap()
+                .latest_sesno,
+            8
+        );
+        replay_step(&final_, &link, 9, None, false, HardLinks::Allow).unwrap();
+        assert_eq!(fs::read(&second).unwrap(), fs::read(&link).unwrap());
+        assert_eq!(
+            session_chain(&fs::read(&second).unwrap())
+                .unwrap()
+                .latest_sesno,
+            9
+        );
     }
 }

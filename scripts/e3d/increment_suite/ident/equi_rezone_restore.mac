@@ -1,0 +1,33 @@
+-- 登记: A02（变更类型 CT-S5、CT-D10、CT-S6；按名称案例 B-06 的单元一级） | 语义: 把设备 EQ-CP 整台挪回区域 Z，并放回成员表里原来的位置（PIPE 前面）
+-- expected_net: modified | apply 搭档: ident/equi_rezone_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply——EQ-CP 整台重建一次（回到原来的世界坐标）；Z、Z2 里别的设备不动。
+-- INCLUDE 把它插在 Z 的成员表第 1 位，再用 REORDER 挪回 PIPE 前面（两句都是实测过的写法）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-EQUI-REZONE-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q OWNER
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-BOX-CP1
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-Z2
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+INCLUDE /AIOS-SUITE-T3-EQ-CP
+REORDER /AIOS-SUITE-T3-EQ-CP BEFORE /AIOS-SUITE-T3-PIPE
+Q MEMB
+/AIOS-SUITE-T3-EQ-CP
+Q OWNER
+Q POS
+Q POS WRT /*
+/AIOS-SUITE-T3-Z2
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/equi_rezone restore: EQ-CP moved back to ZONE Z before PIPE'
+$P SUITE-T3-EQUI-REZONE-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,15 @@
+-- 登记: gen-model #132 | 语义: support/anci_compre_null_apply.mac 的还原——/PS-01-00194.1 的 COMPRE 写回 /300-A-42/B1（绝对值）。
+-- expected_net: modified | apply 搭档: support/anci_compre_null_apply.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-RESTORE-ALIVE
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+COMPRE /300-A-42/B1
+Q COMPRE
+SAVEWORK 'AIOS suite support/anci_compre_null restore: /PS-01-00194.1 COMPRE -> /300-A-42/B1'
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-RESTORE-DONE
+ALPHA LOG END

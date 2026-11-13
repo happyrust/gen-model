@@ -1,0 +1,130 @@
+-- 只读探针（不 SAVEWORK，不进录制清单）：joint/ 下 APS 用例动到的元素，在 E3D 里各问一遍身份与现值。
+-- 库: aps7166（APS，MDB /SDNF）。写腿都按 refno 导航；这里先确认这些 refno 在副本里就是期望的那几只。
+-- 每次导航后跟 handle：走不到就打一行 NAV-FAILED，后面几句查询的输出不算数。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-JOINT-PROBE-PJOI-APS-ALIVE
+$P ==== PB1/4 column C01 ====
+=23550/388
+handle any
+$P NAV-FAILED 23550/388
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q BANG
+Q JOIS
+Q JOIE
+Q JLIN
+Q JUSL
+Q SPRE
+Q CUTL
+Q POSS WRT /*
+Q POSE WRT /*
+$P ==== PB1/4 PNOD N03 ====
+=23550/378
+handle any
+$P NAV-FAILED 23550/378
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+Q NPOS WRT /*
+$P ==== PB1/4 end-plate PJOI ====
+=23550/379
+handle any
+$P NAV-FAILED 23550/379
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q SPRE
+Q CREF
+Q GTYP
+Q DESP
+Q DELP
+Q OPDI
+Q CUTP
+Q CUTB
+Q BANG
+Q JFRE
+Q JLIN
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== PB1/4 base-plate PJOI ====
+=23550/385
+handle any
+$P NAV-FAILED 23550/385
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q DESP
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== PB1/4 rafter R01 ====
+=23550/412
+handle any
+$P NAV-FAILED 23550/412
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q BANG
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+Q JUSL
+Q SPRE
+$P ==== PANEL column C03 ====
+=23550/1079
+handle any
+$P NAV-FAILED 23550/1079
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q BANG
+Q JOIS
+Q JOIE
+Q CUTL
+$P ==== PANEL PNOD of C03 top ====
+=23550/1065
+handle any
+$P NAV-FAILED 23550/1065
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+$P ==== PANEL end-plate PJOI of C03 ====
+=23550/1066
+handle any
+$P NAV-FAILED 23550/1066
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+$P SUITE-JOINT-PROBE-PJOI-APS-DONE
+ALPHA LOG END

@@ -1,0 +1,30 @@
+-- 登记: A02（变更类型 CT-S4 + CT-S6；按名称案例 B-05 的第 ③ 种） | 语义: 同一 SAVEWORK 里删掉 EQ-M 的最后一个成员 BOX-M3，再同名同尺寸同位置建回来，但落在成员表的第 1 位：成员序从 M1, M2, M3 变成 M3, M1, M2
+-- expected_net: modified（按 refno 是成员 deleted + added；按名是成员一个没变、只是顺序变了） | restore 搭档: ident/member_recreate_moved_restore.mac
+-- 预期 gen-model（按 refno）: EQ-M regen 一次，行数与包围盒都不变；没有 datacenter_delete；EQ-U 不动。
+-- 落位: CE 回到属主 EQ-M 再 NEW，新 BOX 插在第 1 位（create/box、P82 实测的规矩）。前后 Q MEMB 留证。
+-- 这是本套件里离「纯换序」最近的一条：PML 的换序写法还没找到（ident/name_probe.mac 第 6 段在探 REORDER 的完整句式）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-MEMBER-RECREATE-MOVED-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-T3-BOX-M3') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  DELETE BOX
+ENDDO
+/AIOS-SUITE-T3-EQ-M
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-M3
+POS E 3000 N 0 U 0
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/member_recreate_moved apply: BOX-M3 recreated at head of member list'
+$P SUITE-T3-MEMBER-RECREATE-MOVED-APPLY-DONE
+ALPHA LOG END

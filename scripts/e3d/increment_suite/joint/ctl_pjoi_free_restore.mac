@@ -1,0 +1,33 @@
+-- 登记: D5-ctl-pjoi-free | 语义: 把没有梁认领的那只主关节的 DELP 写回 0
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/ctl_pjoi_free_apply.mac 的 restore | 库: db8000
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：只重建 JFREE 一件。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-CTL-PJOI-FREE-RESTORE-ALIVE
+/AIOS-SUITE-T2-PJ-B-JFREE
+Q REF
+Q NAME
+Q TYPE
+Q DELP
+Q POS WRT /*
+DELP E 0 N 0 U 0
+Q DELP
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-B-F1-N2-J1
+Q REF
+Q NAME
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-B-F1-S4
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/ctl_pjoi_free restore: unclaimed PJOI DELP -> 0'
+$P SUITE-T2-JOINT-CTL-PJOI-FREE-RESTORE-DONE
+ALPHA LOG END

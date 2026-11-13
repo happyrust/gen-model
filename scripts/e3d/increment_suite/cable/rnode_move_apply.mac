@@ -1,0 +1,31 @@
+-- 登记: 联动分类表第 13 / 14 行（规则 E：电缆经过的路由节点变了 → 电缆重算；变更类型 CT-D6，兼 CT-A4 几何） | 语义: 电缆经过的桥架节点沿桥架挪了 500 mm——
+-- 桥架库 250182 的路由节点 /CWAY-AREA01-POWER_B7-RNODE-003（TAKE 型，电缆从这里离开桥架去灯具）：ZDIS 10460 -> 10960。
+-- 电缆（同一个库，另外的根：/ZONE-CABLES-AREA01 下的 /CBLP-LTG-101-01A..D，经过这条桥架分支的有 4 根）一个字都不改。
+-- 预期：250182 这一窗变的只有这个节点；经过这个节点的电缆要跟着重算（它们的路径拐点跟着节点走），
+-- 不经过这个节点的电缆不该动。哪几根经过，以 E3D 导出的前后差为准。
+-- expected_net: modified | restore 搭档: cable/rnode_move_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。按名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CABLE-RNODE-MOVE-APPLY-ALIVE
+/CBLP-LTG-101-01D
+Q REF
+Q NAME
+Q STAREF
+Q ENDREF
+/CWAY-AREA01-POWER_B7-RNODE-003
+Q REF
+Q NAME
+Q TYPE
+Q RNTYPE
+Q XOFF
+Q YOFF
+Q ZOFF
+Q ZDIS
+Q POS WRT /*
+ZDIS 10960
+Q ZDIS
+Q POS WRT /*
+SAVEWORK 'AIOS suite cable/rnode_move apply: RNODE-003 ZDIS 10460 -> 10960'
+$P SUITE-CABLE-RNODE-MOVE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,156 @@
+{
+  "meta": {
+    "version": 1,
+    "dbnum": 8000,
+    "root_name": "/1-LNR-Q005-PJ",
+    "rvm_file": "D:\\work\\plant-code\\old\\gen-model\\output\\rvm-truth\\ams8000-equi-move-chain-20261027-145147\\725\\725.rvm",
+    "att_files": [],
+    "imported_at": "2026-10-27 14:52:00",
+    "member_count": 4,
+    "geometry_count": 1,
+    "resolved": 1,
+    "unresolved": 3,
+    "export_scope": "narrow",
+    "geo_type_counts": {
+      "Primitive": 1
+    },
+    "degenerate_bbox_count": 0,
+    "facet_aabb_from_vertices": 0,
+    "subresolution_shell_count": 0
+  },
+  "members": [
+    {
+      "path": "/AMS/1RX03-EQUI",
+      "name": "/1RX03-EQUI",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5773254448607027806,
+      "parent_stable_id": null,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-CASE-DQ",
+      "name": "/1RX03-CASE-DQ",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11385475117268780404,
+      "parent_stable_id": 5773254448607027806,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-CASE-DQ/1-LNR-Q005-PJ",
+      "name": "/1-LNR-Q005-PJ",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": "24384/24776",
+      "identity_source": "cli_root",
+      "resolved": true,
+      "stable_id": 12575817991244166079,
+      "parent_stable_id": 11385475117268780404,
+      "translation_mm": [
+        -2821.27,
+        8003.96,
+        1400.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-CASE-DQ/1-LNR-Q005-PJ/BOX 1 of EQUIPMENT /1-LNR-Q005-PJ",
+      "name": "BOX 1 of EQUIPMENT /1-LNR-Q005-PJ",
+      "noun": "BOX",
+      "owner_desc": "EQUIPMENT /1-LNR-Q005-PJ",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8633967635979476918,
+      "parent_stable_id": 12575817991244166079,
+      "translation_mm": [
+        -2821.27,
+        8003.96,
+        1400.0
+      ],
+      "aabb_world_mm": [
+        -3001.3911724090576,
+        7696.573257446289,
+        1125.0,
+        -2641.148805618286,
+        8311.346054077148,
+        1674.9999523162842
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              310.0,
+              590.0,
+              550.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              -0.0009961946634575725,
+              -0.0000871557422215119,
+              0.0,
+              -0.0000871557422215119,
+              0.0009961946634575725,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513
+            ],
+            "translation_mm": [
+              -2821.269989013672,
+              8003.959655761719,
+              1399.999976158142
+            ]
+          },
+          "bbox_world_mm": [
+            -3001.3911724090576,
+            7696.573257446289,
+            1125.0,
+            -2641.148805618286,
+            8311.346054077148,
+            1674.9999523162842
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}

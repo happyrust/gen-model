@@ -1,0 +1,23 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 F-02） | 语义: 给区域 Z（下面带着九个单元）填两个自定义属性：先填 :G_ICS，再填 :FABTARGET。区域的位置、成员都不动
+-- expected_net: modified | 四腿链 meta/uda_zone：1 填两个 → 2 清掉第一个 → 3 把第一个填回原值 → restore 两个都清掉
+-- 预期 gen-model（按 refno，该有的行为）: 任务 succeeded、交付单元 0——自定义属性不进几何，区域下面的单元一个都不该重建。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-ZONE-1-SET-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q UDASET
+:G_ICS 'T3-ICS'
+:FABTARGET 'T3-FAB'
+Q :G_ICS
+Q :FABTARGET
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_zone 1: ZONE Z UDAs G_ICS and FABTARGET set'
+$P SUITE-T3-META-UDA-ZONE-1-SET-DONE
+ALPHA LOG END

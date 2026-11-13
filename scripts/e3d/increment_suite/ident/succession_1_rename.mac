@@ -1,0 +1,24 @@
+-- 登记: A07（变更类型 CT-A1、CT-S2；按名称案例 G-08 第一步、A-01） | 语义: 接替的第一步——原件让出名字：把支管 BRAN-R 连同 9 个有名成员的名字前缀整体换成 BRAN-ROLD（RENAME ALL），别的都不动
+-- expected_net: modified | 三腿链 ident/succession：1 改名让出名字 → 2 复制一份改回原名 → 3 删掉原件
+-- 预期 gen-model（按 refno）: 任务 succeeded、交付单元 0、模型行不变（支管和 9 个成员都只动了 NAME，metadata_only）；支管自身改名记一条 datacenter_delete reason=renamed（已发布时），成员不记。
+-- RENAME ALL <旧前缀> <新前缀> 的写法 2026-11-12 探针实测成立（ident/succ_probe.mac 第 3 段）。按 COLLECT 找旧名再改。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SUCCESSION-1-RENAME-ALIVE
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+Q MEMB
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  RENAME ALL /AIOS-SUITE-T3-BRAN-R /AIOS-SUITE-T3-BRAN-ROLD
+  Q REF
+  Q NAME
+  Q MEMB
+ENDDO
+SAVEWORK 'AIOS suite T3 ident/succession 1: BRAN-R and members renamed to BRAN-ROLD'
+$P SUITE-T3-SUCCESSION-1-RENAME-DONE
+ALPHA LOG END

@@ -1,0 +1,13 @@
+-- 登记: A02 | 语义: 只改 NBOX-N1 的 POS（E 0 → E 200，相对 BOX-N）。孔仍在 2000 立方体内，不改尺寸 | expected_net: modified | restore 搭档: geom/nbox_move_restore.mac
+-- 来源: scripts/e3d/s4_db8000_nbox_in_box_move.mac 的 `POS E 200 N 0 U 0`；同句已在 geom/nbox_add_apply.mac 对另一只 NBOX 写过
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXMOVE-APPLY-ALIVE
+/AIOS-SUITE-NBOX-N1
+Q REF
+Q NAME
+Q POS
+POS E 200 N 0 U 0
+Q POS
+SAVEWORK 'AIOS suite geom/nbox_move apply: NBOX-N1 POS E 200'
+$P SUITE-GEOM-NBOXMOVE-APPLY-DONE
+ALPHA LOG END

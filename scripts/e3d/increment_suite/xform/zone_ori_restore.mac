@@ -1,0 +1,23 @@
+-- 登记: D06 | 语义: 把 ZONE-MV 的朝向写回缺省 Y IS N AND Z IS U。句式与 setup 里 EQ-PA 相同 | expected_net: cancelled | restore 搭档: 本文件是 xform/zone_ori_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ZONE-ORI-RESTORE-ALIVE
+/AIOS-SUITE-ZONE-MV
+Q REF
+Q NAME
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q POS WRT /*
+/AIOS-SUITE-ZONE-MV
+ORI Y IS N AND Z IS U WRT /*
+Q ORI
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV1
+Q POS WRT /*
+/AIOS-SUITE-BOX-MV2
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/zone_ori restore: ZONE-MV ORI Y IS N AND Z IS U'
+$P SUITE-XFORM-ZONE-ORI-RESTORE-DONE
+ALPHA LOG END

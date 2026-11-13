@@ -1,0 +1,25 @@
+-- 登记: gen-model #132（变更类型 CT-A2「DCHC=0 但生成读」+ CT-A6 单引用） | 语义: 支撑件自己的 COMPRE 被清空——
+-- 把 /PS-01-00194.1（支撑库 250104）的 COMPRE 从 /300-A-42/B1 写成空引用（=0/0）。
+-- 预期：250104 这一窗只有 /PS-01-00194.1 的 COMPRE 变了，过元数据门，重建根 /PS-01-00194；
+-- 件的形状以 E3D 的导出为准——E3D 没有被支撑件可问时拿什么当管外径，这一步之后的导出就是答案
+-- （同一轮里「被支撑件被删、COMPRE 悬空」那一步 E3D 是照 300 画的：支撑件上一级 SUPC 的 HBOR）。
+-- expected_net: modified | restore 搭档: support/anci_compre_null_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-APPLY-ALIVE
+/PS-01-00194/B1
+Q REF
+Q NAME
+Q TYPE
+Q HBOR
+Q TBOR
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+COMPRE =0/0
+Q COMPRE
+SAVEWORK 'AIOS suite support/anci_compre_null apply: /PS-01-00194.1 COMPRE -> null'
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-APPLY-DONE
+ALPHA LOG END

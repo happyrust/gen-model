@@ -1,0 +1,27 @@
+-- 登记: A02（变更类型 CT-A4；按名称案例 C-05、C-06） | 语义: 把无名设备下面两个 BOX 的长度改回原值（BOX-NN 400、无名 BOX 600）
+-- expected_net: modified | apply 搭档: ident/unnamed_unit_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply——这台无名设备重建一次。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNNAMED-UNIT-RESTORE-ALIVE
+/AIOS-SUITE-T3-BOX-NN
+Q REF
+Q NAME
+Q XLEN
+XLEN 400
+Q XLEN
+OWNER
+$P T3-ALIAS UNNAMED-EQUI
+Q REF
+Q TYPE
+Q MEMB
+!mm = !!CE.MEMBERS
+!!CE = !mm[2]
+$P T3-ALIAS UNNAMED-EQUI-BOX2
+Q REF
+Q TYPE
+Q XLEN
+XLEN 600
+Q XLEN
+SAVEWORK 'AIOS suite T3 ident/unnamed_unit restore: both BOX of the unnamed EQUI back to original size'
+$P SUITE-T3-UNNAMED-UNIT-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,29 @@
+-- 登记: A01（变更类型 CT-S7、CT-S4；按名称案例 D-01） | 语义: 把叫 BOX-M3 的圆柱删掉，在原位建回原来的 BOX（300 x 300 x 300，名字 BOX-M3）
+-- expected_net: deleted | apply 搭档: ident/same_name_other_type_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply——设备 EQ-M 重建一次，结果与整库重建相等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SAME-NAME-OTHER-TYPE-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL CYLI WITH (NAME EQ '/AIOS-SUITE-T3-BOX-M3') FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q TYPE
+  DELETE CYLI
+ENDDO
+/AIOS-SUITE-T3-BOX-M2
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-M3
+POS E 3000 N 0 U 0
+Q REF
+Q NAME
+Q TYPE
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/same_name_other_type restore: the CYLI named BOX-M3 deleted, the BOX rebuilt in place'
+$P SUITE-T3-SAME-NAME-OTHER-TYPE-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,215 @@
+-- T2「关节」主题的基线，落在 db8000：SITE /AIOS-SUITE-T2-PJOI 下一个 ZONE、三只 STRU。幂等（先删自己的 SITE 再建）。
+-- teardown 搭档: joint/teardown.mac
+--
+-- 语料全部 COPY 自 ams7999 的真实支架（只读地用它们，不改生产元素）：
+--   PJ-A <- /1RX02-LSUP-E0361：一根 BAR（SCTN）加一只画得出来的主关节（PJOI，JT5），梁的 JOIS 指关节、关节的 CREF 指梁。
+--           主关节级联三种窗（只改主关节 / 只改梁 / 只挪 PNOD）都在它上面做。
+--   PJ-B <- /1RX02-LSUP-E0549：一根立柱加三根 BAR；第二只 PNOD 名下两只主关节，一只被立柱认领，一只 CREF 为空（没有梁认领）。
+--           对照「改没有梁认领的主关节」。原件那只的规格是 LJJ1（E3D 不画），这里换成 JT5，改了看得见。
+--   PJ-C <- /1RB06-MSUP-E0082：四根 BAR 各被一只主关节认领，另有一根两端不接关节的 SCTN。
+--           对照「改没有主关节认领的型钢」。
+-- 三只 STRU 的 ORI 都改成不转（原件各带 25 / 0 / -26 度的自转），世界系里的位移就是属主系里的位移。
+--
+-- 命名（COPY 进来的成员全是无名的）：<STRU>-F<i> / <STRU>-F<i>-S<j>（SCTN）/ <STRU>-F<i>-N<k>（PNOD）/ …-N<k>-J<m>（PJOI）；
+--   另按属性再起两个语义名：PJ-B 里 CREF 为空的那只主关节叫 /AIOS-SUITE-T2-PJ-B-JFREE，
+--   PJ-C 里两端都不接关节的那根型钢叫 /AIOS-SUITE-T2-PJ-C-SFREE。写腿只用这些名字导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-SETUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T2-PJOI*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-T2-PJOI
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T2-PJOI-Z
+!zone = !!CE
+Q REF
+Q NAME
+NEW STRU /AIOS-SUITE-T2-PJ-A
+COPY /1RX02-LSUP-E0361
+POS E 120000 N 40000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-PJ-B
+COPY /1RX02-LSUP-E0549
+POS E 124000 N 40000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-T2-PJ-C
+COPY /1RB06-MSUP-E0082
+POS E 128000 N 40000 U 0
+ORI Y IS N AND Z IS U
+Q REF
+Q NAME
+Q MEMB
+-- 补名：STRU -> FRMW -> SCTN / PNOD -> PJOI
+!!CE = !zone
+!strus = !!CE.MEMBERS
+DO !st VALUES !strus
+  !!CE = !st
+  IF (!!CE.TYPE EQ 'STRU') THEN
+    !pre = !!CE.NAME
+    !fs = !!CE.MEMBERS
+    !fi = 0
+    DO !f VALUES !fs
+      !!CE = !f
+      IF (!!CE.TYPE EQ 'FRMW') THEN
+        !fi = !fi + 1
+        !fn = '$!pre-F$!fi'
+        NAME $!fn
+        !ms = !!CE.MEMBERS
+        !si = 0
+        !ni = 0
+        DO !m VALUES !ms
+          !!CE = !m
+          IF (!!CE.TYPE EQ 'SCTN') THEN
+            !si = !si + 1
+            !nm = '$!fn-S$!si'
+            NAME $!nm
+          ENDIF
+          IF (!!CE.TYPE EQ 'PNOD') THEN
+            !ni = !ni + 1
+            !nn = '$!fn-N$!ni'
+            NAME $!nn
+            !js = !!CE.MEMBERS
+            !ji = 0
+            DO !j VALUES !js
+              !!CE = !j
+              IF (!!CE.TYPE EQ 'PJOI') THEN
+                !ji = !ji + 1
+                !nm = '$!nn-J$!ji'
+                NAME $!nm
+              ENDIF
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDIF
+    ENDDO
+  ENDIF
+ENDDO
+-- 语义名一：PJ-B 里没有梁认领的主关节（CREF 为空）。原件规格 LJJ1 不画，换成 JT5。
+/AIOS-SUITE-T2-PJ-B
+VAR !free COLLECT ALL PJOI WITH (BADREF(CREF)) FOR CE
+Q VAR !free
+DO !x VALUES !free
+  !!CE = !x.dbref()
+  NAME /AIOS-SUITE-T2-PJ-B-JFREE
+  SPRE =21438/3356
+ENDDO
+-- 语义名二：PJ-C 里两端都不接关节的型钢。
+/AIOS-SUITE-T2-PJ-C
+VAR !bars COLLECT ALL SCTN WITH (BADREF(JOIS) AND BADREF(JOIE)) FOR CE
+Q VAR !bars
+DO !x VALUES !bars
+  !!CE = !x.dbref()
+  NAME /AIOS-SUITE-T2-PJ-C-SFREE
+ENDDO
+-- 回读：写腿要用的每一只，身份与连接（COPY 之后关节与梁是不是互相指着副本里的对方）
+$P ==== PJ-A ====
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q BANG
+Q JOIS
+Q JOIE
+Q SPRE
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q DELP
+Q OPDI
+Q CUTP
+Q CUTB
+Q BANG
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== PJ-B ====
+/AIOS-SUITE-T2-PJ-B
+Q REF
+Q NAME
+VAR !pj COLLECT ALL PJOI FOR CE
+DO !x VALUES !pj
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q CREF
+  Q BANG
+  Q DELP
+ENDDO
+/AIOS-SUITE-T2-PJ-B
+VAR !sc COLLECT ALL SCTN FOR CE
+DO !x VALUES !sc
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q POSS
+  Q POSE
+  Q JOIS
+  Q JOIE
+ENDDO
+/AIOS-SUITE-T2-PJ-B-JFREE
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q SPRE
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+$P ==== PJ-C ====
+/AIOS-SUITE-T2-PJ-C
+Q REF
+Q NAME
+VAR !pj COLLECT ALL PJOI FOR CE
+DO !x VALUES !pj
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q SPRE
+  Q CREF
+ENDDO
+/AIOS-SUITE-T2-PJ-C
+VAR !sc COLLECT ALL SCTN FOR CE
+DO !x VALUES !sc
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q POSS
+  Q POSE
+  Q JOIS
+  Q JOIE
+ENDDO
+/AIOS-SUITE-T2-PJ-C-SFREE
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint: baseline setup (db8000)'
+$P SUITE-T2-JOINT-SETUP-DONE
+ALPHA LOG END

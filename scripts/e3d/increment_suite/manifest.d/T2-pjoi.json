@@ -1,0 +1,476 @@
+{
+  "version": 1,
+  "owner": "T2",
+  "topic": "primary-joint",
+  "copy": "ams",
+  "sites": [
+    "/AIOS-SUITE-T2-PJOI"
+  ],
+  "setup": "joint/setup.mac",
+  "teardown": "joint/teardown.mac",
+  "corpus": {
+    "note": "setup 从 ams7999 的三只真实支架 COPY 到 db8000 的 SITE /AIOS-SUITE-T2-PJOI 下（只读地用生产元素）。COPY 之后关节与梁互相指着副本里的对方（E3D 实测）。",
+    "/AIOS-SUITE-T2-PJ-A": "/1RX02-LSUP-E0361：一根 BAR 加一只画得出来的主关节（JT5），梁的 JOIS 指关节、关节的 CREF 指梁",
+    "/AIOS-SUITE-T2-PJ-B": "/1RX02-LSUP-E0549：一根立柱加三根 BAR；一只 PNOD 下两只主关节，一只被立柱认领、一只没有梁认领（setup 把后者的规格从 LJJ1 换成 JT5）",
+    "/AIOS-SUITE-T2-PJ-C": "/1RB06-MSUP-E0082：四根 BAR 各被一只主关节（JT3）认领，另有一根两端不接关节的 SCTN",
+    "limit": "AMS（E3D 3.1 缺省项目）里主关节的目录件都没有负体：这里「主关节变 → 梁重建」只验得到计划，梁的几何不变；带负体的那一半在 T2-pjoi-aps.json。"
+  },
+  "rvm_export_root": "/AIOS-SUITE-T2-PJOI",
+  "baseline_evidence": "T2/20261112-034644-joint-setup",
+  "cases": [
+    {
+      "id": "D5-pjoi-spre",
+      "situation": "只改主关节：给一只接着梁的主关节换规格（JT5 换成 JT1），梁与主节点不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A6"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/pjoi_spre_apply.mac",
+      "restore": "joint/pjoi_spre_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+          "/AIOS-SUITE-T2-PJ-A-F1-S1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-PJ-B",
+          "/AIOS-SUITE-T2-PJ-C"
+        ],
+        "why": "e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=2 … no_model=1（cache_stamp=1：PNOD 只跳了 CACHID）… cascades=1 units regen=2 remove=0",
+        "geometry": "主关节的图形换成 JT1 的（包围盒变）；梁重建前后逐字相同（JT 一族的负体集是空的）。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-035147-pjoi-spre-beam",
+      "replay_windows": {
+        "apply": [
+          1268,
+          1269
+        ],
+        "apply_tail": 1270,
+        "restore": [
+          1271,
+          1272
+        ],
+        "restore_tail": 1273
+      },
+      "net_window": {
+        "apply": [
+          "PJOI J1: SPRE（另 SPAMAP 戳）",
+          "PNOD N1: 只有 CACHID 戳"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "42 组里只有 /AIOS-SUITE-T2-PJ-A-F1-N1-J1 变了（面片换了一套）；梁 S1 逐字相同",
+        "restore": "与改前 42 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "只重建主关节，梁不重建"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6：计划各数、交付单元、几何差都钉了；本地主线的 debug 版在链 A 上也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：重录了带 ATT 的导出、骨架已出（agents/T2/replay/_pending-final/），等盖到会话 1863 的终稿"
+      },
+      "replay": {
+        "case": "t2-pjoi-chain-a",
+        "windows": [
+          1269,
+          1272
+        ],
+        "r6": "过：候选 2（PNOD 只跳了戳）、级联 1、点名 2 件；交付单元 2 个（STRU 与它名下的 FRMW 两级根）；几何变 1 件（主关节），行数 2 → 2",
+        "parity": "过（t2-pjoi-spre-parity）：停在改后的 1269，增量后的 2 行与同数据整库全量重建逐条相等",
+        "r5": "计划只点名 1 件（级联 0）；交付单元与几何差和 r6 相同（r5 把根整根重算，不按点名的件收窄）"
+      }
+    },
+    {
+      "id": "D5-pjoi-beam",
+      "situation": "只改梁：把被主关节接着的梁的起点横移 20 mm，主关节与主节点不动",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/pjoi_beam_apply.mac",
+      "restore": "joint/pjoi_beam_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-PJ-A-F1-S1",
+          "/AIOS-SUITE-T2-PJ-A-F1-N1-J1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-PJ-B",
+          "/AIOS-SUITE-T2-PJ-C"
+        ],
+        "why": "e3d-model src/increment.rs joint_fixings_of / beam_feeds_joint：要重建或已删除的梁，它 JOIS / JOIE 指着、CREF 回指它的带目录正体关节一并重建（主关节的原点落在梁 JLIN 那条线上，datum::primary_joint_world 的 gjtorg_beam_line_shift）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=1 … cascades=1 units regen=2 remove=0",
+        "geometry": "主关节的包围盒沿世界系 N 平移 20（跟到梁线上）；梁的起点横移 20。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-035147-pjoi-spre-beam",
+      "replay_windows": {
+        "apply": [
+          1274,
+          1275
+        ],
+        "apply_tail": 1276,
+        "restore": [
+          1277,
+          1278
+        ],
+        "restore_tail": 1279
+      },
+      "net_window": {
+        "apply": [
+          "SCTN S1: POSS（另 CACHID、SPAMAP 戳）——主关节与主节点一个字没动，连戳都没跳"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "42 组里变了 2 组：梁 S1；主关节 J1 的组原点挪 20.00 mm、包围盒 [0, +20, 0]（E3D 存盘前 Q POS WRT /* 也是 N 40000 → N 40020）",
+        "restore": "与改前 42 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "只重建梁，主关节停在旧位置（E3D 里它挪了 20 mm）"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6：计划各数、交付单元、几何差都钉了；本地主线的 debug 版在链 A 上也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：重录了带 ATT 的导出、骨架已出（agents/T2/replay/_pending-final/），等盖到会话 1863 的终稿"
+      },
+      "replay": {
+        "case": "t2-pjoi-chain-a",
+        "windows": [
+          1275,
+          1278
+        ],
+        "r6": "过：候选 1、级联 1、点名 2 件；交付单元 2 个；几何变 2 件（梁与主关节），行数 2 → 2",
+        "parity": "过（t2-pjoi-beam-parity）：停在改后的 1275，增量后的 2 行与同数据整库全量重建逐条相等",
+        "r5": "计划只点名 1 件（级联 0）；交付单元与几何差和 r6 相同（主关节也变了）"
+      }
+    },
+    {
+      "id": "D5-pjoi-pnod",
+      "situation": "只挪主节点：把主关节所在的 PNOD 沿关节 Z（梁轴）挪 30 mm，主关节与梁不动",
+      "change_types": [
+        "CT-D5",
+        "CT-D7"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/pjoi_pnod_apply.mac",
+      "restore": "joint/pjoi_pnod_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+          "/AIOS-SUITE-T2-PJ-A-F1-S1"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-PJ-B",
+          "/AIOS-SUITE-T2-PJ-C"
+        ],
+        "why": "e3d-model src/increment.rs implicit_frame_host_of 的 PNOD 臂：FRMW / SBFR 名下、带着目录正体主关节的 PNOD 是现算标架宿主（主关节的站位 = PNOD 的 NPOS + 自己的 DELP），改它就把名下的主关节收进计划；被主关节接的梁再由关节级联带出来。 e3d-model src/increment.rs joint_consumer_of / joint_beam_noun：要重建或已删除的关节（FIXING / SJOI / PJOI）若是某根梁的 JOIS / JOIE 关节、CREF 又指着那根梁，那根梁一并重建（梁建模时从关节取负体扣自己的端头）。 docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=2 … no_model=1（cache_stamp=1：主关节只跳了 SPAMAP）… cascades=2 units regen=2 remove=0",
+        "geometry": "主关节的包围盒沿世界系 [-30, 0, +0.06] 平移（沿梁滑 30）；梁重建前后逐字相同。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-035507-pjoi-pnod-ctl",
+      "replay_windows": {
+        "apply": [
+          1295,
+          1296
+        ],
+        "apply_tail": 1297,
+        "restore": [
+          1298,
+          1299
+        ],
+        "restore_tail": 1300
+      },
+      "net_window": {
+        "apply": [
+          "PNOD N1: NPOS（另 CACHID 戳）",
+          "PJOI J1: 只有 SPAMAP 戳"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "42 组里只有主关节 J1 变了：组原点挪 30.00 mm、包围盒 [-30.01, 0, +0.06]；梁 S1 逐字相同",
+        "restore": "与改前 42 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "探针不带元数据门，把只跳了戳的主关节也上卷了；生产上那一条归 cache_stamp，这种窗什么都不重建（E3D 里主关节挪了 30 mm）"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6：计划各数、交付单元、几何差都钉了；本地主线的 debug 版在链 A 上也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：重录了带 ATT 的导出、骨架已出（agents/T2/replay/_pending-final/），等盖到会话 1863 的终稿"
+      },
+      "replay": {
+        "case": "t2-pjoi-chain-b",
+        "windows": [
+          1296,
+          1299
+        ],
+        "r6": "过：候选 2（主关节只跳了戳）、级联 2、点名 2 件；交付单元 2 个；几何变 1 件（主关节），行数 2 → 2",
+        "parity": "过（t2-pjoi-pnod-parity）：停在改后的 1296，增量后的 2 行与同数据整库全量重建逐条相等",
+        "r5": "r5（链 B 不钉数的那一份）：计划一件都不点名（候选 2 全进 no_model）；交付单元 2 个、几何变 1 件——结果与 r6 相同（空子计划回退整根重算）"
+      }
+    },
+    {
+      "id": "D5-ctl-pjoi-free",
+      "situation": "对照：改一只没有梁认领的主关节（DELP 挪 50 mm），只该点名它自己",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/ctl_pjoi_free_apply.mac",
+      "restore": "joint/ctl_pjoi_free_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-PJ-B-JFREE"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-PJ-B-F1-N2-J1",
+          "/AIOS-SUITE-T2-PJ-B-F1-S4",
+          "/AIOS-SUITE-T2-PJ-B-F1-S1",
+          "/AIOS-SUITE-T2-PJ-A",
+          "/AIOS-SUITE-T2-PJ-C"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）；没有级联的腿命中时只重建它自己。 joint_consumer_of 在 CREF 为空时是 None：没有梁可带。docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=2 … no_model=1（cache_stamp=1：PNOD 只跳了 CACHID）… cascades=0 units regen=1 remove=0",
+        "geometry": "JFREE 的包围盒沿世界系 N 平移 50；同一只 PNOD 下被立柱认领的那只主关节、立柱、三根 BAR 都不变。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-035507-pjoi-pnod-ctl",
+      "replay_windows": {
+        "apply": [
+          1301,
+          1302
+        ],
+        "apply_tail": 1303,
+        "restore": [
+          1304,
+          1305
+        ],
+        "restore_tail": 1306
+      },
+      "net_window": {
+        "apply": [
+          "PJOI JFREE: DELP",
+          "PNOD N2: 只有 CACHID 戳"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "42 组里只有 /AIOS-SUITE-T2-PJ-B-JFREE 变了：组原点挪 50.00 mm、包围盒 [0, +50, 0]",
+        "restore": "与改前 42 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 0,
+        "cascades": 0,
+        "reading": "这只关节的 GTYP 没设，#43 之前按「不是目录构件」不成单元，一件都不重建；E3D 是画它的"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6：计划各数、交付单元、几何差都钉了；本地主线的 debug 版在链 A 上也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：重录了带 ATT 的导出、骨架已出（agents/T2/replay/_pending-final/），等盖到会话 1863 的终稿"
+      },
+      "replay": {
+        "case": "t2-pjoi-chain-b",
+        "windows": [
+          1302,
+          1305
+        ],
+        "r6": "过：候选 2（PNOD 只跳了戳）、级联 0、点名 1 件；交付单元 2 个；几何变 1 件，行数 8 → 8；PJ-A、PJ-C 不在交付单元里",
+        "parity": "没单独跑",
+        "r5": "r5：计划一件都不点名；几何差 0/0/0、行数 7 → 7（r6 是 8 行）——r5 没有 e3d-model #43，这只没有梁认领的主关节不成单元、压根没建出来（E3D 是画它的）"
+      }
+    },
+    {
+      "id": "D5-ctl-sctn-free",
+      "situation": "对照：改一根没有主关节认领的型钢（拉长 100 mm），一只主关节都不该点名",
+      "change_types": [
+        "CT-D5",
+        "CT-A4"
+      ],
+      "name_case": null,
+      "tickets": [
+        "gen-model#148",
+        "V22",
+        "gen-model#144",
+        "gen-model#34",
+        "e3d-model#43"
+      ],
+      "apply": "joint/ctl_sctn_free_apply.mac",
+      "restore": "joint/ctl_sctn_free_restore.mac",
+      "db": 8000,
+      "expected_net": "modified",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T2-PJ-C-SFREE"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T2-PJ-C-F1-N1-J1",
+          "/AIOS-SUITE-T2-PJ-C-F1-N2-J1",
+          "/AIOS-SUITE-T2-PJ-C-F1-N3-J1",
+          "/AIOS-SUITE-T2-PJ-C-F1-N4-J1",
+          "/AIOS-SUITE-T2-PJ-C-F1-S1",
+          "/AIOS-SUITE-T2-PJ-A",
+          "/AIOS-SUITE-T2-PJ-B"
+        ],
+        "why": "e3d-model src/increment.rs nearest_unit：改动上卷到最近的模型单元（含自身）；没有级联的腿命中时只重建它自己。 joint_fixings_of 在梁的 JOIS / JOIE 都为空时给空名单。docs/2026-09-04_model-cascade-update-inventory.md 第 12 类（★1112 一段）；真机步骤见主关节级联的验证说明（只改主关节 / 只改梁 / 只挪 PNOD 与两条对照）。",
+        "plan_line": "candidates=1 … cascades=0 units regen=1 remove=0",
+        "geometry": "SFREE 的包围盒在世界系 E 的下界外扩 100；同一个 FRMW 里四只主关节、四根 BAR 都不变。"
+      },
+      "status": "verified",
+      "known_gap": null,
+      "evidence": "T2/20261112-035507-pjoi-pnod-ctl",
+      "replay_windows": {
+        "apply": [
+          1307,
+          1308
+        ],
+        "apply_tail": 1309,
+        "restore": [
+          1310,
+          1311
+        ],
+        "restore_tail": 1312
+      },
+      "net_window": {
+        "apply": [
+          "SCTN SFREE: POSE（另 CACHID 戳）"
+        ]
+      },
+      "e3d_truth": {
+        "apply": "42 组里只有 /AIOS-SUITE-T2-PJ-C-SFREE 变了：包围盒 [-100, 0, 0, 0, 0, 0]",
+        "restore": "与改前 42 组逐字相同"
+      },
+      "old_planner": {
+        "note": "11-08 编的规划对照探针（increment_planner_parity，e3d-model 还没有 #43 与主关节级联）在这一窗上的结果",
+        "units_regen": 1,
+        "cascades": 0,
+        "reading": "与期望相同"
+      },
+      "layers": {
+        "e3d_run": "pass",
+        "e3d_rvm": "pass",
+        "net_window": "pass",
+        "replay": "pass（r6：计划各数、交付单元、几何差都钉了；本地主线的 debug 版在链 A 上也过）",
+        "l3": "没跑",
+        "rvm_truth": "没跑：重录了带 ATT 的导出、骨架已出（agents/T2/replay/_pending-final/），等盖到会话 1863 的终稿"
+      },
+      "replay": {
+        "case": "t2-pjoi-chain-b",
+        "windows": [
+          1308,
+          1311
+        ],
+        "r6": "过：候选 1、级联 0、点名 1 件；交付单元 2 个；几何变 1 件，行数 9 → 9；PJ-A、PJ-B 不在交付单元里",
+        "parity": "没单独跑",
+        "r5": "r5：点名 1 件、几何变 1 件，与 r6 相同"
+      }
+    }
+  ],
+  "chains": [],
+  "probes": [
+    {
+      "macro": "joint/probe_pjoi_ams.mac",
+      "purpose": "只读探针：setup 要 COPY 的三只生产支架（ams7999）各元素的身份、连接与现值",
+      "no_savework": true
+    }
+  ],
+  "replay_variants": [
+    {
+      "id": "W2-pjoi-then-beam",
+      "what": "并窗：链 A 的 1268 → 1275 当一窗（换规格、换回、梁横移三次保存并成一窗，净效果只剩梁）",
+      "replay_case": "t2-w2-pjoi-then-beam",
+      "r6": "过：点名 2 件、几何变 2 件；链尾增量 = 整库全量",
+      "status": "verified"
+    },
+    {
+      "id": "W2-pjoi-there-and-back",
+      "what": "并窗：链 A 的 1268 → 1272 当一窗（换规格再换回，净效果为零）；该有的行为是一件都不重建",
+      "replay_case": "t2-w2-pjoi-there-and-back",
+      "r6": "红：规划对（候选 3：主关节 unchanged、PNOD 只跳了戳、一条记账；点名 0 件），但两级根照样整根重算了一遍——交付单元 2 个、几何差 0/0/0。结果没错，白算。",
+      "status": "known_gap",
+      "known_gap": {
+        "now": "缺省配置（三条级联都关着）：两级根整根重算，交付单元 2 个（kind=regen）、几何差 0/0/0。三条级联同开（t2-w2-pjoi-there-and-back-d10，r6）也一样是 2 个交付单元（STRU 那一级变成 kind=unit，FRMW 仍是 regen）——候选里那条 unchanged（主关节两端相同、中间被写过）不算「不影响模型的候选」，这种窗落不进「只推回执」那一桶。结果没有错，是白算。",
+        "draft": "agents/T2/drafts/note-net-zero-window-still-regens-root.md"
+      }
+    },
+    {
+      "id": "D5-c2-sameroot-on",
+      "what": "结构连接级联（gen-model #34）开着，关节与梁在同一个生成根里：链 A 原样再走一遍",
+      "replay_case": "t2-c2-sameroot-on",
+      "r6": "过：四个存盘窗的计划、交付单元、几何差与关着时逐数相同",
+      "status": "verified"
+    }
+  ]
+}

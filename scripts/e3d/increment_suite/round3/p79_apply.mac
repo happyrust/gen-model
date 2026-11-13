@@ -1,0 +1,21 @@
+-- P79：同一窗口创建 OWNER 与 CHILD。isElementCreated 沿 owner 链应把 child 归入 created，
+-- 只产生一个 new root；child 不重复记录 owner。目标为 run-owned SITE。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P79-APPLY-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}-Z
+NEW EQUIPMENT {{TARGET_NAME}}-OWNER
+POS E 41000 N 5000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 600 ZLEN 400
+NAME {{TARGET_NAME}}-CHILD
+POS E 500 N 0 U 0
+Q REF
+Q NAME
+Q OWNE
+{{TARGET_NAME}}-Z
+Q MEMB
+SAVEWORK 'AMS round3 P79 created ancestor dedupe'
+$P AMS-R3-P79-APPLY-DONE
+ALPHA LOG END

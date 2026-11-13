@@ -1,0 +1,35 @@
+-- 登记: C06（带 NOZZ 的 EQUI 位移）/ 变更类型 CT-A3 位姿；联动分类表第 5 行（连接 / 邻居） | 语义: 已经接了管的设备挪位——
+-- EQUI /AIOS-SUITE-T1-EQ-NZ 向北挪 300 mm，管嘴跟着设备走；接在管嘴上的支管 /AIOS-SUITE-T1-BRAN-C 一个字不改。
+-- 预期：只有设备这个根动（整根平移 [0, 300, 0]）；支管**不**重算、几何不变——支管头的位置是存在支管记录里的值，
+-- E3D 没有回写它，E3D 自己也照着旧位置画。E3D 导出的 RVM 里：设备挪了，管子没挪。
+-- expected_net: modified | restore 搭档: pipeconn/nozz_conn_move_restore.mac
+--
+-- 链: pipeconn/nozz_conn 的第 2 腿（前一腿把支管接到了管嘴上）。
+-- 这一窗是语料里从来没有过的形状：292 个设计库的会话链里，「名下带管嘴的元素挪了位」的窗口是 0 个
+-- （docs/2026-09-04_model-cascade-update-inventory.md 第 2.8 节）。结论当时靠读 core 得出，这里拿宏坐实。
+-- 如果 E3D 的导出里管子跟着挪了，说明那条结论不成立——标成已知缺口，不改期望去迁就。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPECONN-NOZZMOVE-APPLY-ALIVE
+/AIOS-SUITE-T1-BRAN-C
+Q REF
+Q NAME
+Q HREF
+Q HPOS WRT /*
+/AIOS-SUITE-T1-EQ-NZ
+Q REF
+Q NAME
+Q TYPE
+Q POS WRT /*
+BY N 300
+Q POS WRT /*
+/AIOS-SUITE-T1-NZ1
+Q REF
+Q NAME
+Q CREF
+Q POS WRT /*
+/AIOS-SUITE-T1-BRAN-C
+Q HREF
+Q HPOS WRT /*
+SAVEWORK 'AIOS suite pipeconn/nozz_conn_move apply: EQ-NZ BY N 300, connected branch untouched'
+$P SUITE-PIPECONN-NOZZMOVE-APPLY-DONE
+ALPHA LOG END

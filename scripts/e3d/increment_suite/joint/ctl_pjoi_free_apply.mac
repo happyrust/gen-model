@@ -1,0 +1,58 @@
+-- 登记: D5-ctl-pjoi-free（CT-D5 结构关节的对照；联动 #12 主关节级联）
+-- 语义: 改一只没有梁认领的主关节（DELP N 0 -> N 50）——只该点名它自己
+-- expected_net: modified | restore 搭档: joint/ctl_pjoi_free_restore.mac | 前置: joint/setup.mac | 库: db8000
+--
+-- 样本（setup 从 ams7999 /1RX02-LSUP-E0549 COPY 来）：PNOD /AIOS-SUITE-T2-PJ-B-F1-N2 名下两只主关节，
+--   /AIOS-SUITE-T2-PJ-B-F1-N2-J1：SPRE YMJ-600X600X30，CREF 指立柱 /AIOS-SUITE-T2-PJ-B-F1-S4，立柱的 JOIE 指回它；
+--   /AIOS-SUITE-T2-PJ-B-JFREE：CREF 为空（没有梁认领），setup 把它的规格从 LJJ1 换成了 JT5（E3D 画）。本宏改的是这一只。
+-- 期望：这一窗只重建 JFREE 一件，它的图形沿世界系 N 向挪 50。同一只 PNOD 下的 J1、立柱 S4、三根 BAR 都不该被点名；
+--   PJ-A、PJ-C 一件都不该动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-CTL-PJOI-FREE-APPLY-ALIVE
+/AIOS-SUITE-T2-PJ-B-F1-N2-J1
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-B-F1-S4
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-B-JFREE
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q DELP
+Q BANG
+Q POS WRT /*
+Q ORI WRT /*
+DELP E 0 N 50 U 0
+Q DELP
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-B-F1-N2-J1
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-B-F1-S4
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-B-F1-N2
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/ctl_pjoi_free apply: unclaimed PJOI DELP N 0 -> N 50'
+$P SUITE-T2-JOINT-CTL-PJOI-FREE-APPLY-DONE
+ALPHA LOG END

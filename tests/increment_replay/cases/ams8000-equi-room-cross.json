@@ -1,17 +1,19 @@
 {
   "name": "ams8000-equi-room-cross",
-  "registry": ["INC-G02", "INC-I01", "INC-I02", "INC-I04", "INC-I05"],
+  "registry": ["INC-G01", "INC-G02", "INC-I01", "INC-I02", "INC-I04", "INC-I05"],
   "budget_gate": true,
-  "_doc": "2026-10-26 在隔离副本上录的跨房链（tests/fixtures/sessions/ams8000-equi-room-cross，每个会话时刻都拷了真文件）：731 基线（EQUI =24384/24776 在 U 1400，属房间 R224 /1RX-RM02-R224，面板 24381_948，z 1400..3080）→ 732 SAVEWORK：BY U 2000 到 U 3400，进入上一层 R124（z 3080..6400，同一 x/y 足印）→ 733 QUIT 尾会话 → 734 SAVEWORK：BY D 2000 回到 R224 → 735 QUIT 尾会话。INC-G02 跨房那一半：732 后 `rooms_after` 应换房（R224 退出、R124 进入）、库上旧房边消失；734 后换回来。回执只比房间号：732 是 R224 → R124/R144/R413，734 再换回 R224（#71 修后的实测）。库上 `room_relate` 边还没有进 harness。",
+  "rebuild_edges_equal": ["24384/24776"],
+  "rebuild_records_equal": ["24384/24776"],
+  "_doc": "2026-10-26 在隔离副本上录的跨房链（tests/fixtures/sessions/ams8000-equi-room-cross，每个会话时刻都拷了真文件）：731 基线（EQUI =24384/24776 在 U 1400，属房间 R224 /1RX-RM02-R224，面板 24381_948，z 1400..3080）→ 732 SAVEWORK：BY U 2000 到 U 3400，进入上一层 R124（z 3080..6400，同一 x/y 足印）→ 733 QUIT 尾会话 → 734 SAVEWORK：BY D 2000 回到 R224 → 735 QUIT 尾会话。INC-G02 跨房那一半：732 后 `rooms_after` 应换房（R224 退出、R124 进入）、库上旧房边消失；734 后换回来。回执只比房间号：732 是 R224 → R124/R144/R413，734 再换回 R224（#71 修后的实测）。库上那半：732 / 734 两步各带 `room_edges`（按边目标 `type::thing('pe', …)<-room_relate` 读 `room_num`，present/absent 各钉一条），链尾 `rebuild_edges_equal` 打一枪 `POST /dbnums/8000/model/rebuild` 再做 RI-12 的逐边对拍（INC-G01）。2026-10-27 回放全绿：732 库上边 {R124,R144,R413}（R224 没了）、734 回到 {R224}，链尾整库重建（953 根、succeeded）后逐边相等（INC-G01），整条 320 s、预算门 ok 4 / warn 0 / fail 0。库上的边挂在根的子树构件上（根自己无 room_relate 边，`inst_relate.anc` 只记直接祖先链），harness 逐层下探后按边目标读。链尾同一次重建还对拍根的 `/model/records`（`rebuild_records_equal`，容差同补常驻那一档）：732 / 734 两窗走的是刚体前移，重建后矩阵与盒要逐条相等（2026-10-27 加，未重跑）。",
   "dbnum": 8000,
   "db_file": "AvevaMarineSample/ams000/ams8000_0001",
   "fixture_dir": "tests/fixtures/sessions/ams8000-equi-room-cross",
   "start": 731,
   "init": { "to": 731, "records_present": ["24384/24776"], "generate_prime": ["24384/24776"] },
   "steps": [
-    { "to": 732, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, 2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R224"], "after": ["R124", "R144", "R413"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
+    { "to": 732, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, 2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R224"], "after": ["R124", "R144", "R413"] } }, "room_edges": { "24384/24776": { "present": ["R124"], "absent": ["R224"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
     { "to": 733, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776"], "generate_budget_ms": 250 },
-    { "to": 734, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, -2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R124", "R144", "R413"], "after": ["R224"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
+    { "to": 734, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, -2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R124", "R144", "R413"], "after": ["R224"] } }, "room_edges": { "24384/24776": { "present": ["R224"], "absent": ["R124"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
     { "to": 735, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776"], "generate_budget_ms": 250, "log_must_not_contain": ["[模型目标核对]"] }
   ]
 }

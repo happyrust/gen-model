@@ -1,0 +1,53 @@
+-- 登记: A02（变更类型 CT-S4；按名称案例 A-02 的设备变体） | 语义: 同一 SAVEWORK 里把整台 EQ-M 删掉，再在原位按原样重建（设备和三个 BOX 的名字、尺寸、位置、成员顺序都不变，四个 refno 全换）
+-- expected_net: deleted（按 refno 是旧根删除 + 新根新建；按名终态与基线相等） | restore 搭档: 无（终态按名即基线，重跑幂等）
+-- 预期 gen-model（按 refno）: 旧根清掉、新根 regen 一次；旧 refno 记一条 datacenter_delete reason=deleted（已发布时）；同 ZONE 的 EQ-U 不动。
+-- 重建位置: EQ-M 是 ZONE 的第 1 个成员；CE 回到 ZONE 再 NEW，新设备插在第 1 位（create/box、P82 实测的规矩），ZONE 成员序按名不变。前后各 Q MEMB 留证。
+-- 尺寸、位置与 ident/setup_t3.mac 同一组数，改一处两处都要改。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNIT-RECREATE-EQUI-APPLY-ALIVE
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q MEMB
+VAR !old COLLECT ALL EQUIPMENT WITH (NAME EQ '/AIOS-SUITE-T3-EQ-M') FOR CE
+DO !e VALUES !old
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  !mm = !!CE.MEMBERS
+  DO !b VALUES !mm
+    !!CE = !b
+    Q REF
+    Q NAME
+  ENDDO
+  !!CE = !e.dbref()
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-T3-Z
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-M
+POS E 100000 N 30000 U 0
+DESC 'AIOS T3 baseline'
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 400 ZLEN 200
+NAME /AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+NEW BOX XLEN 400 YLEN 400 ZLEN 600
+NAME /AIOS-SUITE-T3-BOX-M2
+POS E 1500 N 0 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-M3
+POS E 3000 N 0 U 0
+Q REF
+Q NAME
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/unit_recreate_equi apply: EQ-M deleted and recreated identical'
+$P SUITE-T3-UNIT-RECREATE-EQUI-APPLY-DONE
+ALPHA LOG END

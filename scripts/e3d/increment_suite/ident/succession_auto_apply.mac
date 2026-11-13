@@ -1,0 +1,49 @@
+-- 登记: A01（变更类型 CT-S2、CT-S4；按名称案例 G-09、C-07） | 语义: 接替，但成员没有起回原名——同一次保存里：原件 BRAN-R 让出名字、复制一份并只把支管自己起回原名、复制出来的 9 个成员叫 /Copy-of- 开头的自动名、删掉原件
+-- expected_net: deleted（按 refno：旧支管删除、新支管新建；按名：支管还叫原名，9 个有名成员没了，换成 9 个自动命名的） | restore 搭档: ident/succession_auto_restore.mac
+-- 预期 gen-model（按 refno）: 旧支管的管件行、管身行清掉，新支管重建一次；旧支管记一条 datacenter_delete reason=deleted（已发布时）；别的设备不动。
+-- 写法 2026-11-12 探针实测（ident/succ_probe.mac 第 1 段）：PML 的 COPY 不带 RENAME 时，复制出来的成员没有名字（不是 E3D 界面复制给的 /Copy-of- 名）。
+--   这里照界面的样子给它们补上 /Copy-of- 名；第一批的探针证过这种名字 E3D 原样保留。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SUCCESSION-AUTO-APPLY-ALIVE
+/AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+Q MEMB
+VAR !hit COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-R') FOR CE
+DO !b VALUES !hit
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  RENAME ALL /AIOS-SUITE-T3-BRAN-R /AIOS-SUITE-T3-BRAN-ROLD
+  NEW BRAN /AIOS-SUITE-T3-BRAN-R
+  COPY /AIOS-SUITE-T3-BRAN-ROLD
+  Q REF
+  Q NAME
+  Q HPOS
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/Copy-of-AIOS-SUITE-T3-BRAN-R-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+Q MEMB
+/AIOS-SUITE-T3-PIPE
+VAR !gone COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-T3-BRAN-ROLD') FOR CE
+DO !b VALUES !gone
+  !!CE = !b.dbref()
+  DELETE BRAN
+ENDDO
+/AIOS-SUITE-T3-PIPE
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/succession_auto apply: BRAN-R replaced by a copy whose members keep Copy-of names'
+$P SUITE-T3-SUCCESSION-AUTO-APPLY-DONE
+ALPHA LOG END

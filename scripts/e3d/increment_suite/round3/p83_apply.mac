@@ -1,0 +1,19 @@
+-- P83：从 run-owned BRAN 删除第一个 FTUB 成员。
+-- primary-list 分支：成员比较结果不是 3，只补 ATT_MEMB changed，不升级成 reorder。
+-- 被删的 FTUB 本身是窗口前已存在（非 created）元素，因此还会产生一条普通 deleted 事件。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P83-APPLY-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+Q REF
+Q NAME
+Q MEMB
+FTUB 1
+Q REF
+Q POS
+DELETE FTUB
+{{TARGET_NAME}}
+Q MEMB
+SAVEWORK 'AMS round3 P83 primary list remove member'
+$P AMS-R3-P83-APPLY-DONE
+ALPHA LOG END

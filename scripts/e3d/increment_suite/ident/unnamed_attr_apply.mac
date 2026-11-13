@@ -1,0 +1,20 @@
+-- 登记: A02（变更类型 CT-A4；按名称案例 C-02） | 语义: 无名成员改了属性——把设备 EQ-U 的第 2 个成员（没有名字的 BOX）的长度从 700 改成 900
+-- expected_net: modified | restore 搭档: ident/unnamed_attr_restore.mac
+-- 预期 gen-model（按 refno）: 设备 EQ-U 重建一次；别的设备不动；没有 datacenter_delete。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNNAMED-ATTR-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-U
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+!!CE = !mm[2]
+$P T3-ALIAS EQ-U-BOX2
+Q REF
+Q TYPE
+Q XLEN
+XLEN 900
+Q XLEN
+SAVEWORK 'AIOS suite T3 ident/unnamed_attr apply: unnamed BOX 2 of EQ-U XLEN 700 -> 900'
+$P SUITE-T3-UNNAMED-ATTR-APPLY-DONE
+ALPHA LOG END

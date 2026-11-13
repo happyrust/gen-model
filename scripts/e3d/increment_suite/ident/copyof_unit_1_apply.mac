@@ -1,0 +1,30 @@
+-- 登记: A02（变更类型 CT-S1、CT-S2；按名称案例 C-08、C-09） | 语义: 多了两台设备：一台是自动命名的（名字以 /Copy-of- 开头，像在界面里复制 EQ-CP 得到的那样，成员也是 /Copy-of- 名）；另一台的名字中间含有 Copy-of（/AIOS-SUITE-T3-Copy-of-EQ，是个真实名字）
+-- expected_net: cancelled（三腿链 ident/copyof_unit：1 建 → 2 改 → restore 删） | restore 搭档: ident/copyof_unit_restore.mac
+-- 预期 gen-model（按 refno）: 两台新设备各重建一次（按 refno 认身份，名字是不是自动起的不影响生成）；别的设备不动；没有 datacenter_delete。
+-- 导航到 EQ-CP 再 NEW EQUIPMENT，两台新设备依次接在 EQ-CP 后面。/Copy-of- 名字 E3D 原样保留（第一批探针实测）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-COPYOF-UNIT-1-APPLY-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+NEW EQUIPMENT /Copy-of-AIOS-SUITE-T3-EQ-CP
+POS E 102000 N 40000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 500 YLEN 300 ZLEN 300
+NAME /Copy-of-AIOS-SUITE-T3-BOX-CP1
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T3-Copy-of-EQ
+POS E 104000 N 40000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-Copy-of-BOX
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/copyof_unit 1: an auto-named EQUI and an EQUI with Copy-of inside its name created'
+$P SUITE-T3-COPYOF-UNIT-1-APPLY-DONE
+ALPHA LOG END

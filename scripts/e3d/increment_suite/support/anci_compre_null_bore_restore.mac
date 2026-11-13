@@ -1,0 +1,22 @@
+-- 登记: gen-model #132 一族 | 语义: support/anci_compre_null_bore_apply.mac 的还原——SUPC 的 HBOR、TBOR 写回 300，COMPRE 写回 /300-A-42/B1。
+-- expected_net: modified | apply 搭档: support/anci_compre_null_bore_apply.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-BORE-RESTORE-ALIVE
+/PS-01-00194/B1
+Q REF
+Q NAME
+HBOR 300
+TBOR 300
+Q HBOR
+Q TBOR
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+COMPRE /300-A-42/B1
+Q COMPRE
+SAVEWORK 'AIOS suite support/anci_compre_null_bore restore: SUPC HBOR TBOR 300, COMPRE -> /300-A-42/B1'
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-BORE-RESTORE-DONE
+ALPHA LOG END

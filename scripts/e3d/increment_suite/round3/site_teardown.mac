@@ -1,0 +1,15 @@
+-- P79-P81 teardown：删掉整个 run-owned SITE（含 ZONE / BASE / OWNER 残留）。
+-- 与 setup 配对，保证案例不把测试站点留在 AMS 库里。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-SITE-TEARDOWN-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'{{TARGET_NAME}}*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+SAVEWORK 'AMS round3 site teardown'
+$P AMS-R3-SITE-TEARDOWN-DONE
+ALPHA LOG END

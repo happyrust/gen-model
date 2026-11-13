@@ -1,0 +1,26 @@
+-- 登记: A02（变更类型 CT-S7；按名称案例 D-01 的原地版：同名、同参考号、类型不同） | 语义: 原地改类型——把支管 BRAN-R 下面的弯头 M2 从 BEND 改成 ELBO（CHANGETYPE TO）。名字、参考号、规格引用都不变，只有类型变了
+-- expected_net: modified | restore 搭档: ident/changetype_restore.mac
+-- 预期 gen-model（按 refno）: 这个成员是 TypeChanged：两端上卷，支管 BRAN-R 重建一次；增量的结果要和整库重建相等（库里不能留着按旧类型落的行）；别的设备不动。
+-- 2026-11-12 探针实测（ident/uda_set_probe.mac 第 4C 段）：BEND → ELBO 许改，参考号、名字不变；
+--   BOX → CYLI、EQUI → STRU、EQUI → SUBE 都被拒（(2,704) Element type … may not be changed to type …）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-CHANGETYPE-APPLY-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-T3-BRAN-R-M2
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+CHANGETYPE TO ELBO
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+/AIOS-SUITE-T3-BRAN-R
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/changetype apply: BRAN-R-M2 changed in place from BEND to ELBO'
+$P SUITE-T3-CHANGETYPE-APPLY-DONE
+ALPHA LOG END

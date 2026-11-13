@@ -1,0 +1,23 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 F-02、G-03） | 语义: 把区域 Z 的自定义属性 :G_ICS 按原值填回去
+-- expected_net: modified | 四腿链 meta/uda_zone 的第 3 腿。第 2、3 腿并进同一个消费窗口：两端的属性逐项相同，净效果是零
+-- 预期 gen-model（按 refno，该有的行为）: 交付单元 0。并成一窗时同样一个都不该重建——
+--   但清掉再填回之后这个属性在记录里换了位置，记录的字节变了；现在的规划器对「字节变了、逐项相等」的容器保守级联整棵子树（known_gap）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-ZONE-3-RESET-ALIVE
+/AIOS-SUITE-T3-EQ-M
+Q REF
+Q NAME
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+Q UDASET
+:G_ICS 'T3-ICS'
+Q :G_ICS
+Q :FABTARGET
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_zone 3: ZONE Z UDA G_ICS set back to the same value'
+$P SUITE-T3-META-UDA-ZONE-3-RESET-DONE
+ALPHA LOG END

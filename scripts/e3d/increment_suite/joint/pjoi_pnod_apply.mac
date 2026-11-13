@@ -1,0 +1,48 @@
+-- 登记: D5-pjoi-pnod（CT-D5 结构关节 / CT-D7 现算标架；联动 #12 主关节级联）
+-- 语义: 只挪 PNOD——把 PJ-A 那只主关节所在的主节点沿关节 Z（梁轴）挪 30 mm（NPOS E 63 -> E 33），主关节与梁一个字不动
+-- expected_net: modified | restore 搭档: joint/pjoi_pnod_restore.mac | 前置: joint/setup.mac | 库: db8000
+--
+-- 样本（setup 从 ams7999 /1RX02-LSUP-E0361 COPY 来）：
+--   PNOD /AIOS-SUITE-T2-PJ-A-F1-N1：NPOS E 63 N 0 D 42.3（属主系）。名下 PJOI /AIOS-SUITE-T2-PJ-A-F1-N1-J1
+--   （带目录正体，OPDI = CUTP = W，DELP 0，CUTB 0），CREF 指梁 /AIOS-SUITE-T2-PJ-A-F1-S1。
+-- 期望：这一窗该重建 2 件——主关节（现算标架宿主：FRMW 名下、带着目录正体主关节的 PNOD，改它就把名下的主关节收进计划）、
+--   梁 S1（关节级联：由主关节带出）。PNOD 自己不是模型单元、上方也没有单元，接上之前这种窗什么都不重建。
+--   主关节的站位是 NPOS + DELP，原点再落到梁线上：节点沿梁轴挪 30，主关节原点沿梁滑 30（另随梁的坡度升 0.06）。
+--   PJ-B、PJ-C 一件都不该动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-PJOI-PNOD-APPLY-ALIVE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+NPOS E 33 N 0 U -42.3
+Q NPOS
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q CREF
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/pjoi_pnod apply: PNOD NPOS E 63 -> E 33'
+$P SUITE-T2-JOINT-PJOI-PNOD-APPLY-DONE
+ALPHA LOG END

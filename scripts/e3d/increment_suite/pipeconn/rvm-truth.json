@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "suite": "pml-increment-suite",
+  "owner": "T1",
+  "description": "管嘴与管线连接这一组（清单片段 manifest.d/T1-pipeconn.json）的 RVM 期望模型，格式同套件根下的 rvm-truth.json，给 Compare-SuiteRvmTruth.ps1 -Model 用；导出根 /AIOS-SUITE-T1-8000（-Root）。",
+  "pairing_rules": "六腿是一条链，每条腿都与紧挨着它的上一份快照比（不是与对应 apply 之前的那份比）：链里前后腿改的是不同的东西，第 4 腿之后的状态并不等于第 2 腿之前。只有最后一腿（断开）与整条链开头那份比。",
+  "tolerances": { "aabb_mm": 1.0 },
+  "baseline": {
+    "after": "pipeconn/setup_t1_8000.mac",
+    "note": "2026-11-12 实测（私有副本，8000 会话 1164）：E3D 导出三件。",
+    "members_exact": {
+      "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-EQ-NZ-BOX": [99500, 29500, -500, 100500, 30500, 500],
+      "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-NZ1": [99200, 29970, -30, 99500, 30030, 30],
+      "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-PIPE/AIOS-SUITE-T1-BRAN-C/TUBE 1 of BRANCH /AIOS-SUITE-T1-BRAN-C": [96200, 29970, -30, 99200, 30030, 30]
+    }
+  },
+  "legs": {
+    "pipeconn/bran_conn_nozz_apply.mac": {
+      "note": "只有引用在变（支管的 HREF、管嘴的 CREF），三件逐一不动。"
+    },
+    "pipeconn/nozz_conn_move_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-EQ-NZ-BOX": [0, 300, 0],
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-NZ1": [0, 300, 0]
+      },
+      "note": "设备挪了，接在管嘴上的支管不该跟：管身那一件落在「其余成员逐一吻合」里，动了就红。"
+    },
+    "pipeconn/bran_reconn_apply.mac": {
+      "moved": {
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-PIPE/AIOS-SUITE-T1-BRAN-C/TUBE 1 of BRANCH /AIOS-SUITE-T1-BRAN-C": [0, 300, 0]
+      },
+      "note": "重接之后管身跟到新位置；设备两件不动。"
+    },
+    "pipeconn/nozz_conn_move_restore.mac": {
+      "moved": {
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-EQ-NZ-BOX": [0, -300, 0],
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-EQ-NZ/AIOS-SUITE-T1-NZ1": [0, -300, 0]
+      },
+      "note": "设备挪回原位；管身仍停在挪过之后的位置。"
+    },
+    "pipeconn/bran_reconn_restore.mac": {
+      "moved": {
+        "AIOS-SUITE-T1-Z/AIOS-SUITE-T1-PIPE/AIOS-SUITE-T1-BRAN-C/TUBE 1 of BRANCH /AIOS-SUITE-T1-BRAN-C": [0, -300, 0]
+      },
+      "note": "再接一次，管身回到基线位置。"
+    },
+    "pipeconn/bran_conn_nozz_restore.mac": {
+      "equals_state_before": "pipeconn/bran_conn_nozz_apply.mac",
+      "note": "与整条链开头那份比：三件逐一相同。"
+    }
+  }
+}

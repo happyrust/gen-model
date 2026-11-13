@@ -1,0 +1,1662 @@
+{
+  "version": 1,
+  "owner": "T3",
+  "topic": "window2",
+  "copy": "ams",
+  "sites": [
+    "/AIOS-SUITE-T3",
+    "/AIOS-SUITE-T3-S2"
+  ],
+  "setup": "ident/setup_t3.mac",
+  "teardown": "ident/teardown_t3.mac",
+  "description": "会话窗口的形状（第二批）：同一个 E3D 会话里存两次；改了没存就退；以及从第二批各条链上换起止取出来的并窗（replay_windows，不开 E3D）。并窗的期望在 expect.detail，口径同 manifest.d/T3-window.json。",
+  "setup_note": "语料同 manifest.d/T3-ident.json。",
+  "cases": [
+    {
+      "id": "W1-two-saves-one-session",
+      "situation": "用户在同一个 E3D 会话里先建了一台设备、保存；没有退出，接着又建了一台、再保存，然后才退出。后来把这两台都删掉并保存。",
+      "change_types": [
+        "CT-W1",
+        "CT-W2"
+      ],
+      "name_case": "G01",
+      "name_keyed_cases": [
+        "G-01",
+        "G-10"
+      ],
+      "tickets": [],
+      "apply": "window/two_saves_apply.mac",
+      "restore": "window/two_saves_restore.mac",
+      "db": 8000,
+      "expected_net": "cancelled",
+      "registration": "A08",
+      "expect": {
+        "rebuild": [
+          "/AIOS-SUITE-T3-EQ-SV1",
+          "/AIOS-SUITE-T3-EQ-SV2"
+        ],
+        "remove": [],
+        "untouched": [
+          "/AIOS-SUITE-T3-EQ-M",
+          "/AIOS-SUITE-T3-EQ-SUB"
+        ],
+        "why": "按 refno 认身份：旧的是删除、新的是新建（docs/specs/incr-gen-audit-aux/increment-change-types.md §4.1 CT-S4）。删除的单元不上卷、直接出 Remove；新建在 target 端上卷到最近单元重建（vendor/shared/e3d-model/src/increment.rs 模块头注「候选分类」）。 一窗跨多个会话取净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）：两次存盘无论各占一个会话还是并成一个，两台新设备都各重建一次。交付删除记录：src/data_interface/increment_pipeline.rs——交付单元自身被删记 deleted、自身改名记 renamed，下属成员不记；INSERT IGNORE，同一 refno 只留首次事件；前提是该 refno 的 datacenter_version 已存在。",
+        "note": "rebuild / remove / untouched 说的是第一条腿。同一个名字同时出现在 rebuild 和 remove 里，是「旧 refno 清掉、新 refno 重建」；逐腿的期望和 refno 的前后之分在 legs 里（键是宏的相对路径）。",
+        "legs": {
+          "window/two_saves_apply.mac": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-SV1",
+              "/AIOS-SUITE-T3-EQ-SV2"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 2,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-SV1",
+              "/AIOS-SUITE-T3-EQ-SV2"
+            ],
+            "plan_line": {
+              "inserted": 4,
+              "modified": 1,
+              "deleted": 0,
+              "units_regen": 2,
+              "units_remove": 0
+            },
+            "note": "说的是这条腿前后整段窗口（两次存盘并成一窗消费）。两次存盘各占一个会话还是并成一个、会话号一共走几步，以实测为准；各占一个的话，回放层还可以把它拆成两窗消费：第一窗只重建 EQ-SV1，第二窗只重建 EQ-SV2、EQ-SV1 不该再动。",
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          },
+          "window/two_saves_restore.mac": {
+            "roots_regen": [],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-EQ-SV1@before",
+              "/AIOS-SUITE-T3-EQ-SV2@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-SV1@before",
+                "name": "/AIOS-SUITE-T3-EQ-SV1",
+                "type": "EQUI",
+                "reason": "deleted"
+              },
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-SV2@before",
+                "name": "/AIOS-SUITE-T3-EQ-SV2",
+                "type": "EQUI",
+                "reason": "deleted"
+              }
+            ],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 1,
+              "deleted": 4,
+              "units_regen": 0,
+              "units_remove": 2
+            },
+            "plan_line_checked": "2026-11-12 离线规划核对：这几项与实测相符"
+          }
+        },
+        "name_keyed": {
+          "source": "docs/plans/2026-11-11-name-keyed-increment-cases.md G-01（从未提资过的新单元）、G-10",
+          "asserted_now": false,
+          "windows": {
+            "apply": {
+              "rows": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-SV1",
+                  "type": "EQUI",
+                  "category": "added",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-SV1"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-SV1",
+                  "type": "BOX",
+                  "category": "added",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-SV1"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-SV2",
+                  "type": "EQUI",
+                  "category": "added",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-SV2"
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-BOX-SV2",
+                  "type": "BOX",
+                  "category": "added",
+                  "renumbered": false,
+                  "unit": "/AIOS-SUITE-T3-EQ-SV2"
+                }
+              ],
+              "units": [
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-SV1",
+                  "category": "added",
+                  "renumbered": false,
+                  "never_delivered": true
+                },
+                {
+                  "name": "/AIOS-SUITE-T3-EQ-SV2",
+                  "category": "added",
+                  "renumbered": false,
+                  "never_delivered": true
+                }
+              ],
+              "delivery": {
+                "action": "first",
+                "preview_column": "首次提资"
+              }
+            },
+            "apply+restore": {
+              "rows": [],
+              "units": [],
+              "delivery": {
+                "action": "skip",
+                "preview_column": "跳过"
+              },
+              "note": "两台设备都从没出现过。"
+            }
+          }
+        }
+      },
+      "status": "macro_ok",
+      "known_gap": null,
+      "evidence": "T3/20261112-053946-b2-window",
+      "rvm_truth": {
+        "window/two_saves_apply.mac": {
+          "added": {
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-SV1/AIOS-SUITE-T3-BOX-SV1": [
+              101850,
+              43850,
+              -150,
+              102150,
+              44150,
+              150
+            ],
+            "AIOS-SUITE-T3-Z/AIOS-SUITE-T3-EQ-SV2/AIOS-SUITE-T3-BOX-SV2": [
+              103850,
+              43850,
+              -150,
+              104150,
+              44150,
+              150
+            ]
+          },
+          "e3d_export": {
+            "/AIOS-SUITE-T3": {
+              "identical": false,
+              "touched_under": [
+                "/AIOS-SUITE-T3-EQ-SV1",
+                "/AIOS-SUITE-T3-EQ-SV2"
+              ],
+              "must_change": [
+                "/AIOS-SUITE-T3-BOX-SV1",
+                "/AIOS-SUITE-T3-BOX-SV2"
+              ]
+            }
+          }
+        },
+        "window/two_saves_restore.mac": {
+          "equals_state_before": "window/two_saves_apply.mac",
+          "e3d_export": {
+            "/AIOS-SUITE-T3": {
+              "identical": false,
+              "touched_under": [
+                "/AIOS-SUITE-T3-EQ-SV1",
+                "/AIOS-SUITE-T3-EQ-SV2"
+              ],
+              "must_change": [
+                "/AIOS-SUITE-T3-BOX-SV1",
+                "/AIOS-SUITE-T3-BOX-SV2"
+              ]
+            }
+          }
+        }
+      },
+      "needs_entry_switch": "-AllowMultiSave（宏里有两个 SAVEWORK）",
+      "checks": {
+        "macro": "各腿实跑通过（2026-11-12）",
+        "e3d_export_diff": [
+          "/AIOS-SUITE-T3 two_saves_apply.mac：过；逐字相同 40、变了 0、只在改前 0、只在改后 4；有差异的组：/AIOS-SUITE-T3-BOX-SV1（只在改后）、/AIOS-SUITE-T3-BOX-SV2（只在改后）、/AIOS-SUITE-T3-EQ-SV1（只在改后）、/AIOS-SUITE-T3-EQ-SV2（只在改后）",
+          "/AIOS-SUITE-T3 two_saves_restore.mac：过；逐字相同 40、变了 0、只在改前 4、只在改后 0；有差异的组：/AIOS-SUITE-T3-BOX-SV1（只在改前）、/AIOS-SUITE-T3-BOX-SV2（只在改前）、/AIOS-SUITE-T3-EQ-SV1（只在改前）、/AIOS-SUITE-T3-EQ-SV2（只在改前）"
+        ],
+        "plan_offline": [
+          "two_saves_apply：过（会话 1842 → 1845：candidates=6 (+4 ~2 -0) unchanged=0 no_model=4 cascades=0 units regen=2 remove=0 derived=0）",
+          "two_saves_restore：过（会话 1846 → 1848：candidates=6 (+0 ~2 -4) unchanged=0 no_model=4 cascades=0 units regen=0 remove=2 derived=0）"
+        ],
+        "replay": [
+          "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+          "two_saves_apply 腿：t3b2-seg10-split → 1845：相符（根 touched=2 regen=2 delete=0；件 +4 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 2、清掉 0、派生 0）",
+          "two_saves_restore 腿：t3b2-seg10-split → 1848：相符（根 touched=2 regen=0 delete=2；件 +0 ~2 -4，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 2、派生 0）"
+        ],
+        "l3": "没跑（等隔离后端）"
+      }
+    }
+  ],
+  "chains": [],
+  "probes": [
+    {
+      "macro": "window/modify_quit_nosave.mac",
+      "purpose": "改了没存就退（变更类型 CT-W8）：改一个 BOX 的长度、新建一台设备，不保存直接退出。库里多不多一个只记账的会话、那个会话里有没有设计元素的候选",
+      "no_savework": true,
+      "decides": [
+        "W8-modify-quit-nosave"
+      ],
+      "result": "2026-11-12 跑过（会话 1863 → 1863），证据 T3/20261112-054253-b2-nosave"
+    }
+  ],
+  "replay_windows": {
+    "note": "不开 E3D：同一条录下来的会话链，回放层取不同的起止会话就是不同形状的窗。from / to 是宏的相对路径——窗口从 from 那条腿之前的会话到 to 那条腿之后的会话；同一份宏在链里跑过多次时取最后一次。两条腿必须在同一批里（中间没有夹着别人的会话）。",
+    "windows": [
+      {
+        "id": "W2-uda-all-back",
+        "from": "meta/uda_text_apply.mac",
+        "to": "meta/uda_text_restore.mac",
+        "situation": "后端停着的时候，用户改了一台设备的一个自定义属性、改回、清空、又填回原值，一共存了四次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-A10"
+        ],
+        "name_keyed_cases": [
+          "G-03",
+          "G-02"
+        ],
+        "gap_of_case": "A10-uda-unset",
+        "expect": {
+          "why": "窗口只看两端净差：解析出来的内容相同就是没变。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "now": {
+              "units_regen": 1,
+              "cascades": 1,
+              "why": "现在：设备的记录字节变了但逐项相等，保守级联，它下面的 BOX 重建一次"
+            },
+            "note": "两端的属性逐项相同，该有的行为是不重建。to 取的是 uda_text_restore 最后一次跑。"
+          }
+        },
+        "status": "known_gap",
+        "corrections": [
+          "实跑之前这里写的是「两端的记录逐属性相同，逐元素差分判没变，这个并窗即使现在也不该重建」。规划层核对（会话 1552 → 1560）：属性确实逐项相同，但 :EQNA 清掉再填回之后在记录里换了位置（原来在 :WEIGHT 前面，现在在后面），记录的字节变了，规划器对这种容器保守级联，设备下面的 BOX 重建了一次（cascades=1、units regen=1）。把窗口拆开看：改值又改回（1552 → 1556）记录逐字相同、判没变；清掉又填回（1556 → 1560）才触发。登记成已知缺口，加了「现在的行为」；期望（零重建）没有改。"
+        ],
+        "checks": {
+          "plan_offline": "已知缺口（会话 1552 → 1560：candidates=2 (+0 ~2 -0) unchanged=0 no_model=1 cascades=1 units regen=1 remove=0 derived=0）；单元重建：期望 0，实测 1；现在的行为与登记的一致（units_regen=1、derived_containers=0、cascades=1）；有 1 条候选既不是「没变」、老收集器也看不到（自定义属性变了，或记录字节不同而逐项相等；在 EQUI 24384/47479 里）：没过元数据门，照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1552 → 1560",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-gap-uda-refill-equi → 1560：已知缺口（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=1，单元重建 1、清掉 0、派生 0）；不重建：被重算了 24384/47479（kind=regen，几何差 0/0/0）；交付单元数：期望 0，实际 1；规划行 units_regen：期望 0，实际 1；钉住的规格红了（known_red）：断言不过：根 24384/47479 不该在这一窗的交付单元里，却在；窗口规划 cascades=Some(1)，期望 0；窗口规划 regen=Some(1)，期望 0；窗口规划 root_regen=Some(1)，期望 0",
+            "t3b2-seg1-merged → 1560：已知缺口（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=1，单元重建 1、清掉 0、派生 0）；不重建：被重算了 24384/47479（kind=regen，几何差 0/0/0）；交付单元数：期望 0，实际 1；规划行 units_regen：期望 0，实际 1"
+          ]
+        }
+      },
+      {
+        "id": "W2-uda-zone-reset-merged",
+        "from": "meta/uda_zone_2_unset.mac",
+        "to": "meta/uda_zone_3_reset.mac",
+        "situation": "后端停着的时候，用户把一个区域的一个自定义属性清掉（存一次），又按原值填回去（再存一次）；后端一次消费。区域下面有九个单元，一个都没动过。",
+        "change_types": [
+          "CT-W2",
+          "CT-A10"
+        ],
+        "name_keyed_cases": [
+          "G-03",
+          "F-02"
+        ],
+        "gap_of_case": "A10-uda-zone-reset",
+        "expect": {
+          "why": "窗口只看两端净差：解析出来的内容相同就是没变。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-EQ-CP",
+              "/AIOS-SUITE-T3-EQ-NZ",
+              "/AIOS-SUITE-T3-EQ-SUB",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "now": {
+              "cascades": 1,
+              "why": "现在（实跑之前照 W2-uda-all-back 的实测推的）：区域的记录字节变了但逐项相等，保守级联，区域下面整棵子树的单元都重建"
+            },
+            "note": "两端的属性逐项相同，该有的行为是一个都不重建。这个窗口量的是白算的范围：容器越大越贵。"
+          }
+        },
+        "status": "known_gap",
+        "checks": {
+          "plan_offline": "已知缺口（会话 1704 → 1708：candidates=2 (+0 ~2 -0) unchanged=0 no_model=1 cascades=1 units regen=24 remove=0 derived=1）；单元重建：期望 0，实测 24；现在的行为与登记的一致（units_regen=24、derived_containers=1、cascades=1）；有 1 条候选既不是「没变」、老收集器也看不到（自定义属性变了，或记录字节不同而逐项相等；在 ZONE 24384/47463 里）：没过元数据门，照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1704 → 1708",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-gap-uda-refill-zone → 1708：已知缺口（根 touched=9 regen=9 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=1，单元重建 24、清掉 0、派生 1）；没碰：24384/47464 却在交付单元里（kind=regen）；没碰：24384/47472 却在交付单元里（kind=regen）；没碰：24384/47479 却在交付单元里（kind=regen）；没碰：24384/47571 却在交付单元里（kind=regen）；没碰：24384/47495 却在交付单元里（kind=regen）；没碰：24384/47594 却在交付单元里（kind=regen）；没碰：24384/47468 却在交付单元里（kind=regen）；没碰：24384/47470 却在交付单元里（kind=regen）；没碰：24384/47476 却在交付单元里（kind=regen）；交付单元数：期望 0，实际 9；规划行 units_regen：期望 0，实际 24；钉住的规格红了（known_red）：断言不过：根 24384/47464 不该在这一窗的交付单元里，却在；根 24384/47472 不该在这一窗的交付单元里，却在；根 24384/47479 不该在这一窗的交付单元里，却在；根 24384/47571 不该在这一窗的交付单元里，却在；根 24384/47495 不该在这一窗的交付单元里，却在；根 24384/47594 不该在这一窗的交付单元里，却在；根 24384/47468 不",
+            "t3b2-seg5-merged → 1708：已知缺口（根 touched=9 regen=9 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=1，单元重建 24、清掉 0、派生 1）；没碰：24384/47464 却在交付单元里（kind=regen）；没碰：24384/47472 却在交付单元里（kind=regen）；没碰：24384/47479 却在交付单元里（kind=regen）；没碰：24384/47571 却在交付单元里（kind=regen）；没碰：24384/47495 却在交付单元里（kind=regen）；没碰：24384/47594 却在交付单元里（kind=regen）；交付单元数：期望 0，实际 9；规划行 units_regen：期望 0，实际 24；期望里没提到的交付单元：24384/47468(regen)、24384/47470(regen)、24384/47476(regen)"
+          ]
+        }
+      },
+      {
+        "id": "W2-ref-rename-there-and-back",
+        "from": "refs/target_rename_apply.mac",
+        "to": "refs/target_rename_restore.mac",
+        "situation": "后端停着的时候，被管口引用的支管改了名又改回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-A1",
+          "CT-A6"
+        ],
+        "name_keyed_cases": [
+          "E-03",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差；与第一批的 W2-rename-there-and-back 同形，多一个引用它的管口当对照。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-NZ",
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "两端名字相同：净窗口里不落 renamed 记录（逐腿消费时 apply 那一窗会落一条）。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1615 → 1620：candidates=2 (+0 ~2 -0) unchanged=1 no_model=1 cascades=0 units regen=0 remove=0 derived=0）",
+          "window": "会话 1615 → 1620",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg3-offset1 → 1620：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-ref-delete-rebuild-merged",
+        "from": "refs/target_delete.mac",
+        "to": "refs/target_rebuild_reconnect.mac",
+        "situation": "后端停着的时候，被管口引用的支管先被删掉（存一次），又按原样同名建回并接上（再存一次）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S4",
+          "CT-A6"
+        ],
+        "name_keyed_cases": [
+          "E-01",
+          "A-02"
+        ],
+        "expect": {
+          "why": "跨两个会话的「删后同名重建」与同一次保存里的那种，净窗口相同。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after",
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "unit_count": 2,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted",
+                "condition": "这个 refno 此前没有落过记录时"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after",
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "deleted": 10
+            },
+            "note": "净效果与 refs/target_recreate.mac 一条腿相同：旧支管删除、新支管新建、管口的 CREF 换了值。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1621 → 1626：candidates=24 (+10 ~4 -10) unchanged=0 no_model=3 cascades=0 units regen=10 remove=9 derived=2）",
+          "window": "会话 1621 → 1626",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg3-offset1 → 1626：相符（根 touched=3 regen=2 delete=1；件 +10 ~4 -10，metadata_only=0 cache_stamp=1 cascades=0，单元重建 10、清掉 9、派生 2）"
+          ]
+        }
+      },
+      {
+        "id": "W2-ref-rebuild-then-disconnect",
+        "from": "refs/target_rebuild_reconnect.mac",
+        "to": "refs/href_disconnect.mac",
+        "situation": "后端停着的时候，支管被建回并接上管口（存一次），随后又解开（再存一次）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S1",
+          "CT-A6",
+          "CT-A9"
+        ],
+        "name_keyed_cases": [
+          "E-07"
+        ],
+        "expect": {
+          "why": "引用空 → 有 → 空并成一窗，引用方净差为零。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "unit_count_either": [
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "deleted": 0
+            },
+            "note": "管口的 CREF 两端都是空（E-07 ①）：管口的记录判「没变」，设备 EQ-NZ 至多只有戳不同，不该重建。新支管照常重建。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-NZ 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-NZ：管口的 CREF 回写又清掉）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1624 → 1629：candidates=14 (+10 ~4 -0) unchanged=1 no_model=3 cascades=0 units regen=9 remove=0 derived=1）；只有戳不同的候选 1 条（EQUI 24384/47571）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1624 → 1629",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg3-offset2 → 1629：相符（根 touched=2 regen=2 delete=0；件 +10 ~4 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 9、清掉 0、派生 1）；都算对的根 24384/47571：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-refs-all",
+        "from": "refs/href_connect.mac",
+        "to": "refs/href_disconnect.mac",
+        "situation": "后端停着的时候，引用目标那一组的八次保存全做完了；后端一次消费。",
+        "change_types": [
+          "CT-W2"
+        ],
+        "name_keyed_cases": [
+          "E-01",
+          "E-07",
+          "A-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after",
+              "/AIOS-SUITE-T3-EQ-NZ@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before",
+              "/AIOS-SUITE-T3-EQ-NZ@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "unit_count": 2,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              },
+              {
+                "refno": "/AIOS-SUITE-T3-EQ-NZ@before",
+                "name": "/AIOS-SUITE-T3-EQ-NZ",
+                "type": "EQUI",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after",
+              "/AIOS-SUITE-T3-EQ-NZ@after"
+            ],
+            "plan_line": {
+              "inserted": 13,
+              "deleted": 13
+            },
+            "note": "净效果：支管和设备各「删后同名重建」一次，引用两端都是空。中间那条支管（第 2 腿建、第 6 腿删）在净窗口里从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1607 → 1629：candidates=29 (+13 ~3 -13) unchanged=0 no_model=5 cascades=0 units regen=11 remove=11 derived=2）",
+          "window": "会话 1607 → 1629",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg3-merged → 1629：相符（根 touched=4 regen=2 delete=2；件 +13 ~3 -13，metadata_only=0 cache_stamp=0 cascades=0，单元重建 11、清掉 11、派生 2）"
+          ]
+        }
+      },
+      {
+        "id": "W2-succession-merged",
+        "from": "ident/succession_1_rename.mac",
+        "to": "ident/succession_3_delete.mac",
+        "situation": "后端停着的时候，接替的三步（改名让出名字、复制回原名、删掉原件）各存一次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S2"
+        ],
+        "name_keyed_cases": [
+          "G-08",
+          "A-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "deleted": 10
+            },
+            "note": "净效果与 ident/unit_recreate_bran_apply.mac（A-02）相同。交付删除记录落的是 deleted、旧位号 BRAN-R——逐腿消费时落的是 renamed（第 1 腿），两种都能让按名称口径认定接替。BRAN-ROLD 这个名字在净窗口里从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1652 → 1660：candidates=22 (+10 ~2 -10) unchanged=0 no_model=2 cascades=0 units regen=9 remove=9 derived=2）",
+          "window": "会话 1652 → 1660",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg4-merged → 1660：相符（根 touched=2 regen=1 delete=1；件 +10 ~2 -10，metadata_only=0 cache_stamp=0 cascades=0，单元重建 9、清掉 9、派生 2）"
+          ]
+        }
+      },
+      {
+        "id": "W2-succession-auto-merged",
+        "from": "ident/succession_auto_apply.mac",
+        "to": "ident/succession_auto_restore.mac",
+        "situation": "后端停着的时候，支管被复制件换掉（成员是自动命名的，存一次），随后成员改回原名（再存一次）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S2"
+        ],
+        "name_keyed_cases": [
+          "G-09",
+          "A-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "roots_removed": [
+              "/AIOS-SUITE-T3-BRAN-R@before"
+            ],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [
+              {
+                "refno": "/AIOS-SUITE-T3-BRAN-R@before",
+                "name": "/AIOS-SUITE-T3-BRAN-R",
+                "type": "BRAN",
+                "reason": "deleted"
+              }
+            ],
+            "full_equal": [
+              "/AIOS-SUITE-T3-BRAN-R@after"
+            ],
+            "plan_line": {
+              "inserted": 10,
+              "deleted": 10
+            },
+            "note": "净效果就是 A-02：/Copy-of- 那些名字在净窗口里从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1661 → 1666：candidates=22 (+10 ~2 -10) unchanged=0 no_model=2 cascades=0 units regen=9 remove=9 derived=2）",
+          "window": "会话 1661 → 1666",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg4-merged → 1666：相符（根 touched=2 regen=1 delete=1；件 +10 ~2 -10，metadata_only=0 cache_stamp=0 cascades=0，单元重建 9、清掉 9、派生 2）"
+          ]
+        }
+      },
+      {
+        "id": "W2-pipe-rezone-there-and-back",
+        "from": "ident/pipe_rezone_apply.mac",
+        "to": "ident/pipe_rezone_restore.mac",
+        "situation": "后端停着的时候，整条管线挪到另一个区域又挪回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S5"
+        ],
+        "name_keyed_cases": [
+          "B-06",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-Z2"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "往返改挂：逐腿消费时相关的根各重建两次；并成一窗净效果是零（属主、成员表次序都回到原样），不该重建。两端的属主链都要读才看得出来。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-BRAN-R 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（支管 BRAN-R）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1684 → 1689：candidates=12 (+0 ~12 -0) unchanged=10 no_model=1 cascades=0 units regen=0 remove=0 derived=1）；只有戳不同的候选 1 条（BRAN 24384/47594）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1684 → 1689",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg5-merged → 1689：相符（根 touched=1 regen=1 delete=0；件 +0 ~12 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47594：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-equi-rezone-there-and-back",
+        "from": "ident/equi_rezone_apply.mac",
+        "to": "ident/equi_rezone_restore.mac",
+        "situation": "后端停着的时候，整台设备挪到另一个区域又挪回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S5"
+        ],
+        "name_keyed_cases": [
+          "B-06",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-Z2"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "往返改挂：逐腿消费时相关的根各重建两次；并成一窗净效果是零（属主、成员表次序都回到原样），不该重建。两端的属主链都要读才看得出来。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-CP 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-CP）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1690 → 1695：candidates=5 (+0 ~5 -0) unchanged=3 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（EQUI 24384/47479）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1690 → 1695",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg5-merged → 1695：相符（根 touched=1 regen=1 delete=0；件 +0 ~5 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47479：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-box-rehome-there-and-back",
+        "from": "ident/box_rehome_apply.mac",
+        "to": "ident/box_rehome_restore.mac",
+        "situation": "后端停着的时候，一个有名 BOX 挪到另一台设备又挪回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S5"
+        ],
+        "name_keyed_cases": [
+          "B-06",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-CP"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-CASE",
+              "/AIOS-SUITE-T3-EQ-RN"
+            ],
+            "unit_count_either": [
+              0,
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "往返改挂：逐腿消费时相关的根各重建两次；并成一窗净效果是零（属主、成员表次序都回到原样），不该重建。两端的属主链都要读才看得出来。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-CASE、/AIOS-SUITE-T3-EQ-RN 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-CASE、EQ-RN）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1696 → 1701：candidates=4 (+0 ~4 -0) unchanged=1 no_model=3 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 2 条（EQUI 24384/47468、EQUI 24384/47470）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1696 → 1701",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg5-merged → 1701：相符（根 touched=2 regen=2 delete=0；件 +0 ~4 -0，metadata_only=0 cache_stamp=2 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47470：重算了（kind=regen，几何差 0/0/0）；都算对的根 24384/47468：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-zone-resite-there-and-back",
+        "from": "ident/zone_resite_apply.mac",
+        "to": "ident/zone_resite_restore.mac",
+        "situation": "后端停着的时候，整个区域挪到另一个 SITE 又挪回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S5"
+        ],
+        "name_keyed_cases": [
+          "B-06",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-S2"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-Z2"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "往返改挂：逐腿消费时相关的根各重建两次；并成一窗净效果是零（属主、成员表次序都回到原样），不该重建。两端的属主链都要读才看得出来。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-Z2 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-Z2）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1731 → 1737：candidates=5 (+0 ~5 -0) unchanged=3 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（EQUI 24384/47501）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1731 → 1737",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg6-merged → 1737：相符（根 touched=1 regen=1 delete=0；件 +0 ~5 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47501：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-between-unnamed-there-and-back",
+        "from": "ident/named_between_unnamed_apply.mac",
+        "to": "ident/named_between_unnamed_restore.mac",
+        "situation": "后端停着的时候，有名 BOX 在两个无名子设备之间挪过去又挪回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S5"
+        ],
+        "name_keyed_cases": [
+          "B-06",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "往返改挂：逐腿消费时相关的根各重建两次；并成一窗净效果是零（属主、成员表次序都回到原样），不该重建。两端的属主链都要读才看得出来。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-SUB 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-SUB 下面的两个无名子设备）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1769 → 1774：candidates=4 (+0 ~4 -0) unchanged=1 no_model=3 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 2 条（SUBE 24384/47496、SUBE 24384/47498）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1769 → 1774",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg7-merged → 1774：相符（根 touched=1 regen=1 delete=0；件 +0 ~4 -0，metadata_only=0 cache_stamp=2 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47495：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-changetype-there-and-back",
+        "from": "ident/changetype_apply.mac",
+        "to": "ident/changetype_restore.mac",
+        "situation": "后端停着的时候，一个弯头原地改了类型又改回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S7"
+        ],
+        "name_keyed_cases": [
+          "D-01",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。净差里有一条真变了的记录（变的都是不进几何的属性）：重建一次或不重建都符合「增量 = 两端全量」。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-NZ"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0
+            },
+            "note": "类型回到了 BEND、几何没变，但这个弯头的记录没有逐项回到原样（一来一回丢了五个不进几何的属性），所以不按零重建断言。现在：这个弯头重建一次、支管的隐含管段重算一次。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里写的是「不重建」，并注明前提是改回去之后两端逐属性相同。实测前提不成立（会话 1739 → 1744）：BEND 改成 ELBO 再改回 BEND，这个弯头的记录回不到原样——老收集器看到五个属性不同（AEXCES、CLUTCH、ISOH、LEXCES、LOOS），窗口规划看到的是「记录字节不同、属性表逐项相等」。五个属性都不进几何（E3D 的导出在两条腿前后逐字相同），但净窗口里这条记录是真变了，不是「改了又改回、净差为零」。规划器保守地把这个弯头重建一次、支管的隐含管段重算一次（cascades=1、units regen=1、derived=1）。所以把支管从「不重建」改登记为「重建与否都算对」，并把这种来法记进票草稿 agents/T3/drafts/ticket-uda-change-overcomputes.md 第 2 条。",
+          "上一条订正把支管改成了「重建与否都算对」，交付单元数却还留着 0，两处自相矛盾——是我登记时漏改的。回放（t3b2-seg6-merged，会话 1739 → 1744）：后端把支管这个根重算了一次，几何差 0/0/0，窗口规划那一行 cascades=1、units regen=1、derived=1，与登记的现状一致；逐步对比因为那个 0 报了「与期望不符」。把交付单元数改成「0 或 1」（unit_count_either）。期望本身（重建与否都算对）没有改。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1739 → 1744：candidates=3 (+0 ~3 -0) unchanged=0 no_model=1 cascades=1 units regen=1 remove=0 derived=1）；只有戳不同的候选 1 条（BRAN 24384/47594）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1739 → 1744",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg6-merged → 1744：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=1，单元重建 1、清掉 0、派生 1）；都算对的根 24384/47594：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-same-name-other-type-merged",
+        "from": "ident/same_name_other_type_apply.mac",
+        "to": "ident/same_name_other_type_restore.mac",
+        "situation": "后端停着的时候，一个有名 BOX 被同名的圆柱换掉（存一次），又被同名的 BOX 换回（再存一次）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-S4"
+        ],
+        "name_keyed_cases": [
+          "A-03",
+          "D-01"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-U",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "plan_line": {
+              "inserted": 1,
+              "deleted": 1
+            },
+            "note": "净效果是成员删后同名重建、内容不变（A-03）；中间那个圆柱从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1745 → 1750：candidates=4 (+1 ~2 -1) unchanged=0 no_model=2 cascades=0 units regen=1 remove=1 derived=0）",
+          "window": "会话 1745 → 1750",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg6-merged → 1750：相符（根 touched=1 regen=1 delete=0；件 +1 ~2 -1，metadata_only=0 cache_stamp=0 cascades=0，单元重建 1、清掉 1、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-unnamed-attr-there-and-back",
+        "from": "ident/unnamed_attr_apply.mac",
+        "to": "ident/unnamed_attr_restore.mac",
+        "situation": "后端停着的时候，一个无名 BOX 的长度改了又改回，存了两次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-A4"
+        ],
+        "name_keyed_cases": [
+          "G-03",
+          "C-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "无名 BOX 的记录两端逐字相同；属主设备只有戳不同（cache_stamp），不该重建。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-U 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-U）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1778 → 1783：candidates=3 (+0 ~3 -0) unchanged=1 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（EQUI 24384/47472）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1778 → 1783",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg7-merged → 1783：相符（根 touched=1 regen=1 delete=0；件 +0 ~3 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47472：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-unnamed-add-there-and-back",
+        "from": "ident/unnamed_add_apply.mac",
+        "to": "ident/unnamed_add_restore.mac",
+        "situation": "后端停着的时候，设备下面多了一个无名 BOX（存一次），又被删掉（再存一次）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-W1"
+        ],
+        "name_keyed_cases": [
+          "C-03",
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差：建了又删消失。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-BRAN-R"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T3-EQ-U"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "那个 BOX 在净窗口里从没出现过；属主设备只有戳不同，不该重建。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T3-EQ-U 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（设备 EQ-U）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1793 → 1798：candidates=2 (+0 ~2 -0) unchanged=0 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（EQUI 24384/47472）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1793 → 1798",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg8-merged → 1798：相符（根 touched=1 regen=1 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=1 cascades=0，单元重建 0、清掉 0、派生 0）；都算对的根 24384/47472：重算了（kind=regen，几何差 0/0/0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-copyof-unit-chain-merged",
+        "from": "ident/copyof_unit_1_apply.mac",
+        "to": "ident/copyof_unit_restore.mac",
+        "situation": "后端停着的时候，两台带 Copy-of 名字的设备被建出来、改过、又删掉，存了三次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-W1"
+        ],
+        "name_keyed_cases": [
+          "C-08",
+          "C-09"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差：建了又删消失。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-CP",
+              "/AIOS-SUITE-T3-EQ-M"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "两台设备在净窗口里从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1814 → 1822：candidates=2 (+0 ~2 -0) unchanged=1 no_model=1 cascades=0 units regen=0 remove=0 derived=0）",
+          "window": "会话 1814 → 1822",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg9-merged → 1822：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+          ]
+        }
+      },
+      {
+        "id": "W2-two-saves-merged",
+        "from": "window/two_saves_apply.mac",
+        "to": "window/two_saves_restore.mac",
+        "situation": "后端停着的时候，同一个会话里存两次建出来的两台设备又都被删掉；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-W1"
+        ],
+        "name_keyed_cases": [
+          "G-02"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差：建了又删消失。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "两台设备在净窗口里从没出现过。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1842 → 1848：candidates=2 (+0 ~2 -0) unchanged=1 no_model=1 cascades=0 units regen=0 remove=0 derived=0）",
+          "window": "会话 1842 → 1848",
+          "replay": [
+            "回放层（T0 的入口，本地主线 debug 版，2026-11-12）",
+            "t3b2-seg10-merged → 1848：相符（根 touched=0 regen=0 delete=0；件 +0 ~2 -0，metadata_only=0 cache_stamp=0 cascades=0，单元重建 0、清掉 0、派生 0）"
+          ]
+        }
+      }
+    ],
+    "session_note": "同一条腿里面再切：window/two_saves_apply.mac 在一个 E3D 会话里存了两次，实测库里是两个业务会话紧挨着（中间没有尾会话），然后才是退出时的尾会话。回放层可以把这条腿拆成两窗消费：from_offset / to_offset 是相对这条腿起点会话号的偏移。期望写在跑规划层核对之前（05:46，只知道会话号走了 3 步）。",
+    "session_windows": [
+      {
+        "id": "W1-two-saves-first",
+        "leg": "window/two_saves_apply.mac",
+        "from_offset": 0,
+        "to_offset": 1,
+        "situation": "用户在一个 E3D 会话里建了一台设备、点了保存，还没退出；后端这时消费了一次。",
+        "change_types": [
+          "CT-W1",
+          "CT-S1"
+        ],
+        "expect": {
+          "why": "第一次存盘自己就是一个完整的业务会话：窗口里只有第一台设备。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-SV1"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-SV1"
+            ],
+            "plan_line": {
+              "inserted": 2,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0
+            },
+            "note": "第二台设备这时还不存在。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1842 → 1843：candidates=3 (+2 ~1 -0) unchanged=0 no_model=2 cascades=0 units regen=1 remove=0 derived=0）",
+          "window": "会话 1842 → 1843",
+          "replay": "用例已生成（agents/T3/replay/cases-b2-waiting-final/），等新终稿"
+        }
+      },
+      {
+        "id": "W1-two-saves-second",
+        "leg": "window/two_saves_apply.mac",
+        "from_offset": 1,
+        "to_offset": 3,
+        "situation": "同一个 E3D 会话里用户接着建了第二台设备、再保存、退出；后端从上一次消费的地方接着消费。",
+        "change_types": [
+          "CT-W1",
+          "CT-S1"
+        ],
+        "expect": {
+          "why": "窗口里只有第二台设备（加退出时的尾会话）；第一台已经在上一窗处理过，这一窗它的记录没有被写，不该再动。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T3-EQ-SV2"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-SV1",
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 1,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T3-EQ-SV2"
+            ],
+            "plan_line": {
+              "inserted": 2,
+              "deleted": 0,
+              "units_regen": 1,
+              "units_remove": 0
+            }
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1843 → 1845：candidates=4 (+2 ~2 -0) unchanged=0 no_model=3 cascades=0 units regen=1 remove=0 derived=0）",
+          "window": "会话 1843 → 1845",
+          "replay": "用例已生成（agents/T3/replay/cases-b2-waiting-final/），等新终稿"
+        }
+      }
+    ],
+    "foreign_note": "并窗换专业：这些窗口取自别人录的链（T1 的支管连接链、T2 的主关节链），都在同一份副本的 db8000 里；T3 没有为它们开过 E3D。evidence 是那条链的证据目录（相对 runs\\），from / to 是那条链上的宏。核对用 tools\\foreign_windows.py。",
+    "foreign_windows": [
+      {
+        "id": "W2-t1-pipeconn-all-back",
+        "owner_of_chain": "T1",
+        "evidence": "T1/20261112-033604-pipeconn-chain",
+        "from": "pipeconn/bran_conn_nozz_apply.mac",
+        "to": "pipeconn/bran_conn_nozz_restore.mac",
+        "situation": "后端停着的时候，一根支管的头接上了设备的管嘴、设备挪开 300、管线重新接上、设备挪回、管线接回原位、断开，一共存了六次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-A5",
+          "CT-A6",
+          "CT-A3"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W2）。支管的头尾连接、位置、设备的位置都回到原值。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "roots_no_rebuild": [
+              "/AIOS-SUITE-T1-BRAN-C"
+            ],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T1-EQ-NZ"
+            ],
+            "unit_count_either": [
+              0,
+              1
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "前提是 T1 的三条还原腿把属性逐项写回了。逐腿消费时支管重建四次、设备重建两次；并成一窗净效果是零，都不该重建（至多只有戳不同）。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T1-EQ-NZ 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（T1 的设备 EQ-NZ）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1193 → 1210：candidates=4 (+0 ~4 -0) unchanged=2 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（EQUI 24384/33559）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1193 → 1210",
+          "replay": "没有出用例（链是别人的）"
+        }
+      },
+      {
+        "id": "W2-t1-conn-move-reconn",
+        "owner_of_chain": "T1",
+        "evidence": "T1/20261112-033604-pipeconn-chain",
+        "from": "pipeconn/bran_conn_nozz_apply.mac",
+        "to": "pipeconn/bran_reconn_apply.mac",
+        "situation": "后端停着的时候，一根支管的头接上了设备的管嘴、设备挪开 300、管线重新接上，一共存了三次；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-A5",
+          "CT-A6",
+          "CT-A3"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差：三次保存里对同一个根的改动合成一次重建。",
+          "detail": {
+            "roots_regen": [
+              "/AIOS-SUITE-T1-BRAN-C",
+              "/AIOS-SUITE-T1-EQ-NZ"
+            ],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "unit_count": 2,
+            "datacenter_delete": [],
+            "full_equal": [
+              "/AIOS-SUITE-T1-BRAN-C",
+              "/AIOS-SUITE-T1-EQ-NZ"
+            ],
+            "note": "净效果：支管的头连接从空变成管嘴、头位置跟到了管嘴的新位置；设备挪了 300、管嘴的 CREF 从空变成这根支管。两个根各重建一次（逐腿消费时支管两次、设备两次）。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过（会话 1193 → 1201：candidates=4 (+0 ~4 -0) unchanged=0 no_model=1 cascades=1 units regen=2 remove=0 derived=1）",
+          "window": "会话 1193 → 1201",
+          "replay": "没有出用例（链是别人的）"
+        }
+      },
+      {
+        "id": "W2-t2-pjoi-spre-there-and-back",
+        "owner_of_chain": "T2",
+        "evidence": "T2/20261112-035147-pjoi-spre-beam",
+        "from": "joint/pjoi_spre_apply.mac",
+        "to": "joint/pjoi_spre_restore.mac",
+        "situation": "后端停着的时候，一只接着梁的主关节换了规格又换回；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-D5"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差；三道结构级联的种子是净窗口里真变了的元素，改了又改回的不算。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+              "/AIOS-SUITE-T2-PJ-A-F1-S1"
+            ],
+            "unit_count_either": [
+              0,
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "梁和主关节互相带动（改主关节 → 被它削的梁重建；改梁 → 认领它的主关节重建）。逐腿消费时两个各重建两次；并成一窗净效果是零，结构级联不该被点着。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T2-PJ-A-F1-N1-J1、/AIOS-SUITE-T2-PJ-A-F1-S1 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（主关节所在的主节点 PNOD、梁 SCTN）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。",
+          "实跑规划层核对之前，这里多写了一条对照（T2 的 /AIOS-SUITE-T2-PJ-B 不该动）。T2 那两批的宏日志里没有回读它的参考号，解不出来，撤掉这条对照；别的期望没有改。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1268 → 1273：candidates=3 (+0 ~3 -0) unchanged=1 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（PNOD 24384/33636）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1268 → 1273",
+          "replay": "没有出用例（链是别人的）"
+        }
+      },
+      {
+        "id": "W2-t2-pjoi-beam-there-and-back",
+        "owner_of_chain": "T2",
+        "evidence": "T2/20261112-035147-pjoi-spre-beam",
+        "from": "joint/pjoi_beam_apply.mac",
+        "to": "joint/pjoi_beam_restore.mac",
+        "situation": "后端停着的时候，被主关节接着的梁的起点横移 20 又移回；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-D5"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差；三道结构级联的种子是净窗口里真变了的元素，改了又改回的不算。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+              "/AIOS-SUITE-T2-PJ-A-F1-S1"
+            ],
+            "unit_count_either": [
+              0,
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "梁和主关节互相带动（改主关节 → 被它削的梁重建；改梁 → 认领它的主关节重建）。逐腿消费时两个各重建两次；并成一窗净效果是零，结构级联不该被点着。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T2-PJ-A-F1-N1-J1、/AIOS-SUITE-T2-PJ-A-F1-S1 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（主关节所在的主节点 PNOD、梁 SCTN）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。",
+          "实跑规划层核对之前，这里多写了一条对照（T2 的 /AIOS-SUITE-T2-PJ-B 不该动）。T2 那两批的宏日志里没有回读它的参考号，解不出来，撤掉这条对照；别的期望没有改。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1274 → 1279：candidates=2 (+0 ~2 -0) unchanged=0 no_model=1 cascades=0 units regen=1 remove=0 derived=0）；只有戳不同的候选 1 条（SCTN 24384/33635）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1274 → 1279",
+          "replay": "没有出用例（链是别人的）"
+        }
+      },
+      {
+        "id": "W2-t2-pjoi-spre-beam-all-back",
+        "owner_of_chain": "T2",
+        "evidence": "T2/20261112-035147-pjoi-spre-beam",
+        "from": "joint/pjoi_spre_apply.mac",
+        "to": "joint/pjoi_beam_restore.mac",
+        "situation": "后端停着的时候，主关节换规格又换回、梁的起点横移又移回（四次保存）；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-D5"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差；三道结构级联的种子是净窗口里真变了的元素，改了又改回的不算。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+              "/AIOS-SUITE-T2-PJ-A-F1-S1"
+            ],
+            "unit_count_either": [
+              0,
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "梁和主关节互相带动（改主关节 → 被它削的梁重建；改梁 → 认领它的主关节重建）。逐腿消费时两个各重建两次；并成一窗净效果是零，结构级联不该被点着。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T2-PJ-A-F1-N1-J1、/AIOS-SUITE-T2-PJ-A-F1-S1 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（主关节所在的主节点 PNOD、梁 SCTN）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。",
+          "实跑规划层核对之前，这里多写了一条对照（T2 的 /AIOS-SUITE-T2-PJ-B 不该动）。T2 那两批的宏日志里没有回读它的参考号，解不出来，撤掉这条对照；别的期望没有改。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1268 → 1279：candidates=4 (+0 ~4 -0) unchanged=1 no_model=2 cascades=0 units regen=1 remove=0 derived=0）；只有戳不同的候选 2 条（SCTN 24384/33635、PNOD 24384/33636）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1268 → 1279",
+          "replay": "没有出用例（链是别人的）"
+        }
+      },
+      {
+        "id": "W2-t2-pjoi-pnod-there-and-back",
+        "owner_of_chain": "T2",
+        "evidence": "T2/20261112-035507-pjoi-pnod-ctl",
+        "from": "joint/pjoi_pnod_apply.mac",
+        "to": "joint/pjoi_pnod_restore.mac",
+        "situation": "后端停着的时候，主关节所在的主节点沿梁轴挪 30 又挪回；后端一次消费。",
+        "change_types": [
+          "CT-W2",
+          "CT-D5"
+        ],
+        "expect": {
+          "why": "窗口只看两端净差；三道结构级联的种子是净窗口里真变了的元素，改了又改回的不算。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [],
+            "roots_rebuild_optional": [
+              "/AIOS-SUITE-T2-PJ-A-F1-N1-J1",
+              "/AIOS-SUITE-T2-PJ-A-F1-S1"
+            ],
+            "unit_count_either": [
+              0,
+              1,
+              2
+            ],
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "梁和主关节互相带动（改主关节 → 被它削的梁重建；改梁 → 认领它的主关节重建）。逐腿消费时两个各重建两次；并成一窗净效果是零，结构级联不该被点着。"
+          }
+        },
+        "status": "plan_checked",
+        "corrections": [
+          "实跑之前这里把 /AIOS-SUITE-T2-PJ-A-F1-N1-J1、/AIOS-SUITE-T2-PJ-A-F1-S1 登记成了「不重建」（roots_no_rebuild）。规划层核对：净窗口里还剩只有戳不同的候选（主关节所在的主节点 PNOD、梁 SCTN）——改成员的属性、改挂、接上又断开之后，E3D 给属主盖过的戳回不去。只有戳跳了的候选不上卷、不级联，但现行设计照旧拿它做祖先闭包的种子，它所在的根整根重算一次，结果与不重算逐字相同（设计如此，不是缺口）。改登记为 roots_rebuild_optional，unit_count 相应地放宽；「净效果是零、模型不变」这个期望没有改。根这一层规划层的离线程序看不到，回放层跑出来是哪一种照实登记。",
+          "实跑规划层核对之前，这里多写了一条对照（T2 的 /AIOS-SUITE-T2-PJ-B 不该动）。T2 那两批的宏日志里没有回读它的参考号，解不出来，撤掉这条对照；别的期望没有改。"
+        ],
+        "checks": {
+          "plan_offline": "过（会话 1295 → 1300：candidates=3 (+0 ~3 -0) unchanged=1 no_model=2 cascades=0 units regen=0 remove=0 derived=0）；只有戳不同的候选 1 条（PNOD 24384/33636）：现行设计照旧做闭包种子，所在的根会整根重算一次",
+          "window": "会话 1295 → 1300",
+          "replay": "没有出用例（链是别人的）"
+        }
+      }
+    ],
+    "probe_windows": [
+      {
+        "id": "W8-modify-quit-nosave",
+        "probe": "window/modify_quit_nosave.mac",
+        "situation": "用户改了一个 BOX 的长度、又新建了一台设备，没有保存就退出了。",
+        "change_types": [
+          "CT-W8",
+          "CT-W3"
+        ],
+        "name_keyed_cases": [
+          "G-02"
+        ],
+        "expect": {
+          "why": "只看已存会话：没保存的改动不在库里。E3D 进过这本库就记一笔账，窗口里只有这种只记账的会话，0 候选，无动作（docs/specs/incr-gen-audit-aux/increment-change-types.md 的 CT-W8、CT-W3）。",
+          "detail": {
+            "roots_regen": [],
+            "roots_removed": [],
+            "roots_untouched": [
+              "/AIOS-SUITE-T3-EQ-M",
+              "/AIOS-SUITE-T3-EQ-SUB"
+            ],
+            "unit_count": 0,
+            "datacenter_delete": [],
+            "plan_line": {
+              "inserted": 0,
+              "modified": 0,
+              "deleted": 0,
+              "units_regen": 0,
+              "units_remove": 0
+            },
+            "note": "窗口 = 这一步前后的会话号。水位照推，任务 succeeded、交付单元 0。"
+          }
+        },
+        "status": "plan_checked",
+        "checks": {
+          "plan_offline": "过",
+          "window": "会话 1863 → 1863",
+          "replay": "用例已生成（agents/T3/replay/cases-b2-waiting-final/），等新终稿"
+        }
+      }
+    ]
+  }
+}

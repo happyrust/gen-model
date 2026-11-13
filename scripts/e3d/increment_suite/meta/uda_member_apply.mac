@@ -1,0 +1,21 @@
+-- 登记: A07（变更类型 CT-A10；按名称案例 B-02） | 语义: 给支管 BRAN-R 下面一个有名弯头（M2）设上一个自定义属性（:MDSComment，从没设到设了），别的都不动
+-- expected_net: modified | restore 搭档: meta/uda_member_restore.mac
+-- 预期 gen-model（按 refno，该有的行为）: 任务 succeeded、交付单元 0、支管的管件行和管身行都不变——这个属性不进几何（E3D 导出前后逐字相同）。
+-- 变更类型总表 CT-A10 这一格要的就是这一对：改支管里一个元件的自定义属性，看是跳过还是整条支管重建。
+-- ★ 现在的元数据门不放行自定义属性，整条支管会重建一次：结果不错，但白算（known_gap，同 meta/uda_text_apply.mac）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-UDA-MEMBER-APPLY-ALIVE
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+/AIOS-SUITE-T3-BRAN-R-M2
+Q REF
+Q NAME
+Q TYPE
+Q UDASET
+:MDSComment 'AIOS T3 uda on member'
+Q :MDSComment
+Q UDASET
+SAVEWORK 'AIOS suite T3 meta/uda_member apply: BRAN-R-M2 UDA MDSComment set'
+$P SUITE-T3-META-UDA-MEMBER-APPLY-DONE
+ALPHA LOG END

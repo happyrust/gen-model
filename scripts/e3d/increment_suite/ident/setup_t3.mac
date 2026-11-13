@@ -1,0 +1,232 @@
+-- T3 语料（名称、身份与会话窗口）：db8000 里自己的 SITE /AIOS-SUITE-T3，下面一个 ZONE /AIOS-SUITE-T3-Z。
+-- 不依赖公共基线 /AIOS-SUITE-8000（那棵树归套件原有用例，随时会被改、被删、被重建）；只读地 COPY 一条生产支管 /C-OR-1R345-C。
+-- 幂等：先按名删掉旧的 T3 SITE（连同里面的无名件、自动命名件），再整套重建。收场用 ident/teardown_t3.mac。
+-- 世界锚点占位符渲染成两行（/1RX03-EQUI + OWNER）：把 CE 挪进 db8000 再上跳到它的 WORLD，否则 SITE 会建进缺省库 1112。
+-- （注释里不能写出占位符本身：渲染是整份文本替换，注释里的也会被换成两行，第二行就成了一句坏命令。）
+--
+-- 为什么另起一套而不用套件的 EQ-A / BRAN-S：这一组用例要删掉重建整台单元、要留无名成员、要改大小写，
+-- 都会和别的用例抢同一个元素；按名称案例文档里的元素名与这里的对应关系记在 manifest.d/T3-ident.json 的 doc_names 里。
+--
+-- 成员顺序是这一组用例的断言对象，所以创建时不回到 ZONE 再 NEW：
+--   CE 是属主时 NEW 把新元素插在成员表第 1 位（create/box、P82 两次实测）；
+--   CE 是同级成员（或它的后代）时 NEW 插在它后面（PDMS 的规矩，本套件此前没有单独实测，setup 末尾 Q MEMB 留证）。
+-- 所以 EQ-M 第一个建，其余依次接在前一台后面。期望的 ZONE 成员序：
+--   EQ-M, EQ-RN, EQ-CASE, EQ-U, <无名 EQUI>, EQ-CP, PIPE, EQ-NZ, EQ-SUB
+-- SITE 下面还有第二个 ZONE（Z2，高 3000，里面一台 EQ-Z2），给整个容器改挂、单元换 ZONE 用。
+-- 另有第二个 SITE /AIOS-SUITE-T3-S2（偏北 2000，里面 ZONE S2-Z、设备 EQ-S2），给整个 ZONE 改挂用；收场时两个 SITE 一起删。
+--
+-- 坐标都落在 E 100000..104000 / N 30000..42000，离套件原有语料（E <= 98000、N <= 25000）和房间都远。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-SETUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T3*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-T3
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T3-Z
+Q REF
+Q NAME
+-- EQ-M：三个有名 BOX，顺序 M1, M2, M3。整台删后重建（A-02）、成员删后重建（A-04、B-05）都打在它上面。
+-- DESC 给一个非空基线，只动元数据的用例写回它（清成空会让差分落在显式属性的有无上，见 attr/desc_restore.mac 的注）。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-M
+POS E 100000 N 30000 U 0
+DESC 'AIOS T3 baseline'
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 400 ZLEN 200
+NAME /AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+NEW BOX XLEN 400 YLEN 400 ZLEN 600
+NAME /AIOS-SUITE-T3-BOX-M2
+POS E 1500 N 0 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-M3
+POS E 3000 N 0 U 0
+Q REF
+Q NAME
+-- EQ-RN：一个无名 BOX。删掉重建同时换名（A-06）用它：有几何可对，又没有有名成员跟着换单元。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-RN
+POS E 100000 N 32000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 800 YLEN 400 ZLEN 300
+Q REF
+Q TYPE
+-- EQ-CASE：名称只差大小写（D-04）。BOX-CASE 兼作导航锚：改名之后按子件名上跳，不按设备名导航。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-CASE
+POS E 100000 N 34000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 600 YLEN 300 ZLEN 200
+NAME /AIOS-SUITE-T3-BOX-CASE
+Q REF
+Q NAME
+-- EQ-U：成员序 [有名 BOX-U0, 无名 BOX(700x300x200), 无名 BOX(300x700x200)]。无名成员的改、增删、重建（C-01～C-04）用它。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-U
+POS E 100000 N 36000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 500 YLEN 500 ZLEN 500
+NAME /AIOS-SUITE-T3-BOX-U0
+Q REF
+Q NAME
+NEW BOX XLEN 700 YLEN 300 ZLEN 200
+POS E 1500 N 0 U 0
+Q REF
+Q TYPE
+NEW BOX XLEN 300 YLEN 700 ZLEN 200
+POS E 3000 N 0 U 0
+Q REF
+Q TYPE
+-- 没有名字的设备（C-05、C-06）：自己无名，下面一个有名 BOX-NN（导航锚）和一个无名 BOX。
+NEW EQUIPMENT
+POS E 100000 N 38000 U 0
+Q REF
+Q TYPE
+NEW BOX XLEN 400 YLEN 400 ZLEN 400
+NAME /AIOS-SUITE-T3-BOX-NN
+Q REF
+Q NAME
+NEW BOX XLEN 600 YLEN 200 ZLEN 200
+POS E 1500 N 0 U 0
+Q REF
+Q TYPE
+-- EQ-CP：自动命名（Copy-of）的成员和单元（C-07～C-09）挂在它旁边。
+-- FUNC、PURP 给非空基线：只改这两个属性的用例（B-03）写回它们，不用去找「清空」的写法。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-CP
+POS E 100000 N 40000 U 0
+FUNC 'AIOS T3 func base'
+PURP EQUI
+-- 两个自定义属性（UDA）也给基线值：:EQNA 是文本（长度 50），:WEIGHT 是实数，都只挂在 EQUI 上。
+-- 定义与赋值句见 ident/uda_probe.mac、ident/uda_set_probe.mac 的实测（2026-11-12）。
+:EQNA 'AIOS T3 eqna base'
+:WEIGHT 100
+Q REF
+Q NAME
+Q :EQNA
+Q :WEIGHT
+Q UDASET
+NEW BOX XLEN 500 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-T3-BOX-CP1
+Q REF
+Q NAME
+-- PIPE + BRAN-R：整条支管删后同名重建（A-02、A-05）用自己的一条。
+-- 语料与公共基线的 BRAN-S 同源（COPY /C-OR-1R345-C，9 个成员），抬高 6000 与原件、与 BRAN-S 分开。
+NEW PIPE /AIOS-SUITE-T3-PIPE
+Q REF
+Q NAME
+NEW BRAN /AIOS-SUITE-T3-BRAN-R
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+BY U 6000 WRT /*
+Q HPOS
+Q MEMB
+/AIOS-SUITE-T3-BRAN-R
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-T3-BRAN-R-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-BRAN-R
+Q MEMB
+-- EQ-NZ + NOZZ-1：引用目标那一组（E-01、E-03、E-07）的管口。自建、无目录件（db8000 里没有带管口的生产设备）。
+-- 导航到 PIPE 再 NEW EQUIPMENT，新设备接在 ZONE 成员表末尾。
+/AIOS-SUITE-T3-PIPE
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-NZ
+POS E 100000 N 42000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 400 YLEN 400 ZLEN 400
+NAME /AIOS-SUITE-T3-BOX-NZ
+Q REF
+Q NAME
+NEW NOZZ /AIOS-SUITE-T3-NOZZ-1
+Q REF
+Q NAME
+-- EQ-SUB：两个没有名字的子设备（SUBE），第一个里有一个有名 BOX-SUB，第二个里一个无名 BOX。
+-- 有名构件在无名层级之间挪（B-07）用它：BOX-SUB 从第 1 个 SUBE 挪到第 2 个，最近的有名祖先始终是 EQ-SUB。
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-SUB
+POS E 100000 N 44000 U 0
+Q REF
+Q NAME
+NEW SUBE
+Q REF
+Q TYPE
+NEW BOX XLEN 400 YLEN 400 ZLEN 400
+NAME /AIOS-SUITE-T3-BOX-SUB
+Q REF
+Q NAME
+NEW SUBE
+Q REF
+Q TYPE
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+POS E 1500 N 0 U 0
+Q REF
+Q TYPE
+/AIOS-SUITE-T3-EQ-SUB
+Q MEMB
+-- 第二个 ZONE（Z2）：比第一个高 3000。整个容器改挂、单元换 ZONE 的目标；里面原有一台 EQ-Z2 当对照（它不该被改挂连累）。
+-- 导航到第一个 ZONE 再 NEW ZONE，新 ZONE 接在它后面。
+/AIOS-SUITE-T3-Z
+NEW ZONE /AIOS-SUITE-T3-Z2
+POS E 0 N 0 U 3000
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-Z2
+POS E 106000 N 30000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 600 YLEN 600 ZLEN 600
+NAME /AIOS-SUITE-T3-BOX-Z2
+Q REF
+Q NAME
+-- 第二个 SITE（S2，比第一个偏北 2000）：整个 ZONE 改挂的目标。里面原有一个 ZONE、一台设备当对照。
+-- 导航到第一个 SITE 再 NEW SITE，新 SITE 接在它后面（CE 已经在 db8000 里，不用再走世界锚点）。
+/AIOS-SUITE-T3
+NEW SITE /AIOS-SUITE-T3-S2
+POS E 0 N 2000 U 0
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T3-S2-Z
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-S2
+POS E 108000 N 30000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 500 YLEN 500 ZLEN 500
+NAME /AIOS-SUITE-T3-BOX-S2
+Q REF
+Q NAME
+/AIOS-SUITE-T3-S2
+Q MEMB
+/AIOS-SUITE-T3-EQ-M
+Q MEMB
+/AIOS-SUITE-T3-EQ-U
+Q MEMB
+/AIOS-SUITE-T3-Z
+Q MEMB
+/AIOS-SUITE-T3-Z2
+Q MEMB
+/AIOS-SUITE-T3
+Q MEMB
+SAVEWORK 'AIOS suite T3: baseline setup (ident corpus, own SITE /AIOS-SUITE-T3)'
+$P SUITE-T3-SETUP-DONE
+ALPHA LOG END

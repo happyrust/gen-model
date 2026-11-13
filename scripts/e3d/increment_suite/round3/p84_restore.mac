@@ -1,0 +1,16 @@
+-- P84 restore：把 BEND 1 的 SPRE 写回案例开始前的值（TBR:50 =13244/108844）。
+-- apply 内先写 108852 再清 0，窗口结束后 CE 的属性已是空；restore 直接写回初始 refno。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-R3-P84-RESTORE-ALIVE
+{{WORLD_ANCHOR}}
+{{TARGET_NAME}}
+BEND 1
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+SPRE =13244/108844
+Q SPRE
+SAVEWORK 'AMS round3 P84 restore qualifier'
+$P AMS-R3-P84-RESTORE-DONE
+ALPHA LOG END

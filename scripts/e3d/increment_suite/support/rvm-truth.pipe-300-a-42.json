@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "suite": "pml-increment-suite",
+  "owner": "T1",
+  "description": "支吊架这一组在管道那一侧的 RVM 期望模型：导出根 /300-A-42（250132，PIPE；没有 POS，导出步要用 exportnp）。三件：头段管身、三通、三通到尾的那一段管身。给 Compare-SuiteRvmTruth.ps1 -Model 用。",
+  "pairing_rules": "apply 腿与它之前那份快照比；restore 腿与对应 apply 之前的那份比（equals_state_before）。",
+  "tolerances": { "aabb_mm": 1.0 },
+  "legs": {
+    "support/compre_hstu_xdb_apply.mac": {
+      "resized": {
+        "300-A-42/B1/TUBE 1 of BRANCH /300-A-42/B1": [-321870.51, 309963.47, 106485.20, -312915.50, 310236.54, 106803.02]
+      },
+      "note": "2026-11-12 实测（250132 会话 41）。头段管身每侧缩 25.40（外径 323.85 → 273.05），改之前是 [-321870.64, 309938.08, 106459.80, -312915.37, 310261.93, 106828.42]；三通与尾段不动（三通的 LSTU 没换）。"
+    },
+    "support/compre_hstu_xdb_restore.mac": { "equals_state_before": "support/compre_hstu_xdb_apply.mac" },
+    "support/compre_ctl_move_apply.mac": {
+      "moved": {
+        "300-A-42/B1/TUBE 1 of BRANCH /300-A-42/B1": [0, 0, 100],
+        "300-A-42/B1/TEE 1 of BRANCH /300-A-42/B1": [0, 0, 100]
+      },
+      "removed": ["300-A-42/B1/TUBE 2 of BRANCH /300-A-42/B1"],
+      "note": "2026-11-12 实测（250132 会话 43）。头点与三通各上抬 100；三通到尾的那一段管身不画了——三通抬高之后与尾点不再对齐，E3D 不画没对齐的隐含管段。"
+    },
+    "support/compre_ctl_move_restore.mac": { "equals_state_before": "support/compre_ctl_move_apply.mac" }
+  }
+}

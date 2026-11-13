@@ -1,0 +1,33 @@
+-- 只读探针（不存盘）：认领、释放的句子怎么写；8000 这个库是哪种认领方式。给「只留下盖戳的保存」那个用例定写法。
+-- 带 ONERROR CONTINUE：哪一句不成立，报错带行号留在日志里，宏接着走。打在 T4 自己的 EQ-CLM 上，不碰生产元素。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T4-CLAIM-PROBE-ALIVE
+/AIOS-SUITE-T4-EQ-CLM
+Q REF
+Q NAME
+$P T4-PROBE-1 db attributes
+Q DBNAME
+Q DBNUMB
+Q DBACC
+Q DBCLAI
+Q DBWRITE
+$P T4-PROBE-2 claim state before
+Q LCLM
+Q USERC
+Q LCLMH
+$P T4-PROBE-3 claim
+CLAIM CE
+Q LCLM
+Q USERC
+$P T4-PROBE-4 unclaim
+UNCLAIM CE
+Q LCLM
+Q USERC
+$P T4-PROBE-5 claim hierarchy / unclaim all
+CLAIM CE HIERARCHY
+Q LCLM
+UNCLAIM ALL
+Q LCLM
+$P SUITE-T4-CLAIM-PROBE-DONE
+ALPHA LOG END

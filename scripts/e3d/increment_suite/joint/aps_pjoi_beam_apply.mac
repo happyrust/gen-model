@@ -1,0 +1,59 @@
+-- 登记: D5-pjoi-beam-aps（CT-D5 结构关节 / CT-A4 几何；联动 #12 主关节级联）
+-- 语义: 只改被接的柱——把 /SB3/PANEL/1/COL/C03 整根东移 40 mm（POSS、POSE 的 E 各 +40），主关节与 PNOD 一个字不动
+-- expected_net: modified | restore 搭档: joint/aps_pjoi_beam_restore.mac | 库: aps7166（APS 副本，MDB /SDNF）
+-- 直接改生产元素（样本只在生产元素上）：/SB3/PANEL/1/COL/C03。restore 把两个端点按绝对值写回。
+--
+-- 样本（只读探针 2026-11-12；E3D 取证 2026-11-11）：
+--   SCTN /SB3/PANEL/1/COL/C03（=23550/1079）：POSS W 1250 N 1250 U 170，POSE W 1250 N 1250 U 5250（属主系），
+--   JOIE 指端板主关节 =23550/1066（SPRE /End-Plate，DESP 0 10 200 200 0 0，CUTB 10，CREF 回指这根柱），
+--   JOIS 指 =23550/1099（没有规格，不成模型单元）；名下三只 SNOD 里的 SJOI 都没有规格。
+-- 期望：这一窗该重建 2 件——柱 C03 自己（上卷到自己）、端板主关节 =23550/1066（反向关节级联：梁要重建，
+--   它认领的、CREF 回指它的带目录正体主关节一并重建）。同一个 SBFR 里的 C01 / C02 / C04 不该被点名。
+--   主关节的原点落在柱的 JLIN 线与「过站位、法向为关节 Z 的平面」的交点上：柱东移 40，端板同样东移 40；
+--   端板让位的那只 NSEX 跟着端板走，柱顶仍短 10 mm。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-BEAM-APPLY-ALIVE
+=23550/1066
+Q REF
+Q NAME
+Q TYPE
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+=23550/1065
+Q REF
+Q NAME
+Q NPOS
+/SB3/PANEL/1/COL/C03
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+POSS E -1210 N 1250 U 170
+POSE E -1210 N 1250 U 5250
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q JOIS
+Q JOIE
+=23550/1066
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+=23550/1065
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_beam apply: column C03 moved E 40'
+$P SUITE-T2-JOINT-APS-PJOI-BEAM-APPLY-DONE
+ALPHA LOG END

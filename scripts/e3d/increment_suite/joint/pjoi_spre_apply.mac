@@ -1,0 +1,49 @@
+-- 登记: D5-pjoi-spre（CT-D5 结构关节 / CT-A6 单引用；联动 #12 主关节级联）
+-- 语义: 只改主关节——给 PJ-A 上那只主关节换规格（JT5 -> JT1），梁与 PNOD 一个字不动
+-- expected_net: modified | restore 搭档: joint/pjoi_spre_restore.mac | 前置: joint/setup.mac | 库: db8000
+--
+-- 样本（setup 从 ams7999 /1RX02-LSUP-E0361 COPY 来）：
+--   PJOI /AIOS-SUITE-T2-PJ-A-F1-N1-J1：SPRE /ACP1000-ELEC-JT5（=21438/3356），CREF 指 SCTN /AIOS-SUITE-T2-PJ-A-F1-S1，
+--   那根梁的 JOIS 指回它。JT5 / JT1（=21438/3354）的目录件正体集里有图元（E3D 画），负体集是空的。
+-- 期望（机器可读的那份在 manifest.d/T2-pjoi.json）：这一窗该重建 2 件——主关节自己（上卷到自己）、
+--   梁 S1（关节级联：关节要重建，JOIS / JOIE 指着它的梁一并重建）。主关节的图形换成 JT1 的；S1 重建前后几何相同。
+--   PJ-B、PJ-C 一件都不该动。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-PJOI-SPRE-APPLY-ALIVE
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-A-F1-N1-J1
+Q REF
+Q NAME
+Q TYPE
+Q SPRE
+Q CREF
+Q DELP
+Q BANG
+Q POS WRT /*
+Q ORI WRT /*
+SPRE =21438/3354
+Q SPRE
+Q CREF
+Q DELP
+Q BANG
+Q POS WRT /*
+Q ORI WRT /*
+/AIOS-SUITE-T2-PJ-A-F1-S1
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-A-F1-N1
+Q REF
+Q NAME
+Q NPOS
+SAVEWORK 'AIOS suite T2 joint/pjoi_spre apply: PJOI SPRE JT5 -> JT1'
+$P SUITE-T2-JOINT-PJOI-SPRE-APPLY-DONE
+ALPHA LOG END

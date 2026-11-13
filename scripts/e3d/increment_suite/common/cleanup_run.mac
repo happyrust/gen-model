@@ -1,0 +1,13 @@
+-- Delete only objects owned by this run. Replace {{RUN_PREFIX}}, {{WORLD_ANCHOR}},
+-- and {{LOG_PATH}}. Never broaden the name predicate to /AIOS-SUITE-*.
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P AMS-INPLACE-CLEANUP-ALIVE
+{{WORLD_ANCHOR}}
+VAR !sites COLLECT ALL SITE WITH (MATCHWILD(NAME,'{{RUN_PREFIX}}*')) FOR CE
+DO !s VALUES !sites
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+SAVEWORK 'AMS in-place incremental cleanup'
+$P AMS-INPLACE-CLEANUP-DONE
+ALPHA LOG END

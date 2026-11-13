@@ -334,7 +334,9 @@ function Export-State([string]$Name, [int]$StateSesno, [string]$CaseId, [string]
 }
 
 function Invoke-Compare($Entry, [string]$BeforeTruth, [string]$MacroRel) {
-    $report = Join-Path $evidenceRoot "$($Entry.case)-$($Entry.leg).compare.json"
+    # 强制链的 case 形如 chain:connect/bran_reparent，冒号和斜杠不能进 Windows 文件名
+    $reportLeaf = ('{0}-{1}.compare.json' -f $Entry.case, $Entry.leg) -replace '[:\\/]', '-'
+    $report = Join-Path $evidenceRoot $reportLeaf
     & $compareScript -Before $BeforeTruth -After (Join-Path $TruthDir $Entry.truth) -Leg $MacroRel -Model $modelPath -Root $Element -Report $report -Quiet
     $code = $LASTEXITCODE
     $verdict = 'error'

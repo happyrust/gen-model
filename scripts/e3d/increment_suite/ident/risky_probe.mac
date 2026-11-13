@@ -1,0 +1,33 @@
+-- 探针（只探不存）之四：两句没有先例、可能让 E3D 出事的写法，单独放一份，最后跑。
+-- 本文件**无 SAVEWORK**，改动随 wrapper 的 QUIT 丢弃。前置：ident/setup_t3.mac 已跑。
+-- 这份崩了（退出码 3221225477、日志为空）也是结论：那一句在 TTY 里不能用，记下来就行。
+--
+--  11B  CONNECT PH TO /<管口>：整套接管（HREF、HPOS、HDIR、HBOR 一起写）。自建的 NOZZ-1 没有目录件、没有 P 点，E3D 可能拒。
+--  12   改类型：CHANGETYPE TO <类型> 有没有这个句子、改完 refno 变不变（按名称案例 D-01；变更类型 CT-S7 的 PML 入口待核）
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-RISKY-PROBE-ALIVE
+
+$P T3-PROBE-12-CHANGETYPE
+/AIOS-SUITE-T3-EQ-CP
+NEW BOX XLEN 130 YLEN 130 ZLEN 130
+Q REF
+Q TYPE
+CHANGETYPE TO CYLI
+Q REF
+Q TYPE
+
+$P T3-PROBE-11B-CONNECT-PH
+/AIOS-SUITE-T3-BRAN-R
+Q REF
+Q NAME
+Q HREF
+Q HPOS
+CONNECT PH TO /AIOS-SUITE-T3-NOZZ-1
+Q HREF
+Q HPOS
+/AIOS-SUITE-T3-NOZZ-1
+Q CREF
+
+$P SUITE-T3-RISKY-PROBE-DONE
+ALPHA LOG END

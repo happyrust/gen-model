@@ -1,0 +1,31 @@
+-- 登记: A01（变更类型 CT-S4；按名称案例 C-01） | 语义: 无名成员删后原样重建——同一次保存里把设备 EQ-U 的第 2 个成员（没有名字的 BOX，700 x 300 x 200）删掉，在原位按原样再建一个，还是没有名字
+-- expected_net: deleted（按 refno：旧 BOX 删除、新 BOX 新建；按名：什么都没变） | restore 搭档: 无（终态按名即跑之前，重跑幂等）
+-- 预期 gen-model（按 refno）: 设备 EQ-U 重建一次（成员的参考号换了）；重建出来的几何与之前相同；没有 datacenter_delete；别的设备不动。
+-- 无名成员按「所在设备的名字 + 第几个成员」来找：先到 EQ-U，取成员表第 2 个。新 BOX 在 BOX-U0 后面建，回到第 2 位。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNNAMED-RECREATE-ALIVE
+/AIOS-SUITE-T3-EQ-U
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+!!CE = !mm[2]
+$P T3-ALIAS EQ-U-BOX2
+Q REF
+Q TYPE
+Q XLEN
+Q POS
+DELETE BOX
+/AIOS-SUITE-T3-BOX-U0
+NEW BOX XLEN 700 YLEN 300 ZLEN 200
+POS E 1500 N 0 U 0
+$P T3-ALIAS EQ-U-BOX2
+Q REF
+Q TYPE
+Q XLEN
+Q POS
+/AIOS-SUITE-T3-EQ-U
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/unnamed_recreate: unnamed BOX 2 of EQ-U deleted and rebuilt identical in place'
+$P SUITE-T3-UNNAMED-RECREATE-DONE
+ALPHA LOG END

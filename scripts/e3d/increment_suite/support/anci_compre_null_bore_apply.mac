@@ -1,0 +1,28 @@
+-- 探针性质的一对（落库、成对还原）：E3D 在支撑件没有被支撑件可问时，管外径到底取自哪里。
+-- 登记: gen-model #132 一族（变更类型 CT-A2 + CT-A6，兼 CT-A4：改的是上一级 SUPC 的通径） | 语义:
+-- 同一次存盘里把 /PS-01-00194.1 的 COMPRE 清空，并把它上一级 SUPC /PS-01-00194/B1 的 HBOR 300 → 250、TBOR 300 → 200。
+-- 看 E3D 导出里这只件的下沿：-(250 / 2 + 100) = -225 说明取的是 HBOR；-(200 / 2 + 100) = -200 说明取的是 TBOR；
+-- 仍是 -250 说明两个都不是。
+-- expected_net: modified | restore 搭档: support/anci_compre_null_bore_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-BORE-APPLY-ALIVE
+/PS-01-00194/B1
+Q REF
+Q NAME
+Q HBOR
+Q TBOR
+HBOR 250
+TBOR 200
+Q HBOR
+Q TBOR
+/PS-01-00194.1
+Q REF
+Q NAME
+Q COMPRE
+COMPRE =0/0
+Q COMPRE
+SAVEWORK 'AIOS suite support/anci_compre_null_bore apply: COMPRE -> null, SUPC HBOR 250 TBOR 200'
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-BORE-APPLY-DONE
+ALPHA LOG END

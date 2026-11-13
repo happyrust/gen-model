@@ -1,0 +1,33 @@
+-- 登记: D5-pjoi-pnod-aps | 语义: 把主节点 /SB3/PB1/4/N03 的 NPOS 写回 E 0 N 18000 U 6197.883
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/aps_pjoi_pnod_apply.mac 的 restore | 库: aps7166（APS 副本，MDB /SDNF）
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：重建端板主关节与柱 C01 两件，柱顶回到短 10 mm。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-APS-PJOI-PNOD-RESTORE-ALIVE
+=23550/379
+Q REF
+Q NAME
+Q POS WRT /*
+/SB3/PB1/4/N03
+Q REF
+Q NAME
+Q TYPE
+Q NPOS
+NPOS E 0 N 18000 U 6197.883
+Q NPOS
+=23550/379
+Q CREF
+Q DESP
+Q CUTB
+Q DELP
+Q POS WRT /*
+Q ORI WRT /*
+/SB3/PB1/4/POR/C01
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+SAVEWORK 'AIOS suite T2 joint/aps_pjoi_pnod restore: PNOD N03 NPOS back'
+$P SUITE-T2-JOINT-APS-PJOI-PNOD-RESTORE-DONE
+ALPHA LOG END

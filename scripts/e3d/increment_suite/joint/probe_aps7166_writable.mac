@@ -1,0 +1,33 @@
+-- 探针（不 SAVEWORK，不进录制清单）：aps7166 在 MDB /SDNF 的会话里能不能写。
+-- 做法：把斜梁 /SB3/PB1/4/POR/R01（=23550/412）的 BANG 写成 90 再写回 0，不存盘。
+--   写得进：日志里 PROBE-WRITE-OK；只读库：E3D 报 (2,25) Read only DB，日志里 PROBE-WRITE-FAILED 带原文。
+--   两句写之间不存盘，会话由 driver 结束，库文件上不留会话。
+-- 取证代理 2026-11-11 只在 /SDNF 里导出过，没有写过；7166 属 *SDNF 队，登录用户对它有没有写权限没人试过。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-JOINT-PROBE-APS7166-WRITABLE-ALIVE
+Q MDB
+=23550/412
+handle any
+$P NAV-FAILED 23550/412
+endhandle
+Q REF
+Q NAME
+Q TYPE
+Q BANG
+BANG 90
+handle any
+$P PROBE-WRITE-FAILED $!!ERROR.TEXT
+elsehandle none
+$P PROBE-WRITE-OK
+endhandle
+Q BANG
+BANG 0
+handle any
+$P PROBE-REVERT-FAILED $!!ERROR.TEXT
+elsehandle none
+$P PROBE-REVERT-OK
+endhandle
+Q BANG
+$P SUITE-JOINT-PROBE-APS7166-WRITABLE-DONE
+ALPHA LOG END

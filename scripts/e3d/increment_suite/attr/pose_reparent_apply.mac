@@ -1,0 +1,20 @@
+-- 登记: A02 | 语义: BOX-POSE 从 EQ-PA INCLUDE 到朝向、位置都不同的 EQ-PB。不写 BOX 的 POS。预期两端重建，世界坐标变、本地位置命令没再下 | expected_net: modified | restore 搭档: attr/pose_reparent_restore.mac
+-- 来源: attr/owner_apply.mac 的 INCLUDE。甲乙朝向差一象限（Y is N / Y is E），位置差 N 5000
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-POSE-REPARENT-APPLY-ALIVE
+/AIOS-SUITE-BOX-POSE
+!box = !!CE
+Q REF
+Q NAME
+Q OWNE
+Q POS WRT /*
+/AIOS-SUITE-EQ-PB
+INCLUDE $!box
+/AIOS-SUITE-BOX-POSE
+Q REF
+Q NAME
+Q OWNE
+Q POS WRT /*
+SAVEWORK 'AIOS suite attr/pose_reparent apply: BOX-POSE PA -> PB'
+$P SUITE-ATTR-POSE-REPARENT-APPLY-DONE
+ALPHA LOG END

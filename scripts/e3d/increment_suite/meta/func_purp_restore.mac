@@ -1,0 +1,17 @@
+-- 登记: A07（变更类型 CT-A1；按名称案例 B-03） | 语义: 把 EQ-CP 的 FUNC 和 PURP 写回基线值
+-- expected_net: modified | apply 搭档: meta/func_purp_apply.mac
+-- 预期 gen-model（按 refno）: 同 apply，零重建（metadata_only）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-META-FUNC-PURP-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q FUNC
+Q PURP
+FUNC 'AIOS T3 func base'
+PURP EQUI
+Q FUNC
+Q PURP
+SAVEWORK 'AIOS suite T3 meta/func_purp restore: EQ-CP FUNC and PURP back to base'
+$P SUITE-T3-META-FUNC-PURP-RESTORE-DONE
+ALPHA LOG END

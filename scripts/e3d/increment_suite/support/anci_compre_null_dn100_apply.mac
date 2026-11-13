@@ -1,0 +1,22 @@
+-- 登记: gen-model #132 一族（变更类型 CT-A2 + CT-A6） | 语义: 另一只、另一档口径的支撑件 COMPRE 被清空——
+-- /PS-01-00217.4（支撑库 250104，托着 DN100 的支管 /100-A-18/B1）的 COMPRE 写成空引用（=0/0）。
+-- 和 support/anci_compre_null_apply.mac（DN300 的那只）配成一对，用来分辨 E3D 没有被支撑件可问时拿什么当管外径：
+-- DN300 那只 E3D 照 300 画（它的目录件 PARA[1] = 300；上一级 SUPC 的 HBOR / TBOR 改了不起作用）。
+-- 这一只如果照 100 画（下沿 = -(100 / 2 + 100) = -150），就说明取的是目录件自己的公称口径。
+-- expected_net: modified | restore 搭档: support/anci_compre_null_dn100_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑——动的是生产元素，写绝对值，重跑幂等。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-DN100-APPLY-ALIVE
+/PS-01-00217.4
+Q REF
+Q NAME
+Q TYPE
+Q OWNER
+Q SPRE
+Q COMPRE
+COMPRE =0/0
+Q COMPRE
+SAVEWORK 'AIOS suite support/anci_compre_null_dn100 apply: /PS-01-00217.4 COMPRE -> null'
+$P SUITE-SUPPORT-ANCI-COMPRE-NULL-DN100-APPLY-DONE
+ALPHA LOG END

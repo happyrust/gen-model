@@ -1,0 +1,13 @@
+-- 登记: A09 | 语义: 把 EQ-DESC 的 DESC 按 setup 的原值再写一遍再 SAVEWORK。预期字符串同值早退，RVM 不变 | expected_net: unchanged | restore 搭档: attr/desc_same_restore.mac
+-- 字符串与 common/setup_8000.mac 里 NEW EQUIPMENT /AIOS-SUITE-EQ-DESC 的 DESC 同一句
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-DESC-SAME-APPLY-ALIVE
+/AIOS-SUITE-EQ-DESC
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS suite desc same'
+Q DESC
+SAVEWORK 'AIOS suite attr/desc_same apply: EQ-DESC DESC rewritten unchanged'
+$P SUITE-ATTR-DESC-SAME-APPLY-DONE
+ALPHA LOG END

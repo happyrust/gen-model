@@ -1,0 +1,32 @@
+-- 登记: D5-ctl-sctn-free | 语义: 把那根没有关节的型钢的终点写回 W 175 N 0 D 40
+-- expected_net: cancelled | restore 搭档: 本文件是 joint/ctl_sctn_free_apply.mac 的 restore | 库: db8000
+-- 写的是绝对值，重跑幂等。期望与 apply 对称：只重建 SFREE 一件。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T2-JOINT-CTL-SCTN-FREE-RESTORE-ALIVE
+/AIOS-SUITE-T2-PJ-C-SFREE
+Q REF
+Q NAME
+Q TYPE
+Q POSS
+Q POSE
+POSE E -175 N 0 U -40
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-C-F1-S1
+Q REF
+Q NAME
+Q POSS
+Q POSE
+Q JOIS
+Q JOIE
+/AIOS-SUITE-T2-PJ-C-F1-N1-J1
+Q REF
+Q NAME
+Q CREF
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'AIOS suite T2 joint/ctl_sctn_free restore: unjointed SCTN POSE -> W 175'
+$P SUITE-T2-JOINT-CTL-SCTN-FREE-RESTORE-DONE
+ALPHA LOG END

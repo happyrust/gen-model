@@ -1,0 +1,21 @@
+-- 探针式的一步（**无 SAVEWORK**）：改了没存就退——变更类型 CT-W8；会话窗口形状「改了没保存就退出」。
+-- 语义: 用户把设备 EQ-M 下面 BOX-M1 的长度从 1000 改成 1111，又新建了一台设备，然后不保存直接退出。
+-- 预期 gen-model（按 refno）: 库里可能多一个只记账的会话（E3D 进过这本库就记一笔），那个会话里不该有任何设计元素的候选；没有任何单元重建。
+-- 宏用例的静态审要求恰好一个 SAVEWORK，所以这一步登记在清单的 probes 里；回放层拿它前后的会话号当一个窗口来消费（清单的 replay_windows）。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-WINDOW-MODIFY-QUIT-NOSAVE-ALIVE
+/AIOS-SUITE-T3-BOX-M1
+Q REF
+Q NAME
+Q XLEN
+XLEN 1111
+Q XLEN
+/AIOS-SUITE-T3-EQ-SUB
+NEW EQUIPMENT /AIOS-SUITE-T3-EQ-NOSAVE
+POS E 106000 N 44000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+$P SUITE-T3-WINDOW-MODIFY-QUIT-NOSAVE-DONE
+ALPHA LOG END

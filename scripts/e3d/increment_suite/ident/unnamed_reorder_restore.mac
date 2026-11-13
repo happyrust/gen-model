@@ -1,0 +1,30 @@
+-- 登记: A02 | 语义: 把两个无名 BOX 换回基线顺序 [BOX-U0, 无名(XLEN 700), 无名(XLEN 300)]（refno 都不变，真逆）
+-- expected_net: cancelled | restore 搭档: 本文件是 ident/unnamed_reorder_apply.mac 的 restore
+-- 幂等：第 2 个成员的 XLEN 是 300（换过的顺序）才挪回；已经是基线顺序就空转。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-UNNAMED-REORDER-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-U
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+!b2 = !mm[2]
+!!CE = !b2
+Q REF
+Q TYPE
+Q XLEN
+!x = !!CE.XLEN
+/AIOS-SUITE-T3-EQ-U
+IF (!x LT 500) THEN
+  REORDER 3 BEFORE 2
+ENDIF
+/AIOS-SUITE-T3-EQ-U
+Q MEMB
+!mm = !!CE.MEMBERS
+!b2 = !mm[2]
+!!CE = !b2
+Q REF
+Q XLEN
+SAVEWORK 'AIOS suite T3 ident/unnamed_reorder restore: unnamed BOXes back to baseline order'
+$P SUITE-T3-UNNAMED-REORDER-RESTORE-DONE
+ALPHA LOG END

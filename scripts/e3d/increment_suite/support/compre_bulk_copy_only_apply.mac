@@ -1,0 +1,42 @@
+-- 登记: 大窗的对照，给管线行为那一组用（变更类型 CT-S2 复制 + CT-W10 大窗；gen-model #143 的反面） | 语义: 只成批复制、不换管径——
+-- 管道库 250132：把整个管道区 /ZONE-PIPING-AREA01 复制两份到自建的 SITE /AIOS-SUITE-T1-BULK 下（1561 个新元素），别的什么都不改。
+-- 和 support/compre_bulk_apply.mac 的差别只有一处：那一份在同一次存盘里还把 /300-A-42/B1 的 HSTU 换了。
+-- 预期：250132 这一窗只有新建；被支撑的支管没变——COMPRE 不触发、不交接，支撑库没有新会话、没有任务。
+--       窗口大到反查超预算时，回执照实说判不了，但「带条件那一类的表整张走一遍」之后结论仍是 0 changed。
+-- expected_net: modified | restore 搭档: support/compre_bulk_copy_only_restore.mac
+--
+-- 工程: APS（AvevaPlantSample，MDB /ALL）。只在私有副本上跑。重跑幂等：先删掉上一次留下的 /AIOS-SUITE-T1-BULK*。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SUPPORT-BULK-COPY-ONLY-APPLY-ALIVE
+/SITE-PIPING-AREA01
+Q REF
+Q NAME
+Q TYPE
+OWNER
+!world = !!CE
+Q REF
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-T1-BULK*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+!!CE = !world
+NEW SITE /AIOS-SUITE-T1-BULK
+!site = !!CE
+Q REF
+Q NAME
+NEW ZONE /AIOS-SUITE-T1-BULK-1
+COPY /ZONE-PIPING-AREA01
+Q REF
+Q NAME
+!!CE = !site
+NEW ZONE /AIOS-SUITE-T1-BULK-2
+COPY /ZONE-PIPING-AREA01
+Q REF
+Q NAME
+$P SUITE-SUPPORT-BULK-COPY-ONLY-APPLY-COPIED
+SAVEWORK 'AIOS suite support/compre_bulk_copy_only apply: two zone copies, nothing else'
+$P SUITE-SUPPORT-BULK-COPY-ONLY-APPLY-DONE
+ALPHA LOG END

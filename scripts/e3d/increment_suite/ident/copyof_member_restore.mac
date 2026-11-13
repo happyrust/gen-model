@@ -1,0 +1,26 @@
+-- 登记: A02 | 语义: 三腿链的收尾——删掉 EQ-CP 下面除 BOX-CP1 之外的 BOX（就是前两腿建、改的那个自动命名 BOX）
+-- expected_net: cancelled（按名、按 refno 都回到链开始之前：BOX-CP1 没动过） | restore 搭档: 本文件是 ident/copyof_member_1_apply.mac / 2_apply.mac 的 restore
+-- 找它的办法同第 2 腿：遍历成员，不按 /Copy-of-… 导航。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-T3-COPYOF-MEMBER-RESTORE-ALIVE
+/AIOS-SUITE-T3-EQ-CP
+Q REF
+Q NAME
+Q MEMB
+!mm = !!CE.MEMBERS
+DO !b VALUES !mm
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BOX') THEN
+    !cn = !!CE.NAME
+    IF (NOT (!cn EQ '/AIOS-SUITE-T3-BOX-CP1')) THEN
+      Q REF
+      Q NAME
+      DELETE BOX
+    ENDIF
+  ENDIF
+ENDDO
+/AIOS-SUITE-T3-EQ-CP
+Q MEMB
+SAVEWORK 'AIOS suite T3 ident/copyof_member restore: delete the Copy-of BOX'
+$P SUITE-T3-COPYOF-MEMBER-RESTORE-DONE
+ALPHA LOG END

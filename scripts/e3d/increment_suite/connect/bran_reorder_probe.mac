@@ -1,3 +1,10 @@
+-- ★ 2026-11-12 订正：REORDER 是有的。完整句式 `REORDER <成员> BEFORE <成员>` / `AFTER`，CE 在属主上；
+--   按名、按序号（`REORDER 3 BEFORE 1`）、按类型加序号（`REORDER BOX 3 BEFORE BOX 1`）都行。
+--   下面当年试的五种写法报语法错，是因为 REORDER 后面少写了「挪谁」。实测的探针与带存盘的用例在
+--   ident/order_probe.mac、ident/member_reorder_apply.mac、ident/unnamed_reorder_apply.mac（设备基本体上）。
+--   支管成员上的 REORDER 还没有人试。本文件原样保留，作「少写操作数会报语法错」的反例；
+--   下面「PML 层无法给 BRAN 成员换序」「归 (c) 类」的结论已经不成立。
+--
 -- 探针：REORDER 语法是否成立。仓内 `REORDER` 零命中，无已证替代，不能写进正式套件。
 -- 本文件**无 SAVEWORK**：改动不落库，会话由 wrapper QUIT 丢弃。
 -- 因此它会被 Record-Db8000SessionChain.ps1:74-77 拒（要求恰好一个 SAVEWORK），
