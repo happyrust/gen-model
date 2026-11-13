@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "session": "u20261113-031200-a1b2",
+  "state": "open",
+  "missing": [
+    {
+      "sha256": "68d97bfa7f5f244fed0c325df31124c6134b75293bbb4eea1e4e266334c4a44f",
+      "bytes": 234799616,
+      "have": 16777216
+    }
+  ],
+  "missing_bytes": 218022400,
+  "plan": {
+    "add": 2,
+    "replace": 5,
+    "delete": 1,
+    "kept_modified": ["www/config/model-display.config.json"],
+    "conflicts": ["config/DbOption.factory.toml"],
+    "components_changed": ["backend", "plant3d-web"],
+    "needs_stop": true,
+    "agent_changes": true,
+    "disk_needed_bytes": 300000000,
+    "disk_free_bytes": 134000000000
+  },
+  "problems": []
+}

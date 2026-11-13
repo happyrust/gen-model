@@ -1,0 +1,61 @@
+[package]
+name = "deploy-dash"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+default-run = "deploy-dash"
+
+[[bin]]
+name = "deploy-dash"
+path = "src/main.rs"
+
+# 不带界面库的代理（老系统上起不了面板 exe 时用）。只在 `--features headless-agent` 时编，缺省的 build / test 不碰它。
+[[bin]]
+name = "deploy-dash-agent"
+path = "src/headless_agent.rs"
+required-features = ["headless-agent"]
+test = false
+
+# 依赖和特性与早先的试验 crate deploy-ui 完全一致：沿用已经编好的依赖（构建缓存在哪、怎么指过去，见 ..\Cargo.toml 开头）。
+# 给 windows-sys 0.61 加特性会让 tokio、async-io、polling 等一串基础包连带重编，所以 DWM 调用改用手写 extern。
+[dependencies]
+gpui-kit = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry"] }
+async-channel = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"
+# 远程访问（REMOTE-ACCESS-PLAN 待定 6）：挂在 remote 特性后面，J1（21:50）起缺省开；
+# `--no-default-features` 编出不带代理的旧面板（回退用）。
+deploy-dash-proto = { path = "../deploy-dash-proto", optional = true }
+deploy-agent = { path = "../deploy-agent", optional = true }
+# 自动升级（设计 7.2）：签名和 sha256 都在本机算，和代理同一套规则。
+sha2 = { version = "0.10.9", optional = true }
+hmac = { version = "0.12.1", optional = true }
+
+[features]
+default = ["remote"]
+remote = ["dep:deploy-dash-proto", "dep:deploy-agent", "dep:sha2", "dep:hmac"]
+headless-agent = ["remote"]
+# 不带界面库的代理的只看驱动（`--watch`、src/watch.rs）：没有单测、没交付，缺省关。和面板的 `upgrade --watch` 无关。
+watch-driver = ["headless-agent"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Graphics_Gdi","Win32_NetworkManagement_IpHelper","Win32_Networking_WinSock",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-resource = "3"

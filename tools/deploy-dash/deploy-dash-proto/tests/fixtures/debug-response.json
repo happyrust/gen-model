@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "ok": true,
+  "history_seed": {
+    "step_secs": 5,
+    "states": [
+      [ { "ago_secs": 10.0, "state": "ok" }, { "ago_secs": 5.0, "state": "ok" }, { "ago_secs": 0.0, "state": "ok" } ],
+      [ { "ago_secs": 10.0, "state": "ok" }, { "ago_secs": 5.0, "state": "ok" }, { "ago_secs": 0.0, "state": "ok" } ],
+      [ { "ago_secs": 10.0, "state": "ok" }, { "ago_secs": 5.0, "state": "bad" }, { "ago_secs": 0.0, "state": "bad" } ],
+      [ { "ago_secs": 10.0, "state": "ok" }, { "ago_secs": 5.0, "state": "ok" }, { "ago_secs": 0.0, "state": "ok" } ]
+    ],
+    "cpu": [ [1.6, 1.7, 1.5], [15.0, 14.2, 16.8], [0.8, null, null], [0.3, 0.3, 0.29] ],
+    "mem": [ [0.42, 0.42, 0.43], [1.92, 1.95, 2.01], [0.31, null, null], [0.12, 0.12, 0.12] ],
+    "disk": [15.0, 13.5, 12.0],
+    "commit": [18.4, 18.6, 18.3],
+    "queue": [3.0, 3.0, 4.0]
+  }
+}

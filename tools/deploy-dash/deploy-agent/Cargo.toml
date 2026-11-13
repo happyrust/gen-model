@@ -1,0 +1,31 @@
+[package]
+name = "deploy-agent"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "部署面板的 stack 代理：无界面，对外提供 HTTP + JSON（协议见 deploy-dash-proto），服务端半边。"
+
+[lib]
+path = "src/lib.rs"
+
+# 开发用：`deploy-agent-dev --mock --listen 127.0.0.1:<端口> --root <目录>`，面板那边和自检对着它跑。
+[[bin]]
+name = "deploy-agent-dev"
+path = "src/bin/deploy-agent-dev.rs"
+
+# 版本照工作空间 Cargo.lock（..\Cargo.lock）里已有的写，不引新包、不联网。
+# tokio 的特性和 deploy-dash 完全一样：面板以后加这个 path 依赖时，不给它已编好的 tokio 加特性（加了会连带重编一串）。
+# HTTP 服务端是手写的（httparse + tokio，设计第 7 节甲路），不开 hyper 的 server 特性。
+[dependencies]
+deploy-dash-proto = { path = "../deploy-dash-proto" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+httparse = "1.10.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+subtle = "2.6.1"
+# 升级密钥的签名（HMAC-SHA256，设计 4.3）。工作空间 Cargo.lock 里已有 0.12.1，不引新包、不联网。
+hmac = "0.12.1"
+toml = "0.8.23"
+getrandom = "0.2.17"
+anyhow = "1.0.104"

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "project": { "e3d_root": "D:/<工程根>", "name": "<项目名>", "dir": "", "code": "1516", "mdb": "ALL", "e3d_version": "e3d31" },
+  "project_defaults": null,
+  "services": [
+    { "name": "database", "enabled": true, "port": 8009 },
+    { "name": "backend", "enabled": true, "port": 8022 },
+    { "name": "rs_server", "enabled": true, "port": 9098 },
+    { "name": "frontend", "enabled": true, "port": 3100 }
+  ],
+  "listen": { "loopback_only": false },
+  "guard": { "min_commit_free_gb": 6.0, "abort_commit_free_gb": 4.0, "max_backend_gb": 0.0, "min_disk_free_gb": 2.0, "protect_ports": [8023, 8029] },
+  "init": { "dbnums": [], "auto_new": false },
+  "backend_config": { "generated": true, "drift": [ { "key": "web_server.port", "want": "8022", "have": "8020" } ] },
+  "fs": { "browse_roots": ["D:/AVEVA/Projects"] }
+}

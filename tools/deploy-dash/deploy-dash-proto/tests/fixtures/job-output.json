@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "job_id": 17,
+  "state": "done",
+  "from": 1,
+  "next": 3,
+  "reset": false,
+  "more": false,
+  "lines": [
+    { "n": 1, "t": "19:22:00.112", "level": "info", "text": "stack down（进程 PowerShell 5.1，输出也写到 D:\\<根>\\run\\gui\\jobs\\17.log）" },
+    { "n": 2, "t": "19:22:06.900", "level": "info", "text": "· 库 7997 正在初始化（解析）" },
+    { "n": 3, "t": "19:22:07.015", "level": "info", "text": "stack 全部停止 结束：退出码 6，用时 7.0 秒" }
+  ]
+}

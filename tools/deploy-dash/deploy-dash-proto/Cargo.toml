@@ -1,0 +1,12 @@
+[package]
+name = "deploy-dash-proto"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "部署面板 ↔ stack 代理的线上协议（schema = 1）：只有 serde 类型和常量，不依赖 GPUI、tokio。"
+
+# 版本照工作空间 Cargo.lock（..\Cargo.lock）里已有的写，不引新包。
+# serde_json 也在这里（并 re-export）：面板那边只加 path 依赖就能用同一份 serde_json。
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

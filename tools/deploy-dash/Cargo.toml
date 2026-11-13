@@ -1,0 +1,50 @@
+# AIOS 部署面板的子 crate（2026-11-13 从 output\gui-20261112\spike 挪到这里）：
+#   deploy-dash-proto  面板 ↔ 代理的线上协议（schema = 1）
+#   deploy-agent       stack 代理：HTTP 服务层、内嵌的 Web 面板（src\dashboard.html）、mock 后端、install 子命令
+#   deploy-dash        GPUI 桌面面板；不带界面库的代理 deploy-dash-agent 也从它编（--features headless-agent）
+#
+# 只依赖伞形包 gpui-kit（它导出 GPUI、gpui-base、gpui-component、默认图标），
+# 取 GitHub main 并钉死到提交；它铁定 gpui-pre =0.3.12。
+# 必须自成工作空间：这里位于 gen-model 仓库目录之下，没有这个 [workspace] 时 cargo 会向上找到
+# gen-model 的工作空间并报 “current package believes it's in a workspace when it's not”。
+# 不列进 gen-model 根工作空间的 members：这里用 stable 编、依赖版本以本目录的 Cargo.lock 为准，
+# 根工作空间用 nightly，两份 Cargo.lock 有两百多个包版本不同。
+# Cargo.lock 以 gpui-kit 同一提交的 Cargo.lock 为种子，gpui-pre-* 和传递依赖与上游 CI 一致。
+#
+# 怎么编：cargo 要在 gen-model 目录树之外起（仓库 .cargo\config.toml 里的 -Z threads=8 只有 nightly 认），
+# 用 stable，并且经编译锁 output\ops\with-build-lock.ps1：
+#   $env:RUSTUP_TOOLCHAIN = 'stable'
+#   pwsh -NoProfile -File <仓库>\output\ops\with-build-lock.ps1 -Who <谁> -WorkDir <仓库的上一级目录> -Log <日志文件> `
+#       -CargoArgs "build,-p,deploy-dash,--offline,--manifest-path,<仓库>\tools\deploy-dash\Cargo.toml,--target-dir,<仓库>\output\gui-20261112\spike\target" `
+#       -Jobs 2 -StartCommitFreeGb 14
+# --target-dir 指向已经编好全部依赖的那份缓存；不带它，cargo 会在本目录的 target\ 里把依赖从头编一遍。
+[workspace]
+members = [
+    "deploy-dash-proto",  # 面板 ↔ 代理的线上协议（schema = 1）
+    "deploy-agent",       # stack 代理（HTTP 服务层、Web 面板、mock 后端、install 子命令）
+    "deploy-dash",        # GPUI 桌面面板 + 不带界面库的代理
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# longbridge/gpui-kit main @ 2026-11-12T11:58:24+08:00（v0.9.1 之后 57 个提交）
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "b003decbf7ab0067f0ab7b4931ca5995d11f4282" }
+# 退回 crates.io 发布版时换成：gpui-kit = "=0.9.1"
+
+# 照 gpui-kit 仓库根 Cargo.toml：这些包在 debug 下也开 opt-level 3，运行时帧耗时差 20% 以上。
+[profile.dev.package]
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smol = { opt-level = 3 }
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-pre-sum-tree = { opt-level = 3 }
+
+[profile.release]
+strip = "symbols"

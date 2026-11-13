@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "at": "2026-11-12T19:24:10+08:00",
+  "seq": 2,
+  "dbnums": [
+    { "dbnum": 7997, "initialized": true, "db_type": "DESI", "name": "/1RX-ARCHHB", "file_size": 23330816, "pieces": 48 },
+    { "dbnum": 8000, "initialized": false, "db_type": "DESI", "name": "/1WCC-PIPEBJ", "file_size": 41222144, "pieces": null }
+  ]
+}

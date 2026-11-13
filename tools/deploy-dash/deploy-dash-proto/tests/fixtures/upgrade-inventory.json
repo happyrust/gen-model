@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "enabled": true,
+  "key_id": "3fa9c2e1",
+  "accept_channels": [],
+  "accept_dirty": true,
+  "managed": true,
+  "release": {
+    "name": "plant3d-web-offline-v0.2.10-backend-v0.1.44-20261112-rc1-r7",
+    "version": "20261112-rc1-r7",
+    "channel": "rc",
+    "created_at": "2026-11-12T09:37:05+08:00"
+  },
+  "components": [
+    {
+      "id": "database",
+      "title": "数据库 SurrealDB（自家分支）",
+      "version": "2.1.4+20250317.45013fc9",
+      "path": "bin/surreal.exe",
+      "sha256": "b3ed75182ce026a2136ebdacdf99849d440cba659b47ff1ab4a43e5db1036dd3",
+      "dirty": false,
+      "bytes": 46080512
+    },
+    {
+      "id": "backend",
+      "title": "后端 aios-database",
+      "version": "0.1.44",
+      "path": "bin/aios-database.exe",
+      "sha256": "68d97bfa7f5f244fed0c325df31124c6134b75293bbb4eea1e4e266334c4a44f",
+      "dirty": true,
+      "bytes": 234799616
+    }
+  ],
+  "agent_exe": {
+    "kind": "headless",
+    "version": "0.1.0",
+    "sha256": "c3c010b6dd39ff9be2d3fceac433cfd9dcf01ede86ef09966987cb3c1eee62ac",
+    "bytes": 6117888
+  },
+  "files": [
+    {
+      "path": "bin/aios-database.exe",
+      "bytes": 234799616,
+      "sha256": "68d97bfa7f5f244fed0c325df31124c6134b75293bbb4eea1e4e266334c4a44f",
+      "state": "same"
+    },
+    {
+      "path": "config/DbOption.factory.toml",
+      "bytes": 9333,
+      "sha256": "02bfe0e2a1c4b7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6",
+      "state": "modified"
+    },
+    {
+      "path": "www/old-bundle.js",
+      "bytes": 0,
+      "sha256": "",
+      "state": "missing"
+    }
+  ],
+  "digest": "9c1f4e77d2a0b3586e1c4f7a2d90b3586e1c4f7a2d90b3586e1c4f7a2d90b358",
+  "disk_free_bytes": 134000000000,
+  "busy": {
+    "job_id": null,
+    "backend_running": 0,
+    "backend_queued": 0,
+    "stack_lock": ""
+  },
+  "services_running": true,
+  "can_rollback": true,
+  "last": null
+}

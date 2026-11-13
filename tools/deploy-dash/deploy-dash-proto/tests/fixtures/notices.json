@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "instance": "20261112-201800-4321",
+  "next": 3,
+  "reset": false,
+  "notices": [
+    { "n": 2, "at": "2026-11-12T19:12:40+08:00", "kind": "warning", "title": "不能单独停止", "message": "stack 现在不能单独停rs-server（-Service 只给它内部用）。要停就「全部停止…」。" },
+    { "n": 3, "at": "2026-11-12T19:15:02+08:00", "kind": "success", "title": "生成模型完成", "message": "库 7997，用时 95 秒" }
+  ]
+}

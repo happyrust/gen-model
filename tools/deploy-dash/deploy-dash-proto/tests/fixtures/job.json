@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "id": 17,
+  "kind": "down",
+  "args": { "force": false },
+  "state": "done",
+  "label": "全部停止",
+  "exit_code": 6,
+  "message": "后端正在忙，什么都没停",
+  "busy_reasons": ["库 7997 正在初始化（解析）"],
+  "queued_at": "2026-11-12T19:22:00+08:00",
+  "started_at": "2026-11-12T19:22:00+08:00",
+  "finished_at": "2026-11-12T19:22:07+08:00",
+  "by": "<计算机名>\\<用户名>",
+  "from": "<客户端地址>",
+  "confirm": true,
+  "note": "",
+  "output_lines": 42,
+  "output_file": "D:\\<根>\\run\\gui\\jobs\\17.log",
+  "progress": null,
+  "result": { "exit_code": 6, "message": "后端正在忙，什么都没停", "doctor": null, "preview": null }
+}

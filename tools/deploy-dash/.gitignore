@@ -1,0 +1,11 @@
+# 构建产物（根 .gitignore 的 /target 只管仓库根目录那一个）
+/target/
+
+# 机密与运行时状态：任何位置都不进库
+**/agent.token
+**/servers.toml
+**/client-store*
+**/run/gui/
+**/.env
+**/.env.*
+*.dmp

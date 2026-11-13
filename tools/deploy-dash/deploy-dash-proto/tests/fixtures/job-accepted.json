@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "job_id": 18,
+  "job": {
+    "id": 18, "kind": "init", "args": { "dbnums": [7997, 8000] }, "state": "queued", "label": "生成模型",
+    "exit_code": null, "message": "", "busy_reasons": [],
+    "queued_at": "2026-11-12T19:21:00+08:00", "started_at": null, "finished_at": null,
+    "by": "<计算机名>\\<用户名>", "from": "<客户端地址>", "confirm": true, "note": "",
+    "output_lines": 0, "output_file": "D:\\<根>\\run\\gui\\jobs\\18.log",
+    "progress": null, "result": null
+  }
+}

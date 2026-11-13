@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "instance": "20261112-201800-4321",
+  "seq": 1907,
+  "generated_at": "2026-11-12T19:31:12+08:00",
+  "stack": { "name": "plant-stack", "first_run": false, "lock_command": "up" },
+  "job": null,
+  "services": [
+    { "name": "database", "state": "ok", "reason_code": "" },
+    { "name": "backend", "state": "waiting", "reason_code": "" },
+    { "name": "rs_server", "state": "stopped", "reason_code": "" },
+    { "name": "frontend", "state": "stopped", "reason_code": "" }
+  ],
+  "host": { "commit_free_gb": 17.9, "disks": [ { "drive": "D:", "role": "root,system", "free_gb": 12.0 } ] }
+}

@@ -1,0 +1,12 @@
+{
+  "release": null,
+  "components": [],
+  "files": [],
+  "release_json": null,
+  "agent": {
+    "kind": "headless",
+    "version": "0.1.1",
+    "sha256": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    "bytes": 6120000
+  }
+}

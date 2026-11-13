@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "instance": "20261112-201800-4321",
+  "seq": 1842,
+  "generated_at": "2026-11-12T19:20:03+08:00",
+  "elapsed_ms": 38,
+  "stack": { "name": "plant-stack", "root": "D:\\<根>", "version": "0.4.0", "first_run": false, "config_valid": null },
+  "project": { "e3d_root": "D:/<工程根>", "name": "<项目名>", "dir": "", "code": "1516", "mdb": "ALL", "e3d_version": "e3d31" },
+  "lock": { "held": true, "command": "up", "pid": 23110, "since": "19:19:51.402" },
+  "job": {
+    "id": 17, "kind": "up", "state": "running", "label": "一键启动", "service": null,
+    "started_at": "2026-11-12T19:19:51+08:00", "finished_at": null, "by": "<计算机名>\\<用户名>",
+    "exit_code": null, "message": "", "progress": { "done": 3, "total": 4, "step": "rs-server" }
+  },
+  "last_job": {
+    "id": 16, "kind": "doctor", "state": "done", "label": "自检", "service": null,
+    "started_at": "2026-11-12T19:10:02+08:00", "finished_at": "2026-11-12T19:10:08+08:00", "by": "<计算机名>\\<用户名>",
+    "exit_code": 0, "message": "自检，用时 6 秒", "progress": null
+  },
+  "services": [
+    {
+      "name": "database", "title": "数据库", "enabled": true, "state": "ok", "reason_code": "", "reason": "",
+      "checked": "GET http://127.0.0.1:8009/version 要回 2.1.x 的版本号", "next": "",
+      "port": 8009, "pid": 12345, "ours": true, "started_at": "2026-11-12T17:06:00+08:00",
+      "version": "surreal 2.1.4", "log": "D:\\<根>\\logs\\database\\database-20261112-170600.log", "cpu_pct": 2.1, "mem_gb": 0.4
+    },
+    {
+      "name": "backend", "title": "后端", "enabled": true, "state": "ok", "reason_code": "", "reason": "",
+      "checked": "GET http://127.0.0.1:8022/api/v1/health 要有应答，并且已经连上数据库", "next": "",
+      "port": 8022, "pid": 12388, "ours": true, "started_at": "2026-11-12T17:06:03+08:00",
+      "version": "0.1.44", "log": "D:\\<根>\\logs\\backend\\backend-20261112-170603.log", "cpu_pct": 15.2, "mem_gb": 1.95
+    },
+    {
+      "name": "rs_server", "title": "rs-server", "enabled": true, "state": "bad", "reason_code": "not_running",
+      "reason": "stack 记下的那个进程（进程号 23456）已经不在了", "checked": "GET http://127.0.0.1:9098/api/metadata/meta 要有应答",
+      "next": "一键启动：stack up 只把没起的补起来，别的服务不动",
+      "port": 9098, "pid": 0, "ours": false, "started_at": null, "version": "", "log": "", "cpu_pct": null, "mem_gb": null
+    },
+    {
+      "name": "frontend", "title": "前端", "enabled": true, "state": "waiting", "reason_code": "waiting_storage_version",
+      "reason": "后端的库版本记录还没写上，stack 先不起 rs-server", "checked": "GET http://127.0.0.1:3100/ 要回 plant3d-web 首页",
+      "next": "等后端写上库版本记录，再一键启动把它补起来",
+      "port": 3100, "pid": 0, "ours": false, "started_at": null, "version": "", "log": "", "cpu_pct": null, "mem_gb": null
+    }
+  ],
+  "host": {
+    "cores": 32, "mem_total_gb": 64.0, "commit_free_gb": 18.4,
+    "disks": [
+      { "drive": "D:", "role": "root", "free_gb": 12.0, "total_gb": 500.0 },
+      { "drive": "C:", "role": "system", "free_gb": 14.5, "total_gb": 237.0 }
+    ]
+  },
+  "backend": {
+    "status": "ok", "degraded_sections": [], "mdb_closure_status": "ok", "worker_alive": true, "worker_idle_secs": 12,
+    "requests_total": null, "queue_paused": true, "storage_caught_up": true
+  },
+  "jobs_summary": {
+    "paused": true, "running": 1, "queued": 1, "held": 0,
+    "rows": [
+      { "dbnum": 7997, "state": "running", "intent": "初始化", "phase": "解析", "since": "2026-11-12T19:18:40+08:00", "task_id": "" },
+      { "dbnum": 8000, "state": "queued", "intent": "增量", "phase": "排队", "since": "2026-11-12T19:19:02+08:00", "task_id": "" }
+    ],
+    "failures_24h": [ { "at": "2026-11-12T18:40:00+08:00", "dbnum": 8000, "message": "解析失败：元件 0042 的属性表读不到" } ],
+    "upgrade": null
+  },
+  "guard": { "min_commit_free_gb": 6.0, "abort_commit_free_gb": 4.0, "max_backend_gb": 0.0, "min_disk_free_gb": 2.0 },
+  "backend_config_generated": true,
+  "backend_exe_note": "0.1.44（离线包）",
+  "drift": [],
+  "urls": {
+    "frontend": "http://<服务器地址>:3100/", "backend": "http://<服务器地址>:8022/",
+    "ops": "http://<服务器地址>:8022/ops.html", "rs_server": "http://<服务器地址>:9098/"
+  },
+  "notice_seq": 3,
+  "dbnums_seq": 2,
+  "log_heads": { "agent": 41, "backend": 12990, "database": 803, "frontend": 77, "job": 220, "rs_server": 512, "stack": 0 }
+}

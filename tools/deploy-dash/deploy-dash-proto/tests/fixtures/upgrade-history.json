@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "items": [
+    {
+      "id": "0004-u20261113-031500-b2c3",
+      "kind": "upgrade",
+      "session": "u20261113-031500-b2c3",
+      "outcome": "rolled_back",
+      "from": {
+        "name": "plant3d-web-offline-v0.2.10-backend-v0.1.44-20261112-rc1-r7",
+        "version": "20261112-rc1-r7",
+        "channel": "rc",
+        "created_at": "2026-11-12T09:37:05+08:00"
+      },
+      "to": {
+        "name": "plant3d-web-offline-v0.2.10-backend-v0.1.45-20261113-rc1-r8",
+        "version": "20261113-rc1-r8",
+        "channel": "rc",
+        "created_at": "2026-11-13T03:10:00+08:00"
+      },
+      "started_at": "2026-11-13T03:15:02+08:00",
+      "finished_at": "2026-11-13T03:16:41+08:00",
+      "stopped_services": true,
+      "downtime_ms": 96500,
+      "files": { "added": 1, "replaced": 3, "deleted": 0 },
+      "kept_modified": [],
+      "conflicts": [],
+      "failed_step": "up",
+      "message": "已换回：后端没起来（up 退出码 4）",
+      "rollback": { "ok": true, "message": "已换回旧文件并恢复服务，用时 96 秒" },
+      "by": "<计算机名>\\<用户名>",
+      "from_ip": "<客户端地址>",
+      "key_id": "3fa9c2e1"
+    },
+    {
+      "id": "0003-u20261113-031200-a1b2",
+      "kind": "upgrade",
+      "session": "u20261113-031200-a1b2",
+      "outcome": "ok",
+      "from": {
+        "name": "plant3d-web-offline-v0.2.10-backend-v0.1.44-20261112-rc1-r6",
+        "version": "20261112-rc1-r6",
+        "channel": "rc",
+        "created_at": "2026-11-12T04:15:55+08:00"
+      },
+      "to": {
+        "name": "plant3d-web-offline-v0.2.10-backend-v0.1.44-20261112-rc1-r7",
+        "version": "20261112-rc1-r7",
+        "channel": "rc",
+        "created_at": "2026-11-12T09:37:05+08:00"
+      },
+      "started_at": "2026-11-13T03:12:04+08:00",
+      "finished_at": "2026-11-13T03:13:02+08:00",
+      "stopped_services": true,
+      "downtime_ms": 58200,
+      "files": { "added": 2, "replaced": 5, "deleted": 1 },
+      "kept_modified": ["www/config/model-display.config.json"],
+      "conflicts": ["config/DbOption.factory.toml"],
+      "failed_step": "",
+      "message": "升级完成：换了 8 个文件，服务停了 58 秒",
+      "rollback": null,
+      "by": "<计算机名>\\<用户名>",
+      "from_ip": "<客户端地址>",
+      "key_id": "3fa9c2e1"
+    }
+  ]
+}

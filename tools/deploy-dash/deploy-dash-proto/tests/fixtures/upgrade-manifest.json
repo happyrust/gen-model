@@ -1,0 +1,41 @@
+{
+  "release": {
+    "name": "plant3d-web-offline-v0.2.10-backend-v0.1.44-20261112-rc1-r7",
+    "version": "20261112-rc1-r7",
+    "channel": "rc",
+    "created_at": "2026-11-12T09:37:05+08:00"
+  },
+  "components": [
+    {
+      "id": "backend",
+      "title": "后端 aios-database",
+      "version": "0.1.44",
+      "path": "bin/aios-database.exe",
+      "sha256": "68d97bfa7f5f244fed0c325df31124c6134b75293bbb4eea1e4e266334c4a44f",
+      "dirty": true,
+      "bytes": 234799616
+    }
+  ],
+  "files": [
+    {
+      "path": "bin/aios-database.exe",
+      "bytes": 234799616,
+      "sha256": "68d97bfa7f5f244fed0c325df31124c6134b75293bbb4eea1e4e266334c4a44f"
+    },
+    {
+      "path": "www/index.html",
+      "bytes": 1271,
+      "sha256": "bacaf3f7df5fd9e6b18675169b99b4ee7a3f34e6c2e3151901fa76eaaebabf9f"
+    }
+  ],
+  "release_json": {
+    "bytes": 71234,
+    "sha256": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
+  },
+  "agent": {
+    "kind": "headless",
+    "version": "0.1.0",
+    "sha256": "c3c010b6dd39ff9be2d3fceac433cfd9dcf01ede86ef09966987cb3c1eee62ac",
+    "bytes": 6117888
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "jobs": [
+    {
+      "id": 20, "kind": "configure", "args": { "project": { "e3d_root": "D:/<工程根>", "name": "<项目名>", "dir": "", "code": "1516", "mdb": "ALL", "e3d_version": "e3d31" } },
+      "state": "done", "label": "保存配置", "exit_code": 4, "message": "配置已保存；doctor 发现 1 个问题",
+      "busy_reasons": [], "queued_at": "2026-11-12T19:30:00+08:00", "started_at": "2026-11-12T19:30:00+08:00",
+      "finished_at": "2026-11-12T19:30:07+08:00", "by": "<计算机名>\\<用户名>", "from": "<客户端地址>", "confirm": true, "note": "",
+      "output_lines": 12, "output_file": "D:\\<根>\\run\\gui\\jobs\\20.log", "progress": null,
+      "result": {
+        "exit_code": 4, "message": "配置已保存；doctor 发现 1 个问题",
+        "doctor": {
+          "can_start": false,
+          "problems": [ { "what": "E3D 工程根目录不在", "checked": "配置 [project] e3d_root 指的目录在不在", "result": "不存在", "next": "填 E3D 工程根目录：它下面是各个项目的文件夹", "field": "project.e3d_root" } ],
+          "notes": ["数据库程序：SurrealDB 2.1.4"]
+        },
+        "preview": null
+      }
+    },
+    {
+      "id": 19, "kind": "preview_update", "args": { "dbnums": [7997, 1112] }, "state": "done", "label": "增量预览",
+      "exit_code": 0, "message": "", "busy_reasons": [], "queued_at": "2026-11-12T19:25:00+08:00",
+      "started_at": "2026-11-12T19:25:00+08:00", "finished_at": "2026-11-12T19:25:01+08:00",
+      "by": "<计算机名>\\<用户名>", "from": "<客户端地址>", "confirm": false, "note": "",
+      "output_lines": 0, "output_file": "D:\\<根>\\run\\gui\\jobs\\19.log", "progress": null,
+      "result": { "exit_code": 0, "message": "", "doctor": null, "preview": [ { "dbnum": 7997, "changes": 12 }, { "dbnum": 1112, "changes": 3 } ] }
+    },
+    {
+      "id": 18, "kind": "stop", "args": { "force": false, "service": "rs_server" }, "state": "rejected", "label": "停止rs-server",
+      "exit_code": null, "message": "不能单独停止：stack 现在不能单独停rs-server（-Service 只给它内部用）。要停就「全部停止…」。",
+      "busy_reasons": [], "queued_at": "2026-11-12T19:23:00+08:00", "started_at": null, "finished_at": "2026-11-12T19:23:00+08:00",
+      "by": "<计算机名>\\<用户名>", "from": "<客户端地址>", "confirm": true, "note": "",
+      "output_lines": 0, "output_file": "D:\\<根>\\run\\gui\\jobs\\18.log", "progress": null, "result": null
+    }
+  ]
+}

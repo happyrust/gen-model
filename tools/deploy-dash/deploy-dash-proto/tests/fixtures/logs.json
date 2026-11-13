@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "agent_version": "0.1.0",
+  "instance": "20261112-201800-4321",
+  "source": "backend",
+  "from": 12346,
+  "next": 12348,
+  "reset": false,
+  "dropped": 0,
+  "more": false,
+  "oldest": 7349,
+  "newest": 12348,
+  "file": "D:\\<根>\\logs\\backend\\backend-20261112-170600.log",
+  "lines": [
+    { "n": 12346, "t": "15:32:07.120", "level": "info", "text": "增量解析「库 7997/元件-0042」完成，写入 75 条" },
+    { "n": 12347, "t": "15:32:07.906", "level": "warn", "text": "WARN 库 8000 解析告警 3 处" },
+    { "n": 12348, "t": "15:32:08.011", "level": "info", "text": "（这一行可能含账号信息，已隐去）" }
+  ]
+}
