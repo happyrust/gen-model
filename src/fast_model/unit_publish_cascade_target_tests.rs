@@ -8,8 +8,10 @@
 //!
 //! 四组：
 //! - **纯内存**：手搓一窗，走生产同一段（规划器选根 → 工作单带单元级提示 → 执行体切子计划）。
-//! - **真库，假定源**（手动）：ams7999 等库里带目录正体的 `PJOI` 与它 `CREF` 的梁，把其中一端当成一窗仅有的候选
-//!   喂给 e3d-model 的 `plan_update_with`，看它点名了谁、子计划切出来是什么。
+//! - **真库，假定源**：ams7999 等库里带目录正体的 `PJOI` 与它 `CREF` 的梁，把其中一端当成一窗仅有的候选
+//!   喂给 e3d-model 的 `plan_update_with`，看它点名了谁、子计划切出来是什么。2026-11-11 钉的是缺口（两个方向都不
+//!   点名对端）；2026-11-12 e3d-model 的关节级联接上主关节之后改钉「两端一起点名」——四本库那条是手动的，
+//!   aps7166 那条随整套跑。
 //! - **量法**（手动）：真实会话窗口上，级联目标根里有多少今天走局部重建；顺带找自然窗口里「一端被点名、
 //!   对端没被点名」的结构连接，两端各建一次比几何。
 //! - **真库，真实窗口**（手动）：电缆 / 桥架库的自然窗口上，电缆端点（C8）与设计引用（P4）的目标根修之前带
@@ -325,8 +327,9 @@ fn a_cascade_target_root_that_also_changed_itself_is_regenerated_whole_not_by_un
 /// 四种窗口里根 10 都只是被闭包直接命中：三条级联都关着；缺省配置（C2 关、C8 / P4 开）没有目标；三条都开着没有
 /// 目标；三条都开着、目标是**另一根**（20）。根 10 的任务每一种都带基线 S 的提示。
 ///
-/// 第二种就是「带目录正体的 PJOI 与同根的梁」在缺省配置下的样子：C2 关着不读边，根 10 不在任何目标集里。
-/// 这条规则靠级联的目标集认根，目标集里没有的它罩不住。
+/// 第二种是只有 C2 认得的依赖（`FIXING ↔ STWALL`、不带目录正体的关节……）在缺省配置下的样子：C2 关着不读边，
+/// 根 10 不在任何目标集里。这条规则靠级联的目标集认根，目标集里没有的它罩不住。（「带目录正体的 PJOI 与同根的梁」
+/// 原先也是这个样子；2026-11-12 起由 e3d-model 的关节级联在单元这一层接住，见本文件的真库测试。）
 #[test]
 fn roots_outside_every_cascade_target_set_keep_their_unit_publish_hint() {
     // (用例, C2 开关, C8 / P4 开关, 三条都开时的级联目标根)
@@ -635,6 +638,25 @@ fn joint_cut_trace(set: &Arc<DbSet>, beam: RefNo, joint: RefNo) -> JointCutTrace
         JointCutTrace::Applied
     } else {
         JointCutTrace::Unclear
+    }
+}
+
+/// 梁建模时一共扣了几把负体（建不出实体给 0）。与 [`joint_cut_trace`] 合着看：账上分不出的那一类（NAPP 门挡下了
+/// 若干把）靠它知道其余的刀是不是真扣上了。
+fn negatives_applied_on(set: &Arc<DbSet>, beam: RefNo) -> usize {
+    let element = set.element(beam);
+    let Ok(noun) = element.element_type() else {
+        return 0;
+    };
+    let modeled =
+        e3d_model::category::element_category(&element, e3d_model::category::classify(&noun))
+            .ok()
+            .and_then(|category| e3d_model::elmodl::model_element(&element, category).ok());
+    match modeled {
+        Some(e3d_model::elmodl::Modeled::Solid(generated)) => {
+            usize::try_from(generated.negatives_applied).unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 
@@ -1017,38 +1039,47 @@ impl ShapeTally {
 /// GitHub #144，真库上的假定源：带目录正体的 `PJOI`（自己是模型单元）与它 `CREF` 的梁（梁的 `JOIS` / `JOIE` 指回它）。
 ///
 /// 两端互相吃：梁建模时扣关节给的刀（e3d-model `elmodl::collect_joint_negatives` 接受 `JOIS` / `JOIE` 指向的
-/// `PJOI`），关节的标架原点沿梁轴投到梁端（`datum::primary_joint_world` 读 `CREF` 梁的 `POSS` / `POSE` / `JLIN`）。
-/// e3d-model `plan_update` 自己的同库关节级联只认 FIXING ↔ GENSEC 与 SJOI ↔ SCTN（`increment::joint_beam_noun`），
-/// 这一对它两个方向都不点名——这一句由本测试在真库上核。
+/// `PJOI`；aps7166 的端板把被接的柱削短 10～25 mm），关节的原点在垂直于关节 Z 的平面里挪到梁 `JLIN` 那条线上、
+/// 目录件经 `APAR` 读梁（`datum::primary_joint_world`）。
+///
+/// e3d-model `plan_update` 自己的同库关节级联原先只认 FIXING ↔ GENSEC 与 SJOI ↔ SCTN，这一对它两个方向都不点名
+/// （2026-11-11 这条测试钉的就是那个缺口：2,145 个假定窗全部成立）。**2026-11-12 起 `increment::joint_beam_noun` /
+/// `joint_fixings_of` 接上了主关节**，这条测试改钉接上之后的样子。
 ///
 /// 三种形状各走一遍假定窗（把一端当成一窗仅有的候选，喂给真的 `plan_update_with`）：
-/// - **同根，关节变**：梁最近的根在关节的根链上。候选 = 关节；看梁最近的根。
+/// - **同根，关节变**：梁最近的根在关节的根链上。候选 = 关节；看梁最近的根。只走梁是 `SCTN` 的对——`GENSEC` 不吃
+///   主关节的负体，这个方向对它不成立。
 /// - **同根，梁变**：关节最近的根在梁的根链上。候选 = 梁；看关节最近的根。
 /// - **跨根，关节变 + 对端根另有改动**：梁最近的根不在关节的根链上。候选 = 关节，加上梁那个根名下另一件模型单元；
-///   看梁最近的根。这是票面那一句「一个根既被直接命中、又是某条级联的目标」。
+///   看梁最近的根。
 ///
 /// 每一对两态（C2 关 / 开）各问一次：根在不在 regen、是不是级联目标、子计划、任务带不带单元级提示。
 ///
 /// 断言：
-/// 1. ams7999 里同根那两种形状都**存在**——这是「属实」在真库上的那一半；
-/// 2. C2 开着、这根是级联目标时，任务**不许**带单元级提示；
-/// 3. C2 关着时这些根不是任何级联的目标，任务照旧带单元级提示——这一半靠级联目标集的规则罩不住，如实钉在这里。
+/// 1. ams7999 里同根那两种形状都**存在**（语料前提）；
+/// 2. 变的那一端被点名的每一对，`plan_update` 自己把对端也点了名——不靠 C2，两个方向、同根跨根都是；#144 那种
+///    「对端留在旧几何上」的形状一对都不剩；
+/// 3. aps7166 在本机时，同根的对里至少有一根梁真的被这只关节的目录刀扣过（「关节变了梁的几何要跟」在生成这一侧
+///    的依据；ams7999 / ams251183 那 1,071 对里是 0 根——它们成立的是反方向）。
 ///
 /// 只读文件：`AIOS_AMS_PROJECT_DIR` / `AIOS_APS_PROJECT_DIR` / `AIOS_ACP_PROJECT_DIR`（缺省本机样例工程）+
 /// `AIOS_E3D_TEMPLATE_DIR`。每类最多走 `AIOS_144_PAIRS_PER_CLASS` 对（缺省 60）。会话取各库文件的最新会话。
 #[test]
 #[ignore = "manual live: reads real DESI files of the AMS / APS sample projects; needs the E3D template directory"]
-fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
+fn live_a_catalogue_joint_and_the_beam_it_cuts_are_planned_together() {
     let schema = DirectSchema::open_from_env().expect("E3D template directory");
     let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
     let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
     let per_class = env_usize("AIOS_144_PAIRS_PER_CLASS", 60);
-    // 第一本是票面点名的（关节与梁同根）；后两本关节与梁常在不同的根下，给跨根那一种形状。
-    let libraries: [(&Path, &str); 3] = [
+    // 第一本是 #144 票面点名的（关节与梁同根）；中间两本关节与梁常在不同的根下，给跨根那一种形状；最后一本是端板
+    // 削柱的那一本（E3D 取证过）。
+    let libraries: [(&Path, &str); 4] = [
         (ams.as_path(), "ams7999_0001"),
         (ams.as_path(), "ams251183_0001"),
         (aps.as_path(), "aps7200_0001"),
+        (aps.as_path(), "aps7166_0001"),
     ];
+    let mut aps7166_present = false;
     if !libraries[0].0.join(libraries[0].1).is_file() {
         eprintln!(
             "skip: 语料不在本机（{}）——装了 E3D 样例库的机器上这条会真跑",
@@ -1138,14 +1169,26 @@ fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
         if name == "ams7999_0001" {
             ams7999_same_root = same_root.len();
         }
+        if name == "aps7166_0001" {
+            aps7166_present = true;
+        }
+        // 正向（关节变 → 梁）只对吃主关节负体的梁成立：`SCTN`。
+        let takes_joint_cuts = |beam: RefNo| {
+            site.set
+                .element(beam)
+                .element_type()
+                .is_ok_and(|noun| noun == "SCTN")
+        };
 
         // 同根：关节变 → 看梁的根；梁变 → 看关节的根。
         let mut joint_tally = ShapeTally::default();
         let mut beam_tally = ShapeTally::default();
         for &(joint, beam, beam_root, joint_root, _) in same_root.iter().take(per_class) {
-            let (off, named) = site.hypothetical(&[joint], false, beam_root, beam);
-            let (on, _) = site.hypothetical(&[joint], true, beam_root, beam);
-            joint_tally.record(name, joint, beam, beam_root, &named, off, on);
+            if takes_joint_cuts(beam) {
+                let (off, named) = site.hypothetical(&[joint], false, beam_root, beam);
+                let (on, _) = site.hypothetical(&[joint], true, beam_root, beam);
+                joint_tally.record(name, joint, beam, beam_root, &named, off, on);
+            }
             // 反方向只在关节最近的根也在梁的根链上时才是「同根」。
             if !site.root_chain(beam).contains(&joint_root) {
                 continue;
@@ -1164,7 +1207,13 @@ fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
         for &(joint, beam, ..) in same_root.iter().take(per_class) {
             let trace = joint_cut_trace(&site.set, beam, joint);
             beams_checked += 1;
-            beams_cut_by_their_joint += usize::from(trace == JointCutTrace::Applied);
+            // 「账上分不出」里有一种是 NAPP 门挡下了若干把、其余照交（aps7166 的端板：4 把螺栓孔挡下，削短柱的
+            // NSEX 照交）——梁是 SCTN 且确实扣过负体时也算。
+            let cut = trace == JointCutTrace::Applied
+                || (trace == JointCutTrace::Unclear
+                    && takes_joint_cuts(beam)
+                    && negatives_applied_on(&site.set, beam) > 0);
+            beams_cut_by_their_joint += usize::from(cut);
             *traces.entry(trace.label()).or_default() += 1;
         }
         println!("[#144]   同根那几对里，梁建模时这只关节的目录刀：{traces:?}");
@@ -1181,8 +1230,11 @@ fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
                 }
             }
             for &(joint, beam, beam_root, _, _) in other_root.iter().take(per_class) {
-                // 「另一件」：梁那个根名下、这一对两端之外的第一件模型单元（结构根里多半是另一根梁）。它若恰好
-                // 让 `plan_update` 把这根梁也点了名，这一对记进「plan_update 自己点了对端」。挑不到就不走这一对。
+                if !takes_joint_cuts(beam) {
+                    continue;
+                }
+                // 「另一件」：梁那个根名下、这一对两端之外的第一件模型单元（结构根里多半是另一根梁）。挑不到就不走
+                // 这一对。
                 let other = members
                     .get(&key_of(beam_root))
                     .into_iter()
@@ -1216,28 +1268,18 @@ fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
         }
     }
     println!(
-        "[#144] ==== 同根的对里建过 {beams_checked} 根梁，其中这只关节的目录刀确实扣在梁上的 {beams_cut_by_their_joint} 根\
+        "[#144] ==== 同根的对里建过 {beams_checked} 根梁，其中扣过负体、且这只关节交出过刀的 {beams_cut_by_their_joint} 根\
          （梁的几何吃这只关节：关节变了、梁没重建，梁就留在旧刀上）"
     );
 
-    // 1. 属实：ams7999 里这一形状存在，两个方向都有。
+    // 1. 语料前提：ams7999 里这一形状存在，两个方向都走到了。
     assert!(
         ams7999_same_root > 0,
-        "ams7999 里没有「带目录正体的 PJOI 与同根的梁」——票面的形状不存在"
+        "ams7999 里没有「带目录正体的 PJOI 与同根的梁」——语料变了"
     );
     assert!(
-        joint_changed.left_out > 0,
-        "关节变的假定窗里没有一对成立 #144 的形状：{}",
-        joint_changed.line()
-    );
-    assert!(
-        beam_changed.left_out > 0,
-        "梁变的假定窗里没有一对成立 #144 的形状：{}",
-        beam_changed.line()
-    );
-    assert!(
-        joint_changed.c2_on_cascaded > 0 && beam_changed.c2_on_cascaded > 0,
-        "C2 开着时这些根该是级联目标（边读得到、回指成立）：关节变 {}；梁变 {}",
+        joint_changed.checked > 0 && beam_changed.checked > 0,
+        "两个方向都该走到假定窗：关节变 {}；梁变 {}",
         joint_changed.line(),
         beam_changed.line()
     );
@@ -1246,23 +1288,488 @@ fn live_a_catalogue_joint_and_the_beam_it_cuts_are_not_planned_together() {
         ("同根，梁变", &beam_changed),
         ("跨根，关节变 + 对端根另有改动", &cross_root),
     ] {
-        // 3. C2 关着：这些根不是任何级联的目标，任务照旧带单元级提示（这一半靠级联目标集罩不住）。
+        // 2. 接上之后：变的那一端被点名的每一对，`plan_update` 自己把对端也点了名（不靠 C2）。
         assert_eq!(
-            (tally.c2_off_not_cascaded, tally.c2_off_hinted),
-            (tally.left_out, tally.left_out),
-            "{what}：C2 关着时这些根不是任何级联的目标、任务照旧带单元级提示：{}",
+            tally.partner_named_by_plan,
+            tally.checked - tally.changed_end_not_named,
+            "{what}：变的那一端被点名的每一对，对端都该由 e3d-model 的关节级联点名：{}",
             tally.line()
         );
-        // 2. C2 开着、是级联目标：不许带单元级提示。
         assert_eq!(
-            tally.c2_on_cascaded_hinted,
-            0,
-            "{what}：C2 开着时这些根既被直接命中、又是级联目标，子计划不空而且不含被牵连的那一端——任务不许带单元级提示\
-             （GitHub #144）：{}",
+            (tally.left_out, tally.whole_root_today),
+            (0, 0),
+            "{what}：不该再有「对端留在旧几何上」的对：{}",
             tally.line()
         );
     }
+    assert!(
+        joint_changed.partner_named_by_plan > 0 && beam_changed.partner_named_by_plan > 0,
+        "两个方向都该有对端被点名的对：关节变 {}；梁变 {}",
+        joint_changed.line(),
+        beam_changed.line()
+    );
+    // 3. 生成这一侧的依据：aps7166 的端板把被接的柱削短了。
+    if aps7166_present {
+        assert!(
+            beams_cut_by_their_joint > 0,
+            "aps7166 在本机，同根的对里该有被这只关节的目录刀扣过的梁（建过 {beams_checked} 根）"
+        );
+    }
 }
+
+/// 主关节的关节级联在缺省配置（C2 关）下的样子，aps7166 真库、假定窗。随整套跑；语料不在本机就跳过。
+///
+/// aps7166 `/SB3` 的端板主关节挂在 `PNOD ← SBFR` 下，目录件 `/Endplates-Column-JOINT` 的 NSEX 把被接的柱削短
+/// 10～25 mm（E3D 导出的柱同样短这么多，2026-11-11 取证）。e3d-model 的关节级联 2026-11-12 接上主关节
+/// （`increment::joint_beam_noun` / `joint_fixings_of` / `implicit_frame_host_of`）之后，下面几件事都不靠 C2：
+///
+/// 1. 只改主关节 → 被它削的柱被 `plan_update` 点名，柱所在的根在 regen 里、子计划里有这根柱；
+/// 2. 只改柱 → 主关节被点名，它所在的根的子计划里有它；
+/// 3. 只改 PNOD（主关节的站位读它的 `NPOS`）→ 主关节被点名，柱跟着被点名；
+/// 4. 不相关的改动不拉人：改一根没有主关节认领的型钢，一只主关节都不点名；改一只没有梁认领的主关节，只点名它自己。
+///
+/// 每一种都把一端当成一窗仅有的候选，喂给真的 `plan_update_with`（[`Site::hypothetical`]）。
+#[test]
+fn live_aps7166_a_primary_joint_and_the_column_it_cuts_are_planned_together() {
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let file = aps.join("aps7166_0001");
+    if !file.is_file() {
+        eprintln!("skip: 语料不在本机（{}）", file.display());
+        return;
+    }
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let sesno = chain_steps(&file, 1).expect("aps7166 的会话链")[0].1;
+    let project = Project::open(&schema, &aps);
+    let site = Site::open(&project, &file, sesno);
+    let noun_of = |refno: RefNo| {
+        site.set
+            .element(refno)
+            .element_type()
+            .unwrap_or_else(|_| "?".into())
+    };
+    let named_joints = |named: &BTreeSet<(u32, u32)>| -> Vec<RefNo> {
+        named
+            .iter()
+            .map(|&(word0, word1)| RefNo::new(word0, word1))
+            .filter(|refno| noun_of(*refno) == "PJOI")
+            .collect()
+    };
+
+    let (pjoi_hash, sctn_hash) = (e3d_attlib::db1_hash("PJOI"), e3d_attlib::db1_hash("SCTN"));
+    let mut engine = ReadOnlyEngine::open_at(&file, sesno).expect("open the DESI file");
+    let (mut joints, mut sections): (Vec<RefNo>, Vec<RefNo>) = (Vec::new(), Vec::new());
+    for scanned in engine
+        .scan_elements(ScanTier::Header)
+        .expect("scan element headers")
+        .filter_map(|scanned| scanned.ok())
+    {
+        if scanned.noun_hash == pjoi_hash {
+            joints.push(scanned.refno);
+        } else if scanned.noun_hash == sctn_hash {
+            sections.push(scanned.refno);
+        }
+    }
+    drop(engine);
+
+    // 带目录正体（自成单元）的主关节：有 SCTN 认领的成对，没有的单列。
+    let mut pairs: Vec<(RefNo, RefNo)> = Vec::new();
+    let mut unclaimed: Vec<RefNo> = Vec::new();
+    for &joint in &joints {
+        if !is_model_unit(&site.set, joint) {
+            continue;
+        }
+        let beams: Vec<RefNo> = connection_partners(&site.set, joint, "PJOI")
+            .into_iter()
+            .filter(|beam| noun_of(*beam) == "SCTN" && is_model_unit(&site.set, *beam))
+            .collect();
+        match beams.first() {
+            Some(&beam) => pairs.push((joint, beam)),
+            None => unclaimed.push(joint),
+        }
+    }
+    println!(
+        "[PJOI] aps7166@{sesno}: PJOI {} 只，自成单元且有 SCTN 认领 {} 对，自成单元而没有梁认领 {} 只；SCTN {} 根",
+        joints.len(),
+        pairs.len(),
+        unclaimed.len(),
+        sections.len()
+    );
+    assert!(
+        !pairs.is_empty(),
+        "aps7166 里该有带目录正体、被 SCTN 认领的主关节（端板 `/Endplates-Column-JOINT` 那 7 只）"
+    );
+
+    let claimed_beams: BTreeSet<(u32, u32)> = pairs.iter().map(|(_, beam)| key_of(*beam)).collect();
+    let mut cut = 0usize;
+    let (mut by_unit_when_c2_off, mut whole_root_when_c2_on) = (0usize, 0usize);
+    let mut traces: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for &(joint, beam) in &pairs {
+        let (Some(&beam_root), Some(&joint_root)) = (
+            site.root_chain(beam).first(),
+            site.root_chain(joint).first(),
+        ) else {
+            panic!("{joint} / {beam}：两端都该在某个生成根下");
+        };
+        // 1. 只改主关节。
+        let (facts, named) = site.hypothetical(&[joint], false, beam_root, beam);
+        assert!(
+            named.contains(&key_of(joint)) && named.contains(&key_of(beam)),
+            "只改主关节 {joint}：它自己与被它削的柱 {beam} 都该被点名：{named:?}"
+        );
+        assert!(
+            !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+            "只改主关节 {joint}：柱 {beam} 的根 {beam_root} 在 regen 里、子计划里有这根柱：{facts:?}"
+        );
+        assert!(!facts.cascaded, "C2 关着：这不是 gen-model 哪条级联的事");
+        // 同一窗 C2 开着：柱的根成了结构连接级联的目标，#144 的规则让它整根重算（不带单元级提示）——结果一样对，
+        // 只是从「多重建一根柱」变成「整根过一遍」。数出来给 #34 的决策材料用，不下断言之外的结论。
+        let (on, _) = site.hypothetical(&[joint], true, beam_root, beam);
+        by_unit_when_c2_off += usize::from(facts.hinted);
+        whole_root_when_c2_on += usize::from(on.cascaded && !on.hinted);
+        assert!(
+            !(on.cascaded && on.hinted),
+            "C2 开着、柱的根是级联目标时不许带单元级提示（GitHub #144）：{on:?}"
+        );
+        // 2. 只改柱。
+        let (facts, named) = site.hypothetical(&[beam], false, joint_root, joint);
+        assert!(
+            named.contains(&key_of(beam)) && named.contains(&key_of(joint)),
+            "只改柱 {beam}：它自己与它认领的主关节 {joint} 都该被点名：{named:?}"
+        );
+        assert!(
+            !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+            "只改柱 {beam}：主关节 {joint} 的根 {joint_root} 在 regen 里、子计划里有这只主关节：{facts:?}"
+        );
+        // 3. 只改 PNOD。
+        let node = site
+            .set
+            .element(joint)
+            .owner()
+            .expect("read the owner")
+            .expect("PJOI 的属主")
+            .refno();
+        assert_eq!(noun_of(node), "PNOD");
+        let (_, named) = site.hypothetical(&[node], false, joint_root, joint);
+        assert!(
+            named.contains(&key_of(joint)) && named.contains(&key_of(beam)),
+            "只改 PNOD {node}：它名下的主关节 {joint} 与被主关节削的柱 {beam} 都该被点名：{named:?}"
+        );
+        // 生成这一侧的依据：柱建模时扣过负体，而这只主关节交出过刀。端板的目录件有 9 把负体，NAPP 门在关节路径上
+        // 挡下 4 把螺栓孔（E3D 同样不拿它们切柱），削短柱的那把 NSEX 照交——账上是「刀扣在梁上」或「挡下若干把」。
+        let trace = joint_cut_trace(&site.set, beam, joint);
+        let applied = negatives_applied_on(&site.set, beam);
+        *traces.entry(trace.label()).or_default() += 1;
+        cut += usize::from(
+            applied > 0 && matches!(trace, JointCutTrace::Applied | JointCutTrace::Unclear),
+        );
+    }
+    println!(
+        "[PJOI] aps7166: {} 对里，柱建模时扣过负体、且这只主关节交出过刀的 {cut} 根；这只主关节在柱的账上：{traces:?}",
+        pairs.len()
+    );
+    assert!(
+        cut > 0,
+        "aps7166 的端板把被接的柱削短——{} 对里该有扣过主关节的刀的柱：{traces:?}",
+        pairs.len()
+    );
+    println!(
+        "[PJOI] aps7166: 只改主关节的 {} 个假定窗里，C2 关着时柱的根走单元级发布（只重建点名的几件）{by_unit_when_c2_off} 个；\
+         C2 开着时柱的根成了级联目标、整根重算 {whole_root_when_c2_on} 个",
+        pairs.len()
+    );
+
+    // 4a. 改一根没有主关节认领的型钢：一只主关节都不点名。
+    let free_section = sections.iter().copied().find(|section| {
+        !claimed_beams.contains(&key_of(*section))
+            && is_model_unit(&site.set, *section)
+            && ["JOIS", "JOIE"].iter().all(|end| {
+                site.set
+                    .element(*section)
+                    .get_ref(end)
+                    .ok()
+                    .flatten()
+                    .is_none_or(|joint| noun_of(joint) != "PJOI")
+            })
+    });
+    let free_section = free_section.expect("aps7166 里该有两端都不接主关节的型钢");
+    let free_root = *site
+        .root_chain(free_section)
+        .first()
+        .expect("型钢在某个生成根下");
+    let (_, named) = site.hypothetical(&[free_section], false, free_root, free_section);
+    assert!(
+        named.contains(&key_of(free_section)),
+        "{free_section} 自己该被点名"
+    );
+    assert_eq!(
+        named_joints(&named),
+        Vec::<RefNo>::new(),
+        "改一根没有主关节认领的型钢 {free_section}，不该点名任何主关节：{named:?}"
+    );
+    // 4b. 改一只没有梁认领的主关节：只点名它自己。
+    match unclaimed.first() {
+        Some(&lonely) => {
+            let root = *site
+                .root_chain(lonely)
+                .first()
+                .expect("主关节在某个生成根下");
+            let (_, named) = site.hypothetical(&[lonely], false, root, lonely);
+            assert_eq!(
+                named,
+                BTreeSet::from([key_of(lonely)]),
+                "改一只没有梁认领的主关节 {lonely}，只该点名它自己"
+            );
+        }
+        None => println!("[PJOI] aps7166: 没有「自成单元而没有梁认领」的主关节，4b 没走"),
+    }
+}
+/// 量法（手动）：主关节接进 e3d-model 的关节级联之后，真实会话窗口上多点名了多少单元。
+///
+/// 走遍下面几本库的整条会话链（`AIOS_PJOI_LAST_STEPS=n` 只走每本库最后 n 步；候选数超过
+/// `AIOS_PJOI_MAX_CANDIDATES`、缺省两万的导入级大窗跳过），每窗只做 `collect_window` + `plan_update_with`（生产同一个
+/// 元数据门），从计划的级联记录里数主关节那三条腿各带出了什么：
+/// - 正向：`PJOI` 要重建或已删除 → 认领它的 `SCTN`。每条记录恰好是一根**原本不在计划里**、被这条腿新带进来的梁；
+///   对每一根再在窗口两端各建一次，数「真的变了」的有几根（没变的是多算，不是错算）。
+/// - 反向：梁要重建或已删除 → 它认领的 `PJOI`，同样每条记录是一只新带进来的主关节。
+/// - `PNOD`：现算标架宿主是 `PNOD` → 它名下的主关节。这一格是**命中数**，含本来就在计划里的——建库 / 导入的窗里
+///   `PNOD` 与主关节一起新建，主关节自己就是候选。所以另数「窗口左端就已经在的主关节」（它们才是因为挪 `PNOD`
+///   才被带出来的）以及其中两端建模结果真的变了的。
+///
+/// 前五本是正式后端监听 / 回放套件用的库，后面是带目录正体主关节多的。只打印，不下数值断言（数是语料的性质）。
+#[test]
+#[ignore = "manual live measurement: walks whole DESI session chains of the AMS / APS sample projects; needs the E3D template directory"]
+fn live_measure_what_the_primary_joint_cascade_adds_on_natural_windows() {
+    #[derive(Default)]
+    struct Tally {
+        windows: usize,
+        skipped: usize,
+        hit_windows: usize,
+        forward: usize,
+        reverse: usize,
+        node_hosts: usize,
+        node_units: usize,
+        regenerate: usize,
+        /// 正向带出来的梁里，窗口两端各建一次：变了 / 没变 / 有一端建不出来。
+        forward_changed: usize,
+        forward_same: usize,
+        forward_unknown: usize,
+        /// `PNOD` 宿主名下、窗口左端就已经在的主关节，以及其中两端建模结果变了的。
+        node_existing: usize,
+        node_existing_changed: usize,
+    }
+    let started = std::time::Instant::now();
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let last = env_usize("AIOS_PJOI_LAST_STEPS", 0);
+    let cap = env_usize("AIOS_PJOI_MAX_CANDIDATES", 20_000);
+    let libraries: [(&Path, &str); 13] = [
+        (ams.as_path(), "ams7997_0001"),
+        (ams.as_path(), "ams7998_0001"),
+        (ams.as_path(), "ams8000_0001"),
+        (ams.as_path(), "ams251095_0001"),
+        (ams.as_path(), "ams251137_0001"),
+        (ams.as_path(), "ams7999_0001"),
+        (ams.as_path(), "ams251183_0001"),
+        (aps.as_path(), "aps7166_0001"),
+        (aps.as_path(), "aps7200_0001"),
+        (aps.as_path(), "aps7324_0001"),
+        (aps.as_path(), "aps7350_0001"),
+        (aps.as_path(), "aps250104_0001"),
+        (aps.as_path(), "aps250102_0001"),
+    ];
+    let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    let mut total = Tally::default();
+    for (project_dir, name) in libraries {
+        let file = project_dir.join(name);
+        if !file.is_file() {
+            println!("[PJOI] skip {name}: 文件不在");
+            continue;
+        }
+        let steps = match chain_steps(&file, last) {
+            Ok(steps) => steps,
+            Err(reason) => {
+                println!("[PJOI] skip {name}: {reason}");
+                continue;
+            }
+        };
+        let project = projects
+            .entry(project_dir.to_path_buf())
+            .or_insert_with(|| Project::open(&schema, project_dir));
+        let mut tally = Tally::default();
+        for (base_sesno, target_sesno) in steps {
+            let window = match e3d_model::increment::collect_window(&file, base_sesno, target_sesno)
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    println!("[PJOI]   {name} {base_sesno}→{target_sesno}: 收窗口失败：{error}");
+                    continue;
+                }
+            };
+            let candidates = window.diff.changes.len();
+            if candidates > cap {
+                tally.skipped += 1;
+                continue;
+            }
+            tally.windows += 1;
+            if candidates == 0 {
+                continue;
+            }
+            let (Some(base), Some(target)) = (
+                project.set_at(&file, base_sesno),
+                project.set_at(&file, target_sesno),
+            ) else {
+                println!("[PJOI]   {name} {base_sesno}→{target_sesno}: 两端开不了");
+                continue;
+            };
+            let plan = plan_update_with(
+                &base,
+                &target,
+                &window,
+                PlanLimits::default(),
+                change_metadata_tier,
+            );
+            tally.regenerate += plan.regenerate.len();
+            let noun_of = |refno: RefNo| {
+                target
+                    .element(refno)
+                    .element_type()
+                    .or_else(|_| base.element(refno).element_type())
+                    .unwrap_or_default()
+            };
+            let (mut forward, mut reverse, mut node_hosts, mut node_units) =
+                (0usize, 0usize, 0usize, 0usize);
+            let (mut forward_changed, mut forward_same, mut forward_unknown) =
+                (0usize, 0usize, 0usize);
+            let (mut node_existing, mut node_existing_changed) = (0usize, 0usize);
+            for incident in &plan.report.cascades {
+                if incident.noun == "PJOI" && incident.detail.starts_with("关节负体的来源") {
+                    forward += 1;
+                    let beam = incident
+                        .detail
+                        .split("指着它的梁 ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(' ').next())
+                        .and_then(crate::data_interface::cross_db_handoff::parse_refno);
+                    match beam.and_then(|beam| unit_changed(&base, &target, beam)) {
+                        Some(true) => forward_changed += 1,
+                        Some(false) => forward_same += 1,
+                        None => forward_unknown += 1,
+                    }
+                } else if incident.noun == "PNOD"
+                    && incident.detail.starts_with("现算标架的输入变了")
+                {
+                    node_hosts += 1;
+                    node_units += incident
+                        .detail
+                        .split("级联重建整棵宿主子树 ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(' ').next())
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let node =
+                        crate::data_interface::cross_db_handoff::parse_refno(&incident.refno);
+                    let mut joints: Vec<RefNo> = Vec::new();
+                    if let Some(node) = node {
+                        let node = target.element(node);
+                        if let Ok(members) = node.members() {
+                            joints.extend(members.map(|member| member.refno()));
+                        }
+                    }
+                    for joint in joints {
+                        if noun_of(joint) != "PJOI"
+                            || !is_model_unit(&target, joint)
+                            || !base.element(joint).exists().unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        node_existing += 1;
+                        node_existing_changed +=
+                            usize::from(unit_changed(&base, &target, joint) == Some(true));
+                    }
+                } else if let Some(rest) = incident.detail.strip_prefix("关节 ") {
+                    let joint = rest
+                        .split(' ')
+                        .next()
+                        .and_then(crate::data_interface::cross_db_handoff::parse_refno);
+                    if joint.is_some_and(|joint| noun_of(joint) == "PJOI") {
+                        reverse += 1;
+                    }
+                }
+            }
+            if forward + reverse + node_hosts > 0 {
+                tally.hit_windows += 1;
+                println!(
+                    "[PJOI]   {name} {base_sesno}→{target_sesno}: 候选 {candidates}，计划重建 {} 件；主关节带出梁 \
+                     {forward} 根（两端各建一次：变了 {forward_changed}、没变 {forward_same}、建不出 \
+                     {forward_unknown}）、梁带出主关节 {reverse} 只、PNOD 宿主 {node_hosts} 个（命中 {node_units} \
+                     件，其中左端就在的主关节 {node_existing} 只、两端建模结果变了 {node_existing_changed} 只）",
+                    plan.regenerate.len()
+                );
+            }
+            tally.forward += forward;
+            tally.reverse += reverse;
+            tally.node_hosts += node_hosts;
+            tally.node_units += node_units;
+            tally.forward_changed += forward_changed;
+            tally.forward_same += forward_same;
+            tally.forward_unknown += forward_unknown;
+            tally.node_existing += node_existing;
+            tally.node_existing_changed += node_existing_changed;
+        }
+        println!(
+            "[PJOI] {name}: {} 窗（另 {} 窗候选超 {cap} 跳过），计划重建合计 {} 件；主关节那三条腿命中 {} 窗：\
+             主关节带出梁 {} 根（变了 {} / 没变 {} / 建不出 {}）、梁带出主关节 {} 只、PNOD 宿主 {} 个（命中 {} 件，\
+             左端就在的主关节 {} 只、其中变了 {} 只）",
+            tally.windows,
+            tally.skipped,
+            tally.regenerate,
+            tally.hit_windows,
+            tally.forward,
+            tally.forward_changed,
+            tally.forward_same,
+            tally.forward_unknown,
+            tally.reverse,
+            tally.node_hosts,
+            tally.node_units,
+            tally.node_existing,
+            tally.node_existing_changed
+        );
+        total.windows += tally.windows;
+        total.skipped += tally.skipped;
+        total.hit_windows += tally.hit_windows;
+        total.forward += tally.forward;
+        total.reverse += tally.reverse;
+        total.node_hosts += tally.node_hosts;
+        total.node_units += tally.node_units;
+        total.regenerate += tally.regenerate;
+        total.forward_changed += tally.forward_changed;
+        total.forward_same += tally.forward_same;
+        total.forward_unknown += tally.forward_unknown;
+        total.node_existing += tally.node_existing;
+        total.node_existing_changed += tally.node_existing_changed;
+    }
+    println!(
+        "[PJOI] 合计 {} 窗（另 {} 窗跳过），计划重建合计 {} 件；主关节那三条腿命中 {} 窗：主关节带出梁 {} 根\
+         （变了 {} / 没变 {} / 建不出 {}）、梁带出主关节 {} 只、PNOD 宿主 {} 个（命中 {} 件，左端就在的主关节 {} 只、\
+         其中变了 {} 只）；用时 {:.0} 秒",
+        total.windows,
+        total.skipped,
+        total.regenerate,
+        total.hit_windows,
+        total.forward,
+        total.forward_changed,
+        total.forward_same,
+        total.forward_unknown,
+        total.reverse,
+        total.node_hosts,
+        total.node_units,
+        total.node_existing,
+        total.node_existing_changed,
+        started.elapsed().as_secs_f64()
+    );
+}
+
 // ───────────────────────────── 量法（手动） ─────────────────────────────
 
 /// 上一轮量 C2 用的那 20 个库（`structural_connection::tests::live::live_measure_how_much_the_cascade_widens_regen_on_real_windows`

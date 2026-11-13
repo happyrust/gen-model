@@ -46,8 +46,11 @@
 //! 所以同库 FIXING ↔ GENSEC 这一类，开关关着对端根也已在 `regen` 里（`aps250110_0001` 29→30 两态都是 258 根，见
 //! `tests::live`）。**SCTN 那一支 2026-10-23 落地**（e3d-model `28d0402`，计划 §3 C2 ★0907）：带目录正体、标架有样本的
 //! SJOI 自成单元，法兰端板的负体切梁端，`plan_update` 的同库关节级联也推广到 SJOI ↔ SCTN——`aps7200_0001` 3→4
-//! （94 个 `SJOI` 单独改）开关关着也是 8 根（此前关 6 / 开 8）。仍只有本开关补得上的是 `PJOI` / `SUBJ` → SCTN、
-//! 标架没有样本的 SJOI（连接梁转了 ±90°、连的就是宿主自己）与 `CMPF.CFRA`。跨库那一格两边都盖不住：
+//! （94 个 `SJOI` 单独改）开关关着也是 8 根（此前关 6 / 开 8）。**主关节 2026-11-12 落地**：带目录正体的 `PJOI` ↔ 认领它的 SCTN
+//! （柱被端板削短、主关节的原点落在梁线上）同样由 `plan_update` 的同库关节级联接住，挪 PNOD 也带上它名下的主关节
+//! ——见 `fast_model::unit_publish_cascade_target_tests` 的 aps7166 测试。仍只有本开关补得上的是 `SUBJ` → SCTN、
+//! 不带目录正体的 `PJOI`、标架没有样本的 SJOI（连接梁转了 ±90°、连的就是宿主自己）与 `CMPF.CFRA`。跨库那一格
+//! 两边都盖不住：
 //! e3d-model 对 `CREF` 指到别的库的关节只记一条 note（`JointConsumer::OtherDatabase`）。
 
 use std::collections::{BTreeMap, BTreeSet};
