@@ -172,17 +172,47 @@ pub async fn generation_roots_cache_current(
         .await
         .map_err(|error| anyhow::anyhow!("resolve catalogue versions task failed: {error}"))?
     };
+    let durable_fallback_allowed = !crate::options::data_face().is_read_through()
+        && crate::options::store_mode().is_durable();
+    Ok(judge_generation_roots_cache_current_with(
+        versions,
+        &libraries,
+        |dbnum| catalogue_latest.get(&dbnum).copied().flatten(),
+        |dbnum, root| crate::data_interface::model_root_ledger::entry(dbnum, root),
+        durable_fallback_allowed,
+        |roots| async move { durable_roots_model_sesnos(&roots).await },
+    )
+    .await)
+}
+
+/// [`generation_roots_cache_current`] 的判定与持久库兜底回读本体（GitHub #146 / #168）。
+///
+/// 持久库回读是冷重启后的兜底手段：查询出错时只记 `warn`、把这批未命中内存缓存的根按「不算当前」处理，
+/// 不得用 `?` 让整次判定失败并丢掉已由库级承诺或进程账本判出的命中根。
+async fn judge_generation_roots_cache_current_with<L, E, F, Fut>(
+    versions: Vec<(String, u32, i32)>,
+    libraries: &BTreeMap<u32, Option<LibraryCredential>>,
+    catalogue_latest: L,
+    mut ledger_entry: E,
+    durable_fallback_allowed: bool,
+    fetch_durable: F,
+) -> HashSet<String>
+where
+    L: Fn(u32) -> Option<u32>,
+    E: FnMut(u32, RefnoEnum) -> Option<crate::data_interface::model_root_ledger::RootEntry>,
+    F: FnOnce(Vec<RefnoEnum>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<HashMap<RefnoEnum, i64>>>,
+{
     let mut current: HashSet<String> = HashSet::new();
     let mut uncovered: Vec<(String, RefnoEnum, i32)> = Vec::new();
     for (root_refno, dbnum, required_sesno) in versions {
         let parsed_root = crate::data_interface::model_root_ledger::parse_root(&root_refno);
-        let entry =
-            parsed_root.and_then(|root| crate::data_interface::model_root_ledger::entry(dbnum, root));
+        let entry = parsed_root.and_then(|root| ledger_entry(dbnum, root));
         if root_credential_covers(
             libraries.get(&dbnum).and_then(Option::as_ref),
             entry.as_ref(),
             required_sesno,
-            |dbnum| catalogue_latest.get(&dbnum).copied().flatten(),
+            &catalogue_latest,
         ) {
             current.insert(root_refno);
         } else if entry.as_ref().is_none_or(|e| e.is_settled())
@@ -191,36 +221,70 @@ pub async fn generation_roots_cache_current(
             uncovered.push((root_refno, root, required_sesno));
         }
     }
-    if !uncovered.is_empty()
-        && !crate::options::data_face().is_read_through()
-        && crate::options::store_mode().is_durable()
-    {
-        let roots_to_query = uncovered
-            .iter()
-            .map(|(_, root, _)| *root)
-            .collect::<Vec<_>>();
-        let durable_sesnos = durable_roots_model_sesnos(&roots_to_query).await?;
-        for (root_refno, root, required_sesno) in uncovered {
-            if let Some(&sesno) = durable_sesnos.get(&root)
-                && i32::try_from(sesno).is_ok_and(|durable_sesno| {
-                    crate::data_interface::model_source::credential_covers(
-                        Some(durable_sesno),
-                        required_sesno,
-                    )
-                })
-            {
-                current.insert(root_refno);
-            }
+    if uncovered.is_empty() || !durable_fallback_allowed {
+        return current;
+    }
+    let roots_to_query = uncovered
+        .iter()
+        .map(|(_, root, _)| *root)
+        .collect::<Vec<_>>();
+    let durable_sesnos = match fetch_durable(roots_to_query).await {
+        Ok(sesnos) => sesnos,
+        Err(error) => {
+            log::warn!(
+                "[model-coverage] 按根回读持久库 model_sesno 失败（{} 个未命中根按不当前处理）: {error:#}",
+                uncovered.len()
+            );
+            return current;
+        }
+    };
+    for (root_refno, root, required_sesno) in uncovered {
+        if let Some(&sesno) = durable_sesnos.get(&root)
+            && i32::try_from(sesno).is_ok_and(|durable_sesno| {
+                crate::data_interface::model_source::credential_covers(
+                    Some(durable_sesno),
+                    required_sesno,
+                )
+            })
+        {
+            current.insert(root_refno);
         }
     }
-    Ok(current)
+    current
 }
 
-/// 从持久库（RocksDB）按生成根批量查回已落盘的 `model_sesno`（2026-11-13，GitHub #146）。
+/// 按根回读持久库 `model_sesno` 的单根四路查询（`inst_relate` / `tubi_relate` × `anc CONTAINS` / `in =`）。
+///
+/// 两路分开写以各自走 `idx_*_anc` 与 `idx_*_in`（合成 `OR` 会让优化器退回扫表）；每路取 `math::min`
+/// 而不是无序 `LIMIT 1` 再取 `max`（GitHub #168）：`anc CONTAINS <外层根>` 同时命中子树内嵌套子根的行，
+/// 子根在更新会话单独重建后 `max` 会把子根的新版本号冒充成外层旧根的版本。同根内部未触记录的旧 `model_sesno`
+/// 在基线未落按需全量重算下不存在，而在已初始化库下已有 `dbnum_watermark.model_sesno` 兜底。
+/// 注意 SurrealDB 2.1 对 `GROUP ALL` 不会因 `SELECT VALUE` 解包对象，故用显式别名 `AS s` 解出。
+pub(crate) fn durable_root_min_sesno_queries(root: RefnoEnum) -> [String; 4] {
+    let e3d_root = crate::data_interface::generation_root::refno_to_e3d(root);
+    let packed = crate::fast_model::model_memory_store::packed_refno(e3d_root);
+    let owner = root.to_pe_key();
+    [
+        format!(
+            "SELECT math::min(model_sesno) AS s FROM inst_relate WHERE anc CONTAINS {packed} AND model_sesno != NONE AND model_sesno > 0 GROUP ALL"
+        ),
+        format!(
+            "SELECT math::min(model_sesno) AS s FROM inst_relate WHERE in = {owner} AND model_sesno != NONE AND model_sesno > 0 GROUP ALL"
+        ),
+        format!(
+            "SELECT math::min(model_sesno) AS s FROM tubi_relate WHERE anc CONTAINS {packed} AND model_sesno != NONE AND model_sesno > 0 GROUP ALL"
+        ),
+        format!(
+            "SELECT math::min(model_sesno) AS s FROM tubi_relate WHERE in = {owner} AND model_sesno != NONE AND model_sesno > 0 GROUP ALL"
+        ),
+    ]
+}
+
+/// 从持久库（RocksDB）按生成根批量查回已落盘的保守 `model_sesno`（2026-11-13 GitHub #146；#168 改取最小值）。
 ///
 /// 未建立库级水位的库上按需生成的结果会通过 write-behind 落盘，每条 `inst_relate` / `tubi_relate`
-/// 都带着 `anc` 与 `model_sesno`。进程重启后内存投影和账本为空，用每根 `LIMIT 1` 的索引点查
-/// 找回已落盘的会话版本，避免重启后重新触发全量生成。
+/// 都带着 `anc` 与 `model_sesno`。进程重启后内存投影和账本为空，按每根覆盖行的最小正会话号
+/// 找回已落盘的会话版本，避免重启后重新触发全量生成，同时防止嵌套子根的新版本把外层旧根误判为当前。
 pub async fn durable_roots_model_sesnos(
     roots: &[RefnoEnum],
 ) -> anyhow::Result<HashMap<RefnoEnum, i64>> {
@@ -237,6 +301,12 @@ pub async fn durable_roots_model_sesnos_on(
     db: &Surreal<Any>,
     roots: &[RefnoEnum],
 ) -> anyhow::Result<HashMap<RefnoEnum, i64>> {
+    #[derive(Deserialize)]
+    struct MinSesnoRow {
+        #[serde(default)]
+        s: Option<i64>,
+    }
+
     let mut unique_roots = Vec::new();
     let mut seen = HashSet::new();
     for &root in roots {
@@ -248,29 +318,24 @@ pub async fn durable_roots_model_sesnos_on(
     for chunk in unique_roots.chunks(32) {
         let mut sql = String::new();
         for root in chunk {
-            let e3d_root = crate::data_interface::generation_root::refno_to_e3d(*root);
-            let packed = crate::fast_model::model_memory_store::packed_refno(e3d_root);
-            let owner = root.to_pe_key();
-            sql.push_str(&format!(
-                "SELECT VALUE model_sesno FROM inst_relate WHERE anc CONTAINS {packed} AND model_sesno != NONE LIMIT 1;\n\
-                 SELECT VALUE model_sesno FROM inst_relate WHERE in = {owner} AND model_sesno != NONE LIMIT 1;\n\
-                 SELECT VALUE model_sesno FROM tubi_relate WHERE anc CONTAINS {packed} AND model_sesno != NONE LIMIT 1;\n\
-                 SELECT VALUE model_sesno FROM tubi_relate WHERE in = {owner} AND model_sesno != NONE LIMIT 1;\n"
-            ));
+            for query in durable_root_min_sesno_queries(*root) {
+                sql.push_str(&query);
+                sql.push_str(";\n");
+            }
         }
         let mut response = db.query(sql).await?.check()?;
         for (idx, root) in chunk.iter().enumerate() {
             let base = idx * 4;
-            let mut best: Option<i64> = None;
+            let mut conservative: Option<i64> = None;
             for offset in 0..4 {
-                let vals: Vec<Option<i64>> = response.take(base + offset)?;
-                for v in vals.into_iter().flatten() {
+                let rows: Vec<MinSesnoRow> = response.take(base + offset)?;
+                for v in rows.into_iter().filter_map(|row| row.s) {
                     if v > 0 {
-                        best = Some(best.map_or(v, |prev| prev.max(v)));
+                        conservative = Some(conservative.map_or(v, |prev| prev.min(v)));
                     }
                 }
             }
-            if let Some(sesno) = best {
+            if let Some(sesno) = conservative {
                 out.insert(*root, sesno);
             }
         }
@@ -2813,5 +2878,243 @@ mod tests {
             )
         );
         assert_eq!(state.observed.as_ref().unwrap().len(), 3);
+    }
+
+    /// GitHub #168（第 1 点）：持久库回读是冷重启兜底手段，查询报错时不得用 `?` 让整次判定失败；
+    /// 已由库级承诺或进程账本判出的命中根照常保留，未命中内存缓存的根按「不算当前」处理，整体正常返回。
+    #[tokio::test]
+    async fn durable_fallback_query_error_preserves_memory_hits_and_treats_misses_as_not_current() {
+        use crate::data_interface::model_root_ledger::{RootEntry, RootOutcome, parse_root};
+
+        let lib_hit_root = "24383/10";
+        let ledger_hit_root = "24384/20";
+        let cold_miss_root = "24384/21";
+        let failed_ledger_root = "24384/22";
+
+        let versions = vec![
+            (lib_hit_root.to_owned(), 8000, 25),
+            (ledger_hit_root.to_owned(), 8001, 20),
+            (cold_miss_root.to_owned(), 8001, 20),
+            (failed_ledger_root.to_owned(), 8001, 20),
+        ];
+        let libraries = BTreeMap::from([
+            (
+                8000,
+                Some(LibraryCredential {
+                    model_sesno: 25,
+                    catalogue: Vec::new(),
+                }),
+            ),
+            (8001, None),
+        ]);
+        let ledger_hit_parsed = parse_root(ledger_hit_root).unwrap();
+        let failed_parsed = parse_root(failed_ledger_root).unwrap();
+        let cold_miss_parsed = parse_root(cold_miss_root).unwrap();
+
+        let mut queried_roots = Vec::new();
+        let current = judge_generation_roots_cache_current_with(
+            versions,
+            &libraries,
+            |_| None,
+            |dbnum, root| match (dbnum, root) {
+                (8001, r) if r == ledger_hit_parsed => Some(RootEntry {
+                    noun: "BRAN".into(),
+                    outcome: RootOutcome::Generated,
+                    source_end_sesno: 20,
+                    failure_streak: 0,
+                    consecutive_failures: 0,
+                    retry_at: None,
+                }),
+                (8001, r) if r == failed_parsed => Some(RootEntry {
+                    noun: "BRAN".into(),
+                    outcome: RootOutcome::Failed {
+                        error: "bake boom".into(),
+                    },
+                    source_end_sesno: 20,
+                    failure_streak: 1,
+                    consecutive_failures: 1,
+                    retry_at: None,
+                }),
+                _ => None,
+            },
+            true,
+            |roots| {
+                queried_roots = roots;
+                async { Err(anyhow::anyhow!("simulated SurrealDB connection failure")) }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            queried_roots,
+            vec![cold_miss_parsed],
+            "只有内存未命中且无悬着失败的根才去查持久库"
+        );
+        assert_eq!(
+            current,
+            HashSet::from([lib_hit_root.to_owned(), ledger_hit_root.to_owned()]),
+            "持久库查询报错时，内存已命中的根照常判当前，未命中的根按不当前处理"
+        );
+    }
+
+    /// GitHub #168（第 2 点）：外层根停在旧会话 10，内层嵌套子根单独按需重建到会话 20；
+    /// `anc CONTAINS <外层根>` 同时命中两者的行，回读必须取保守最小值 10，不能拿子根的 20
+    /// 把外层旧根误判成已追平到 20。
+    #[tokio::test]
+    async fn nested_child_root_newer_sesno_does_not_mark_stale_outer_root_current() {
+        use crate::data_interface::generation_root::refno_to_e3d;
+        use crate::data_interface::model_root_ledger::parse_root;
+        use crate::fast_model::model_memory_store::packed_refno;
+
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem db");
+        db.use_ns("test")
+            .use_db("nested_durable_sesno")
+            .await
+            .expect("use ns/db");
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .expect("define indices")
+            .check()
+            .expect("check indices");
+
+        let outer = parse_root("24383/100").unwrap();
+        let outer_member = parse_root("24383/101").unwrap();
+        let inner = parse_root("24383/200").unwrap();
+        let inner_member = parse_root("24383/201").unwrap();
+        let outer_tube_only = parse_root("24383/300").unwrap();
+        let inner_tube_branch = parse_root("24383/301").unwrap();
+
+        let p_outer = packed_refno(refno_to_e3d(outer));
+        let p_outer_member = packed_refno(refno_to_e3d(outer_member));
+        let p_inner = packed_refno(refno_to_e3d(inner));
+        let p_inner_member = packed_refno(refno_to_e3d(inner_member));
+        let p_outer_tube = packed_refno(refno_to_e3d(outer_tube_only));
+        let p_inner_tube = packed_refno(refno_to_e3d(inner_tube_branch));
+
+        // 刻意让子根（id 较小）排在索引前面，旧的无 ORDER BY LIMIT 1 + max 必然误拿 20：
+        // - `inst_relate:⟨24383_050⟩`：属于嵌套子根 inner，已单独重建到会话 20，祖先链含 [self, inner, outer]
+        // - `inst_relate:⟨24383_900⟩`：属于外层根 outer 自己的直属件，仍停在旧会话 10，祖先链含 [self, outer]
+        // 另测 `tubi_relate` 同款嵌套情形。
+        db.query(format!(
+            "INSERT INTO inst_relate [\
+               {{ id: inst_relate:⟨24383_050⟩, in: {}, anc: [{p_inner_member}, {p_inner}, {p_outer}], model_sesno: 20 }},\
+               {{ id: inst_relate:⟨24383_900⟩, in: {}, anc: [{p_outer_member}, {p_outer}], model_sesno: 10 }}\
+             ];\
+             INSERT RELATION INTO tubi_relate [\
+               {{ id: tubi_relate:[{}, 0], in: {}, out: inst_geo:m1, anc: [{p_inner_tube}, {p_outer_tube}], model_sesno: 20 }},\
+               {{ id: tubi_relate:[{}, 0], in: {}, out: inst_geo:m2, anc: [{p_outer_tube}], model_sesno: 10 }}\
+             ];",
+            inner_member.to_pe_key(),
+            outer_member.to_pe_key(),
+            inner_tube_branch.to_pe_key(),
+            inner_tube_branch.to_pe_key(),
+            outer_tube_only.to_pe_key(),
+            outer_tube_only.to_pe_key(),
+        ))
+        .await
+        .expect("seed rows")
+        .check()
+        .expect("check seed");
+
+        let sesnos = durable_roots_model_sesnos_on(&db, &[outer, inner, outer_tube_only, inner_tube_branch])
+            .await
+            .expect("query durable sesnos");
+        assert_eq!(sesnos.get(&outer), Some(&10), "外层根保守版本应停在 10");
+        assert_eq!(sesnos.get(&inner), Some(&20), "内层子根版本应为 20");
+        assert_eq!(
+            sesnos.get(&outer_tube_only),
+            Some(&10),
+            "管身表上外层根同样不能被子分支的 20 冒充"
+        );
+        assert_eq!(sesnos.get(&inner_tube_branch), Some(&20));
+
+        // 走完整的缓存当前判定：目标会话 20 下，内层子根当前，外层旧根不当前；目标会话 10 下两者都当前。
+        let libraries = BTreeMap::from([(7997, None)]);
+        let current_at_20 = judge_generation_roots_cache_current_with(
+            vec![
+                ("24383/100".to_owned(), 7997, 20),
+                ("24383/200".to_owned(), 7997, 20),
+                ("24383/300".to_owned(), 7997, 20),
+            ],
+            &libraries,
+            |_| None,
+            |_, _| None,
+            true,
+            |roots| {
+                let db = &db;
+                async move { durable_roots_model_sesnos_on(db, &roots).await }
+            },
+        )
+        .await;
+        assert_eq!(
+            current_at_20,
+            HashSet::from(["24383/200".to_owned()]),
+            "目标会话 20 下外层旧根不能被子根的新版本误判成已追平"
+        );
+
+        let current_at_10 = judge_generation_roots_cache_current_with(
+            vec![
+                ("24383/100".to_owned(), 7997, 10),
+                ("24383/200".to_owned(), 7997, 10),
+            ],
+            &libraries,
+            |_| None,
+            |_, _| None,
+            true,
+            |roots| {
+                let db = &db;
+                async move { durable_roots_model_sesnos_on(db, &roots).await }
+            },
+        )
+        .await;
+        assert_eq!(
+            current_at_10,
+            HashSet::from(["24383/100".to_owned(), "24383/200".to_owned()])
+        );
+    }
+
+    /// GitHub #168（第 4 点核实）：按根回读的四句单索引查询在 `INST_RELATE_INDEX_SQL` 下全部经索引规划，
+    /// 不退回 `Iterate Table`（即使是没有命中行的未生成根也只点查对应索引键，不扫两张整表）。
+    #[tokio::test]
+    async fn durable_root_sesno_queries_are_planned_through_anc_and_in_indexes() {
+        use crate::data_interface::model_root_ledger::parse_root;
+
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem db");
+        db.use_ns("test")
+            .use_db("durable_sesno_explain")
+            .await
+            .expect("use ns/db");
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .expect("define indices")
+            .check()
+            .expect("check indices");
+
+        let root = parse_root("24383/99999").unwrap();
+        let queries = durable_root_min_sesno_queries(root);
+        let expected_indexes = [
+            "idx_inst_relate_anc",
+            "idx_inst_relate_in",
+            "idx_tubi_relate_anc",
+            "idx_tubi_relate_in",
+        ];
+        for (query, expected_index) in queries.iter().zip(expected_indexes) {
+            let mut response = db
+                .query(format!("{query} EXPLAIN FULL;"))
+                .await
+                .expect("explain query")
+                .check()
+                .expect("check explain");
+            let plan: surrealdb::Value = response.take(0).expect("take plan");
+            let plan_text = plan.to_string();
+            assert!(
+                !plan_text.contains("Iterate Table") && plan_text.contains(expected_index),
+                "{query} must use {expected_index} without table scan, got plan: {plan_text}"
+            );
+        }
     }
 }

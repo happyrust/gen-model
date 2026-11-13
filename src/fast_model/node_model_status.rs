@@ -813,11 +813,8 @@ pub fn unit_facts(scope: &NodeScope) -> Vec<UnitFacts> {
 
 /// 未建立库级水位（`durable_promise().is_none()`）且允许按根回读持久库时，在进程冷重启后内存投影清空，
 /// 从 `SUL_DB` 的 `inst_relate` / `tubi_relate` 回读已落盘单元的 `model_sesno` 作为 `receipt_sesno`
-/// （2026-11-13，GitHub #146）。
-async fn hydrate_durable_unit_facts(
-    library: &LibraryStatus,
-    units: &mut [UnitFacts],
-) -> anyhow::Result<()> {
+/// （2026-11-13 GitHub #146；#168 回读失败记告警并退回未生成）。
+async fn hydrate_durable_unit_facts(library: &LibraryStatus, units: &mut [UnitFacts]) {
     hydrate_durable_unit_facts_on(
         &aios_core::SUL_DB,
         crate::options::store_mode().is_durable(),
@@ -825,7 +822,7 @@ async fn hydrate_durable_unit_facts(
         library,
         units,
     )
-    .await
+    .await;
 }
 
 async fn hydrate_durable_unit_facts_on(
@@ -834,13 +831,29 @@ async fn hydrate_durable_unit_facts_on(
     read_through: bool,
     library: &LibraryStatus,
     units: &mut [UnitFacts],
-) -> anyhow::Result<()> {
+) {
+    hydrate_durable_unit_facts_with(store_is_durable, read_through, library, units, |roots| async move {
+        crate::data_interface::model_coverage::durable_roots_model_sesnos_on(db, &roots).await
+    })
+    .await;
+}
+
+async fn hydrate_durable_unit_facts_with<F, Fut>(
+    store_is_durable: bool,
+    read_through: bool,
+    library: &LibraryStatus,
+    units: &mut [UnitFacts],
+    fetch_durable: F,
+) where
+    F: FnOnce(Vec<RefnoEnum>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<HashMap<RefnoEnum, i64>>>,
+{
     if !store_is_durable
         || read_through
         || library.durable_promise().is_some()
         || !(library.route.is_database() || library.route.allows_durable_fallback())
     {
-        return Ok(());
+        return;
     }
     let missing_roots: Vec<RefnoEnum> = units
         .iter()
@@ -848,13 +861,18 @@ async fn hydrate_durable_unit_facts_on(
         .map(|unit| refno_from_e3d(unit.root))
         .collect();
     if missing_roots.is_empty() {
-        return Ok(());
+        return;
     }
-    let durable = crate::data_interface::model_coverage::durable_roots_model_sesnos_on(
-        db,
-        &missing_roots,
-    )
-    .await?;
+    let missing_count = missing_roots.len();
+    let durable = match fetch_durable(missing_roots).await {
+        Ok(sesnos) => sesnos,
+        Err(error) => {
+            log::warn!(
+                "[node-model-status] 按根回读持久库单元状态失败（{missing_count} 个未命中单元按未生成处理）: {error:#}"
+            );
+            return;
+        }
+    };
     for unit in units.iter_mut() {
         if unit.receipt_sesno.is_none()
             && unit.ledger != LedgerFact::Unsettled
@@ -865,7 +883,6 @@ async fn hydrate_durable_unit_facts_on(
             unit.receipt_sesno = Some(sesno_u32);
         }
     }
-    Ok(())
 }
 
 /// HTTP 回执（spec §4.5.3）。
@@ -947,9 +964,7 @@ pub async fn node_model_status(
         .await
         .map_err(|error| NodeStatusError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
     let mut units = unit_facts(&scope);
-    hydrate_durable_unit_facts(&library, &mut units)
-        .await
-        .map_err(|error| NodeStatusError::new("internal", format!("读取持久库单元状态失败: {error:#}")))?;
+    hydrate_durable_unit_facts(&library, &mut units).await;
     let (judgement, windows_cached, scope, library) = tokio::task::spawn_blocking(move || {
         let (judgement, windows_cached) = judge_on_files(&scope, &library, &units);
         (judgement, windows_cached, scope, library)
@@ -1645,9 +1660,7 @@ mod tests {
 
         // 重启后进程内投影和账本均为空（cold unit）
         let mut units = vec![cold(101)];
-        hydrate_durable_unit_facts_on(&db, true, false, &bare, &mut units)
-            .await
-            .expect("hydrate durable");
+        hydrate_durable_unit_facts_on(&db, true, false, &bare, &mut units).await;
         assert_eq!(units[0].receipt_sesno, Some(447));
         assert_eq!(
             classify_unit(&bare, &units[0], false),
@@ -1659,16 +1672,54 @@ mod tests {
 
         // 纯内存（非 durable）和读透模式下不回读持久库
         let mut mem_units = vec![cold(101)];
-        hydrate_durable_unit_facts_on(&db, false, false, &bare, &mut mem_units)
-            .await
-            .expect("skip non-durable");
+        hydrate_durable_unit_facts_on(&db, false, false, &bare, &mut mem_units).await;
         assert_eq!(mem_units[0].receipt_sesno, None);
 
         let rt = library(DataFace::ReadThrough, 0, 0, 447, false);
         let mut rt_units = vec![cold(101)];
-        hydrate_durable_unit_facts_on(&db, true, true, &rt, &mut rt_units)
-            .await
-            .expect("skip read-through");
+        hydrate_durable_unit_facts_on(&db, true, true, &rt, &mut rt_units).await;
         assert_eq!(rt_units[0].receipt_sesno, None);
+
+        // GitHub #168（第 1 点）：持久库回读失败时降级为不填充未命中的冷单元，已驻留内存投影的单元原样保留。
+        let mut mixed_units = vec![generated(100, 447), cold(101)];
+        hydrate_durable_unit_facts_with(true, false, &bare, &mut mixed_units, |_roots| async {
+            Err(anyhow::anyhow!("simulated durable query failure"))
+        })
+        .await;
+        assert_eq!(mixed_units[0].receipt_sesno, Some(447));
+        assert_eq!(mixed_units[1].receipt_sesno, None);
+    }
+
+    #[tokio::test]
+    async fn hydrate_durable_unit_facts_takes_conservative_sesno_when_nested_child_is_newer() {
+        let db = surrealdb::engine::any::connect("mem://").await.expect("mem db");
+        db.use_ns("test")
+            .use_db("nested_unit_sesno")
+            .await
+            .expect("use ns/db");
+        let outer = refno(100);
+        let inner = refno(200);
+        let p_outer = crate::fast_model::model_memory_store::packed_refno(outer);
+        let p_inner = crate::fast_model::model_memory_store::packed_refno(inner);
+        db.query(format!(
+            "INSERT INTO inst_relate [\
+               {{ id: inst_relate:⟨24383_050⟩, in: pe:⟨24383_200⟩, anc: [{p_inner}, {p_outer}], model_sesno: 20 }},\
+               {{ id: inst_relate:⟨24383_900⟩, in: pe:⟨24383_100⟩, anc: [{p_outer}], model_sesno: 10 }}\
+             ];"
+        ))
+        .await
+        .expect("insert inst_relate")
+        .check()
+        .expect("check insert");
+
+        let bare = library(DataFace::Ingest, 0, 0, 20, false);
+        let mut units = vec![cold(100), cold(200)];
+        hydrate_durable_unit_facts_on(&db, true, false, &bare, &mut units).await;
+        assert_eq!(
+            units[0].receipt_sesno,
+            Some(10),
+            "外层单元不能被嵌套子单元的新版本 20 冒充"
+        );
+        assert_eq!(units[1].receipt_sesno, Some(20));
     }
 }
