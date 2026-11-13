@@ -1,5 +1,5 @@
 //! 极简 JSON 读取：面板读后端接口和 stack 的状态文件用。
-//! 不引 serde_json：给 deploy-dash 加依赖有让 spike\target 里已编好的依赖跟着重编的风险。
+//! 不引 serde_json：给 deploy-dash 加依赖有让已编好的依赖跟着重编的风险。
 #![allow(dead_code)]
 
 #[derive(Clone, Debug, PartialEq)]

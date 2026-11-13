@@ -15,9 +15,10 @@
 # 用 stable，并且经编译锁 output\ops\with-build-lock.ps1：
 #   $env:RUSTUP_TOOLCHAIN = 'stable'
 #   pwsh -NoProfile -File <仓库>\output\ops\with-build-lock.ps1 -Who <谁> -WorkDir <仓库的上一级目录> -Log <日志文件> `
-#       -CargoArgs "build,-p,deploy-dash,--offline,--manifest-path,<仓库>\tools\deploy-dash\Cargo.toml,--target-dir,<仓库>\output\gui-20261112\spike\target" `
+#       -CargoArgs "build,-p,deploy-dash,--offline,--manifest-path,<仓库>\tools\deploy-dash\Cargo.toml" `
 #       -Jobs 2 -StartCommitFreeGb 14
-# --target-dir 指向已经编好全部依赖的那份缓存；不带它，cargo 会在本目录的 target\ 里把依赖从头编一遍。
+# 不用带 --target-dir：这台机器装的 cargo 按工作区名分目录放中间产物（D:\Rust\.cargo\targets\gen-model-<哈希>\），
+# 不认 --target-dir 和 CARGO_TARGET_DIR（只给一句警告），成品固定出在本目录的 target\debug\。
 [workspace]
 members = [
     "deploy-dash-proto",  # 面板 ↔ 代理的线上协议（schema = 1）
