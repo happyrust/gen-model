@@ -150,12 +150,10 @@ pub struct IncrResult {
 /// 发布到哪」（`model_floor`，调用方按 `startup_reconcile::startup_model_recovery_plan`
 /// 同一判据算出）。两者不一致时模型必须从更早的那个起算。
 ///
-/// **为什么不能只用数据窗左端**：收尾那一笔是
-/// `model_sesno = math::max([model_sesno ?: 0, T])`（`task_end.rs:161`），没有「本任务
-/// 模型左端 ≤ 当前模型水位」的连续性闸。若模型从数据窗左端起算，则 S→T 之间没做完的根
-/// 会被这一窗的成功收尾直接盖过去，欠账从此在库上不可见（账本 `model_root_ledger` 只活
-/// 在进程里）。详见
-/// `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md` 第三节。
+/// **为什么模型水位已盖章时要从它起算**：从数据窗左端起算的话，S→T 之间没做完的根不在
+/// 这一窗的计划里，收尾的连续性闸（ADR-092 D2：本任务模型左端 ≤ 库上 `model_sesno` 才盖）
+/// 只能拒盖 `model_sesno`，欠账要等 `ModelOnly` 补；从模型水位起算，这一窗就把欠账一并
+/// 补齐并盖章。详见 `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md` 第三节。
 ///
 /// `None` / `<= 0` / 不小于数据左端时一律沿用数据窗左端：`0` 是「模型从没盖过章」哨兵，
 /// dabacon 库文件没有会话 0（会话从 1 起），传 `0` 会让 `DbSet@0` 打开失败并把数据批次
