@@ -47,8 +47,8 @@ use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
 use e3d_model::element_diff::ElementDiff;
 use e3d_model::increment::{
-    AffectedClosure, NoModelTier, PlanLimits, UpdatePlan, collect_window, plan_update,
-    plan_update_with,
+    AffectedClosure, IncrementReport, NoModelTier, PlanLimits, UpdatePlan, collect_window,
+    plan_update, plan_update_with,
 };
 use e3d_model::ledger::{ChangeKind, ChangeLedger, Disposition};
 
@@ -337,6 +337,42 @@ pub fn delete_coverage_gap_warning(
         gap.len(),
         named.join(", "),
         removed.len()
+    )
+}
+
+/// 窗口规划那一行回执里 e3d-model 账的**计划半**（GitHub #75）。
+///
+/// [`IncrementReport::totals_line`] 把计划账与 `execute_plan` 的执行账印在同一行：
+/// `… units regen= remove= derived= | regenerated= skipped= failed= | derived regen= retired= failed= tubes + -`。
+/// gen-model 生产只消费 `collect_window → plan_update`、按根重算，从不跑 `execute_plan`（e3d-model `increment`
+/// 模块文档「生产定位」一节），后半段在这里**恒为 0**。整行照印，回执上读出来就是「计划重算 1 条派生、执行 0 条、
+/// 管身 +0 −0」——BRAN 只改 `HPOS` 那一窗（ams7997 385→387）正是 `derived=1 | … derived regen=0 … tubes +0 -0`，
+/// 而那一根其实照常生成了（单元回执 `status=generated`、几何 0 动 0 增 0 减）。
+///
+/// 这里只印规划器真算过的那一半，字段与顺序照 `totals_line` 的前半段；执行结果看单元回执
+/// （`kind` / `status` / `geometry_diff`），不在这一行。
+pub(crate) fn plan_totals_line(report: &IncrementReport) -> String {
+    format!(
+        "window {}→{}: candidates={} (+{} ~{} -{}) rolled_up={} unchanged={} no_model={} \
+         (metadata_only={} unread_attribute={} cache_stamp={}) unresolved={} cascades={} units regen={} \
+         remove={} derived={}",
+        report.base_sesno,
+        report.target_sesno,
+        report.candidates,
+        report.inserted,
+        report.modified,
+        report.deleted,
+        report.rolled_up,
+        report.unchanged,
+        report.no_model.values().sum::<usize>(),
+        report.metadata_only,
+        report.unread_attribute,
+        report.cache_stamp,
+        report.unresolved.len(),
+        report.cascades.len(),
+        report.units_to_regenerate,
+        report.units_to_remove,
+        report.derived_to_regenerate,
     )
 }
 
@@ -2247,6 +2283,7 @@ pub(crate) async fn build_model_update_plan_from_window(
         );
     }
     let change_list_ms = lap(&mut tick);
+    // 只带 e3d-model 账的计划半（`plan_totals_line`，GitHub #75）：执行半是 `execute_plan` 的，生产不跑它，恒为 0。
     let mut warnings = vec![format!(
         "dbnum={dbnum}: window {base_sesno}→{target_sesno} roots_T={} roots_S={} touched={} \
          regen={} delete={} advance={} lazy={} | {}",
@@ -2257,7 +2294,7 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.delete.len(),
         plan.advance.len(),
         plan.lazy.len(),
-        sources.plan.report.totals_line()
+        plan_totals_line(&sources.plan.report)
     )];
     // 覆盖账（计划 D3，2026-09-18）：账本说要删的单元，自身或 S 端属主链上得有一级落在 `delete`
     // 或 `regen` 里，否则它的旧行这一窗没人清——09-15 S5 那窗 `remove=1` / `delete=0` 就并排在
@@ -2283,7 +2320,9 @@ pub(crate) async fn build_model_update_plan_from_window(
              attributes with dictionary DCHC=0 that the generator never reads (or only the CACHID / \
              SPAMAP stamps) and were not rolled up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, \
              unread_attribute={} on the wider S6 tier, cache_stamp={} on the stamp-only Q6 tier); \
-             ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
+             ledger unchanged; a candidate whose changed attributes carry no CACHID / SPAMAP stamp \
+             does not seed the ancestor closure (its root advances instead of regenerating, GitHub #76), \
+             a stamped one still does (model_skip_metadata_only_changes)",
             sources.plan.report.metadata_only,
             sources.plan.report.unread_attribute,
             sources.plan.report.cache_stamp
@@ -2293,8 +2332,8 @@ pub(crate) async fn build_model_update_plan_from_window(
         warnings.push(format!(
             "dbnum={dbnum}: unread-attribute gate — {} modified candidate(s) touched at least one \
              attribute outside the old list that the dictionary rates DCHC=0 and no generator \
-             reads by name, and were not rolled up; ledger and closure seeds unchanged \
-             (model_skip_metadata_only_changes)",
+             reads by name, and were not rolled up; ledger unchanged, closure seeding as stated on \
+             the metadata-only gate line (model_skip_metadata_only_changes)",
             sources.plan.report.unread_attribute
         ));
     }
@@ -5402,6 +5441,70 @@ mod tests {
         assert!(!metadata_only_change_seeds_no_root(&opaque));
     }
 
+    /// GitHub #75：窗口规划那一行只印 e3d-model 账的**计划半**。样本是 ams7997 385→387（BRAN `24381/145764` 只改
+    /// `HPOS`）那一窗规划器真给出的数：1 条候选上卷、1 条 `no_model`、0 个单元、1 条派生容器。`totals_line` 的后半段
+    /// （`regenerated` / `derived regen` / `tubes`）是 `execute_plan` 的执行账，生产不跑它，印出来恒为 0，读起来就是
+    /// 「计划重算 1 条派生、执行 0 条」。
+    #[test]
+    fn the_window_plan_line_carries_the_plan_half_of_the_increment_account_only() {
+        let report = IncrementReport {
+            base_sesno: 385,
+            target_sesno: 387,
+            candidates: 2,
+            modified: 2,
+            rolled_up: 1,
+            no_model: BTreeMap::from([("DBMDAT".to_string(), 1)]),
+            derived_to_regenerate: 1,
+            ..Default::default()
+        };
+        let line = plan_totals_line(&report);
+        assert_eq!(
+            line,
+            "window 385→387: candidates=2 (+0 ~2 -0) rolled_up=1 unchanged=0 no_model=1 \
+             (metadata_only=0 unread_attribute=0 cache_stamp=0) unresolved=0 cascades=0 units regen=0 \
+             remove=0 derived=1"
+        );
+        // 计划半与 e3d-model 那一行的前半段逐字相同：两边说的是同一本账，只是这里不带没跑过的那一半。
+        let full = report.totals_line();
+        assert!(
+            full.starts_with(&line),
+            "计划半要与 totals_line 的前半段逐字相同:\n{line}\n{full}"
+        );
+        let execution_half = &full[line.len()..];
+        for field in ["regenerated=", "skipped=", "derived regen=", "retired=", "tubes +"] {
+            assert!(
+                execution_half.contains(field),
+                "e3d-model 那一行的后半段应当还是执行账（{field}）: {execution_half}"
+            );
+            assert!(!line.contains(field), "计划那一行不带执行账 {field}: {line}");
+        }
+    }
+
+    /// GitHub #75 的接线：生产的窗口计划（`build_model_update_plan_from_window`）拼回执用的是
+    /// [`plan_totals_line`]，不直接调 `IncrementReport::totals_line`。
+    #[test]
+    fn the_production_window_plan_does_not_print_the_unexecuted_account() {
+        let source = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let body = source
+            .split_once(concat!(
+                "pub(crate) async fn ",
+                "build_model_update_plan_from_window("
+            ))
+            .expect("窗口计划入口")
+            .1
+            .split_once(concat!("pub(crate) fn ", "carry_unsettled_generation("))
+            .expect("carry_unsettled_generation 紧随其后")
+            .0;
+        assert!(
+            body.contains(concat!("plan_totals_", "line(&sources.plan.report)")),
+            "窗口计划那一行要用计划半"
+        );
+        assert!(
+            !body.contains(concat!(".totals_", "line()")),
+            "生产的窗口计划不许再印 execute_plan 的执行账（恒为 0）"
+        );
+    }
+
     /// 档位是**整个元素**的一句话（S6）：全落老名单才算老档，有一个靠新档过关这一笔就记进
     /// `unread_attribute`。两档的去向相同，档位只决定这一笔记在回执哪一格。
     #[test]
@@ -6273,6 +6376,148 @@ mod tests {
         assert!(
             out.window_planned,
             "窗口规划器的计划必须自报家门，否则 apply_one 还会去跑那条会炸的复核"
+        );
+    }
+
+    /// 真库门共用的那一段：在 `file` 的 S / T 两端各钉一个 `DbSet`，跑一遍 `collect` + 分桶，回
+    /// `(sources, 计划)`。`roots_S` 取 base 端枚举（S 时刻每个根都已发布）。
+    fn live_window_plan(
+        file: &std::path::Path,
+        base_sesno: u32,
+        target_sesno: u32,
+    ) -> (WindowRootSources, WindowRootPlan) {
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let open = |sesno: u32| -> Arc<DbSet> {
+            let set = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            set.add_db(DbFilePin {
+                file: file.to_path_buf(),
+                template: template_file_for(schema.template_dir(), "DESI").expect("DESI template"),
+                db_type: Some("DESI".into()),
+                sesno: Some(sesno),
+            })
+            .expect("pin DESI");
+            set
+        };
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let (base, target) = (open(base_sesno), open(target_sesno));
+        let sources = WindowRootSources::collect(
+            file,
+            base_sesno,
+            target_sesno,
+            &base,
+            &target,
+            &unit_types,
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("collect {base_sesno}→{target_sesno}: {error:#}"));
+        let roots_s = sources.roots_s.clone();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        (sources, plan)
+    }
+
+    /// **GitHub #76 的真库门**（`#[ignore]`，手动）：2026-10-27 那一轮增量夹具的 `data` 例留在 ams7998 里的两窗——
+    /// 547 把 EQUI `24382/1074`（`/AIOS-INC-DATA-EQ`）改名、549 改回，各带一个只动 `DBMDAT` 的尾会话。只改 `NAME` 的候选
+    /// 门放行、不带戳，不做闭包种子：两窗都一根不重算，这台 EQUI 留在 `advance`。修之前它是 `touched=1 regen=1`。
+    ///
+    /// 只读文件：`AIOS_INCREMENT_FIXTURE_7998_FILE`（默认 ams7998_0001）+ E3D 模板目录。
+    #[test]
+    #[ignore = "manual live: needs the real ams7998 DESI file and the E3D template directory"]
+    fn live_ams7998_a_name_only_change_regenerates_no_root() {
+        let file = std::path::PathBuf::from(
+            std::env::var("AIOS_INCREMENT_FIXTURE_7998_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7998_0001".into()
+            }),
+        );
+        let renamed = RefnoEnum::from(RefU64::from_two_nums(24382, 1074));
+        for (base_sesno, target_sesno) in [(546, 548), (548, 550)] {
+            let (sources, plan) = live_window_plan(&file, base_sesno, target_sesno);
+            println!(
+                "ams7998 {base_sesno}→{target_sesno}: regen={:?} delete={} advance={} lazy={} degraded={:?} | {}",
+                plan.regen
+                    .iter()
+                    .map(|root| root.root.to_pdms_str())
+                    .collect::<Vec<_>>(),
+                plan.delete.len(),
+                plan.advance.len(),
+                plan.lazy.len(),
+                plan.degraded,
+                plan_totals_line(&sources.plan.report)
+            );
+            assert_eq!(plan.degraded, None);
+            assert_eq!(
+                sources.plan.report.candidates, 2,
+                "这一窗是 EQUI 改 NAME + DBMDAT 改 DBMVAL 两条"
+            );
+            assert_eq!(
+                sources.plan.report.metadata_only, 1,
+                "EQUI 只改 NAME：老名单档、门放行（元数据门关着的话这条门不成立）"
+            );
+            assert!(
+                plan.regen.is_empty(),
+                "只改 NAME 不该让任何根重算: {:?}",
+                plan.regen
+            );
+            assert!(plan.delete.is_empty());
+            assert!(
+                plan.advance.contains(&renamed),
+                "改名的那台 EQUI 是已发布的根，这一窗按 advance 走"
+            );
+        }
+    }
+
+    /// **GitHub #75 的真库门**（`#[ignore]`，手动）：ams7997 385→387——2026-10-26 23:13 那一次 SAVEWORK，BRAN
+    /// `24381/145764` 只把 `HPOS` 的 U 从 450 改到 950（连带 `CACHID`），紧跟一个只动 `DBMDAT` 的尾会话。
+    /// 规划器的账：这条 BRAN 上卷、不出单元、记 1 条派生容器，根进 `regen`；回执那一行只有计划半。
+    /// （执行结果是另一回事：管身落在已存的管件点之间，这一窗几何一条都不变，E3D 的 RVM 也不变。）
+    ///
+    /// 只读文件：`AIOS_HPOS_ONLY_7997_FILE`（默认 ams7997_0001）+ E3D 模板目录。
+    #[test]
+    #[ignore = "manual live: needs the real ams7997 DESI file and the E3D template directory"]
+    fn live_ams7997_385_to_387_a_bran_hpos_only_change_plans_one_derived_container() {
+        let file = std::path::PathBuf::from(std::env::var("AIOS_HPOS_ONLY_7997_FILE").unwrap_or_else(
+            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
+        ));
+        let (sources, plan) = live_window_plan(&file, 385, 387);
+        let line = plan_totals_line(&sources.plan.report);
+        println!(
+            "ams7997 385→387: regen={:?} delete={} advance={} lazy={} degraded={:?} | {line}",
+            plan.regen
+                .iter()
+                .map(|root| format!("{} {}", root.root.to_pdms_str(), root.noun))
+                .collect::<Vec<_>>(),
+            plan.delete.len(),
+            plan.advance.len(),
+            plan.lazy.len(),
+            plan.degraded,
+        );
+        for entry in sources.plan.ledger.entries() {
+            println!("  ledger: {} {} {:?}", entry.refno, entry.noun, entry.kind);
+        }
+        assert_eq!(plan.degraded, None);
+        assert_eq!(
+            plan.regen
+                .iter()
+                .map(|root| format!("{} {}", root.root.to_pdms_str(), root.noun))
+                .collect::<Vec<_>>(),
+            vec!["24381/145764 BRAN".to_string()],
+            "只有改了 HPOS 的那条 BRAN 进 regen"
+        );
+        assert_eq!(sources.plan.report.units_to_regenerate, 0);
+        assert_eq!(sources.plan.report.derived_to_regenerate, 1);
+        assert_eq!(
+            line,
+            "window 385→387: candidates=2 (+0 ~2 -0) rolled_up=1 unchanged=0 no_model=1 \
+             (metadata_only=0 unread_attribute=0 cache_stamp=0) unresolved=0 cascades=0 units regen=0 \
+             remove=0 derived=1",
+            "回执那一行只印计划半（没跑过的执行账不在里面）"
         );
     }
 

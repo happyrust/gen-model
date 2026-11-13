@@ -14,6 +14,20 @@
 - **验证**：`mesh_purge::tests::the_keeps_shared_declaration_stands_on_both_gates`（声明与两道闸同在，撤了哪一道这一条就红）、`handlers::tests::health_declares_that_purging_geometry_keeps_what_other_scopes_share`（键名、取值、取值来自声明而不是写死）通过；库单测整套（在隔离工作树里跑的）3121 过，红的 3 条与这次无关（两条是主工作区别人未提交改动里的旧冲突，一条是那棵工作树缺 `vendor\shared`）。
 - **没动**：别的能力格；清几何的行为（上一条）。
 
+### 窗口规划那一行回执只印计划半；元数据门两行不再说「闭包种子不变」（GitHub #75 / #76）
+
+- **为什么**：回执里 `window S→T roots_T=… | …` 那一行的后半段是 e3d-model `IncrementReport::totals_line()`，它把计划账和 `execute_plan` 的执行账印在同一行；gen-model 生产从不跑 `execute_plan`，执行账恒为 0。碰上 `derived=1` 读起来就是「计划重算 1 条派生、执行 0 条、管身 +0 −0」——#75 正文引的就是这一行，而那一根其实照常生成了。另外 `78e3d00b2` 之后不带戳的元数据候选不再做闭包种子，回执里却还写着 `ledger and closure seeds unchanged`。
+- **改**：`window_root_plan` 新加 `plan_totals_line`（字段和顺序照 `totals_line` 的前半段），`build_model_update_plan_from_window` 改用它；元数据门 / 不读属性门两行文案改成实话。只改回执文字。
+- **验证**：单测 `the_window_plan_line_carries_the_plan_half_of_the_increment_account_only`、`the_production_window_plan_does_not_print_the_unexecuted_account` 通过；两条 `#[ignore]` 真库门（`live_ams7997_385_to_387_a_bran_hpos_only_change_plans_one_derived_container`、`live_ams7998_a_name_only_change_regenerates_no_root`）在本机语料上通过。改之前的回放：ams7997 385→387（BRAN 只改 HPOS）任务 `succeeded`、单元 `kind=unit status=generated`、几何 0 动，当晚的 0.1.44 二进制重放同一窗也是 `succeeded`——票上的 `partial` 离线复现不出来；ams7998 546→548 / 548→550（只改 NAME）`touched=0 regen=0`、单元 0 个。
+- **没动**：几何、影响判定、任务状态的算法；e3d-model（`totals_line` 仍给离线工具用）。
+
+### 单元回执的 `geometry_diff` 不再看管身读回来的先后（GitHub #75）
+
+- **为什么**：`unit_geometry_snapshot` 按构件 refno 对前后两份快照，一个构件名下有几条行时（隐式管身都挂在支管的 refno 下）取「并集盒 + 读到的第一条的平移」。两条读路给管身的顺序不同：库上冷读按 `tubi_relate:[pe, 槽位]` 排，投影覆盖按投影记录 id（字符串）排。「前」读库、「后」读投影的那一批——冷重启后的第一批、根被逐出投影之后的一批——里，同一组管身的「第一条」换了一根，没动的支管被数成 `moved=1`、样本是支管自己。回放 ams7997 的 385→387（`24381/145764` 只改 HPOS，四段管身一段没动，`/model/records` 前后是同一组行）就是这样：冷重启后回执写 `{moved 1, sample ["24381_145764"]}`。反过来也漏报：不是第一条的那段管身变了、并集盒又没变时数成没动。#75 要的是「回执和结果一致」。
+- **改**：`RootGeometry::members` 从「每个构件一格」改成「每个构件名下的每一条行」；`diff` 用新加的 `same_rows` 逐条配对——条数相同，且「后」的每一条都能在「前」里配到一条还没被配走、九个分量都在 0.5 mm 容差内的——不按位置对。条数变了算这个构件动了。只有一条行的构件判法与原来逐位相同（差是 NaN 的分量照旧不算动）。回执的形状、`geometry_before` / `geometry_after` 的概要（行数 + 并集盒）不变。
+- **验证**：`cargo test --lib -- unit_geometry_snapshot` 4 条通过，新增 2 条，数据取自这根支管的真实行：`the_diff_does_not_depend_on_the_order_a_branch_s_tubes_are_read_in`（库序与投影序、带容差内的抖动，双向都是空差异；改之前这一条数成 `moved=1`）、`a_tube_that_really_moved_is_counted_whichever_row_it_is`（第三段缩短而并集盒不变、换序、少一段、多一段，都数在支管头上）。回放：同一个二进制上冷重启后重放 385→387，回执 `{moved 0, added 0, removed 0}`。
+- **没动**：`sort_overlay_records` 的顺序（它的注释说与库上一致，对管身其实不一致；`/model/records` 分页中途这根被逐出投影时游标可能错位，没有复现，另记）；容差；样本上限。
+
 ## 2026-11-08
 
 ### 投影删除只有一个入口：锁序、受影响根闭包、退役与作废（ADR-097）
