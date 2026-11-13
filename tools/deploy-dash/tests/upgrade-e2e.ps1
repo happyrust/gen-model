@@ -9,9 +9,14 @@
 #   6. 核对：两台的都换了、退出码 0、历史里有两条
 #   7. 再来一次「第一台起不来」：核对换回、第二台没动、退出码 1
 #
+# 用法：pwsh tests\upgrade-e2e.ps1 [-Scene all|fail-first]。先编好 deploy-dash.exe 和 deploy-dash-agent.exe。
+#
 # 端口用 18681–18682（板上给 agent-server 留的 18631–18639 之外，避免撞上别人的）。
 param(
-    [string]$Root = 'D:\work\plant-code\old\deploy-dash-upgrade',
+    # tools/deploy-dash 目录；沙盒建在 <Root>\target\test-run\up-e2e（target 不进库）
+    [string]$Root = (Split-Path $PSScriptRoot -Parent),
+    # 两个 exe 所在的目录，缺省 <Root>\target\debug
+    [string]$ExeDir = '',
     [int]$PortA = 18681,
     [int]$PortB = 18682,
     # all = 两台都成；fail-first = 第一台起不来（up 回 4），验换回 + 第二台不动
@@ -19,13 +24,14 @@ param(
     [string]$Scene = 'all'
 )
 $ErrorActionPreference = 'Stop'
-$work = Join-Path $Root 'spike\tmp\up-e2e'
+$work = Join-Path $Root 'target\test-run\up-e2e'
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-$agentExe = Join-Path $Root 'spike\target\debug\deploy-dash-agent.exe'
-$panelExe = Join-Path $Root 'spike\target\debug\deploy-dash.exe'
-if (-not (Test-Path $agentExe)) { throw "缺代理 exe：$agentExe" }
-if (-not (Test-Path $panelExe)) { throw "缺面板 exe：$panelExe" }
+if (-not $ExeDir) { $ExeDir = Join-Path $Root 'target\debug' }
+$agentExe = Join-Path $ExeDir 'deploy-dash-agent.exe'
+$panelExe = Join-Path $ExeDir 'deploy-dash.exe'
+if (-not (Test-Path $agentExe)) { throw "缺代理 exe：$agentExe（cargo build -p deploy-dash --bin deploy-dash-agent --features headless-agent）" }
+if (-not (Test-Path $panelExe)) { throw "缺面板 exe：$panelExe（cargo build -p deploy-dash --bin deploy-dash）" }
 $out = @()
 function Say($t) { $script:out += $t; Write-Host $t }
 
