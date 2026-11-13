@@ -56,6 +56,10 @@ pub struct FastDeleteDbnumResult {
     pub noun_tables: usize,
     pub range_statements: usize,
     pub elapsed_ms: u64,
+    /// `pe` 删光之后模型面还剩、另行清掉的行数（`inst_relate` + `tubi_relate`，按 `dbnum` 列数）：`pe` 从来没圈到过
+    /// 的那些——按需生成对基线没落的库落的行、初始化中途留下的行（[`wipe_model_residue_after_delete_on`]）。
+    /// 只有整库删除（[`delete_dbnum_fast`]）填它；回退重建 / 升级清库的残留由随后的初始化入口清，恒为 0。
+    pub model_residue_rows: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -783,7 +787,10 @@ async fn execute_transactional_phase(
 /// 目录库，它的依赖行正是别的任务会因 memo 跳过不发的那些；删的是 DESI 库时按目录库分不出哪些该留。
 /// 不作废的话这个进程剩下的任务都当那些行还在，缺行要等到重启才补得回来。
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
-    let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
+    let mut result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
+    // 上面那一趟的范围取自本库 `pe` 行；`pe` 从来没圈到过的模型行（按需生成对基线没落的库落的、初始化中途
+    // 留下的）它够不着，此前这里回成功、那些行原样留着（GitHub #146）。整库删除不该把它们留下。
+    result.model_residue_rows = wipe_model_residue_after_delete_on(&SUL_DB, dbnum).await?;
     crate::data_interface::projection_removal::clear_dbnum(dbnum, false)?;
     // 生成根账本这一页随库一起没了（ADR-079）：库里没有逐根的行，进程里也不该再记着它们。
     crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
@@ -1150,18 +1157,61 @@ pub struct ModelFaceWipeResult {
     pub ref0s: Vec<String>,
     pub range_statements: usize,
     pub elapsed_ms: u64,
+    /// 库上那一侧做了什么。`untouched` 时 `ref0s` 为空、`range_statements` 为 0——那不是「清了、没东西」，
+    /// 是这一档根本不动库。
+    pub database: ModelFaceDatabase,
     /// `purge_meshes=true` 那一格的账（`inst_geo` 行 + `.mesh`）；不勾时 `None`。回执里由 handler
     /// 逐格展开，不整件序列化。
     #[serde(skip)]
     pub geometry: Option<MeshPurgeReport>,
 }
 
+/// 整库模型清理在库上那一侧做了什么（回执的 `database` 一格）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFaceDatabase {
+    /// `Database` 路由：库是权威面，按本库 `pe` 圈到的 Ref0 清模型面。
+    ModelFace,
+    /// 基线还没落的库（读路由是内存）：库里的模型行是残留——按需生成经写后台落的、初始化中途留下的——
+    /// 连 `pe` 圈不到的一并清（[`wipe_unbaselined_model_face_on`]）。
+    Residue,
+    /// 库上一行没动：读透，或者内存路由的其余几档（任务在飞 / 模型落后 / 水位缺席或倒挂——库里那份是已收尾任务
+    /// 落过的旧快照，不归这条清理管）。只作废了进程内投影。
+    Untouched,
+}
+
+impl ModelFaceDatabase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelFace => "model_face",
+            Self::Residue => "residue",
+            Self::Untouched => "untouched",
+        }
+    }
+}
+
+/// 读路由是内存、库上却有这个库的模型行要清的那一档：摄入形态、基线还没落（`applied_sesno <= 0`），而且持久层是
+/// 外部那台库。这种库没有已收尾的快照——库里的模型行只可能是残留（[`model_face_scope_on`]）。内嵌 kv-mem 下
+/// 按需生成不经写后台、不落这些行，不算。
+fn holds_unbaselined_model_rows(
+    route: &crate::data_interface::model_read_route::ModelReadRoute,
+    store_is_durable: bool,
+) -> bool {
+    store_is_durable
+        && route.reason
+            == Some(
+                crate::data_interface::model_read_route::MemoryReason::DataWatermarkUnestablished,
+            )
+}
+
 /// 只清一个库的模型面：模型表区间、房间两边、模型水位归零。不碰 `pe` / noun / 数据水位 /
-/// 目录 memo。`Database` 路由才写库；其余只作废进程内投影，读透另把每个根渲成 spool 墓碑。
+/// 目录 memo。库上动不动看路由（[`ModelFaceDatabase`]）：`Database` 路由清库上的模型面；基线还没落的库
+/// 读路由是内存，但库里可能有按需生成落下的行，连 `pe` 圈不到的一并清（2026-11-11，GitHub #146；此前这一档
+/// 回成功、库上一行没删）；其余只作废进程内投影，读透另把每个根渲成 spool 墓碑。
 ///
 /// `geometry = Purge`（库行「清理模型（整库）」的 `purge_meshes=true`）时连这个库引用过的几何一起清：
 /// 键在生成锁之内、删行之前收（`inst_geo` 不按 Ref0 寻址，行一删就再也收不出来；收不动整趟中止、
-/// 一行不删），`inst_geo` 行与 `.mesh` 在删行之后清。库是权威面（`Database` 路由）才收、删库上那一份；
+/// 一行不删），`inst_geo` 行与 `.mesh` 在删行之后清。库上有行要清的两档（上面前两种）才收、删库上那一份；
 /// 其余路由只删投影指向的文件。口径与单位几何的例外见 [`mesh_purge`] 模块文档。
 pub async fn wipe_dbnum_model_face(
     dbnum: u32,
@@ -1191,35 +1241,53 @@ pub async fn wipe_dbnum_model_face(
         .await;
     let started = Instant::now();
     let route = crate::data_interface::model_read_route::route_for(dbnum).await?;
-    let durable = route.is_database();
+    let database = if route.is_database() {
+        ModelFaceDatabase::ModelFace
+    } else if holds_unbaselined_model_rows(&route, crate::options::store_mode().is_durable()) {
+        ModelFaceDatabase::Residue
+    } else {
+        ModelFaceDatabase::Untouched
+    };
+    // 库上有这个库的模型行要清——权威面，或基线没落的库里的残留——才收、删库上那一份。
+    let on_database = database != ModelFaceDatabase::Untouched;
     // 几何键在删行之前收（已在生成锁之内，没有生成收尾能插进来换路由）：行一删掉，库与投影
     // 都再也说不出这个库引用过哪些网格。收不动就整趟中止（一行不删）。
     let keys = if geometry.purges() {
-        Some(mesh_purge::dbnum_mesh_ids(dbnum, durable).await?)
+        Some(mesh_purge::dbnum_mesh_ids(dbnum, on_database).await?)
     } else {
         None
     };
-    let mut result = if !durable {
-        forget_dbnum_model_in_process(dbnum, crate::options::data_face().is_read_through())?;
-        ModelFaceWipeResult {
-            dbnum,
-            ref0s: Vec::new(),
-            range_statements: 0,
-            elapsed_ms: 0,
-            geometry: None,
+    let mut result = match database {
+        ModelFaceDatabase::ModelFace => {
+            let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
+            forget_dbnum_model_in_process(dbnum, false)?;
+            result
         }
-    } else {
-        let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
-        forget_dbnum_model_in_process(dbnum, false)?;
-        result
+        ModelFaceDatabase::Residue => {
+            let result = wipe_unbaselined_model_face_on(&SUL_DB, dbnum).await?;
+            forget_dbnum_model_in_process(dbnum, false)?;
+            result
+        }
+        ModelFaceDatabase::Untouched => {
+            forget_dbnum_model_in_process(dbnum, crate::options::data_face().is_read_through())?;
+            ModelFaceWipeResult {
+                dbnum,
+                ref0s: Vec::new(),
+                range_statements: 0,
+                elapsed_ms: 0,
+                database,
+                geometry: None,
+            }
+        }
     };
+    result.database = database;
     // 几何排在库行之后：反过来会先把模型还要用的几何删掉、而产物还在。整库的文件可能几万个，
     // 写库串行闸与水位写门到这里已经没有用，先放掉，别让数据任务等一轮删盘；生成锁照持，删文件期间
     // 不许有生成往这个库写新键。
     drop(_state_guard);
     drop(_commit_guard);
     if let Some(keys) = keys {
-        result.geometry = Some(mesh_purge::purge_geometry(&SUL_DB, keys, durable).await?);
+        result.geometry = Some(mesh_purge::purge_geometry(&SUL_DB, keys, on_database).await?);
     }
     result.elapsed_ms = started.elapsed().as_millis() as u64;
     Ok(result)
@@ -1233,11 +1301,53 @@ pub(crate) async fn wipe_dbnum_model_face_on(
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
-    let started = Instant::now();
     let (_pe_rows, ref0s, _noun_tables) = collect_dbnum_ref0s_on(db, dbnum).await?;
+    wipe_model_face_ranges_on(db, dbnum, ref0s, &[]).await
+}
+
+/// 初始化入口清模型面残留用（`dbnum_initialize::clear_model_face_before_initial_on`）：Ref0 由调用方给。
+///
+/// [`wipe_dbnum_model_face_on`] 的 Ref0 取自本库 `pe` 行的 id 前缀；本库 `pe` 一行都没有、模型面却有行时
+/// （按需生成对还没初始化的库照样落库；初始化中途库进程死掉也会留下）它圈不到任何区间。这里换成调用方
+/// 从残留行自己的 id 圈出来、并逐个核对过归属的 Ref0，渲染仍是同一份。
+///
+/// 另按 `dbnum` 列补删管身边：`tubi_relate` 的 id 是复合键 `[pe:⟨分支⟩, 槽位]`，落不进
+/// `RANGE_TABLES` 那条字符串区间；整库清理时它随 `pe` 顶点一起被带走，这里没有 `pe` 可删。
+pub(crate) async fn wipe_model_face_residue_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    ref0s: Vec<String>,
+) -> anyhow::Result<ModelFaceWipeResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    if let Some(invalid) = ref0s
+        .iter()
+        .find(|ref0| ref0.is_empty() || !ref0.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("invalid Ref0 for dbnum {dbnum} model face wipe: {invalid}");
+    }
+    wipe_model_face_ranges_on(
+        db,
+        dbnum,
+        ref0s,
+        &[format!("DELETE tubi_relate WHERE dbnum = {dbnum};")],
+    )
+    .await
+}
+
+/// 两个入口共用的那一半：按给定 Ref0 渲染、删、复位模型水位、核对。
+async fn wipe_model_face_ranges_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    ref0s: Vec<String>,
+    extra_deletes: &[String],
+) -> anyhow::Result<ModelFaceWipeResult> {
+    let started = Instant::now();
     let rendered = render_model_face_wipe(dbnum, &ref0s);
     let mut statements = rendered.range_deletes;
     statements.extend(rendered.room_predicates);
+    statements.extend(extra_deletes.iter().cloned());
     execute_phase(db, "delete model face", &statements).await?;
     execute_transactional_phase(db, "reset model watermark", &rendered.metadata).await?;
 
@@ -1271,6 +1381,8 @@ pub(crate) async fn wipe_dbnum_model_face_on(
         ref0s,
         range_statements: statements.len(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        // 这一半只管删；是哪一档由公开入口（`wipe_dbnum_model_face`）按路由填。
+        database: ModelFaceDatabase::ModelFace,
         geometry: None,
     })
 }
@@ -1366,6 +1478,197 @@ pub(crate) async fn collect_dbnum_ref0s_on(
     Ok((pe_rows, ref0s, noun_tables))
 }
 
+/// 本库模型面残留行（`dbnum` 列点得到的 `inst_relate` / `tubi_relate`）各自落在哪个 Ref0 上，连同行数。
+///
+/// 给「`pe` 圈不到」的时候用（[`collect_dbnum_ref0s_on`] 取的是 `pe` 的 id 前缀）：`inst_relate` 的 id 与
+/// `pe` 同键 `<ref0>_<ref1>`；`tubi_relate` 的 id 是复合键 `[pe:⟨分支⟩, 槽位]`，取 `in`（分支）。
+/// 认不出 Ref0 的行报错——调用方据此拒绝开工，而不是把它跳过去。归属（这个 Ref0 是不是本库的）
+/// 不在这里判，由调用方按位解码核对。
+pub(crate) async fn model_face_residue_ref0s_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Vec<(String, usize)>> {
+    const TABLES: [&str; 2] = ["inst_relate", "tubi_relate"];
+    // 取 `record::id(..)` 再切：`inst_relate` 这个表名自己就带下划线，像 `pe` 那样直接切 `<string>id`
+    // 切出来的第一段是 `inst`。
+    let mut response = db
+        .query(format!(
+            "SELECT string::split(<string>record::id(id), '_')[0] AS prefix, count() AS count \
+             FROM inst_relate WHERE dbnum = {dbnum} GROUP BY prefix;\n\
+             SELECT string::split(<string>record::id(in), '_')[0] AS prefix, count() AS count \
+             FROM tubi_relate WHERE dbnum = {dbnum} GROUP BY prefix;"
+        ))
+        .await
+        .context("inspect model face residue")?
+        .check()
+        .context("inspect model face residue statement")?;
+    let mut by_ref0 = std::collections::BTreeMap::<String, usize>::new();
+    for (index, table) in TABLES.into_iter().enumerate() {
+        let rows = response
+            .take::<Vec<Ref0Row>>(index)
+            .with_context(|| format!("decode {table} residue Ref0 groups"))?;
+        for row in rows {
+            let ref0 = residue_ref0(&row.prefix).with_context(|| {
+                format!(
+                    "unexpected {table} id prefix for dbnum {dbnum}: {}",
+                    row.prefix
+                )
+            })?;
+            *by_ref0.entry(ref0).or_default() += row.count;
+        }
+    }
+    Ok(by_ref0.into_iter().collect())
+}
+
+/// `24381`（`record::id(..)` 切出来的第一段）→ `24381`；带着表名、带着 `⟨` 的写法（`pe:⟨24381`）也认；
+/// 不是纯数字的给 `None`。
+fn residue_ref0(prefix: &str) -> Option<String> {
+    let key = prefix
+        .rsplit_once(':')
+        .map_or(prefix, |(_, key)| key)
+        .trim_start_matches('⟨');
+    (!key.is_empty() && key.bytes().all(|byte| byte.is_ascii_digit())).then(|| key.to_owned())
+}
+
+/// 本库按 `dbnum` 列点得到的模型面行数（`inst_relate` + `tubi_relate`）。
+pub(crate) async fn model_face_residue_rows_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<usize> {
+    let mut total = 0usize;
+    for table in ["inst_relate", "tubi_relate"] {
+        let mut response = db
+            .query(format!(
+                "SELECT count() AS count FROM {table} WHERE dbnum = {dbnum} GROUP ALL"
+            ))
+            .await
+            .with_context(|| format!("count {table} rows for dbnum {dbnum}"))?
+            .check()
+            .with_context(|| format!("count {table} statement for dbnum {dbnum}"))?;
+        total += response
+            .take::<Vec<CountRow>>(0)
+            .context("decode model-face row count")?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+    }
+    Ok(total)
+}
+
+/// 一个库的模型面该按哪些 Ref0 清（[`model_face_scope_on`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelFaceScope {
+    /// 要清的 Ref0：本库 `pe` 行圈到的，加上残留行自己的 id 圈出来、按位解码确认属于本库的。升序。
+    pub ref0s: Vec<String>,
+    /// 按 `dbnum` 列看见的模型面行数（`inst_relate` + `tubi_relate`）。
+    pub residue_rows: usize,
+    /// `ref0s` 里 `pe` 没圈到、靠按位解码认下来的那几个。
+    pub vouched_by_decoding: Vec<String>,
+}
+
+impl ModelFaceScope {
+    /// `pe` 没圈到任何 Ref0、模型面也没有行：没有东西可清。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ref0s.is_empty() && self.residue_rows == 0
+    }
+}
+
+/// 圈出一个库的模型面清理范围，**连 `pe` 圈不到的行也算上**。
+///
+/// [`collect_dbnum_ref0s_on`] 的 Ref0 取自本库 `pe` 行的 id 前缀。「`pe` 没有行、模型面有行」这个状态系统自己
+/// 就造得出来：按需生成对基线还没落的库照样经写后台落库（2026-11-11 用户定：允许），初始化中途库进程死掉也会
+/// 留下。只认 `pe` 的话这些行谁也清不掉——初始化入口拒绝开工（2026-11-10 / 11 的 7997），两个清理接口回成功、
+/// 实际一行没删（GitHub #146）。所以另从残留行自己的 id 取 Ref0（[`model_face_residue_ref0s_on`]），逐个按位
+/// 解码核对归属（`refno_route`：RefNo → dbnum 唯一的解法）：解出来是本库才进范围；解到别的库说明这些行的
+/// `dbnum` 列与 id 对不上，按区间删会删到别人的行——报错、点名，调用方据此一行不删。
+///
+/// 三个调用方共用这一份：初始化入口（`dbnum_initialize::clear_model_face_before_initial_on`）、基线没落的库上的
+/// 整库模型清理（[`wipe_unbaselined_model_face_on`]）、整库删除（[`wipe_model_residue_after_delete_on`]）。
+pub(crate) async fn model_face_scope_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<ModelFaceScope> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let (_pe_rows, pe_ref0s, _noun_tables) = collect_dbnum_ref0s_on(db, dbnum).await?;
+    let residue_rows = model_face_residue_rows_on(db, dbnum).await?;
+    let mut scope: std::collections::BTreeSet<String> = pe_ref0s.into_iter().collect();
+    let mut vouched_by_decoding = Vec::new();
+    if residue_rows > 0 {
+        for (ref0, rows) in model_face_residue_ref0s_on(db, dbnum).await? {
+            if scope.contains(&ref0) {
+                continue;
+            }
+            let owner = ref0.parse::<u32>().ok().and_then(|word0| {
+                crate::data_interface::refno_route::refno_dbnum(aios_core::RefU64::from_two_nums(
+                    word0, 0,
+                ))
+            });
+            if owner != Some(dbnum) {
+                bail!(
+                    "dbnum={dbnum} 仍有 {residue_rows} 行模型面残留，其中 {rows} 行落在 Ref0 {ref0} 上，\
+                     按位解码{}，不是本库的 Ref0；按区间清会删到别的库",
+                    owner.map_or_else(
+                        || "不属于任何库".to_owned(),
+                        |owner| format!("属于 dbnum {owner}")
+                    )
+                );
+            }
+            vouched_by_decoding.push(ref0.clone());
+            scope.insert(ref0);
+        }
+    }
+    Ok(ModelFaceScope {
+        ref0s: scope.into_iter().collect(),
+        residue_rows,
+        vouched_by_decoding,
+    })
+}
+
+/// [`wipe_dbnum_model_face`] 在**基线还没落**的库上的库那一半：读路由是内存，库里却可能有这个库的模型行
+/// （[`model_face_scope_on`] 说的那两种来历）。范围按那一份圈，删法与初始化入口同一条
+/// （[`wipe_model_face_residue_on`]：Ref0 区间 + 房间两边 + 管身边按 `dbnum` 列 + 模型水位复位 + 核对）。
+/// 圈到别的库的 Ref0 上就拒绝，一行不删。
+pub(crate) async fn wipe_unbaselined_model_face_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<ModelFaceWipeResult> {
+    let scope = model_face_scope_on(db, dbnum)
+        .await
+        .context("整库模型清理拒绝、一行不删（先人工核对这些行）")?;
+    if !scope.vouched_by_decoding.is_empty() {
+        println!(
+            "[model-face-wipe] dbnum={dbnum} 模型面有 {} 行落在 pe 圈不到的 Ref0 {:?} 上（按位解码确认属于本库），一并清",
+            scope.residue_rows, scope.vouched_by_decoding
+        );
+    }
+    wipe_model_face_residue_on(db, dbnum, scope.ref0s).await
+}
+
+/// 整库删除（[`delete_dbnum_fast`]）之后补的一刀：`pe` 已经删光，模型面要是还有这个库的行（`pe` 从来没圈到过
+/// 的那些，见 [`model_face_scope_on`]），照同一份范围清掉。返回清之前按 `dbnum` 列看见的行数；没有就不动库。
+///
+/// 模型水位那半句照常发出去：水位行这时已经删了，`UPDATE` 一条不存在的记录不建行（SurrealDB 2.x）。
+pub(crate) async fn wipe_model_residue_after_delete_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<usize> {
+    let scope = model_face_scope_on(db, dbnum)
+        .await
+        .context("整库删除之后模型面还有残留，但清不得（先人工核对这些行）")?;
+    if scope.is_empty() {
+        return Ok(0);
+    }
+    println!(
+        "[fast-delete] dbnum={dbnum} 的 pe 已删光，模型面还有 {} 行（Ref0 {:?}，pe 从没圈到过；按位解码确认属于本库），一并清",
+        scope.residue_rows, scope.ref0s
+    );
+    let residue_rows = scope.residue_rows;
+    wipe_model_face_residue_on(db, dbnum, scope.ref0s).await?;
+    Ok(residue_rows)
+}
+
 /// [`wipe_dbnum_rows`] 的持久层那一半：Ref0 区间圈定 → 三个删除阶段 → 核对，在给定实例上跑。
 ///
 /// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染——初始化在第 k 块
@@ -1427,6 +1730,7 @@ pub(crate) async fn wipe_dbnum_rows_on(
         noun_tables: noun_tables.len(),
         range_statements: ranges.len(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        model_residue_rows: 0,
     })
 }
 
@@ -2181,8 +2485,9 @@ mod tests {
     }
 
     /// 整库清理连几何一起清的先后（2026-10-22）：收键 → 删库行 → 删几何。键在行前收（`inst_geo` 不按
-    /// Ref0 寻址，行一删就收不出来），几何在行后删（反过来会先删掉模型还要用的）；库是权威面才收、
-    /// 删库上那一份。生成锁排在最前由行为测试钉（`projection_removal_contract`：同库在飞时一行不删）；
+    /// Ref0 寻址，行一删就收不出来），几何在行后删（反过来会先删掉模型还要用的）；库上有这个库的模型行要清
+    /// ——权威面，或基线没落的库里的残留（2026-11-11）——才收、删库上那一份，两档同一个先后。
+    /// 生成锁排在最前由行为测试钉（`projection_removal_contract`：同库在飞时一行不删）；
     /// 这三步要全局 `SUL_DB` 和盘上的 `.mesh`，单测里没有，只能按源码先后钉。
     #[test]
     fn the_model_face_wipe_collects_geometry_before_the_rows_and_purges_after() {
@@ -2194,26 +2499,38 @@ mod tests {
             .expect("library half follows")
             .0;
         let collect = body
-            .find("mesh_purge::dbnum_mesh_ids(dbnum, durable)")
+            .find("mesh_purge::dbnum_mesh_ids(dbnum, on_database)")
             .expect("收键");
         let wipe = body
             .find("wipe_dbnum_model_face_on(&SUL_DB, dbnum)")
             .expect("删库行");
+        let residue = body
+            .find("wipe_unbaselined_model_face_on(&SUL_DB, dbnum)")
+            .expect("删库上的残留");
         let purge = body
-            .find("mesh_purge::purge_geometry(&SUL_DB, keys, durable)")
+            .find("mesh_purge::purge_geometry(&SUL_DB, keys, on_database)")
             .expect("删几何");
         assert!(
-            collect < wipe && wipe < purge,
+            collect < wipe && wipe < purge && collect < residue && residue < purge,
             "顺序必须是 收键 → 删库行 → 删几何: {body}"
         );
         assert!(
-            body.contains("let durable = route.is_database();"),
-            "库是权威面才收、删库上那一份: {body}"
+            body.contains("let database = if route.is_database() {")
+                && body.contains(
+                    "} else if holds_unbaselined_model_rows(&route, crate::options::store_mode().is_durable()) {"
+                )
+                && body.contains("let on_database = database != ModelFaceDatabase::Untouched;"),
+            "库上有行要清的两档才收、删库上那一份；其余只作废投影: {body}"
         );
         assert!(
             body.contains("geometry.purges()"),
             "要不要连几何清由调用方的 ClearGeometry 定: {body}"
         );
+        // 残留那一档与权威面那一档一样先摘写后台、攥着生成锁：清的时候不许有按需生成的根落进来。
+        let quiesce = body
+            .find("model_write_behind::quiesce_dbnum_for_wipe(dbnum)")
+            .expect("摘写后台");
+        assert!(quiesce < collect, "{body}");
     }
 
     /// 写两根几何和房间边，清掉模型面：八张表该库为零，`pe` / noun / 别的库不动，
@@ -2291,6 +2608,328 @@ mod tests {
                 .unwrap_or_default();
             assert!(count >= 1, "{label} 不该被整库模型清理删掉，剩下 {count}");
         }
+    }
+
+    /// 残留行的 Ref0 取自 id（`inst_relate`）或 `in`（`tubi_relate`）切出来的第一段；带着表名、带着
+    /// `⟨` 的写法也认，不是纯数字的一律认不出——调用方据此拒绝开工，而不是拿一段拼歪的区间去删。
+    /// `inst`（直接切 `<string>id` 时 `inst_relate` 这个表名被下划线切开的第一段）就是认不出的一种。
+    #[test]
+    fn a_residue_ref0_is_read_off_the_record_id_prefix() {
+        assert_eq!(residue_ref0("24381").as_deref(), Some("24381"));
+        assert_eq!(residue_ref0("pe:24381").as_deref(), Some("24381"));
+        assert_eq!(residue_ref0("pe:⟨16189").as_deref(), Some("16189"));
+        for unreadable in ["NONE", "", "inst", "pe:", "pe:⟨", "abc", "24381x"] {
+            assert_eq!(residue_ref0(unreadable), None, "{unreadable}");
+        }
+    }
+
+    /// 模型面残留按 `dbnum` 列圈、按 Ref0 归组：两张表、两个 extent、复合键管身边都数得到，
+    /// 别的库的行不混进来。
+    #[tokio::test]
+    async fn the_residue_groups_by_ref0_across_both_relation_tables() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("model_face_residue")
+            .use_db("test")
+            .await
+            .unwrap();
+        db.query(
+            "INSERT INTO inst_relate [\
+                {id: inst_relate:⟨24381_1⟩, in: pe:⟨24381_1⟩, dbnum: 7997},\
+                {id: inst_relate:⟨24381_2⟩, in: pe:⟨24381_2⟩, dbnum: 7997},\
+                {id: inst_relate:⟨16189_1⟩, in: pe:⟨16189_1⟩, dbnum: 7997},\
+                {id: inst_relate:⟨24384_1⟩, in: pe:⟨24384_1⟩, dbnum: 8000}];\
+             INSERT RELATION INTO tubi_relate [\
+                {id: tubi_relate:[pe:⟨24381_9⟩, 0], in: pe:⟨24381_9⟩, out: inst_geo:tube, dbnum: 7997},\
+                {id: tubi_relate:[pe:⟨24381_9⟩, 1], in: pe:⟨24381_9⟩, out: inst_geo:tube, dbnum: 7997},\
+                {id: tubi_relate:[pe:⟨24384_9⟩, 0], in: pe:⟨24384_9⟩, out: inst_geo:tube, dbnum: 8000}];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        assert_eq!(
+            model_face_residue_ref0s_on(&db, 7997).await.unwrap(),
+            vec![("16189".to_string(), 1), ("24381".to_string(), 4)]
+        );
+        assert!(
+            model_face_residue_ref0s_on(&db, 7998)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 一只 `mem://` 库：7997 的 `pe` 一行都没有，模型面却有一整套行（按需生成对基线没落的库落的那种）——
+    /// 两个 extent（24381 / 16189，`refno_route` 按位解码都是 7997）下各有构件行、一条复合键管身边、几何伴生行；
+    /// 旁边是 8000（Ref0 24384）自己的行，谁也不该碰。
+    async fn unbaselined_model_face(name: &str) -> Surreal<Any> {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("unbaselined_model_face")
+            .use_db(name)
+            .await
+            .unwrap();
+        db.query(
+            "INSERT INTO inst_relate [\
+                {id: inst_relate:⟨24381_100⟩, in: pe:⟨24381_100⟩, dbnum: 7997, model_sesno: 447},\
+                {id: inst_relate:⟨16189_5⟩, in: pe:⟨16189_5⟩, dbnum: 7997, model_sesno: 447},\
+                {id: inst_relate:⟨24384_1⟩, in: pe:⟨24384_1⟩, dbnum: 8000, model_sesno: 1139}];\
+             INSERT RELATION INTO tubi_relate [\
+                {id: tubi_relate:[pe:⟨24381_200⟩, 0], in: pe:⟨24381_200⟩, out: inst_geo:tube, dbnum: 7997},\
+                {id: tubi_relate:[pe:⟨24384_2⟩, 0], in: pe:⟨24384_2⟩, out: inst_geo:tube, dbnum: 8000}];\
+             CREATE aabb:⟨24381_100⟩ SET d = [0, 0, 0, 1, 1, 1];\
+             CREATE trans:⟨24381_100⟩ SET d = [1];\
+             CREATE inst_info:⟨24381_100⟩ SET dbnum = 7997;\
+             CREATE pe_ptset:⟨16189_5⟩ SET points = [];\
+             CREATE aabb:⟨24384_1⟩ SET d = [0, 0, 0, 1, 1, 1];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db
+    }
+
+    async fn count_of(db: &Surreal<Any>, sql: &str) -> usize {
+        db.query(sql)
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take::<Vec<CountRow>>(0)
+            .unwrap()
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default()
+    }
+
+    /// 清理范围连 `pe` 圈不到的行也算上：Ref0 从残留行自己的 id 取、按位解码确认属于本库；`pe` 圈到的照旧在里面；
+    /// 解到别的库的拒绝、点名；什么都没有就是空范围。
+    #[tokio::test]
+    async fn the_model_face_scope_includes_residue_no_pe_row_vouches_for() {
+        let db = unbaselined_model_face("scope").await;
+        let scope = model_face_scope_on(&db, 7997).await.unwrap();
+        assert_eq!(scope.ref0s, vec!["16189".to_string(), "24381".to_string()]);
+        assert_eq!(scope.residue_rows, 3, "两行 inst_relate、一条管身边");
+        assert_eq!(scope.vouched_by_decoding, scope.ref0s, "pe 一个都没圈到");
+        assert!(!scope.is_empty());
+
+        // `pe` 圈到了其中一个 Ref0：它不必再靠解码认。
+        db.query("CREATE pe:⟨24381_100⟩ SET dbnum = 7997, noun = 'EQUI';")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let scope = model_face_scope_on(&db, 7997).await.unwrap();
+        assert_eq!(scope.ref0s, vec!["16189".to_string(), "24381".to_string()]);
+        assert_eq!(scope.vouched_by_decoding, vec!["16189".to_string()]);
+
+        // 一个模型行都没有的库：空范围。
+        let empty = model_face_scope_on(&db, 7998).await.unwrap();
+        assert!(empty.is_empty() && empty.ref0s.is_empty());
+
+        // `dbnum` 列写着 7997、id 却在 24383（按位解码是 7999）下：拒绝、点名，范围不给。
+        db.query("CREATE inst_relate:⟨24383_7⟩ SET in = pe:⟨24383_7⟩, dbnum = 7997;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let error = format!(
+            "{:#}",
+            model_face_scope_on(&db, 7997)
+                .await
+                .expect_err("别的库的 Ref0 不许进范围")
+        );
+        assert!(
+            error.contains("Ref0 24383") && error.contains("dbnum 7999"),
+            "{error}"
+        );
+    }
+
+    /// GitHub #146 第 3 条的模型面那一半：基线没落的库上整库模型清理此前回成功、库上一行没删（`pe` 圈不到任何
+    /// Ref0）。现在连 `pe` 圈不到的一并清：两个 extent 的行、复合键管身边、几何伴生行都没了，别的库一行不动，
+    /// 模型水位那半句照常复位；清完再清一遍是空操作。
+    #[tokio::test]
+    async fn the_unbaselined_model_face_wipe_clears_rows_no_pe_row_vouches_for() {
+        let db = unbaselined_model_face("wipe").await;
+        db.query(
+            "CREATE dbnum_watermark:7997 SET applied_sesno = 0, model_sesno = 0, state_revision = 4;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        // 只认 `pe` 的那一份（`Database` 路由用的）在这种库上一行也删不掉——这就是此前「回成功、没删」的样子。
+        let by_pe_only = wipe_dbnum_model_face_on(&db, 7997).await.unwrap();
+        assert!(by_pe_only.ref0s.is_empty());
+        assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 3);
+
+        let result = wipe_unbaselined_model_face_on(&db, 7997).await.unwrap();
+        assert_eq!(result.ref0s, vec!["16189".to_string(), "24381".to_string()]);
+        assert!(result.range_statements > 0);
+        assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 0);
+        for (label, sql) in [
+            (
+                "aabb",
+                "SELECT count() AS count FROM aabb:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "trans",
+                "SELECT count() AS count FROM trans:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "inst_info",
+                "SELECT count() AS count FROM inst_info:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "pe_ptset",
+                "SELECT count() AS count FROM pe_ptset:⟨16189_5⟩ GROUP ALL;",
+            ),
+        ] {
+            assert_eq!(count_of(&db, sql).await, 0, "{label} 的本库残留要清掉");
+        }
+        assert_eq!(
+            model_face_residue_rows_on(&db, 8000).await.unwrap(),
+            2,
+            "别的库一行不动"
+        );
+        assert_eq!(
+            count_of(
+                &db,
+                "SELECT count() AS count FROM aabb:⟨24384_1⟩ GROUP ALL;"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count_of(
+                &db,
+                "SELECT count() AS count FROM dbnum_watermark:7997 WHERE state_revision = 6 GROUP ALL;"
+            )
+            .await,
+            1,
+            "模型水位那半句照常发出去：上面两趟各让 state_revision 加一（4 → 6）"
+        );
+
+        let again = wipe_unbaselined_model_face_on(&db, 7997).await.unwrap();
+        assert!(again.ref0s.is_empty(), "已经干净：没有可圈的 Ref0");
+    }
+
+    /// GitHub #146 第 3 条的数据面那一半：整库删除的范围取自 `pe`，`pe` 从来没圈到过的模型行它够不着，此前回成功、
+    /// 那些行原样留着。现在 `pe` 删光之后补一刀：残留清掉、回报清了几行；水位行已经删了，不因为这一刀又长出来；
+    /// 没有残留就不动库。
+    #[tokio::test]
+    async fn the_fast_delete_follow_up_clears_model_rows_the_pe_ranges_never_reached() {
+        let db = unbaselined_model_face("delete").await;
+        // 这个库还有一截半截基线：一个 extent 下有 `pe`、它名下也有模型行——这部分整库删除自己删得掉。
+        db.query(
+            "CREATE pe:⟨24381_100⟩ SET dbnum = 7997, noun = 'EQUI';\
+             CREATE EQUI:⟨24381_100⟩ SET dbnum = 7997;\
+             CREATE dbnum_watermark:7997 SET applied_sesno = 0, model_sesno = 0, state_revision = 4;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let deleted = wipe_dbnum_rows_on(&db, 7997, WatermarkDisposal::DropRow)
+            .await
+            .unwrap();
+        assert_eq!(deleted.pe_rows, 1);
+        assert_eq!(deleted.ref0s, vec!["24381".to_string()]);
+        assert_eq!(deleted.model_residue_rows, 0, "这一格由整库删除的入口填");
+        assert_eq!(
+            model_face_residue_rows_on(&db, 7997).await.unwrap(),
+            2,
+            "pe 圈到的那个 extent 清了；16189 下的构件行、24381 下的复合键管身边还在"
+        );
+        assert_eq!(
+            count_of(
+                &db,
+                "SELECT count() AS count FROM dbnum_watermark:7997 GROUP ALL;"
+            )
+            .await,
+            0,
+            "整库删除连水位行一起删"
+        );
+
+        assert_eq!(
+            wipe_model_residue_after_delete_on(&db, 7997).await.unwrap(),
+            2
+        );
+        assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 0);
+        assert_eq!(
+            count_of(
+                &db,
+                "SELECT count() AS count FROM pe_ptset:⟨16189_5⟩ GROUP ALL;"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count_of(
+                &db,
+                "SELECT count() AS count FROM dbnum_watermark:7997 GROUP ALL;"
+            )
+            .await,
+            0,
+            "模型水位那半句是 UPDATE：水位行已经删了，不因为它又长出来"
+        );
+        assert_eq!(
+            model_face_residue_rows_on(&db, 8000).await.unwrap(),
+            2,
+            "别的库一行不动"
+        );
+        assert_eq!(
+            wipe_model_residue_after_delete_on(&db, 7997).await.unwrap(),
+            0,
+            "没有残留：不动库"
+        );
+
+        // 入口真的接上了这一刀，而且排在删 `pe` 之后、作废进程内记忆之前。
+        let entry = include_str!("fast_delete.rs")
+            .split_once("pub async fn delete_dbnum_fast(")
+            .expect("delete_dbnum_fast")
+            .1
+            .split_once("pub(crate) async fn wipe_dbnum_for_reinit(")
+            .expect("之后是 wipe_dbnum_for_reinit")
+            .0;
+        let wipe = entry
+            .find("wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow)")
+            .expect("删 pe 圈到的");
+        let follow_up = entry
+            .find("result.model_residue_rows = wipe_model_residue_after_delete_on(&SUL_DB, dbnum).await?;")
+            .expect("补一刀");
+        let forget = entry
+            .find("projection_removal::clear_dbnum(dbnum,")
+            .expect("作废进程内记忆");
+        assert!(wipe < follow_up && follow_up < forget, "{entry}");
+    }
+
+    /// 整库模型清理在库上动不动看路由：`Database` 清权威面；基线没落（摄入形态、外部持久层）清残留；内存路由的
+    /// 其余几档与读透、以及内嵌 kv-mem 一律不动库。
+    #[test]
+    fn only_an_unbaselined_library_on_the_external_store_has_residue_to_wipe() {
+        use crate::data_interface::model_read_route::route;
+        use crate::options::DataFace;
+        let unbaselined = route(7997, DataFace::Ingest, 0, 0, false);
+        assert!(holds_unbaselined_model_rows(&unbaselined, true));
+        assert!(
+            !holds_unbaselined_model_rows(&unbaselined, false),
+            "内嵌 kv-mem：按需生成不经写后台，没有这种行"
+        );
+        for other in [
+            route(7997, DataFace::Ingest, 285, 285, false), // Database
+            route(7997, DataFace::Ingest, 285, 284, false), // 模型落后：库里是已收尾任务落过的旧快照
+            route(7997, DataFace::Ingest, 285, 285, true),  // 任务在飞
+            route(7997, DataFace::Ingest, 285, 300, false), // 水位倒挂
+            route(7997, DataFace::ReadThrough, 0, 0, false), // 读透
+        ] {
+            assert!(!holds_unbaselined_model_rows(&other, true), "{other:?}");
+        }
+        assert_eq!(ModelFaceDatabase::ModelFace.as_str(), "model_face");
+        assert_eq!(ModelFaceDatabase::Residue.as_str(), "residue");
+        assert_eq!(ModelFaceDatabase::Untouched.as_str(), "untouched");
     }
 
     #[test]

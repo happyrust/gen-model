@@ -23,7 +23,9 @@
 //! 冷读语句数不会超过连接数——原来的做法没有这个上限，前端并发几路库里就同时摊开几句。
 //!
 //! - 连接数：环境变量 [`CONNECTIONS_ENV`]，缺省 [`DEFAULT_CONNECTIONS`]，上限 [`MAX_CONNECTIONS`]；`0` = 不开，
-//!   一切照旧走 `SUL_DB`（退回原来做法的开关）。
+//!   一切照旧走 `SUL_DB`（退回原来做法的开关）。开几条、以及按连接数发放的借出额度都在
+//!   [`concurrency`](super::concurrency) 里定（`src/fast_model/` 的并发宽度只在那里定，见它的模块文档末节）；
+//!   本模块只管连接本身。
 //! - 只在持久层是外部那台库（`store_mode = rocksdb`）时开：内嵌 kv-mem 没有第二条连接可言，另开一条连到的是另一只空库。
 //! - 只读：连接建好之后只做 `use` + `signin`，不灌函数、不修数据；借出去的连接只会被传给
 //!   [`model_record_reader`] 的两个读函数，那里只有 `SELECT`。增量批次的写入仍然全部走 `SUL_DB`，不经过这里——
@@ -42,21 +44,19 @@ use std::time::{Duration, Instant};
 use aios_core::RefnoEnum;
 use surrealdb::opt::auth::Root;
 use surrealdb::{Surreal, engine::any::Any};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::concurrency::{
+    ReadLeaseGate, ReadLeasePermit, configured_read_connections as configured_connections,
+};
 use super::model_memory_store::{ModelMemoryStore, ProjectionScope};
 use super::model_record_reader::{self as reader, ModelRecord, RecordWindow};
 
-/// 读连接开几条。`0` = 不开（照旧只用 `SUL_DB`）。
-pub const CONNECTIONS_ENV: &str = "AIOS_MODEL_READ_CONNECTIONS";
-
-/// 缺省连接数。保守取 4：实测 4 条已经把 8 万件的 SITE 从 7.9 s 压到 2.4–2.8 s；再加到 6 条是 1.6–1.7 s，
-/// 要那 0.8 s 就把环境变量设成 6。多开连接不抬库的内存（1 / 2 / 3 / 4 / 6 条量下来工作集都在 ±6 MB 内），
-/// 抬的是库同一时刻用几个核。
-pub const DEFAULT_CONNECTIONS: usize = 4;
-
-/// 连接数上限：认到这里为止，写得再大也按它开。
-pub const MAX_CONNECTIONS: usize = 16;
+/// 读连接开几条的环境变量、缺省值、上限与取值规则。定义在 [`concurrency`](super::concurrency)（并发宽度只在那里定），
+/// 这里照原来的名字转出来。
+pub use super::concurrency::{
+    DEFAULT_READ_CONNECTIONS as DEFAULT_CONNECTIONS, MAX_READ_CONNECTIONS as MAX_CONNECTIONS,
+    READ_CONNECTIONS_ENV as CONNECTIONS_ENV, read_connections_from as connections_from,
+};
 
 /// 等一条空闲连接最多等多久。平时等的是别的读（几十到几百毫秒）；等到这个数说明连接都卡住了，这次改走 `SUL_DB`。
 const LEASE_WAIT_LIMIT: Duration = Duration::from_secs(30);
@@ -72,23 +72,6 @@ const REOPEN_AFTER: Duration = Duration::from_secs(60);
 
 /// 每条读连接的请求通道容量。一条连接同一时刻只有一个读在用，留一点余量给 SDK 自己的保活。
 const CHANNEL_CAPACITY: usize = 64;
-
-/// 环境变量的取值规则：没设、空白、认不出的值 → 缺省；`0` → 不开；超过上限按上限。
-pub fn connections_from(raw: Option<&str>) -> usize {
-    match raw.map(str::trim).filter(|raw| !raw.is_empty()) {
-        None => DEFAULT_CONNECTIONS,
-        Some(raw) => match raw.parse::<usize>() {
-            Ok(wanted) => wanted.min(MAX_CONNECTIONS),
-            Err(_) => DEFAULT_CONNECTIONS,
-        },
-    }
-}
-
-/// 本进程要开几条读连接。进程启动后读一次。
-fn configured_connections() -> usize {
-    static WANTED: OnceLock<usize> = OnceLock::new();
-    *WANTED.get_or_init(|| connections_from(std::env::var(CONNECTIONS_ENV).ok().as_deref()))
-}
 
 /// 持久层是不是外部那台库。进程启动后读一次（介质在运行中不会变）。
 fn store_is_external() -> bool {
@@ -106,8 +89,8 @@ struct Pool {
     connections: Vec<Surreal<Any>>,
     /// 没借出去的连接的下标。
     free: StdMutex<Vec<usize>>,
-    /// 许可数 = 连接数：拿到许可就一定拿得到一条空闲连接。
-    permits: Arc<Semaphore>,
+    /// 借出额度，宽度 = 连接数：拿到一份就一定拿得到一条空闲连接。
+    leases: ReadLeaseGate,
     failures_in_a_row: AtomicU32,
 }
 
@@ -117,7 +100,7 @@ impl Pool {
         Arc::new(Self {
             connections,
             free: StdMutex::new((0..size).collect()),
-            permits: Arc::new(Semaphore::new(size)),
+            leases: ReadLeaseGate::with_width(size),
             failures_in_a_row: AtomicU32::new(0),
         })
     }
@@ -137,10 +120,7 @@ impl Pool {
 
     /// 借一条连接；都借出去了就等，最多等 `limit`。`None` = 等到头了。
     async fn lease(self: &Arc<Self>, limit: Duration) -> Option<Lease> {
-        let permit = tokio::time::timeout(limit, self.permits.clone().acquire_owned())
-            .await
-            .ok()?
-            .ok()?;
+        let permit = self.leases.acquire(limit).await?;
         let index = self.free.lock().ok()?.pop()?;
         Some(Lease {
             pool: self.clone(),
@@ -152,7 +132,7 @@ impl Pool {
 
 /// 一条只读连接：与 `aios_core::init_surreal` 同一套连接参数（同一个地址、同样开 AST 载荷、同一个 ns / db、同一个账号），
 /// 但不做它后面那两件**写库**的事（灌函数、修 `DB.STYP`）——函数与数据在库里，谁连上去都看得见。
-async fn open_connection() -> anyhow::Result<Surreal<Any>> {
+pub(super) async fn open_connection() -> anyhow::Result<Surreal<Any>> {
     let option = aios_core::get_db_option();
     let db: Surreal<Any> = Surreal::init();
     let config = surrealdb::opt::Config::default().ast_payload();
@@ -174,8 +154,8 @@ async fn open_connection() -> anyhow::Result<Surreal<Any>> {
 struct Lease {
     pool: Arc<Pool>,
     index: usize,
-    /// 字段在 `Drop::drop` 之后才析构：连接先回空闲表，许可后放——下一个拿到许可的一定拿得到连接。
-    _permit: OwnedSemaphorePermit,
+    /// 字段在 `Drop::drop` 之后才析构：连接先回空闲表，额度后放——下一个拿到额度的一定拿得到连接。
+    _permit: ReadLeasePermit,
 }
 
 impl Lease {
@@ -489,19 +469,16 @@ pub async fn model_records_window(
 mod tests {
     use super::*;
 
+    /// 连接数的取值规则（缺省 4、0 = 不开、上限 16）随宽度的决定搬到了 `concurrency`，细的那条测试在那边
+    /// （`the_read_connection_count_defaults_conservatively_and_zero_switches_the_pool_off`）。这里只确认照原名
+    /// 转出来的还是那几个。
     #[test]
-    fn the_connection_count_defaults_conservatively_and_zero_switches_the_pool_off() {
+    fn the_connection_count_rules_are_the_ones_decided_in_concurrency() {
+        assert_eq!(CONNECTIONS_ENV, "AIOS_MODEL_READ_CONNECTIONS");
+        assert_eq!((DEFAULT_CONNECTIONS, MAX_CONNECTIONS), (4, 16));
         assert_eq!(connections_from(None), DEFAULT_CONNECTIONS);
-        assert_eq!(connections_from(Some("")), DEFAULT_CONNECTIONS);
-        assert_eq!(connections_from(Some("  ")), DEFAULT_CONNECTIONS);
         assert_eq!(connections_from(Some("0")), 0, "0 = 不开，照旧只用共享连接");
-        assert_eq!(connections_from(Some(" 6 ")), 6);
-        assert_eq!(connections_from(Some("1")), 1);
-        assert_eq!(connections_from(Some("999")), MAX_CONNECTIONS, "写得再大也只开到上限");
-        // 认不出的值不当成 0：写错了就悄悄关掉提速，比按缺省开更难发现。
-        assert_eq!(connections_from(Some("six")), DEFAULT_CONNECTIONS);
-        assert_eq!(connections_from(Some("-1")), DEFAULT_CONNECTIONS);
-        assert_eq!(DEFAULT_CONNECTIONS, 4);
+        assert_eq!(connections_from(Some("999")), MAX_CONNECTIONS);
     }
 
     #[test]
@@ -548,7 +525,7 @@ mod tests {
         drop(second);
         drop(third);
         assert_eq!(pool.free.lock().unwrap().len(), 2, "用完全数归还");
-        assert_eq!(pool.permits.available_permits(), 2);
+        assert_eq!(pool.leases.available(), 2);
     }
 
     #[tokio::test]

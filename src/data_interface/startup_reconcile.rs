@@ -689,6 +689,20 @@ pub(crate) fn steady_catch_up_plan(
     Some(plan)
 }
 
+/// [`steady_catch_up_plan`] 的第二道闸：这个库的欠账根（生成根账本里还在赶的）是不是**全**在退避期。
+///
+/// 全在退避期才挡：任务真排了也只会把这些根再 defer 一遍（`batch_worker::split_backing_off_units`
+/// 按 `source_end_sesno = applied` 问同一句 `deferral`），排了等于空转。有一根到期就放行——失败的根
+/// 就是这样按退避重试的（GitHub #72 / ADR-090 D1）。空欠账集不算「全在退避」。
+pub(crate) fn all_chasing_backing_off(dbnum: u32, applied_sesno: i32, now: Instant) -> bool {
+    let chasing = crate::data_interface::model_root_ledger::chasing_entries(dbnum);
+    !chasing.is_empty()
+        && chasing.iter().all(|(root, _)| {
+            crate::data_interface::model_root_ledger::deferral(dbnum, *root, applied_sesno, now)
+                .is_some()
+        })
+}
+
 /// 周期对账拍上的稳态模型补偿（WP-E）：数据追平、模型却落后的库各补一条 `ModelOnly`——
 /// 与启动核对同一枚水位判据、同一个入队形状（`intent=ModelOnly`，`model_start_sesno = model_sesno`，
 /// 右端 `applied`），范围收窄到「监听域（`watch_scope::admits`）∩ 当前 MDB 的 DESI 成员」，
@@ -738,19 +752,7 @@ pub(crate) async fn reconcile_model_catch_up() {
         if !state.db_type.eq_ignore_ascii_case("DESI") {
             continue;
         }
-        // 欠账根全在退避期才挡：任务真排了也只会把这些根再 defer 一遍（`split_backing_off_units`
-        // 按 `source_end_sesno = applied` 问同一句 `deferral`），排了等于空转。
-        let chasing = crate::data_interface::model_root_ledger::chasing_entries(dbnum);
-        let all_backing_off = !chasing.is_empty()
-            && chasing.iter().all(|(root, _)| {
-                crate::data_interface::model_root_ledger::deferral(
-                    dbnum,
-                    *root,
-                    state.applied_sesno,
-                    now,
-                )
-                .is_some()
-            });
+        let all_backing_off = all_chasing_backing_off(dbnum, state.applied_sesno, now);
         let Some(plan) = steady_catch_up_plan(
             state.applied_sesno,
             state.model_sesno,
@@ -964,5 +966,71 @@ mod tests {
             "欠账根全在退避期"
         );
         assert!(!enqueues(26, 20, 26, false, false, true), "数据批次 park");
+    }
+
+    /// GitHub #72 / ADR-090 D1 的重试那一半，从账本接到入队判定：`ModelOnly` 里一根失败之后
+    /// （它不再被数据批次停跑账接走，`parked = false`），补偿在它的退避期里不排、到期就排，再败一次
+    /// 退避翻倍后同理；两根欠账里有一根到期就放行。修之前那次失败是被记成数据批次 park 的——最后一句
+    /// 断言就是那时的样子：到期也不排。
+    #[test]
+    fn the_steady_catch_up_waits_out_a_failed_roots_backoff_and_then_retries() {
+        use crate::data_interface::model_root_ledger as ledger;
+        use std::time::Duration;
+        // 账本是进程全局的：用自己的 dbnum。
+        let dbnum = 995_001;
+        ledger::forget_dbnum(dbnum);
+        let root = ledger::parse_root("24384/7").expect("refno");
+        let enqueues = |at: Instant, parked: bool| {
+            steady_catch_up_plan(
+                1139,
+                1138,
+                1139,
+                false,
+                all_chasing_backing_off(dbnum, 1139, at),
+                parked,
+            )
+            .is_some()
+        };
+
+        assert!(
+            !all_chasing_backing_off(dbnum, 1139, Instant::now()),
+            "没有欠账根不算「全在退避」"
+        );
+        ledger::record_failed(dbnum, root, "EQUI", 1139, "boom");
+        let failed_at = Instant::now();
+        assert!(!enqueues(failed_at, false), "刚失败：退避期里不排");
+        let first_due = failed_at + ledger::RETRY_BACKOFF_BASE + Duration::from_secs(1);
+        assert!(enqueues(first_due, false), "30 s 退避到期：排一条重试");
+
+        ledger::record_failed(dbnum, root, "EQUI", 1139, "boom");
+        let failed_again = Instant::now();
+        assert!(
+            !enqueues(
+                failed_again + ledger::RETRY_BACKOFF_BASE + Duration::from_secs(1),
+                false
+            ),
+            "再败一次退避翻倍：30 s 之后还不排"
+        );
+        assert!(
+            enqueues(
+                failed_again + ledger::RETRY_BACKOFF_BASE * 2 + Duration::from_secs(1),
+                false
+            ),
+            "60 s 到期再排"
+        );
+
+        // 欠账根有两根、只有一根到期：放行（任务里没到期的那根照旧 defer）。
+        let other = ledger::parse_root("24384/8").expect("refno");
+        ledger::record_failed(dbnum, other, "BRAN", 1139, "boom");
+        let both_failed = Instant::now();
+        assert!(!enqueues(both_failed, false));
+        assert!(enqueues(
+            both_failed + ledger::RETRY_BACKOFF_BASE + Duration::from_secs(1),
+            false
+        ));
+
+        // 修之前：`ModelOnly` 的根失败被记成数据批次 park，退避到期也没人排。
+        assert!(!enqueues(first_due, true));
+        ledger::forget_dbnum(dbnum);
     }
 }

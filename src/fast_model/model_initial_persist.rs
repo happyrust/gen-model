@@ -583,8 +583,8 @@ mod tests {
     }
 
     /// T-D-6：`Initial` 直写是 `INSERT IGNORE`，不先清就让同 id 的 legacy 行赢（旧盒指针、没有
-    /// `model_sesno`）；初始化入口先清模型面（Ref0 由本库 `pe` 行圈到；Ref0 统计已退役，`pe` 也空时
-    /// 入口拒绝，见下一条）之后，同一笔落得进去。
+    /// `model_sesno`）；初始化入口先清模型面（Ref0 由本库 `pe` 行圈到；`pe` 也空时改由残留行自己的 id
+    /// 圈、按位解码核对归属，见下两条）之后，同一笔落得进去。
     #[tokio::test]
     async fn the_initial_write_replaces_a_legacy_pointer_row_once_the_entry_clears_the_model_face()
     {
@@ -628,8 +628,9 @@ mod tests {
         assert_eq!(fresh.model_sesno, Some(42));
     }
 
-    /// 模型面空就什么都不做；圈不到 Ref0（本库 `pe` 一行都没有）时现成的模型面清理一行也删不到，
-    /// 入口拒绝开工、点名，而不是把直写压在旧行上。
+    /// 模型面空就什么都不做。本库 `pe` 一行都没有、残留行的 Ref0 又不是本库的（`LEGACY_POINTER_ROW`
+    /// 写着 `dbnum: 7997`，id 却在 24383 下——按位解码那是 7999 的 Ref0）时，没有任何东西能证明这段
+    /// 区间归本库：入口拒绝开工、点名，一行不删，而不是把直写压在旧行上、或按区间删到别的库。
     #[tokio::test]
     async fn the_entry_refuses_an_initial_write_over_a_model_face_it_cannot_clear() {
         use crate::data_interface::dbnum_initialize::clear_model_face_before_initial_on;
@@ -646,10 +647,202 @@ mod tests {
         let error = clear_model_face_before_initial_on(&db, 7997)
             .await
             .expect_err("圈不到 Ref0 就拒绝开工");
-        assert!(format!("{error:#}").contains("仍有 1 行"), "{error:#}");
+        let message = format!("{error:#}");
+        assert!(message.contains("仍有 1 行"), "{message}");
+        assert!(
+            message.contains("Ref0 24383") && message.contains("dbnum 7999"),
+            "要点名是哪个 Ref0、它按位解码是谁的: {message}"
+        );
         assert_eq!(
             count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await,
             1
         );
+    }
+
+    /// 2026-11-10 / 11 的 7997：本库 `pe` 一行都没有，模型面却有一整套行——按需生成对还没初始化的库
+    /// 照样落库，初始化中途库进程死掉也会留下。`pe` 圈不到 Ref0，入口此前只会拒绝，于是这个库每次
+    /// 启动都初始化失败、停跑，只能人工清库。现在 Ref0 从残留行自己的 id 取（`tubi_relate` 的 id 是
+    /// 复合键，取 `in`），按位解码确认是本库的才进区间：两个 extent 下的行都清掉，管身边按 `dbnum`
+    /// 列删，别的库一行不动，模型水位那半句照常复位；清完同 id 的直写落得进去。
+    #[tokio::test]
+    async fn the_entry_clears_a_model_face_that_no_pe_row_vouches_for() {
+        use crate::data_interface::dbnum_initialize::clear_model_face_before_initial_on;
+        // 24381 / 16189 是 7997 的两个 extent（`refno_route`：低 13 位 0x1F3D）；24384 是 8000 的。
+        const MEMBER: RefNo = RefNo::new(24381, 100);
+        let db = database("orphan_model_face").await;
+        db.query(
+            "INSERT INTO inst_relate [\
+                {id: inst_relate:⟨24381_100⟩, in: pe:⟨24381_100⟩, dbnum: 7997, generic: 'EQUI', \
+                 aabb: aabb:⟨24381_100⟩, world_trans: trans:⟨24381_100⟩, model_sesno: 447},\
+                {id: inst_relate:⟨16189_5⟩, in: pe:⟨16189_5⟩, dbnum: 7997, generic: 'EQUI', \
+                 model_sesno: 447},\
+                {id: inst_relate:⟨24384_1⟩, in: pe:⟨24384_1⟩, dbnum: 8000, generic: 'EQUI', \
+                 aabb: aabb:⟨24384_1⟩, model_sesno: 1139}];\
+             INSERT RELATION INTO tubi_relate [\
+                {id: tubi_relate:[pe:⟨24381_200⟩, 0], in: pe:⟨24381_200⟩, out: inst_geo:tube, dbnum: 7997},\
+                {id: tubi_relate:[pe:⟨24384_2⟩, 0], in: pe:⟨24384_2⟩, out: inst_geo:tube, dbnum: 8000}];\
+             CREATE aabb:⟨24381_100⟩ SET d = [0, 0, 0, 1, 1, 1];\
+             CREATE trans:⟨24381_100⟩ SET d = [1];\
+             CREATE inst_info:⟨24381_100⟩ SET dbnum = 7997;\
+             CREATE pe_ptset:⟨24381_100⟩ SET points = [];\
+             CREATE aabb:⟨24384_1⟩ SET d = [0, 0, 0, 1, 1, 1];\
+             CREATE dbnum_watermark:7997 SET applied_sesno = 0, model_sesno = 0, state_revision = 4;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM pe GROUP ALL;").await,
+            0,
+            "前提：本库 pe 一行都没有"
+        );
+
+        let cleared = clear_model_face_before_initial_on(&db, 7997).await.unwrap();
+        assert_eq!(
+            cleared, 3,
+            "按 dbnum 列看见的残留：两行 inst_relate、一条管身边"
+        );
+
+        for (label, sql) in [
+            (
+                "inst_relate",
+                "SELECT count() AS n FROM inst_relate WHERE dbnum = 7997 GROUP ALL;",
+            ),
+            (
+                "tubi_relate",
+                "SELECT count() AS n FROM tubi_relate WHERE dbnum = 7997 GROUP ALL;",
+            ),
+            (
+                "aabb",
+                "SELECT count() AS n FROM aabb:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "trans",
+                "SELECT count() AS n FROM trans:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "inst_info",
+                "SELECT count() AS n FROM inst_info:⟨24381_100⟩ GROUP ALL;",
+            ),
+            (
+                "pe_ptset",
+                "SELECT count() AS n FROM pe_ptset:⟨24381_100⟩ GROUP ALL;",
+            ),
+        ] {
+            assert_eq!(count(&db, sql).await, 0, "{label} 的本库残留要清掉");
+        }
+        for (label, sql) in [
+            (
+                "inst_relate",
+                "SELECT count() AS n FROM inst_relate WHERE dbnum = 8000 GROUP ALL;",
+            ),
+            (
+                "tubi_relate",
+                "SELECT count() AS n FROM tubi_relate WHERE dbnum = 8000 GROUP ALL;",
+            ),
+            ("aabb", "SELECT count() AS n FROM aabb:⟨24384_1⟩ GROUP ALL;"),
+        ] {
+            assert_eq!(count(&db, sql).await, 1, "别的库的 {label} 不许动");
+        }
+        assert_eq!(
+            count(&db, "SELECT state_revision AS n FROM dbnum_watermark:7997;").await,
+            5,
+            "模型水位那半句照常复位、state_revision 前进一步"
+        );
+
+        // 清完之后同 id 的直写落得进去：行上是这次生成的会话号，不是残留的 447。
+        let slice = render_slice(
+            7997,
+            &[(MEMBER, commit(MEMBER, 1))],
+            None,
+            default_transaction_cap(),
+        );
+        assert!(slice.dead_letters.is_empty(), "{:?}", slice.dead_letters);
+        db.query(slice.transactions[0].sql.clone())
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            count(&db, "SELECT model_sesno AS n FROM inst_relate:⟨24381_100⟩;").await,
+            42
+        );
+    }
+
+    /// 清的时候还有行落进来：按需生成不等初始化，它发布的根由写后台随时落库（2026-11-11 用户定：基线没落的库上
+    /// 按需生成的结果也写库，由初始化接住）。一批恰好落在「清完」与「复查」之间时，入口再圈一遍、再清一遍
+    /// （归属照样逐个核对），而不是报「清不干净」把这次初始化判败；连着每一遍都有新行落进来才拒绝开工。
+    /// 测试钩在每遍清完、复查之前往库里补一行。
+    #[tokio::test]
+    async fn the_entry_clears_again_when_rows_land_between_the_wipe_and_the_recheck() {
+        use crate::data_interface::dbnum_initialize::{
+            ENTRY_CLEAR_PASSES, ROWS_LANDING_DURING_ENTRY_CLEAR, clear_model_face_before_initial_on,
+        };
+        let landing = |key: &str| {
+            format!(
+                "CREATE inst_relate:⟨{key}⟩ SET in = pe:⟨{key}⟩, dbnum = 7997, model_sesno = 447;"
+            )
+        };
+        async fn seeded(label: &str) -> Surreal<Any> {
+            let db = database(label).await;
+            db.query(
+                "CREATE inst_relate:⟨24381_100⟩ SET in = pe:⟨24381_100⟩, dbnum = 7997, model_sesno = 447;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+            db
+        }
+        const LEFT: &str = "SELECT count() AS n FROM inst_relate WHERE dbnum = 7997 GROUP ALL;";
+
+        // 落进来一批：第二遍清掉，入口放行。落在另一个 extent（16189）上的照样圈得到。
+        let db = seeded("landing_once").await;
+        let cleared = ROWS_LANDING_DURING_ENTRY_CLEAR
+            .scope(
+                std::cell::RefCell::new(vec![landing("16189_5")]),
+                clear_model_face_before_initial_on(&db, 7997),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared, 2, "第一遍 1 行、第二遍 1 行");
+        assert_eq!(count(&db, LEFT).await, 0);
+
+        // 每一遍都有新行落进来：清满遍数之后拒绝开工，说清是怎么回事。
+        let db = seeded("landing_always").await;
+        let rows = (0..ENTRY_CLEAR_PASSES)
+            .map(|n| landing(&format!("24381_{}", 200 + n)))
+            .collect::<Vec<_>>();
+        let error = ROWS_LANDING_DURING_ENTRY_CLEAR
+            .scope(
+                std::cell::RefCell::new(rows),
+                clear_model_face_before_initial_on(&db, 7997),
+            )
+            .await
+            .expect_err("一直有行落进来");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("连清 {ENTRY_CLEAR_PASSES} 遍"))
+                && message.contains("仍有 1 行"),
+            "{message}"
+        );
+        assert_eq!(count(&db, LEFT).await, 1);
+
+        // 落进来的行在别的库的 Ref0 上（`dbnum` 列与 id 对不上）：第二遍圈范围时照样拒绝、点名，那一行不删。
+        let db = seeded("landing_foreign").await;
+        let error = ROWS_LANDING_DURING_ENTRY_CLEAR
+            .scope(
+                std::cell::RefCell::new(vec![landing("24383_7")]),
+                clear_model_face_before_initial_on(&db, 7997),
+            )
+            .await
+            .expect_err("别的库的 Ref0");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Ref0 24383") && message.contains("dbnum 7999"),
+            "{message}"
+        );
+        assert_eq!(count(&db, LEFT).await, 1);
     }
 }

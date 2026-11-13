@@ -24,6 +24,9 @@ pub(crate) mod model_initial_persist;
 pub mod model_memory_store;
 pub mod model_read_pool;
 pub mod model_record_reader;
+/// 冷读翻页的回归与基准夹具：造行数过页的根，把整根与按窗口两种翻法对着不分页的读法逐条比。
+#[cfg(test)]
+mod model_record_reader_bench;
 pub(crate) mod model_write_behind;
 /// 节点两版之间的差异摘要：索引差分 + 模型影响，按最小交付单元分组，不生成几何。
 pub mod node_diff_summary;

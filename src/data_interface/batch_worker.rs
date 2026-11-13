@@ -438,11 +438,59 @@ pub fn idle_round_panic_snapshot() -> Option<serde_json::Value> {
     }))
 }
 
+/// 一个库为什么停了自动重跑。**停法只有一套**——记进 [`BatchFailureLedger`]、挂本库的阶段阻断、重扫与稳态补偿
+/// 都不再排它——这里只记是哪一种原因把它送进来的，好让人知道该修什么、用哪条路解除。三种原因谁先到谁算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkCause {
+    /// 数据窗口没收口（或带数据窗口的任务没跑到数据步）。
+    DataBatch,
+    /// `ModelOnly` 失败，而且没有一根还会按退避重试：失败的根都已判死（同错连败
+    /// `model_root_ledger::DEAD_ROOT_STREAK` 次），或败在没有逐根的账可托付的地方（冻结重扫、规划、收尾那一笔）。
+    /// 见 [`data_failure_booking`]。
+    ModelOnly,
+    /// 整库重排（起点 0 的 `ModelOnly`）连着失败到了 `options::model_whole_library_retry_limit`（缺省 3）。
+    /// 败在还会重试的根上本来不停跑，但这种库每次重试都把全库重算一遍，所以另设这道次数上限
+    /// （[`note_whole_library_failure`] / [`capped_booking`]）。
+    WholeLibraryRetryLimit,
+}
+
+impl ParkCause {
+    /// `/health.batch_failures.<dbnum>.cause` 与失败日志 `park_cause` 用的那个词。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DataBatch => "data_batch",
+            Self::ModelOnly => "model_only",
+            Self::WholeLibraryRetryLimit => "whole_library_retry_limit",
+        }
+    }
+
+    /// 怎么解除。三种原因清的都是同一本账，差别在「人工」那一条：数据窗口失败的库还有窗口可跑，
+    /// `POST /api/v1/update/execute` 会清账并重跑；模型侧停下来的库数据多半已经追平——那时 `update/execute`
+    /// 看到的是「已是最新」，不入队也不清账（`manual_update` 里清账那一句在这条早退之后）——所以人工那一条给的是
+    /// 整库重排（`model_full_rebuild_enabled` 缺省开着）：它排的任务不过 park 那道闸，成了就清账。
+    pub fn unblock(self) -> [&'static str; 3] {
+        match self {
+            Self::DataBatch => [
+                "文件长出新会话（右端 sesno 前进）",
+                "POST /api/v1/update/execute（显式重试，立即清零）",
+                "重启进程（账本在进程内）",
+            ],
+            Self::ModelOnly | Self::WholeLibraryRetryLimit => [
+                "修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（人工整库重排一次；成了账就清，不成仍停着）",
+                "文件长出新会话（右端 sesno 前进；旧账作废，从头再数）",
+                "重启进程（账本在进程内；启动核对会再排，从头再数）",
+            ],
+        }
+    }
+}
+
 /// 数据批次连续失败账本里的一个 dbnum。
 #[derive(Debug, Clone)]
 struct BatchFailureEntry {
     /// 连续失败次数（成功 / 右端前进 / 人工执行清零）。
     streak: u32,
+    /// 最近一次失败是哪一种原因记进来的。
+    cause: ParkCause,
     /// 连败期间观察到的窗口右端。右端前进 = 有人保存了新会话，旧账作废。
     end_sesno: i32,
     last_reason: String,
@@ -462,9 +510,40 @@ impl BatchFailureEntry {
     }
 }
 
+/// 整库重排连败账里的一个 dbnum（[`BatchFailureLedger::whole_library`]）：还没到停跑那一步的计数。
+#[derive(Debug, Clone)]
+struct WholeLibraryRetryEntry {
+    /// 同右端连着失败了几次整库重排（成了 / 右端前进 / 清账归零）。
+    failed_runs: u32,
+    /// 记这一次时生效的上限（`0` = 不限）。存下来是为了 `/health` 摆得出「第几次 / 上限」而不必再读配置。
+    limit: usize,
+    end_sesno: i32,
+    last_reason: String,
+    first_at: String,
+    last_at: String,
+}
+
+/// 记完一次整库重排失败之后的结果（[`note_whole_library_failure`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WholeLibraryRun {
+    /// 同右端连续第几次。
+    pub failed_runs: u32,
+    /// 上限（`options::model_whole_library_retry_limit`）；`0` = 不限。
+    pub limit: usize,
+}
+
+impl WholeLibraryRun {
+    /// 到没到上限。`limit == 0` 永远不到。
+    pub(crate) fn capped(&self) -> bool {
+        self.limit > 0 && self.failed_runs as usize >= self.limit
+    }
+}
+
 /// 重扫问「这个库还自动重跑吗」时的回答。
 pub(crate) struct ParkedVerdict {
     pub streak: u32,
+    /// 为什么停的（[`ParkCause`]）。
+    pub cause: ParkCause,
     /// 本轮是不是这次 park 的**第一次**报出。只有它为真时才该落盘，见
     /// [`BatchFailureEntry::park_announced`]。
     pub first_notice: bool,
@@ -476,7 +555,7 @@ pub(crate) struct ParkedVerdict {
 
 /// 数据批次失败账本（进程内，dbnum → 失败详情）。
 ///
-/// 批次失败后 `mark_failed` 只把当前 epoch 拉 Blocked，而周期对账重扫
+/// 批次失败后 `mark_failed` 只给当前 epoch 挂一条阻断（只挡肇事库，ADR-094 D1），而周期对账重扫
 /// （`AIOS_WATCH_RECONCILE_SECS`，默认 300s）会装新 epoch，把水位没动的库重新入队。
 /// 数据批次不自动重试：同一 dbnum 在窗口右端没有前进时，第一次失败
 /// （[`DATA_BATCH_PARK_AFTER`]）就停，失败原因写入 `logs/batch-failures-*.jsonl`。
@@ -484,15 +563,34 @@ pub(crate) struct ParkedVerdict {
 /// 复活：文件长出新会话（右端前进，[`Self::parked_streak`] 顺带清账）或人工执行
 /// （POST /update/execute → [`reset_batch_failure`]）。成功一次即清零。重启即清零。
 ///
+/// 账里另有一栏 [`Self::whole_library`]：整库重排（起点 0 的 `ModelOnly`）败在还会重试的根上时**不** park，
+/// 只在这一栏记次数；连着记到上限才转成上面那种 park（原因记 [`ParkCause::WholeLibraryRetryLimit`]）。两栏同生共死：
+/// 清账（成功、人工执行）与右端前进都一起清——停法、解除都只有一套。
+///
 /// [`DATA_BATCH_PARK_AFTER`]: DATA_BATCH_PARK_AFTER
 #[derive(Default)]
 struct BatchFailureLedger {
     entries: std::collections::HashMap<u32, BatchFailureEntry>,
+    /// 整库重排连败的次数（没到上限、还没 park 的那一段）。
+    whole_library: std::collections::HashMap<u32, WholeLibraryRetryEntry>,
 }
 
 impl BatchFailureLedger {
     /// 记一次失败，返回该 dbnum 连续第几次。右端比上次前进的按新一轮从 1 数起。
+    #[cfg(test)]
     fn record(&mut self, dbnum: u32, end_sesno: i32, reason: &str, now: &str) -> u32 {
+        self.record_caused(dbnum, end_sesno, reason, now, ParkCause::DataBatch)
+    }
+
+    /// [`Self::record`] 的本体，带上这次是哪种原因。
+    fn record_caused(
+        &mut self,
+        dbnum: u32,
+        end_sesno: i32,
+        reason: &str,
+        now: &str,
+        cause: ParkCause,
+    ) -> u32 {
         let entry = self
             .entries
             .entry(dbnum)
@@ -507,6 +605,7 @@ impl BatchFailureLedger {
             })
             .or_insert_with(|| BatchFailureEntry {
                 streak: 0,
+                cause,
                 end_sesno,
                 last_reason: String::new(),
                 first_at: now.to_string(),
@@ -514,14 +613,54 @@ impl BatchFailureLedger {
                 park_announced: false,
             });
         entry.streak += 1;
+        entry.cause = cause;
         entry.end_sesno = end_sesno;
         entry.last_reason = reason.to_string();
         entry.last_at = now.to_string();
         entry.streak
     }
 
+    /// 记一次整库重排失败（败在还会重试的根上、没 park 的那种），返回同右端连续第几次。
+    /// 右端比上次前进的按新一轮从 1 数起——与 [`Self::record_caused`] 同一条规矩。
+    fn record_whole_library_failure(
+        &mut self,
+        dbnum: u32,
+        end_sesno: i32,
+        reason: &str,
+        now: &str,
+        limit: usize,
+    ) -> WholeLibraryRun {
+        let entry = self
+            .whole_library
+            .entry(dbnum)
+            .and_modify(|entry| {
+                if end_sesno > entry.end_sesno {
+                    entry.failed_runs = 0;
+                    entry.first_at = now.to_string();
+                }
+            })
+            .or_insert_with(|| WholeLibraryRetryEntry {
+                failed_runs: 0,
+                limit,
+                end_sesno,
+                last_reason: String::new(),
+                first_at: now.to_string(),
+                last_at: now.to_string(),
+            });
+        entry.failed_runs += 1;
+        entry.limit = limit;
+        entry.end_sesno = end_sesno;
+        entry.last_reason = reason.to_string();
+        entry.last_at = now.to_string();
+        WholeLibraryRun {
+            failed_runs: entry.failed_runs,
+            limit,
+        }
+    }
+
     fn clear(&mut self, dbnum: u32) {
         self.entries.remove(&dbnum);
+        self.whole_library.remove(&dbnum);
     }
 
     /// 该 dbnum 在这个观察右端下是否已停跑自动重试。
@@ -532,7 +671,7 @@ impl BatchFailureLedger {
     fn parked_streak(&mut self, dbnum: u32, file_latest_sesno: i32) -> Option<ParkedVerdict> {
         let entry = self.entries.get_mut(&dbnum)?;
         if file_latest_sesno > entry.end_sesno {
-            self.entries.remove(&dbnum);
+            self.clear(dbnum);
             return None;
         }
         if !entry.parked() {
@@ -541,6 +680,7 @@ impl BatchFailureLedger {
         let first_notice = !std::mem::replace(&mut entry.park_announced, true);
         Some(ParkedVerdict {
             streak: entry.streak,
+            cause: entry.cause,
             first_notice,
             end_sesno: entry.end_sesno,
             last_reason: entry.last_reason.clone(),
@@ -576,39 +716,83 @@ pub(crate) fn reset_batch_failure(dbnum: u32) {
 
 /// `/health` 用：从没失败过是 `null`，否则逐 dbnum 一本账。
 pub fn batch_failure_snapshot() -> Option<serde_json::Value> {
-    let ledger = batch_failure_ledger();
-    if ledger.entries.is_empty() {
-        return None;
-    }
-    Some(serde_json::Value::Object(
-        ledger
-            .entries
-            .iter()
-            .map(|(dbnum, entry)| {
-                (
-                    dbnum.to_string(),
-                    serde_json::json!({
-                        "streak": entry.streak,
-                        "parked": entry.parked(),
-                        "end_sesno": entry.end_sesno,
-                        "reason": entry.last_reason,
-                        "first_at": entry.first_at,
-                        "last_at": entry.last_at,
-                    }),
-                )
-            })
-            .collect(),
-    ))
+    batch_failure_ledger().failure_snapshot()
 }
 
-/// 这次批次终态要不要把当前 epoch 的数据阶段标记失败（`mark_failed` → Blocked）。
+/// `/health.whole_library_retries` 用：整库重排连败的次数，逐 dbnum 一项；没有就是 `null`。
+///
+/// 与 [`batch_failure_snapshot`] 分两格：那一格里的每一项都是「已经停了」的库（面板按它列失败），
+/// 这一格是「还在自动重试、第几次了」——`capped` 为真的那些同时也在那一格里。
+pub fn whole_library_retry_snapshot() -> Option<serde_json::Value> {
+    batch_failure_ledger().whole_library_snapshot()
+}
+
+impl BatchFailureLedger {
+    fn failure_snapshot(&self) -> Option<serde_json::Value> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        Some(serde_json::Value::Object(
+            self.entries
+                .iter()
+                .map(|(dbnum, entry)| {
+                    (
+                        dbnum.to_string(),
+                        serde_json::json!({
+                            "streak": entry.streak,
+                            "parked": entry.parked(),
+                            "cause": entry.cause.as_str(),
+                            "unblock": entry.cause.unblock(),
+                            "end_sesno": entry.end_sesno,
+                            "reason": entry.last_reason,
+                            "first_at": entry.first_at,
+                            "last_at": entry.last_at,
+                        }),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    fn whole_library_snapshot(&self) -> Option<serde_json::Value> {
+        if self.whole_library.is_empty() {
+            return None;
+        }
+        Some(serde_json::Value::Object(
+            self.whole_library
+                .iter()
+                .map(|(dbnum, entry)| {
+                    let run = WholeLibraryRun {
+                        failed_runs: entry.failed_runs,
+                        limit: entry.limit,
+                    };
+                    (
+                        dbnum.to_string(),
+                        serde_json::json!({
+                            "failed_runs": entry.failed_runs,
+                            "limit": entry.limit,
+                            "capped": run.capped(),
+                            "end_sesno": entry.end_sesno,
+                            "reason": entry.last_reason,
+                            "first_at": entry.first_at,
+                            "last_at": entry.last_at,
+                        }),
+                    )
+                })
+                .collect(),
+        ))
+    }
+}
+
+/// 这次批次终态要不要给当前 epoch 的数据阶段挂失败阻断（`mark_failed`，阻断只挡本库：
+/// [`data_batch_failure_blocker`]）并记一次数据批次连败。
 ///
 /// 判据是**数据窗口本身**，不是任务终态标签：`Partial` 的定义是「有成功也有失败」，
 /// 数据批次 Failed + 某个交付单元成功同样折成 Partial——那种 Partial 数据没收口，
 /// 必须照旧阻断。反过来，数据 Applied 而模型/副作用失败的 Partial，失败都已落在
 /// 进程内的生成根账本里（按根退避重试、同错连败判死，`model_sesno` 不盖），
-/// 再把数据阶段拉 Blocked 只会让同阶段其余库连坐一个对账周期，数据侧却没有任何
-/// 要重放的东西。
+/// 再给它挂数据阶段阻断只会让这个库按数据失败停跑、`data_ready` 一直为假，数据侧却
+/// 没有任何要重放的东西。
 ///
 /// - `Some(Failed)`：水位没推进，阻断。
 /// - `Some(Applied | Skipped)`：数据侧已收口 / 有意跳过（异常由入队与冻结点
@@ -622,20 +806,171 @@ fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchS
     }
 }
 
+/// 一个任务落终态之后，数据批次连败账（park 的判据，[`BatchFailureLedger`]）怎么动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataFailureBooking {
+    /// 数据窗口没收口：挂数据阶段阻断、记一次连败（[`DATA_BATCH_PARK_AFTER`] 次即 park）。
+    Record,
+    /// `ModelOnly` 败在还会重试的根上：不挂阻断、不记连败，也不清账——它没碰数据窗口，这个库若还挂着
+    /// 更早的数据批次失败，那笔账并没有因此解决。
+    Untouched,
+    /// 数据窗口收口了（或任务整个成了）：连败账清零。
+    Clear,
+}
+
+/// [`DataFailureBooking`] 的判据（GitHub #72 / ADR-090 D1：模型根失败按根退避重试，**不** park）。
+///
+/// `ModelOnly` 没有数据窗口，回执恒 `batch: None`。只按 [`batch_failure_blocks_data_phase`] 判的话，
+/// 它那格「没跑到数据步，保守阻断」会把「模型半边跑了、有根没生成成」也接走：一根失败，整库记进数据批次
+/// 连败账、第一次就 park，稳态补偿（`startup_reconcile::reconcile_model_catch_up`）从此被 park 那道闸挡住
+/// ——失败根的退避到了期也没人重排，同错连败判死（ISSUE-029）永远数不到，模型水位停在原地直到有新会话
+/// 或人工执行。2026-11-07 的 `model/rebuild` 注入一根失败就是这样停住的。
+///
+/// 所以 `ModelOnly` 另看 `retriable_root_failures`（[`retriable_root_failures`]）：本任务没生成成、
+/// 且生成根账本上**还在赶**的根数。只要有一根，重试节奏就有人管——它的退避没到期，稳态补偿不排；到期了
+/// 排一条，再败退避翻倍，同错连败到线判死——数据账原样不动。
+///
+/// 一根都没有时照旧走保守那一格，两种情形：
+/// - 没有逐根的账可托付的失败：冻结重扫、规划、前置动作、收尾那一笔（单元清单为空或全成）；
+/// - 失败的根都已判死。判死的根不在「还在赶」里、也不退避，而它只要还落在这一窗里，下一条 `ModelOnly`
+///   照样重算它、照样失败——不停跑的话稳态补偿每个对账周期空转一遍。判死就是「重试多少次都一样」的
+///   终态：停下来，等新会话或人工执行。
+fn data_failure_booking(
+    intent: crate::data_interface::batch_queue::BatchIntent,
+    state: TaskState,
+    batch_status: Option<BatchStatus>,
+    retriable_root_failures: usize,
+) -> DataFailureBooking {
+    if !matches!(state, TaskState::Failed | TaskState::Partial) {
+        return DataFailureBooking::Clear;
+    }
+    if intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
+        && batch_status.is_none()
+        && retriable_root_failures > 0
+    {
+        return DataFailureBooking::Untouched;
+    }
+    if batch_failure_blocks_data_phase(state, batch_status) {
+        DataFailureBooking::Record
+    } else {
+        DataFailureBooking::Clear
+    }
+}
+
+/// 单元清单里没生成成、且生成根账本上还在赶的根数（[`data_failure_booking`] 的输入）。
+///
+/// 「还在赶」= 账本上是 `Failed`：生成报错、刷盘放弃都在任务里记过一次，退避中没重算的原样留着，
+/// 它们都带着 `retry_at`，到期由稳态补偿重排。判死的（`Refused`）、账本上没有的（根号解析不出来，
+/// `mark_generation_failed` 只记日志）不算——没有人会按退避再试它们。
+fn retriable_root_failures(units: &[ModelUnitResult]) -> usize {
+    use crate::data_interface::model_root_ledger as ledger;
+    units
+        .iter()
+        .filter(|unit| unit.status != UnitGenStatus::Generated)
+        .filter(|unit| {
+            ledger::parse_root(&unit.root_refno)
+                .and_then(|root| ledger::entry(unit.dbnum, root))
+                .is_some_and(|entry| entry.is_chasing())
+        })
+        .count()
+}
+
+/// 整库重排的次数上限，接在 [`data_failure_booking`] 后面（2026-11-11，用户定「连续几次失败后停下等人」）。
+///
+/// 模型水位从没盖过的库，稳态补偿每次重排都是整库（起点 0）。这种任务败在还会重试的根上时判 `Untouched`
+/// ——不停跑、按根退避重试——于是每等完一段退避就把整个库再算一遍（7997 一遍约 8 分钟）。`run` 是这次失败记账
+/// 之后的结果（[`note_whole_library_failure`]，只在「整库重排 + `Untouched`」时才有）：到了上限就改判 `Record`，
+/// 原因记 [`ParkCause::WholeLibraryRetryLimit`]，走的还是数据批次失败那一套停法；没到上限、不是整库重排的，原样不动。
+///
+/// 与「失败的根全部判死后停」（[`ParkCause::ModelOnly`]）是同一套停法的两种原因，谁先到谁算：缺省上限 3 比判死线
+/// （同错连败 5 次）小，所以从没盖过水位的库上先到的是这一条；盖过水位的库重试只重算欠账的根，不是整库重排，
+/// 不数这一条，仍由判死线管。
+///
+/// 第二格是 `Record` 时该记的原因；别的去向用不到它。
+fn capped_booking(
+    booking: DataFailureBooking,
+    intent: crate::data_interface::batch_queue::BatchIntent,
+    run: Option<&WholeLibraryRun>,
+) -> (DataFailureBooking, ParkCause) {
+    if booking == DataFailureBooking::Untouched && run.is_some_and(WholeLibraryRun::capped) {
+        return (
+            DataFailureBooking::Record,
+            ParkCause::WholeLibraryRetryLimit,
+        );
+    }
+    let cause = if intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
+        ParkCause::ModelOnly
+    } else {
+        ParkCause::DataBatch
+    };
+    (booking, cause)
+}
+
+/// 整库重排到上限时记进失败账的那句话：是什么、为什么停、最近一次败在哪、怎么解除。
+/// 这句话会出现在 `/health.batch_failures.<dbnum>.reason`、阶段阻断与 `logs/batch-failures-*.jsonl` 里。
+fn whole_library_cap_message(dbnum: u32, run: WholeLibraryRun, last_failure: &str) -> String {
+    format!(
+        "dbnum={dbnum} 整库模型重排已连续失败 {} 次，到上限（{}，配置 model_whole_library_retry_limit），不再自动重排：\
+         这个库的模型水位从没盖过，每次重试都要把全库重算一遍。最近一次：{last_failure}。\
+         解除：修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（成了账就清）；保存新会话或重启服务也会从头再数",
+        run.failed_runs, run.limit
+    )
+}
+
+/// 记一次整库重排失败（败在还会重试的根上的那种），回这是同右端连续第几次、上限是多少。
+/// 上限读 `options::model_whole_library_retry_limit`（缺省 3，0 = 不限）。
+fn note_whole_library_failure(dbnum: u32, end_sesno: i32, reason: &str) -> WholeLibraryRun {
+    note_whole_library_failure_with_limit(
+        dbnum,
+        end_sesno,
+        reason,
+        crate::options::model_whole_library_retry_limit(),
+    )
+}
+
+/// [`note_whole_library_failure`] 的本体；上限明给，单测不必碰配置。
+fn note_whole_library_failure_with_limit(
+    dbnum: u32,
+    end_sesno: i32,
+    reason: &str,
+    limit: usize,
+) -> WholeLibraryRun {
+    batch_failure_ledger().record_whole_library_failure(
+        dbnum,
+        end_sesno,
+        reason,
+        &Local::now().to_rfc3339(),
+        limit,
+    )
+}
+
 /// 记一次数据侧失败。第一次就停自动重跑，并写到控制台。
 ///
 /// 停跑是有代价的（该库的水位差在下一个新会话或人工执行之前不再有人追），
 /// 所以必须在控制台与 `/health` 都看得见。持久那份是 `logs/batch-failures-*.jsonl`
 /// （`batch_failure_log`），它带着这里返回的次数；`parked` 与 `auto_retry_left` 按
 /// [`DATA_BATCH_PARK_AFTER`] 填。永久的 `window_block` 终态行随 `staging/attempts.rs` 一起退了
-/// （ADR-072 D5）。
-async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
-    let streak =
-        batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
-    let message = format!(
-        "dbnum={dbnum} 数据批次失败已记入失败日志（同右端第 {streak} 次，右端 {end_sesno} 未前进，上限 {DATA_BATCH_PARK_AFTER}），\
-         重扫不再自动重跑该库；保存新会话或人工执行即恢复，账本见 /health 的 batch_failures"
+/// （ADR-072 D5）。`cause` 是这次为什么停（[`ParkCause`]），决定控制台上那句「怎么解除」。
+async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str, cause: ParkCause) -> u32 {
+    let streak = batch_failure_ledger().record_caused(
+        dbnum,
+        end_sesno,
+        reason,
+        &Local::now().to_rfc3339(),
+        cause,
     );
+    let message = match cause {
+        ParkCause::DataBatch => format!(
+            "dbnum={dbnum} 数据批次失败已记入失败日志（同右端第 {streak} 次，右端 {end_sesno} 未前进，上限 {DATA_BATCH_PARK_AFTER}），\
+             重扫不再自动重跑该库；保存新会话或人工执行即恢复，账本见 /health 的 batch_failures"
+        ),
+        ParkCause::ModelOnly | ParkCause::WholeLibraryRetryLimit => format!(
+            "dbnum={dbnum} 模型任务失败已记入失败日志（原因 {}，同右端第 {streak} 次，右端 {end_sesno} 未前进），\
+             重扫不再自动重跑该库；解除：{}；账本见 /health 的 batch_failures",
+            cause.as_str(),
+            cause.unblock().join("；")
+        ),
+    };
     log::error!("{message}");
     eprintln!("{message}");
     streak
@@ -945,6 +1280,24 @@ fn batch_needs_exclusive_lane(_db_type: &str, _start_sesno: i32) -> bool {
     true
 }
 
+/// 数据批次失败挂到协调器上的阶段阻断（ADR-094 D1）：肇事者明确，只挡它自己那个库——同一轮清单里
+/// 同相的兄弟库照常出队，`data_ready` 照样为假直到它解决。失败收口（[`run_one_batch`]）与 panic 隔离壳
+/// （[`run_one_batch_isolated`]）共用这一条，别在两处各拼一份：拼成 `.with_dbnum(..)` 就是挡整相，
+/// 一个库的批次失败会把协调器拉成 `Blocked`，别的库的数据行要等下一次发现轮（文件事件或周期重扫）
+/// 重装清单才出得了队。
+pub(crate) fn data_batch_failure_blocker(
+    phase: crate::data_interface::initialization_phase::DataPhase,
+    dbnum: u32,
+    project: &str,
+    task_id: &str,
+    message: impl Into<String>,
+) -> crate::data_interface::initialization_phase::PhaseBlocker {
+    crate::data_interface::initialization_phase::PhaseBlocker::new(phase, message)
+        .scoped_to(dbnum)
+        .with_project(project)
+        .with_task(task_id)
+}
+
 /// [`run_one_batch`] 的隔离壳：一个批次 panic 只丢这一个批次。
 ///
 /// 没有这层壳，panic 会一路展开出 worker 任务：[`WorkerLiveGuard`] 放倒存活旗，
@@ -966,6 +1319,7 @@ async fn run_one_batch_isolated(
     let phase = job.phase;
     let epoch_id = job.epoch_id;
     let end_sesno = job.end_sesno;
+    let intent = job.intent;
     let Err(reason) = isolate_panic(run_one_batch(mgr, registry, scheduler, job)).await else {
         // 正常返回的那条路 `run_one_batch` 自己已经收过口了，别再 finish 一次
         // ——那会把它写好的终态结果覆盖掉。
@@ -982,15 +1336,13 @@ async fn run_one_batch_isolated(
     // 一条不存在的记录，比不给更费人时间——原因就在 message 里。
     crate::data_interface::initialization_phase::InitializationCoordinator::global().mark_failed(
         epoch_id,
-        crate::data_interface::initialization_phase::PhaseBlocker::new(phase, message.clone())
-            .with_dbnum(dbnum)
-            .with_project(project.clone())
-            .with_task(task_id.clone()),
+        data_batch_failure_blocker(phase, dbnum, &project, &task_id, message.clone()),
     );
     // panic = 数据窗口没收口，与普通 Failed 记同一本连败账（park 判定见
     // `BatchFailureLedger`）。右端用入队快照——冻结重扫后的真值这里已经拿不到，
-    // 偏小只会让「新会话解 park」更容易成立，方向保守。
-    note_batch_failure(dbnum, end_sesno, &message).await;
+    // 偏小只会让「新会话解 park」更容易成立，方向保守。原因按任务种类记（`ModelOnly` 的解除路与数据批次不同）。
+    let (_, park_cause) = capped_booking(DataFailureBooking::Record, intent, None);
+    note_batch_failure(dbnum, end_sesno, &message, park_cause).await;
     scheduler.finish(dbnum);
     registry.finish(
         &task_id,
@@ -1301,33 +1653,80 @@ async fn run_one_batch(
     };
     let batch_status = result.batch.as_ref().map(|batch| batch.status.clone());
     let mut failure_streak = None;
-    if matches!(state, TaskState::Failed | TaskState::Partial)
-        && batch_failure_blocks_data_phase(state, batch_status)
-    {
-        let message = result
-            .warnings
-            .last()
-            .cloned()
-            .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
-        // `reason_ref` 指向本函数尾巴上那条 `batch_failure` 记录——两者同一个
-        // task_id，且这个分支的条件是 `record` 那个分支的子集，不会指空。
-        crate::data_interface::initialization_phase::InitializationCoordinator::global()
-            .mark_failed(
-                job.epoch_id,
-                crate::data_interface::initialization_phase::PhaseBlocker::new(
-                    job.phase,
-                    message.clone(),
-                )
-                .with_dbnum(job.dbnum)
-                .with_project(job.project.clone())
-                .with_task(task_id.clone())
-                .with_failure_record(task_id.clone()),
+    let retriable = retriable_root_failures(&result.units);
+    let booking = data_failure_booking(job.intent, state, batch_status, retriable);
+    let last_failure = result
+        .warnings
+        .last()
+        .cloned()
+        .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
+    // 整库重排的次数上限（[`capped_booking`]）：败在还会重试的根上本来不停跑，但从没盖过模型水位的库每次重试都是
+    // 整库重算——连着败到上限就改走下面 `Record` 那一臂停下等人。停法只有一套，这里只多记一栏次数。
+    let whole_library_run = (booking == DataFailureBooking::Untouched
+        && whole_library_model_only(&job))
+    .then(|| note_whole_library_failure(job.dbnum, observed_end_sesno, &last_failure));
+    let (booking, park_cause) = capped_booking(booking, job.intent, whole_library_run.as_ref());
+    match booking {
+        DataFailureBooking::Record => {
+            let message = match whole_library_run {
+                Some(run) if park_cause == ParkCause::WholeLibraryRetryLimit => {
+                    whole_library_cap_message(job.dbnum, run, &last_failure)
+                }
+                _ => last_failure,
+            };
+            // `reason_ref` 指向本函数尾巴上那条 `batch_failure` 记录——两者同一个
+            // task_id，且这个分支的条件是 `record` 那个分支的子集，不会指空。
+            crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                .mark_failed(
+                    job.epoch_id,
+                    data_batch_failure_blocker(
+                        job.phase,
+                        job.dbnum,
+                        &job.project,
+                        &task_id,
+                        message.clone(),
+                    )
+                    .with_failure_record(task_id.clone()),
+                );
+            failure_streak =
+                Some(note_batch_failure(job.dbnum, observed_end_sesno, &message, park_cause).await);
+        }
+        DataFailureBooking::Untouched => {
+            // `ModelOnly` 败在还会重试的根上（GitHub #72 / ADR-090 D1）：数据批次连败账原样不动，退避到期由
+            // 稳态补偿重排。这里只把去向说出来——不说的话，日志里看到的只有一条 partial。
+            let unfinished = result
+                .units
+                .iter()
+                .filter(|unit| unit.status != UnitGenStatus::Generated)
+                .count();
+            println!(
+                "[增量] dbnum={} ModelOnly 有 {unfinished} 根没生成成，其中 {retriable} 根还在按退避重试：\
+                 不记数据批次连败账、不停跑（ADR-090 D1）；退避 30 s 起逐次翻倍、10 min 封顶，到期由稳态补偿重排，\
+                 同一错误连败 {} 次判死",
+                job.dbnum,
+                crate::data_interface::model_root_ledger::DEAD_ROOT_STREAK
             );
-        failure_streak = Some(note_batch_failure(job.dbnum, observed_end_sesno, &message).await);
-    } else {
-        // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
-        // 连败账清零。模型失败另有进程内的生成根账本：按根退避重试、同错连败判死（ADR-090 D1 / ISSUE-029）。
-        batch_failure_ledger().clear(job.dbnum);
+            if let Some(run) = whole_library_run {
+                println!(
+                    "[增量] dbnum={} 这是整库重排（模型水位从没盖过，每次重试都重算全库）：连续第 {} 次失败，{}",
+                    job.dbnum,
+                    run.failed_runs,
+                    if run.limit == 0 {
+                        "次数上限关着（model_whole_library_retry_limit = 0）".to_string()
+                    } else {
+                        format!(
+                            "到 {} 次就停下等人（model_whole_library_retry_limit）",
+                            run.limit
+                        )
+                    }
+                );
+            }
+        }
+        DataFailureBooking::Clear => {
+            // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
+            // 连败账清零。模型失败另有进程内的生成根账本：按根退避重试、同错连败判死（ADR-090 D1 / ISSUE-029）。
+            batch_failure_ledger().clear(job.dbnum);
+        }
     }
     let result_json = serde_json::to_value(&result).unwrap_or_default();
     // 测试钩（只在设了 `AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH` 时生效）：收尾那一笔已落、注册表仍 Running 的窗口
@@ -1427,6 +1826,8 @@ async fn run_one_batch(
                 reason_from,
                 warnings: &result.warnings,
                 streak: failure_streak,
+                park_cause: failure_streak.map(|_| park_cause.as_str()),
+                whole_library_run: whole_library_run.map(|run| (run.failed_runs, run.limit)),
                 elapsed_ms: started.elapsed().as_millis(),
                 staging: &staging,
                 steps: &steps,
@@ -7329,6 +7730,520 @@ mod tests {
         // 没跑到数据步（冻结重扫失败、收口预检失败）：保守阻断。
         assert!(batch_failure_blocks_data_phase(Failed, None));
         assert!(batch_failure_blocks_data_phase(Partial, None));
+    }
+
+    /// GitHub #72 / ADR-090 D1：模型根失败按根退避重试，不 park。`ModelOnly` 的回执恒 `batch: None`，
+    /// 只按上一条的判据会把「有根没生成成」当成「没跑到数据步」记进数据批次连败账、第一次就停跑——
+    /// 2026-11-07 `model/rebuild` 注入一根失败（成功 953 / 失败 1）就是这样停住的，稳态补偿从此被 park 闸
+    /// 挡着，那根再没人重试。只要失败的根里还有一根在按退避重试，数据账就原样不动（不记、也不清）；
+    /// 一根可重试的都没有（没有逐根的账、或失败根都已判死）才照旧停跑。
+    #[test]
+    fn a_model_only_task_with_retriable_root_failures_leaves_the_data_failure_ledger_alone() {
+        use crate::data_interface::batch_queue::BatchIntent::{
+            ApplyWindow, ModelOnly, Reinitialize,
+        };
+        use DataFailureBooking::{Clear, Record, Untouched};
+        use TaskState::*;
+
+        // 现场那个形状：整库重排里一根失败、它还在赶，任务 partial。
+        assert_eq!(data_failure_booking(ModelOnly, Partial, None, 1), Untouched);
+        // 好几根都还在赶（房间计算器冻不出、整批都在退避）也一样。
+        assert_eq!(
+            data_failure_booking(ModelOnly, Partial, None, 954),
+            Untouched
+        );
+
+        // 一根可重试的都没有，照旧记连败、停跑：冻结重扫 / 规划 / 前置动作失败、根全成了却败在
+        // 收尾那一笔（没有逐根的账可托付）；失败的根都已判死（再排一条也只是把它们重算、重败一遍）。
+        assert_eq!(data_failure_booking(ModelOnly, Failed, None, 0), Record);
+        assert_eq!(data_failure_booking(ModelOnly, Partial, None, 0), Record);
+        // 写入标记没落（`failed_window_result`：带一个 Failed 的 batch），有没有可重试的根都是数据失败。
+        assert_eq!(
+            data_failure_booking(ModelOnly, Failed, Some(BatchStatus::Failed), 0),
+            Record
+        );
+        assert_eq!(
+            data_failure_booking(ModelOnly, Partial, Some(BatchStatus::Failed), 3),
+            Record
+        );
+
+        // 带数据窗口的任务不走这条例外：没跑到数据步就是数据失败，哪怕单元清单里有还在赶的根。
+        assert_eq!(data_failure_booking(ApplyWindow, Partial, None, 1), Record);
+        assert_eq!(data_failure_booking(Reinitialize, Failed, None, 0), Record);
+        // 数据 Applied、模型侧失败的窗口批：数据窗口收口了，清账（上一条测试的口径，不变）。
+        assert_eq!(
+            data_failure_booking(ApplyWindow, Partial, Some(BatchStatus::Applied), 1),
+            Clear
+        );
+        // 成了的任务清账，`ModelOnly` 也一样（原有行为）。
+        assert_eq!(data_failure_booking(ModelOnly, Succeeded, None, 0), Clear);
+        assert_eq!(
+            data_failure_booking(ApplyWindow, Succeeded, Some(BatchStatus::Applied), 0),
+            Clear
+        );
+    }
+
+    /// 「可重试的失败根」= 单元没生成成、且生成根账本上还在赶。生成报错与不算这根自己的错的失败
+    /// （刷盘、房间）都算；退避中没重算的那根账本原样留着，也算；判死的不算——它不退避、不进「还在赶」，
+    /// 再排多少条 `ModelOnly` 都一样；生成成了的、账本上没有的（根号解析不出来）不算。
+    #[test]
+    fn retriable_root_failures_are_the_failed_units_the_ledger_is_still_chasing() {
+        use crate::data_interface::model_root_ledger as ledger;
+        // 账本是进程全局的：用自己的 dbnum，别和别的测试互清。
+        let dbnum = 994_201;
+        ledger::forget_dbnum(dbnum);
+        let on = |root: &str, status: UnitGenStatus| ModelUnitResult {
+            dbnum,
+            ..unit(root, status)
+        };
+
+        mark_generation_failed(
+            dbnum,
+            "24384/7",
+            "EQUI",
+            1139,
+            "manifold boolean failed",
+            FailureEvidence::RootFault,
+        );
+        mark_generation_failed(
+            dbnum,
+            "24384/8",
+            "BRAN",
+            1139,
+            "write-behind exhausted",
+            FailureEvidence::Circumstance,
+        );
+        for _ in 0..ledger::DEAD_ROOT_STREAK {
+            mark_generation_failed(
+                dbnum,
+                "24384/9",
+                "BRAN",
+                1139,
+                "db 7004 会话 3 的索引里没有 15196/40431",
+                FailureEvidence::RootFault,
+            );
+        }
+        ledger::record_generated_str(dbnum, "24384/10", "EQUI", 1139);
+
+        let units = [
+            on("24384/7", UnitGenStatus::Failed),
+            on("24384/8", UnitGenStatus::Failed),
+            on("24384/9", UnitGenStatus::Failed),
+            on("24384/10", UnitGenStatus::Generated),
+            on("not-a-refno", UnitGenStatus::Failed),
+        ];
+        assert_eq!(
+            retriable_root_failures(&units),
+            2,
+            "7 与 8 还在赶；9 已判死；10 成了；解析不出的不在账本里"
+        );
+        assert_eq!(
+            retriable_root_failures(&units[2..]),
+            0,
+            "只剩判死的根：没有人会按退避再试它，这种 ModelOnly 照旧停跑"
+        );
+        // 退避中、这一轮没重算的根：单元记失败、账本那一条原样留着——它仍然算可重试。
+        let now = Instant::now();
+        let root = ledger::parse_root("24384/7").unwrap();
+        assert!(ledger::deferral(dbnum, root, 1139, now).is_some());
+        assert_eq!(retriable_root_failures(&units[..1]), 1);
+
+        // 判据接上去：有可重试的根 → 数据账不动；只剩判死的根 → 记连败停跑。
+        use crate::data_interface::batch_queue::BatchIntent::ModelOnly;
+        assert_eq!(
+            data_failure_booking(
+                ModelOnly,
+                TaskState::Partial,
+                None,
+                retriable_root_failures(&units)
+            ),
+            DataFailureBooking::Untouched
+        );
+        assert_eq!(
+            data_failure_booking(
+                ModelOnly,
+                TaskState::Partial,
+                None,
+                retriable_root_failures(&units[2..])
+            ),
+            DataFailureBooking::Record
+        );
+        ledger::forget_dbnum(dbnum);
+    }
+
+    /// 上面的判据只有接在 `run_one_batch` 的收口上才算数：三种去向由它分派，可重试的根数取自
+    /// 本任务的单元清单；`Untouched` 那一臂里既不许挂数据阶段阻断、也不许动连败账。
+    #[test]
+    fn run_one_batch_books_data_failures_through_the_booking_verdict() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_one_batch(")
+            .expect("run_one_batch 必须存在")
+            .1
+            .split_once("pub(crate) enum ExplicitFlag")
+            .expect("run_one_batch 之后是 ExplicitFlag")
+            .0;
+        assert!(
+            body.contains("let retriable = retriable_root_failures(&result.units);")
+                && body.contains(
+                    "let booking = data_failure_booking(job.intent, state, batch_status, retriable);"
+                ),
+            "连败账的去向必须由 data_failure_booking 判，可重试的根数取自本任务的单元清单: {body}"
+        );
+        // 整库重排的次数上限接在它后面：只在「整库重排 + 败在可重试的根上」时记一次，到没到上限由
+        // capped_booking 改判；分派的是改判之后的去向。
+        let verdict = body
+            .split_once("let booking = data_failure_booking(")
+            .expect("先判去向")
+            .1
+            .split_once("match booking {")
+            .expect("再按（过了上限那一道的）去向分派")
+            .0;
+        assert!(
+            verdict.contains("booking == DataFailureBooking::Untouched")
+                && verdict.contains("&& whole_library_model_only(&job))")
+                && verdict.contains(
+                    ".then(|| note_whole_library_failure(job.dbnum, observed_end_sesno, &last_failure));"
+                )
+                && verdict.contains(
+                    "let (booking, park_cause) = capped_booking(booking, job.intent, whole_library_run.as_ref());"
+                ),
+            "整库重排的次数只在 Untouched 的整库 ModelOnly 上记，去向经 capped_booking 改判: {verdict}"
+        );
+        let untouched = body
+            .split_once("DataFailureBooking::Untouched => {")
+            .expect("Untouched 那一臂")
+            .1
+            .split_once("DataFailureBooking::Clear => {")
+            .expect("Untouched 之后是 Clear")
+            .0;
+        for forbidden in [
+            "mark_failed(",
+            "note_batch_failure(",
+            "batch_failure_ledger()",
+        ] {
+            assert!(
+                !untouched.contains(forbidden),
+                "败在可重试的根上的 ModelOnly 不许出现 `{forbidden}`: {untouched}"
+            );
+        }
+    }
+
+    /// 整库重排的次数上限（2026-11-11 用户定：连续几次失败后停下等人）。模型水位从没盖过的库，稳态补偿每次
+    /// 重排都是整库；败在还会重试的根上本来不停跑。到上限前去向还是 `Untouched`（照常重试），到上限改判
+    /// `Record`（停跑，原因另记）；上限 0 = 不限；不是整库重排的任务、别的去向都不受这一道影响。
+    #[test]
+    fn a_whole_library_rebuild_keeps_retrying_below_the_limit_and_parks_at_it() {
+        use crate::data_interface::batch_queue::BatchIntent::{ApplyWindow, ModelOnly};
+        use DataFailureBooking::{Clear, Record, Untouched};
+        let run = |failed_runs, limit| WholeLibraryRun { failed_runs, limit };
+        let booking = |booking, intent, run: Option<WholeLibraryRun>| {
+            capped_booking(booking, intent, run.as_ref())
+        };
+
+        // 缺省上限 3：第 1、2 次照常重试，第 3 次停。
+        assert_eq!(crate::options::MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT, 3);
+        assert_eq!(booking(Untouched, ModelOnly, Some(run(1, 3))).0, Untouched);
+        assert_eq!(booking(Untouched, ModelOnly, Some(run(2, 3))).0, Untouched);
+        assert_eq!(
+            booking(Untouched, ModelOnly, Some(run(3, 3))),
+            (Record, ParkCause::WholeLibraryRetryLimit)
+        );
+        assert_eq!(
+            booking(Untouched, ModelOnly, Some(run(4, 3))),
+            (Record, ParkCause::WholeLibraryRetryLimit),
+            "停着的时候人工重排又败一次：仍停着"
+        );
+        // 上限 1 = 第一次就停；上限 0 = 不限。
+        assert_eq!(booking(Untouched, ModelOnly, Some(run(1, 1))).0, Record);
+        assert_eq!(booking(Untouched, ModelOnly, Some(run(99, 0))).0, Untouched);
+        assert!(!run(99, 0).capped() && run(3, 3).capped() && !run(2, 3).capped());
+
+        // 不是整库重排（盖过水位的库只重算欠账的根，不记这一栏）：照 ADR-090 D1 不停跑，仍由判死线管。
+        assert_eq!(booking(Untouched, ModelOnly, None).0, Untouched);
+        // 别的去向不被这一道改写；停跑的原因按任务种类记。
+        assert_eq!(
+            booking(Record, ModelOnly, None),
+            (Record, ParkCause::ModelOnly),
+            "失败的根全部判死 / 没有逐根的账可托付：0001 的停法，原因记 model_only"
+        );
+        assert_eq!(
+            booking(Record, ApplyWindow, None),
+            (Record, ParkCause::DataBatch)
+        );
+        assert_eq!(booking(Clear, ModelOnly, None).0, Clear);
+
+        // 三种原因各有自己的词与解除路：数据批次失败的库人工执行即可；模型侧停下来的库要整库重排。
+        assert_eq!(ParkCause::DataBatch.as_str(), "data_batch");
+        assert_eq!(ParkCause::ModelOnly.as_str(), "model_only");
+        assert_eq!(
+            ParkCause::WholeLibraryRetryLimit.as_str(),
+            "whole_library_retry_limit"
+        );
+        assert!(
+            ParkCause::DataBatch
+                .unblock()
+                .join("")
+                .contains("update/execute")
+        );
+        for cause in [ParkCause::ModelOnly, ParkCause::WholeLibraryRetryLimit] {
+            let unblock = cause.unblock().join("");
+            assert!(
+                unblock.contains("/model/rebuild") && !unblock.contains("update/execute"),
+                "{unblock}"
+            );
+        }
+    }
+
+    /// 次数账本身：同右端连着数；右端前进（有人存了新会话）从 1 重数；清账归零。到上限转成 park 之后与数据批次
+    /// 失败是同一本账——右端前进一起作废、清账一起清；`/health` 两格都看得出是到上限停的。
+    #[test]
+    fn the_whole_library_retry_count_lives_and_dies_with_the_failure_ledger() {
+        let mut ledger = BatchFailureLedger::default();
+        let fail = |ledger: &mut BatchFailureLedger, end_sesno: i32| {
+            ledger.record_whole_library_failure(7997, end_sesno, "3 根生成失败", "t", 3)
+        };
+
+        assert_eq!(
+            fail(&mut ledger, 1139),
+            WholeLibraryRun {
+                failed_runs: 1,
+                limit: 3
+            }
+        );
+        assert!(
+            ledger.parked_streak(7997, 1139).is_none() && ledger.failure_snapshot().is_none(),
+            "没到上限：没停，稳态补偿照常重排"
+        );
+        let second = fail(&mut ledger, 1139);
+        assert!(second.failed_runs == 2 && !second.capped());
+        let waiting = ledger.whole_library_snapshot().expect("次数账");
+        assert_eq!(waiting["7997"]["failed_runs"], 2);
+        assert_eq!(waiting["7997"]["limit"], 3);
+        assert_eq!(waiting["7997"]["capped"], false);
+
+        let third = fail(&mut ledger, 1139);
+        assert!(third.failed_runs == 3 && third.capped(), "第 3 次到上限");
+        // 到上限：记进同一本失败账，原因另记。
+        ledger.record_caused(
+            7997,
+            1139,
+            "整库模型重排已连续失败 3 次",
+            "t",
+            ParkCause::WholeLibraryRetryLimit,
+        );
+        let parked = ledger.parked_streak(7997, 1139).expect("到上限：停下等人");
+        assert_eq!(parked.cause, ParkCause::WholeLibraryRetryLimit);
+        assert_eq!((parked.streak, parked.end_sesno), (1, 1139));
+        let health = ledger
+            .failure_snapshot()
+            .expect("停着的库在 batch_failures 里");
+        assert_eq!(health["7997"]["cause"], "whole_library_retry_limit");
+        assert_eq!(health["7997"]["parked"], true);
+        assert!(
+            health["7997"]["unblock"]
+                .to_string()
+                .contains("/model/rebuild"),
+            "{health}"
+        );
+        let retries = ledger.whole_library_snapshot().expect("次数账");
+        assert_eq!(retries["7997"]["failed_runs"], 3);
+        assert_eq!(retries["7997"]["capped"], true);
+        assert_eq!(retries["7997"]["end_sesno"], 1139);
+        assert!(ledger.parked_streak(8000, 1139).is_none(), "别的库不受影响");
+
+        // 解除一：清账（人工整库重排成了 / 人工执行）——两栏一起清，再败从 1 数起。
+        ledger.clear(7997);
+        assert!(ledger.parked_streak(7997, 1139).is_none());
+        assert!(ledger.failure_snapshot().is_none() && ledger.whole_library_snapshot().is_none());
+        assert_eq!(
+            fail(&mut ledger, 1139).failed_runs,
+            1,
+            "解除后能再跑，次数从头数"
+        );
+
+        // 解除二：右端前进（有人存了新会话）。停着时，重扫那一问顺带把两栏一起作废……
+        fail(&mut ledger, 1139);
+        assert!(fail(&mut ledger, 1139).capped());
+        ledger.record_caused(7997, 1139, "到上限", "t", ParkCause::WholeLibraryRetryLimit);
+        assert!(ledger.parked_streak(7997, 1139).is_some());
+        assert!(
+            ledger.parked_streak(7997, 1140).is_none(),
+            "右端前进：旧账作废"
+        );
+        assert!(
+            ledger.whole_library_snapshot().is_none(),
+            "次数那一栏一起作废"
+        );
+        // ……还没停着时（次数没到上限），下一次记数自己从 1 重数。
+        fail(&mut ledger, 1140);
+        assert_eq!(fail(&mut ledger, 1140).failed_runs, 2);
+        assert_eq!(
+            fail(&mut ledger, 1141).failed_runs,
+            1,
+            "右端前进的失败按新一轮从 1 数"
+        );
+    }
+
+    /// 一次整库重排败在还会重试的根上之后，`run_one_batch` 收口时做的那几步（记一次、过上限、到上限就记进失败账）。
+    async fn settle_whole_library_failure(
+        dbnum: u32,
+        end_sesno: i32,
+        limit: usize,
+    ) -> DataFailureBooking {
+        let run = note_whole_library_failure_with_limit(dbnum, end_sesno, "3 根生成失败", limit);
+        let (booking, cause) = capped_booking(
+            DataFailureBooking::Untouched,
+            crate::data_interface::batch_queue::BatchIntent::ModelOnly,
+            Some(&run),
+        );
+        if booking == DataFailureBooking::Record {
+            let message = whole_library_cap_message(dbnum, run, "3 根生成失败");
+            note_batch_failure(dbnum, end_sesno, &message, cause).await;
+        }
+        booking
+    }
+
+    /// 上限接到稳态补偿的入队判定上，三段：到上限前照常重试、到上限停、解除后能再跑。
+    /// 库 996_301 的模型水位从没盖过（`model_sesno = 0`）、数据追平在 1139：稳态补偿排的是整库重排（起点 0）。
+    /// 退避那道闸不在这条测试里（当它已到期）；停不停只看失败账。
+    #[tokio::test]
+    async fn the_steady_catch_up_stops_at_the_whole_library_retry_limit_and_runs_again_once_released()
+     {
+        use crate::data_interface::startup_reconcile::steady_catch_up_plan;
+        use DataFailureBooking::{Record, Untouched};
+        // 失败账是进程全局的：用自己的 dbnum，别和别的测试互清。
+        let dbnum = 996_301;
+        reset_batch_failure(dbnum);
+        let key = dbnum.to_string();
+        let enqueues = |file_latest: i32| {
+            steady_catch_up_plan(
+                file_latest,
+                0,
+                file_latest,
+                false,
+                false,
+                batch_failure_parked(dbnum, file_latest).is_some(),
+            )
+            .map(|plan| plan.model_start_sesno)
+        };
+
+        assert_eq!(enqueues(1139), Some(0), "没失败过：排整库重排（起点 0）");
+
+        // 到上限前照常重试。
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched
+        );
+        assert_eq!(enqueues(1139), Some(0), "第 1 次失败后照常重排");
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched
+        );
+        assert_eq!(enqueues(1139), Some(0), "第 2 次失败后照常重排");
+        assert!(
+            batch_failure_snapshot().is_none_or(|health| health.get(key.as_str()).is_none()),
+            "没到上限：不在「已经停了」那一格里"
+        );
+        let retries = whole_library_retry_snapshot().expect("次数账");
+        assert_eq!(retries[key.as_str()]["failed_runs"], 2);
+        assert_eq!(retries[key.as_str()]["capped"], false);
+
+        // 到上限停。
+        assert_eq!(settle_whole_library_failure(dbnum, 1139, 3).await, Record);
+        assert_eq!(enqueues(1139), None, "第 3 次失败：到上限，不再排");
+        assert_eq!(enqueues(1139), None, "下一个对账周期再问，还是不排");
+        let health = batch_failure_snapshot().expect("停着");
+        let entry = &health[key.as_str()];
+        assert_eq!(entry["cause"], "whole_library_retry_limit");
+        assert_eq!(entry["parked"], true);
+        let reason = entry["reason"].as_str().expect("reason");
+        assert!(
+            reason.contains("整库模型重排已连续失败 3 次")
+                && reason.contains("model_whole_library_retry_limit")
+                && reason.contains(&format!("POST /api/v1/dbnums/{dbnum}/model/rebuild")),
+            "停下来的那句话要说清是到上限停的、怎么解除: {reason}"
+        );
+        let retries = whole_library_retry_snapshot().expect("次数账");
+        assert_eq!(retries[key.as_str()]["failed_runs"], 3);
+        assert_eq!(retries[key.as_str()]["capped"], true);
+
+        // 解除后能再跑（一）：清账——人工整库重排成了走的是 `Clear` 那一臂，人工执行走 reset_batch_failure，都是这一句。
+        reset_batch_failure(dbnum);
+        assert_eq!(enqueues(1139), Some(0), "清账后稳态补偿又排");
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched,
+            "次数从头数：这是第 1 次"
+        );
+
+        // 解除后能再跑（二）：再败到上限，这回有人存了新会话（右端到 1140）；数据窗口应用完，稳态补偿照常排。
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched
+        );
+        assert_eq!(settle_whole_library_failure(dbnum, 1139, 3).await, Record);
+        assert_eq!(enqueues(1139), None);
+        assert_eq!(enqueues(1140), Some(0), "右端前进：旧账作废");
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1140, 3).await,
+            Untouched,
+            "新一轮从 1 数"
+        );
+
+        // 上限 0 = 不限：败多少次都不因为次数停。
+        reset_batch_failure(dbnum);
+        for _ in 0..8 {
+            assert_eq!(
+                settle_whole_library_failure(dbnum, 1140, 0).await,
+                Untouched
+            );
+        }
+        assert_eq!(enqueues(1140), Some(0));
+        reset_batch_failure(dbnum);
+    }
+
+    /// ADR-094 D1：数据批次失败的阻断只挡肇事库。失败收口与 panic 隔离壳两处都得经
+    /// [`data_batch_failure_blocker`] 出去——手拼一条 `PhaseBlocker::new(..).with_dbnum(..)` 就是挡整相
+    /// （那一条挂上协调器之后的行为钉在 `initialization_phase` 的
+    /// `a_failed_data_batch_blocks_only_its_own_dbnum`）。
+    #[test]
+    fn both_data_batch_failure_exits_raise_the_dbnum_scoped_blocker() {
+        use crate::data_interface::initialization_phase::DataPhase;
+        let blocker = data_batch_failure_blocker(DataPhase::Design, 7997, "AMS", "task-1", "boom");
+        assert!(!blocker.blocks_whole_phase(), "只挡本库");
+        assert_eq!(blocker.dbnum, Some(7997));
+        assert!(blocker.blocks(DataPhase::Design, Some(7997)));
+        assert!(!blocker.blocks(DataPhase::Design, Some(8000)));
+
+        let source = include_str!("batch_worker.rs");
+        let isolated = source
+            .split_once("async fn run_one_batch_isolated(")
+            .expect("run_one_batch_isolated 必须存在")
+            .1
+            .split_once("fn injected_data_batch_failure(")
+            .expect("隔离壳之后是 injected_data_batch_failure")
+            .0;
+        let settled = source
+            .split_once("async fn run_one_batch(")
+            .expect("run_one_batch 必须存在")
+            .1
+            .split_once("pub(crate) enum ExplicitFlag")
+            .expect("run_one_batch 之后是 ExplicitFlag")
+            .0;
+        for (name, body) in [
+            ("run_one_batch_isolated", isolated),
+            ("run_one_batch", settled),
+        ] {
+            assert!(
+                body.contains("data_batch_failure_blocker("),
+                "{name} 的失败阻断要经 data_batch_failure_blocker: {body}"
+            );
+            assert!(
+                !body.contains("PhaseBlocker::new("),
+                "{name} 不许手拼阶段阻断: {body}"
+            );
+        }
     }
 
     /// 稳态增量只有直写一条路径（ADR-056 P1）。`/health.increment_mode` 那一格曾为监控

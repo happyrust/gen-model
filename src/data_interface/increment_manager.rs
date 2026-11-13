@@ -136,6 +136,7 @@ fn park_blocker_before_enqueue(
                 phase: found.phase.as_str(),
                 streak: parked.streak,
                 max_attempts: crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER,
+                cause: parked.cause,
                 end_sesno: parked.end_sesno,
                 file_path: found.path.to_str(),
                 last_reason: &parked.last_reason,
@@ -4521,6 +4522,7 @@ impl AiosDBManager {
                                 streak: parked.streak,
                                 max_attempts:
                                     crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER,
+                                cause: parked.cause,
                                 end_sesno: parked.end_sesno,
                                 file_path: path.to_str(),
                                 last_reason: &parked.last_reason,

@@ -1112,6 +1112,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "active_dependency": crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot(),
             "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
             "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+            "whole_library_retries": crate::data_interface::batch_worker::whole_library_retry_snapshot(),
             "equip_derived": crate::fast_model::cal_model::equip_model::equip_derived_snapshot(),
             "model_root_backoff": crate::data_interface::model_root_ledger::backoff_snapshot(),
             "model_catch_up_enqueued_total": crate::data_interface::startup_reconcile::model_catch_up_enqueued_total(),
@@ -1315,6 +1316,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 连败到上限、重扫已停止自动重跑——水位差还在但没人再追，只有新会话或
         // 人工执行会解开；不摆出来的话它与「一直没增量」在外面看不出区别。
         "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+        // 整库模型重排（模型水位从没盖过的库，每次重试都重算全库）连着失败了几次、上限多少；到上限的库同时
+        // 出现在上面那一格里（`cause = whole_library_retry_limit`）。`null` = 没有这种失败。
+        "whole_library_retries": crate::data_interface::batch_worker::whole_library_retry_snapshot(),
         // 任务内设备派生量重算的最近一次回执（GitHub #88；进程内，不读库）。`null` = 本进程还没在任务里
         // 重算过；`deferred_total` 非零 = 有设备 / 阀门因为到期留着旧派生量，要靠手动 `update_cal_equip` 回补。
         "equip_derived": crate::fast_model::cal_model::equip_model::equip_derived_snapshot(),
@@ -3938,8 +3942,10 @@ pub async fn model_generate(
     }
     // 模型取数源路由（plan 2026-09-06 §8 R1/R2）：这个 refno 所属的库在 rocksdb 里准备好了没有。
     // 没准备好（基线未落 / 初始化发布 run 在飞）就整段按需生成进「只写内存」作用域——不等队列、
-    // 不进 durable 队列、不落 rocksdb，投影由 `/model/records` 供数。解不出所属库（不在 MDB）
-    // 就不路由，交给下面的正常路径报它该报的错。
+    // 不进数据批次队列、不盖水位，投影由 `/model/records` 供数。「只写内存」说的是读源：外部持久层下
+    // 这些根照样经写后台落库（2026-11-11 用户定：基线没落的库，按需生成的结果也会写进库；之后由初始化入口
+    // 清掉重建，`model_read_route` 模块文档）。回执里的 `durable = false` 说的是读者不能指望重启后还读得到，
+    // 不是库里没有行。解不出所属库（不在 MDB）就不路由，交给下面的正常路径报它该报的错。
     let route = match crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
         std::slice::from_ref(&req.refno),
     )
@@ -5602,6 +5608,9 @@ pub async fn dbnum_model_delete(
         "dbnum": result.dbnum,
         "scope": "model_face",
         "status": "deleted",
+        // 库上那一侧做了什么：`model_face`（权威面，按 pe 圈到的 Ref0 清）/ `residue`（基线没落的库，连 pe 圈不到的
+        // 残留一并清）/ `untouched`（只作废了进程内投影，库上一行没动——`ref0s` 为空不是「清了、没东西」）。
+        "database": result.database.as_str(),
         "ref0s": result.ref0s,
         "range_statements": result.range_statements,
         "elapsed_ms": result.elapsed_ms,

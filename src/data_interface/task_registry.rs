@@ -21,7 +21,8 @@ pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
 pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
 /// 人工触发的指定 dbnum 全量模型重建。
 pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
-/// 读透 / memory-routed 库的整库即时生成；只写进程内投影，不进 durable 队列。
+/// 读透 / memory-routed 库的整库即时生成；以进程内投影为准，不进数据批次队列、不盖水位
+/// （外部持久层下产物照样经写后台落库，见 `model_read_route` 模块文档）。
 pub const TASK_KIND_DBNUM_MODEL_ENSURE: &str = "dbnum_model_ensure";
 /// A read-only source session rebuilt into the dedicated historical kv-mem.
 pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";

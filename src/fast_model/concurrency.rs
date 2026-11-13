@@ -44,6 +44,27 @@
 //! 的锁、同步文件写都在里面），持有时长只读作「许可被占住多久」。两者要到
 //! specs/033 T011～T018 把叶子迁完之后才全都重合；在那之前采到的利用率不得整体
 //! 当成 CPU 利用率写进 A/B 结论。
+//!
+//! # 第二个域：`/model/records` 冷读的读连接（2026-11-11）
+//!
+//! `src/fast_model/` 里的并发宽度只在本模块定。除了几何额度，这里还定一个：冷读另开几条只读连接
+//! （[`configured_read_connections`]，环境变量 [`READ_CONNECTIONS_ENV`]），以及按连接数发放的借出额度
+//! （[`ReadLeaseGate`]）。`model_read_pool` 只管连接本身——建、借、还、坏了收掉——宽度与额度都从这里拿，
+//! 它自己不建信号量、不读那个环境变量（[`tests::no_hardcoded_fanout_width_survives_in_fast_model`] 与
+//! [`tests::the_width_domains_in_this_module_are_named`] 钉住）。
+//!
+//! 它与几何额度是**两个域**，不共用一份，原因有三：
+//!
+//! - 罩的东西相反。几何许可只准罩同步 CPU 段，拿着它不许 `.await`；一份读连接额度罩的恰恰是「一句冷读从
+//!   发出到收完」这段等库的时间。把冷读塞进几何额度，就是 ADR-052 背景里那个容量倒置：许可被等库的任务占满，
+//!   CPU 空着。
+//! - 量的东西不同。几何额度是本进程同时用几个核；读连接数是库那一头同时算几句冷读（SurrealDB 把同一条连接上的
+//!   请求放在一个任务里轮着跑，一条连接只用得上一个核）。
+//! - 两者不相乘。ADR-041 第 3 条要消灭的是「外层 N 路 × 内层 M 路」那种没人算得清的乘积；这两个域谁也不在
+//!   另一个里面——借着读连接的读不派过闸的子任务，CPU 段里不读库——对库的压力是相加：几何那一侧的读写仍走
+//!   共享连接，冷读最多再添「读连接数」句。
+//!
+//! 再添第三个域之前先想清楚它为什么不能归进这两个；添了要在上面那条测试里记名。
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -389,6 +410,75 @@ pub(crate) fn resident_workers(jobs: usize) -> usize {
     geometry_gate().quota().min(jobs)
 }
 
+// ---- 第二个域：`/model/records` 冷读的读连接（模块文档末节） ----
+
+/// 冷读的读连接开几条。`0` = 不开（照旧只用共享连接）。
+pub const READ_CONNECTIONS_ENV: &str = "AIOS_MODEL_READ_CONNECTIONS";
+
+/// 缺省的读连接数。保守取 4：实测 4 条已经把 8 万件的 SITE 从 7.9 s 压到 2.4–2.8 s；再加到 6 条是 1.6–1.7 s，
+/// 要那 0.8 s 就把环境变量设成 6。多开连接不抬库的内存（1 / 2 / 3 / 4 / 6 条量下来工作集都在 ±6 MB 内），
+/// 抬的是库同一时刻用几个核。
+pub const DEFAULT_READ_CONNECTIONS: usize = 4;
+
+/// 读连接数的上限：认到这里为止，写得再大也按它开。
+pub const MAX_READ_CONNECTIONS: usize = 16;
+
+/// 读连接数的取值规则：没设、空白、认不出的值 → 缺省；`0` → 不开；超过上限按上限。
+pub fn read_connections_from(raw: Option<&str>) -> usize {
+    match raw.map(str::trim).filter(|raw| !raw.is_empty()) {
+        None => DEFAULT_READ_CONNECTIONS,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(wanted) => wanted.min(MAX_READ_CONNECTIONS),
+            Err(_) => DEFAULT_READ_CONNECTIONS,
+        },
+    }
+}
+
+/// 本进程要开几条读连接。进程启动后读一次。
+pub(crate) fn configured_read_connections() -> usize {
+    static WANTED: OnceLock<usize> = OnceLock::new();
+    *WANTED
+        .get_or_init(|| read_connections_from(std::env::var(READ_CONNECTIONS_ENV).ok().as_deref()))
+}
+
+/// 读连接的借出额度：宽度 = 读连接数，一份额度对一条连接，一条连接同一时刻只借给一个读。
+///
+/// 与 [`GeometryGate`] 故意是两个类型（为什么是两个域见模块文档末节）：这份额度持有期间必然跨 `.await`
+/// （等库），几何许可不许；它也没有 `chunk_size` / `resident_workers` 那一套——冷读不 fan-out，来一个读借一份。
+pub(crate) struct ReadLeaseGate {
+    semaphore: Arc<Semaphore>,
+}
+
+impl ReadLeaseGate {
+    /// `width` 由调用方按**实际开出来**的连接数给：要开几条是 [`configured_read_connections`] 定的，开不满就整池
+    /// 不要，所以两者相等。宽度 0 的闸一份也借不出。
+    pub(crate) fn with_width(width: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(width)),
+        }
+    }
+
+    /// 当下还借得出几份。
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
+    /// 借一份（RAII，drop 即归还）；都借出去了就等，最多等 `limit`。`None` = 等到头了。
+    pub(crate) async fn acquire(&self, limit: Duration) -> Option<ReadLeasePermit> {
+        let permit = tokio::time::timeout(limit, self.semaphore.clone().acquire_owned())
+            .await
+            .ok()?
+            .ok()?;
+        Some(ReadLeasePermit { _permit: permit })
+    }
+}
+
+/// 一份读连接额度；持有期间占一条读连接。
+pub(crate) struct ReadLeasePermit {
+    _permit: OwnedSemaphorePermit,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +646,108 @@ mod tests {
             }
         }
         assert!(scanned >= 20, "扫描面塌了：只看到 {scanned} 个文件");
+    }
+
+    /// 上面那条护栏只认得出「别的文件里有信号量 / 探测核数」。这一条补另一半：本模块里的并发域是**点名的两个**
+    /// ——几何额度（[`GeometryGate`]）与读连接的借出额度（[`ReadLeaseGate`]）——再添一个要在这里记名、在模块文档里
+    /// 说清它为什么不能归进已有的域，不然「宽度只在本模块定」就成了「信号量都堆到本模块来」。
+    /// 读连接池那一侧：额度与宽度都从本模块拿，它自己不读环境变量定宽度。
+    #[test]
+    fn the_width_domains_in_this_module_are_named() {
+        let production = |source: &'static str| {
+            source
+                .split_once("\n#[cfg(test)]")
+                .expect("production code precedes the tests")
+                .0
+        };
+        let source = production(include_str!("concurrency.rs"));
+        assert_eq!(
+            source.matches("Semaphore::new(").count(),
+            2,
+            "本模块的并发域只有点名的两个"
+        );
+        assert!(source.contains("Semaphore::new(quota)"), "几何额度");
+        assert!(source.contains("Semaphore::new(width)"), "读连接的借出额度");
+        assert_eq!(
+            source.matches("std::env::var(").count(),
+            1,
+            "本模块只直接读一个环境变量：读连接数（几何额度走 options）"
+        );
+        assert!(source.contains("std::env::var(READ_CONNECTIONS_ENV)"));
+
+        let pool = production(include_str!("model_read_pool.rs"));
+        assert!(
+            pool.contains("ReadLeaseGate::with_width(")
+                && pool.contains("configured_read_connections"),
+            "读连接池的额度与宽度都从本模块拿"
+        );
+        assert!(
+            !pool.contains("std::env::var("),
+            "读连接池不自己读环境变量定宽度"
+        );
+    }
+
+    /// 读连接数的取值规则（第二个域的宽度）。
+    #[test]
+    fn the_read_connection_count_defaults_conservatively_and_zero_switches_the_pool_off() {
+        assert_eq!(read_connections_from(None), DEFAULT_READ_CONNECTIONS);
+        assert_eq!(read_connections_from(Some("")), DEFAULT_READ_CONNECTIONS);
+        assert_eq!(read_connections_from(Some("  ")), DEFAULT_READ_CONNECTIONS);
+        assert_eq!(
+            read_connections_from(Some("0")),
+            0,
+            "0 = 不开，照旧只用共享连接"
+        );
+        assert_eq!(read_connections_from(Some(" 6 ")), 6);
+        assert_eq!(read_connections_from(Some("1")), 1);
+        assert_eq!(
+            read_connections_from(Some("999")),
+            MAX_READ_CONNECTIONS,
+            "写得再大也只开到上限"
+        );
+        // 认不出的值不当成 0：写错了就悄悄关掉提速，比按缺省开更难发现。
+        assert_eq!(read_connections_from(Some("six")), DEFAULT_READ_CONNECTIONS);
+        assert_eq!(read_connections_from(Some("-1")), DEFAULT_READ_CONNECTIONS);
+        assert_eq!(DEFAULT_READ_CONNECTIONS, 4);
+    }
+
+    /// 读连接额度：宽度几份就借得出几份；借光了后来的等，等到头回 `None`；一还就借到；宽度 0 一份也借不出。
+    #[tokio::test]
+    async fn the_read_lease_gate_lends_exactly_its_width_and_makes_the_rest_wait() {
+        let gate = Arc::new(ReadLeaseGate::with_width(2));
+        assert_eq!(gate.available(), 2);
+        let first = gate
+            .acquire(Duration::from_millis(50))
+            .await
+            .expect("第一份");
+        let second = gate
+            .acquire(Duration::from_millis(50))
+            .await
+            .expect("第二份");
+        assert_eq!(gate.available(), 0);
+        assert!(
+            gate.acquire(Duration::from_millis(30)).await.is_none(),
+            "借光了：等到头也借不到第三份"
+        );
+
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.acquire(Duration::from_secs(5)).await.is_some() })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!waiter.is_finished(), "额度还没还，后来的读在等");
+        drop(first);
+        assert!(waiter.await.unwrap(), "一还就借到");
+        drop(second);
+        assert_eq!(gate.available(), 2, "用完全数归还");
+
+        assert!(
+            ReadLeaseGate::with_width(0)
+                .acquire(Duration::from_millis(10))
+                .await
+                .is_none(),
+            "宽度 0 的闸一份也借不出"
+        );
     }
 
     /// specs/033 T007：`spawn_gated_leaf` 已退役，剩下的调用点是一份点名清单

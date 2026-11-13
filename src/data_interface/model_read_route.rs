@@ -30,11 +30,38 @@
 //! `/health.room_membership` 单独表达。两枚水位同一次读（镜像那一格），分两次点查会在收尾那一笔的前后各读到一半。
 //!
 //! - `Database`：rocksdb 为准，一个字不改（R4）。
-//! - `Memory`：按需请求直接从文件生成进 `ModelMemoryStore`、由 API 供数；不写 durable rocksdb。
-//!   ingest 的临时 memory 路由是 `ProjectionOnly`；read-through 的 spawned/embedded kv-mem
-//!   则是正式 `ProcessStore{durable:false}`，仍发布模型行、房间边与根回执。
-//!   [`scope_memory_only`] 只表达“不写 durable 权威库”，生成链路再用 [`publication_policy`]
-//!   判断是否写当前 process store。
+//! - `Memory`：按需请求直接从文件生成进 `ModelMemoryStore`、由 API 供数；读者只认投影，不等库。
+//!   **结果写不写库是另一回事**（下一节）：[`scope_memory_only`] 说的是「读源在内存、不等初始化队列、
+//!   不进数据批次队列」，不是「不落库」。
+//!
+//! # 内存路由下按需生成的结果写到哪儿（2026-11-11 用户定）
+//!
+//! 进程内投影一定写。此外看形态与介质：
+//!
+//! | 形态 | 介质 | 还写到哪儿 |
+//! |---|---|---|
+//! | 摄入（ingest），库还没准备好 | 外部持久层（`store_mode = rocksdb`） | **也写进库**：每个发布的根登记进写后台（`model_write_behind::publish`），随后整根一笔落库——模型行，算得了房间的进程里连同房间边 |
+//! | 摄入 | 内嵌 kv-mem | 只有投影（[`ModelPublicationPolicy::ProjectionOnly`]） |
+//! | 读透（read-through） | kv-mem | 本进程正式的 `ProcessStore{durable:false}`：逐根同事务发布模型行、房间边 |
+//!
+//! （读透 + 外部持久层走的是 mirror spool，`model_refresh` 里读透那一支，不在这张表里。）
+//!
+//! 第一行此前写的是「只留投影、不落 rocksdb」，与现在的代码对不上——写后台登记不看路由（GitHub #146）。
+//! 用户的口径：**基线没落的库，按需生成的结果也会写进库**，文档照实改，不为了对上旧文档去改代码。
+//! 这些行不盖水位、不等初始化，读者也不读它们（基线没落的库不回读库，
+//! [`ModelReadRoute::allows_durable_fallback`]），在初始化完成之前只是「先写下的」。代价：
+//!
+//! - **初始化要接住它们**。初始化直写是 `INSERT IGNORE`，旧行会赢；所以入口先把这个库的模型面清掉再建
+//!   （`dbnum_initialize::clear_model_face_before_initial_on`：`pe` 圈不到的行按残留行自己的 id 圈、按位解码
+//!   核对归属；清的时候又落进来的再清一遍）。先清后建不丢东西——初始化把每一根都重新生成，其间投影照常供数。
+//! - **清理接口得认得它们**。这些行 `pe` 圈不到：整库模型清理（`fast_delete::wipe_dbnum_model_face`）在基线没落的
+//!   库上连它们一并清，整库删除（`fast_delete::delete_dbnum_fast`）在 `pe` 删光之后补一刀。子树清理
+//!   （`DELETE /model/subtree`、`force = true` 的先删）在内存路由下仍只清投影：库上那几根留到重生成时被整根
+//!   先删后插换掉，或者留到上面两条之一。
+//! - **回执里的 `durable = false` 不等于库里没有行**。它说的是读者不能指望重启后还读得到（重启后投影是空的，
+//!   基线没落的库又不回读库），不是「没写」。
+//! - 初始化在跑的时候按需生成照常写库：写后台整根一笔、先删后插，初始化遇到已有的行让它赢，同一根在库里始终是
+//!   完整的某一版；文件其间又存了新会话的话，差的那一截由下一个增量窗口重算。
 //!
 //! 「在飞」的来源是任务注册表（ADR-071 S5，d-300）：初始化发布 run 已退役，不再有「run 收口」这一刻；
 //! 翻面（Memory → Database）就是该库的任务跑完。相反方向只在回退重建清库时发生。两处都发
@@ -152,9 +179,13 @@ impl ModelReadRoute {
 
 /// 模型从哪里读与本轮产物向哪里发布是两件事。
 ///
-/// `ProjectionOnly` 只保护 ingest 初始化尚未收口的 durable 库：这时数据库有唯一写者，
-/// 按需生成只能留在进程内投影。read-through 的 process store 本身就是本进程正式的
-/// 非持久发布目标，因此即使读取源是 [`ModelReadSource::Memory`] 也必须走 `ProcessStore`。
+/// `ProjectionOnly` = 这一轮只以投影为准：不走同步的逐根发布事务，就绪也不等落库的 ACK。摄入形态下库还没
+/// 准备好的那些库走这一档。read-through 的 process store 本身就是本进程正式的非持久发布目标，因此即使读取源是
+/// [`ModelReadSource::Memory`] 也必须走 `ProcessStore`。
+///
+/// **`ProjectionOnly` 不等于库里没有行**（2026-11-11 改口）：外部持久层下，每个发布的根照样登记进写后台、
+/// 随后整根落库——见模块文档「内存路由下按需生成的结果写到哪儿」。它曾被写成「这时数据库有唯一写者，按需生成
+/// 只能留在进程内投影」，那句话与现在的代码对不上，用户也定了不照它去改代码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelPublicationPolicy {
     ProjectionOnly,
@@ -296,20 +327,23 @@ tokio::task_local! {
     static MEMORY_ONLY_DBNUM: u32;
 }
 
-/// 在这个作用域里，对 `dbnum` 的按需生成**只写进程内投影**（R2）：不等初始化队列、不进 durable
-/// 队列、不落 rocksdb。只有 [`route_for`] 判成 `Memory` 的库才该进这个作用域。
+/// 在这个作用域里，对 `dbnum` 的按需生成按**内存路由**走（R2）：读者只认进程内投影，不等初始化队列、
+/// 不进数据批次队列、不盖水位。只有 [`route_for`] 判成 `Memory` 的库才该进这个作用域。
+///
+/// 名字里的 `memory_only` 说的是读源，不是写目标：外部持久层下产物照样经写后台落库（模块文档
+/// 「内存路由下按需生成的结果写到哪儿」，2026-11-11 用户定）。代码与注释里沿用的「只写内存」作用域指的就是它。
 pub async fn scope_memory_only<T>(dbnum: u32, future: impl std::future::Future<Output = T>) -> T {
     MEMORY_ONLY_DBNUM.scope(dbnum, future).await
 }
 
-/// 当前任务是否处在对 `dbnum` 的「只写内存」作用域里。
+/// 当前任务是否处在对 `dbnum` 的「只写内存」（内存路由）作用域里。
 pub fn memory_only_for(dbnum: u32) -> bool {
     MEMORY_ONLY_DBNUM
         .try_with(|scoped| *scoped == dbnum)
         .unwrap_or(false)
 }
 
-/// 当前任务处在哪个库的「只写内存」作用域里（不在任何作用域里 = `None`）。
+/// 当前任务处在哪个库的「只写内存」（内存路由）作用域里（不在任何作用域里 = `None`）。
 pub fn memory_only_scope() -> Option<u32> {
     MEMORY_ONLY_DBNUM.try_with(|scoped| *scoped).ok()
 }
@@ -520,7 +554,8 @@ mod tests {
         assert_eq!(
             publication_policy_for(true, DataFace::Ingest, StoreMode::RocksDb),
             ModelPublicationPolicy::ProjectionOnly,
-            "an ingest fallback must not compete with the durable database writer"
+            "an ingest fallback is judged by the projection alone: no synchronous per-root publication, \
+             no waiting for a durable ACK (its rows still reach RocksDB through the write-behind)"
         );
         assert_eq!(
             publication_policy_for(true, DataFace::ReadThrough, StoreMode::Mem),

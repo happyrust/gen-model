@@ -730,9 +730,27 @@ pub(crate) async fn baseline_counts_on(
 
 /// 初始化直写前清模型面残留（T-D-6）：`Initial` 是 `INSERT IGNORE` 幂等写，旧
 /// `inst_relate` / `tubi_relate` 指针行不清会让新行输掉冲突、几何永久指向旧 mesh。
-/// 残留按本库 Ref0 区间删，与整库模型清理同一份渲染；`pe` 圈不到 Ref0 而 `dbnum` 列
-/// 还点得到残留时拒开工——清不干净不开工。
-/// 返回按 `dbnum` 列看见的残留行数（区间里没带 `dbnum` 列的旧行照删但不进计数）。
+/// 残留按本库 Ref0 区间删，与整库模型清理同一份渲染；清不干净不开工。
+///
+/// Ref0 有两个来源：本库 `pe` 行的 id 前缀，和残留行自己的 id（`fast_delete::model_face_scope_on`，与两个
+/// 清理接口共用一份）。后一个是必需的——唯一的调用点（`manual_update` 的基线入口）走到这里时本库 `pe` 恒为 0
+/// （要么本来没有，要么上一步刚整库清过），而「`pe` 没有行、模型面有行」这个状态系统自己就造得出来：按需生成对
+/// 基线还没落的库照样经写后台落库（2026-11-11 用户定：允许，由这里接住），初始化中途库进程死掉也会留下。
+/// 只认 `pe` 的话，这样的库每次初始化都被这里拒掉，只能人工清库（2026-11-10 / 11 的 7997）。`pe` 没圈到的
+/// Ref0 逐个按位解码核对：解出来是本库才进区间；解到别的库说明这些行的 `dbnum` 列与 id 对不上，按区间删会
+/// 删到别人的行——照旧拒开工、点名。
+///
+/// **先清后建不丢东西**：这些行是从文件算出来的，初始化随后把这个库的每一根都重新生成一遍；清掉到重新写出
+/// 之间，按需生成的那几根照旧由进程内投影供数（这里不动投影）。不清反而不行——`Initial` 只插不删，旧行会赢，
+/// 这一版已经不存在的构件的行会一直留着。
+///
+/// **清的时候还有行落进来**（[`ENTRY_CLEAR_PASSES`]）：按需生成不等初始化，它发布的根由写后台随时落库。
+/// 一批恰好落在「清完」与「复查」之间时，复查会看到行——那不是清不干净，再圈一遍、再清一遍就是了
+/// （每一遍都重新核对归属）。复查通过之后才落进来的行不碍事：写后台是整根一笔、先删后插，`Initial` 遇到已有的行
+/// 让它赢，两边都是从文件算出来的整根（文件其间又存了新会话的话，差的那一截由下一个增量窗口重算）。
+/// 连清几遍都还有，才拒绝开工。
+///
+/// 返回按 `dbnum` 列看见的残留行数（区间里没带 `dbnum` 列的旧行照删但不进计数），几遍累计。
 pub(crate) async fn clear_model_face_before_initial_on(
     db: &Surreal<Any>,
     dbnum: u32,
@@ -740,51 +758,58 @@ pub(crate) async fn clear_model_face_before_initial_on(
     if dbnum == 0 {
         anyhow::bail!("dbnum must be greater than zero");
     }
-    #[derive(serde::Deserialize)]
-    struct CountRow {
-        count: usize,
-    }
-    async fn stale_rows(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<usize> {
-        let mut total = 0usize;
-        for table in ["inst_relate", "tubi_relate"] {
-            let mut response = db
-                .query(format!(
-                    "SELECT count() AS count FROM {table} WHERE dbnum = {dbnum} GROUP ALL"
-                ))
-                .await
-                .with_context(|| format!("count stale {table} rows for dbnum {dbnum}"))?
-                .check()
-                .with_context(|| format!("count stale {table} statement for dbnum {dbnum}"))?;
-            total += response
-                .take::<Vec<CountRow>>(0)
-                .context("decode stale model-face count")?
-                .first()
-                .map(|row| row.count)
-                .unwrap_or_default();
+    let mut cleared = 0usize;
+    for pass in 1..=ENTRY_CLEAR_PASSES {
+        let scope = crate::data_interface::fast_delete::model_face_scope_on(db, dbnum)
+            .await
+            .context("拒绝 Initial 直写（先人工核对这些行）")?;
+        if scope.is_empty() {
+            return Ok(cleared);
         }
-        Ok(total)
-    }
-    let (_pe_rows, ref0s, _noun_tables) =
-        crate::data_interface::fast_delete::collect_dbnum_ref0s_on(db, dbnum).await?;
-    let remaining = stale_rows(db, dbnum).await?;
-    if ref0s.is_empty() {
-        if remaining > 0 {
-            anyhow::bail!(
-                "dbnum={dbnum} 仍有 {remaining} 行模型面残留，但 pe 圈不到本库 Ref0，\
-                 拒绝 Initial 直写（先人工清模型面）"
+        if !scope.vouched_by_decoding.is_empty() {
+            println!(
+                "dbnum={dbnum} 模型面残留落在 pe 圈不到的 Ref0 {:?} 上\
+                 （按位解码确认属于本库），按这些 Ref0 清模型面",
+                scope.vouched_by_decoding
             );
         }
-        return Ok(0);
-    }
-    crate::data_interface::fast_delete::wipe_dbnum_model_face_on(db, dbnum).await?;
-    // 区间圈自 pe 行，圈外的 `dbnum` 列残留 wipe 够不着——删完复查，清不干净照样拒。
-    let leftover = stale_rows(db, dbnum).await?;
-    if leftover > 0 {
-        anyhow::bail!(
-            "dbnum={dbnum} 模型面清理后仍有 {leftover} 行残留在本库 Ref0 圈外，拒绝 Initial 直写"
+        cleared += scope.residue_rows;
+        crate::data_interface::fast_delete::wipe_model_face_residue_on(db, dbnum, scope.ref0s)
+            .await?;
+        #[cfg(test)]
+        if let Ok(Some(landing)) =
+            ROWS_LANDING_DURING_ENTRY_CLEAR.try_with(|landing| landing.borrow_mut().pop())
+        {
+            db.query(landing).await?.check()?;
+        }
+        // 区间之外、`dbnum` 列还点得到的残留 wipe 够不着——删完复查。
+        let leftover =
+            crate::data_interface::fast_delete::model_face_residue_rows_on(db, dbnum).await?;
+        if leftover == 0 {
+            return Ok(cleared);
+        }
+        if pass == ENTRY_CLEAR_PASSES {
+            anyhow::bail!(
+                "dbnum={dbnum} 模型面连清 {ENTRY_CLEAR_PASSES} 遍，复查仍有 {leftover} 行按 dbnum 列点得到的残留\
+                 （清理期间一直有行落进这个库，或者这些行落在 Ref0 区间够不着的地方），拒绝 Initial 直写"
+            );
+        }
+        println!(
+            "dbnum={dbnum} 模型面清完复查又有 {leftover} 行（清理期间有按需生成的根落库），\
+             再圈一遍、再清（第 {pass} / {ENTRY_CLEAR_PASSES} 遍）"
         );
     }
-    Ok(remaining)
+    unreachable!("the last pass returns or bails")
+}
+
+/// 初始化入口清模型面最多清几遍（[`clear_model_face_before_initial_on`]）。一遍够用是常态；多出来的两遍只为
+/// 「清的时候写后台正好落进来一批」——写后台 250 ms 轮询一次、一批最多 512 根，连着三遍都撞上不是这种事。
+pub(crate) const ENTRY_CLEAR_PASSES: usize = 3;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// 测试钩：每清完一遍、复查之前要在库上执行的语句——模拟清理期间写后台落进来的一批。从末尾取，取完为止。
+    pub(crate) static ROWS_LANDING_DURING_ENTRY_CLEAR: std::cell::RefCell<Vec<String>>;
 }
 
 /// `clear_model_face_before_initial_on` 的生产入口（`SUL_DB`）。

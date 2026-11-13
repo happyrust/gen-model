@@ -67,6 +67,12 @@ pub struct BatchFailure<'a> {
     pub warnings: &'a [String],
     /// 同右端连败第几次；数据窗口收口了（失败只在模型侧）时为 `None`。
     pub streak: Option<u32>,
+    /// 这次失败让这个库停了自动重跑时，是哪一种原因（`batch_worker::ParkCause::as_str`：`data_batch` /
+    /// `model_only` / `whole_library_retry_limit`）；没停为 `None`。
+    pub park_cause: Option<&'a str>,
+    /// 整库模型重排（起点 0 的 `ModelOnly`）败在还会重试的根上时：这是同右端连续第几次、上限多少（`0` = 不限）。
+    /// 到了上限这一次就停（`park_cause = whole_library_retry_limit`）。别的失败为 `None`。
+    pub whole_library_run: Option<(u32, usize)>,
     pub elapsed_ms: u128,
     /// 落记录这一刻，该 dbnum 名下还挂着的暂存窗口（`staging::lifecycle::
     /// resource_snapshots_for` 的原样输出，与 `/health` 的 `staging_windows` 同形）。
@@ -104,6 +110,8 @@ pub struct BatchPark<'a> {
     pub phase: &'a str,
     pub streak: u32,
     pub max_attempts: u32,
+    /// 为什么停的。解除路径按它给：数据批次失败与模型侧停下来（判死停、整库重排到上限）人工那一条不同。
+    pub cause: crate::data_interface::batch_worker::ParkCause,
     /// 连败期间观察到的窗口右端。它不前进，就说明没人往这个库里存新会话。
     pub end_sesno: i32,
     pub file_path: Option<&'a str>,
@@ -147,6 +155,7 @@ fn to_park_record(park: &BatchPark<'_>, now: DateTime<Local>) -> Value {
         "phase": park.phase,
         "streak": park.streak,
         "max_attempts": park.max_attempts,
+        "cause": park.cause.as_str(),
         "end_sesno": park.end_sesno,
         "file_path": park.file_path,
         "last_reason": park.last_reason,
@@ -154,13 +163,10 @@ fn to_park_record(park: &BatchPark<'_>, now: DateTime<Local>) -> Value {
         "last_at": park.last_at,
         // 解除路径写进记录本身，而不是只留在文档里：读这个文件的人多半是被叫来
         // 救火的，他手上只有这一个文件。三条路清的都是**重试账**，不是病因——
-        // 确定性失败解开之后照样会再走一遍这五次。
+        // 确定性失败解开之后照样会再走一遍这五次。哪三条按 `cause` 给：模型侧停下来的库
+        // 数据多半已经追平，`update/execute` 对它不入队也不清账，人工那一条是整库重排。
         "auto_retry": false,
-        "unblock": [
-            "文件长出新会话（右端 sesno 前进）",
-            "POST /api/v1/update/execute（显式重试，立即清零）",
-            "重启进程（账本在进程内）",
-        ],
+        "unblock": park.cause.unblock(),
         "unblock_note": "三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。",
     })
 }
@@ -304,9 +310,13 @@ fn to_record(failure: &BatchFailure<'_>, now: DateTime<Local>) -> Value {
         "streak": failure.streak,
         "max_attempts": max_attempts,
         "parked": parked,
+        "park_cause": failure.park_cause,
         "auto_retry_left": failure
             .streak
             .map(|streak| max_attempts.saturating_sub(streak)),
+        // 整库模型重排的次数账：第几次 / 上限（0 = 不限）。不是这种失败时两格都是 null。
+        "whole_library_failed_runs": failure.whole_library_run.map(|(runs, _)| runs),
+        "whole_library_retry_limit": failure.whole_library_run.map(|(_, limit)| limit),
         "elapsed_ms": failure.elapsed_ms,
         "staging": failure.staging,
         "steps": failure.steps,
@@ -511,6 +521,8 @@ mod tests {
             reason_from: "result.batch.message",
             warnings: &[],
             streak: Some(1),
+            park_cause: Some("data_batch"),
+            whole_library_run: None,
             elapsed_ms: 3449,
             staging: &[],
             steps: &[],
@@ -577,6 +589,7 @@ mod tests {
                 phase: "meta",
                 streak: 5,
                 max_attempts: 5,
+                cause: crate::data_interface::batch_worker::ParkCause::DataBatch,
                 end_sesno: 37,
                 file_path: Some(r"D:\release\9001\project\JEU\JEU000\jeusys"),
                 last_reason: "读取增量数据失败: boom",
@@ -590,7 +603,14 @@ mod tests {
         assert_eq!(record["streak"], 5);
         assert_eq!(record["end_sesno"], 37, "右端不前进正是 park 成立的前提");
         assert_eq!(record["auto_retry"], false);
+        assert_eq!(record["cause"], "data_batch");
         assert_eq!(record["unblock"].as_array().map(Vec::len), Some(3));
+        assert!(
+            record["unblock"]
+                .to_string()
+                .contains("POST /api/v1/update/execute"),
+            "数据批次失败的库还有窗口可跑，人工执行会清账重跑: {record}"
+        );
         // 解除 ≠ 修好：三条路清的都是重试账。不写这句，park 一解人就以为好了。
         assert!(
             record["unblock_note"]
@@ -598,6 +618,74 @@ mod tests {
                 .is_some_and(|note| note.contains("不是病因")),
             "{record}"
         );
+    }
+
+    /// 模型侧停下来的库（失败根全部判死、整库重排到上限）解除路径不一样：数据多半已经追平，
+    /// `update/execute` 对它不入队也不清账，所以记录里给的人工那一条是整库重排；记录自己说得出是哪种原因停的。
+    #[test]
+    fn a_model_side_park_names_its_cause_and_points_at_the_rebuild() {
+        use crate::data_interface::batch_worker::ParkCause;
+        for (cause, word) in [
+            (ParkCause::ModelOnly, "model_only"),
+            (
+                ParkCause::WholeLibraryRetryLimit,
+                "whole_library_retry_limit",
+            ),
+        ] {
+            let record = to_park_record(
+                &BatchPark {
+                    dbnum: 7997,
+                    db_type: "DESI",
+                    project: "AMS",
+                    phase: "design",
+                    streak: 1,
+                    max_attempts: 1,
+                    cause,
+                    end_sesno: 1139,
+                    file_path: None,
+                    last_reason: "dbnum=7997 整库模型重排已连续失败 3 次，到上限（3，…）",
+                    first_at: "2026-11-11T19:00:00+08:00",
+                    last_at: "2026-11-11T19:24:00+08:00",
+                },
+                Local::now(),
+            );
+            assert_eq!(record["cause"], word);
+            let unblock = record["unblock"].to_string();
+            assert!(
+                unblock.contains("/model/rebuild") && !unblock.contains("update/execute"),
+                "{record}"
+            );
+            assert_eq!(record["unblock"].as_array().map(Vec::len), Some(3));
+        }
+    }
+
+    /// 失败记录带着整库重排的次数账：没到上限的那几次 `parked = false`、看得出是第几次 / 上限；
+    /// 到上限的那一次 `parked = true`、`park_cause = whole_library_retry_limit`。别的失败这两格是 null。
+    #[test]
+    fn a_failure_record_carries_the_whole_library_retry_count() {
+        let mut second = failure("t", 7997, "3 根生成失败");
+        second.streak = None;
+        second.park_cause = None;
+        second.whole_library_run = Some((2, 3));
+        let record = to_record(&second, Local::now());
+        assert_eq!(record["parked"], false, "没到上限：还会自动重排");
+        assert!(record["park_cause"].is_null());
+        assert_eq!(record["whole_library_failed_runs"], 2);
+        assert_eq!(record["whole_library_retry_limit"], 3);
+
+        let mut third = failure("t", 7997, "3 根生成失败");
+        third.streak = Some(1);
+        third.park_cause = Some("whole_library_retry_limit");
+        third.whole_library_run = Some((3, 3));
+        let record = to_record(&third, Local::now());
+        assert_eq!(record["parked"], true, "到上限：停下等人");
+        assert_eq!(record["park_cause"], "whole_library_retry_limit");
+        assert_eq!(record["whole_library_failed_runs"], 3);
+
+        let plain = to_record(&failure("t", 8191, "boom"), Local::now());
+        assert_eq!(plain["park_cause"], "data_batch");
+        assert!(plain["whole_library_failed_runs"].is_null());
+        assert!(plain["whole_library_retry_limit"].is_null());
     }
 
     /// 控制台截断到三条，文件一条都不许少：净窗口的口径标注常常是判断收集口径的

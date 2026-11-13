@@ -169,6 +169,9 @@ pub struct DbOptionExt {
     /// 历史快照（`POST /model/history/generate` 造的 `Historical(*)` 作用域）最多同时留几格（没写 = 16；0 = 不限）。详见 [`model_historical_snapshots_max`]。
     #[serde(default)]
     pub model_historical_snapshots_max: Option<usize>,
+    /// 整库模型重排最多连着失败几次就停下等人（没写 = 3；0 = 不限）。详见 [`model_whole_library_retry_limit`]。
+    #[serde(default)]
+    pub model_whole_library_retry_limit: Option<usize>,
     /// 实时历史查询同时计算几个（1–64，没写 = 4）。详见 [`model_history_realtime_concurrency`]。
     #[serde(default)]
     pub model_history_realtime_concurrency: Option<i64>,
@@ -594,6 +597,7 @@ impl From<DbOption> for DbOptionExt {
             model_element_cache_max_entries: None,
             model_generation_input_max_dbnums: None,
             model_historical_snapshots_max: None,
+            model_whole_library_retry_limit: None,
             model_history_realtime_concurrency: None,
             model_history_realtime_cache: None,
             model_history_query_timeout_secs: None,
@@ -700,6 +704,8 @@ struct DbOptionExtFields {
     model_generation_input_max_dbnums: Option<usize>,
     #[serde(default)]
     model_historical_snapshots_max: Option<usize>,
+    #[serde(default)]
+    model_whole_library_retry_limit: Option<usize>,
     #[serde(default)]
     model_history_realtime_concurrency: Option<i64>,
     #[serde(default)]
@@ -1043,6 +1049,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_element_cache_max_entries: ext.model_element_cache_max_entries,
         model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
         model_historical_snapshots_max: ext.model_historical_snapshots_max,
+        model_whole_library_retry_limit: ext.model_whole_library_retry_limit,
         model_history_realtime_concurrency: ext.model_history_realtime_concurrency,
         model_history_realtime_cache: ext.model_history_realtime_cache,
         model_history_query_timeout_secs: ext.model_history_query_timeout_secs,
@@ -1246,6 +1253,36 @@ pub fn model_historical_snapshots_max() -> usize {
             .as_deref(),
         load_ext_fields().model_historical_snapshots_max,
         MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
+    )
+}
+
+/// 环境变量名：一次性覆盖 [`model_whole_library_retry_limit`]，不必改配置文件。
+pub const MODEL_WHOLE_LIBRARY_RETRY_LIMIT_ENV: &str = "AIOS_MODEL_WHOLE_LIBRARY_RETRY_LIMIT";
+/// [`model_whole_library_retry_limit`] 没写时的默认值：**3**（2026-11-11，用户定「连续几次失败后停下等人」，数字的理由见函数文档）。
+pub const MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT: usize = 3;
+
+/// 整库模型重排（起点 0 的 `ModelOnly`）最多**连着**失败几次就停下等人
+/// （`DbOption.toml` 的 `model_whole_library_retry_limit`，环境变量 [`MODEL_WHOLE_LIBRARY_RETRY_LIMIT_ENV`] 压过；
+/// 没写 = [`MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT`] = 3，**写 0 = 不限**）。
+///
+/// 模型水位从没盖过的库（`model_sesno <= 0`），稳态补偿每次重排都是**整库**——不是只重算上次没成的根。
+/// 这种任务败在还会重试的根上时不停跑（ADR-090 D1：按根退避重试），于是每等完一段退避就把整个库再算一遍：
+/// 7997 一遍约 8 分钟、6,772 根全部重写。没有这道上限时，同一错误要到那根被判死（连败 5 次）才停，约 40 分钟；
+/// 错误每次不一样的话永远停不下来，退避封顶后每 10 分钟整库重算一遍。
+///
+/// 为什么是 3：第 1 次失败可能只是一时的（库抖动、写冲突）；隔 30 s 再来的第 2 次盖得住「慢一点才恢复」；
+/// 第 3 次还败，就不是再等等能好的了，接着整库重算只是白烧——7997 上封顶约 24 分钟。它故意比「同错连败 5 次判死」
+/// 小：那条线管的是只重算欠账根的便宜重试，这一条管的是每次都重算全库的贵重试。
+///
+/// 到上限怎么停、怎么解除见 `batch_worker::ParkCause::WholeLibraryRetryLimit`；停法与数据批次失败、
+/// 失败根全部判死是同一套（同一本失败账），只是原因另记。
+pub fn model_whole_library_retry_limit() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_WHOLE_LIBRARY_RETRY_LIMIT_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_whole_library_retry_limit,
+        MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT,
     )
 }
 
@@ -5580,6 +5617,25 @@ dir = "review_attachments"
         assert_eq!(
             MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV,
             "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX"
+        );
+        // 整库重排的次数上限走同一条裁决：没写 = 3，环境变量压过配置，0 = 不限。
+        assert_eq!(MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT, 3);
+        assert_eq!(
+            MODEL_WHOLE_LIBRARY_RETRY_LIMIT_ENV,
+            "AIOS_MODEL_WHOLE_LIBRARY_RETRY_LIMIT"
+        );
+        assert_eq!(
+            effective_count_limit(None, None, MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT),
+            3
+        );
+        assert_eq!(
+            effective_count_limit(Some("5"), Some(2), MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT),
+            5
+        );
+        assert_eq!(
+            effective_count_limit(Some("0"), Some(2), MODEL_WHOLE_LIBRARY_RETRY_LIMIT_DEFAULT),
+            0,
+            "0 = 不限：整库重排败多少次都不因为次数停"
         );
     }
 }

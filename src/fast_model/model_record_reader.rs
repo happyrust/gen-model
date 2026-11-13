@@ -7,6 +7,7 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 
 use aios_core::{GeomInstQuery, ModelHashInst, RefU64, RefnoEnum};
 use serde::{Deserialize, Serialize};
+use surrealdb::sql::Thing;
 use surrealdb::{Surreal, engine::any::Any};
 use tokio::sync::Mutex;
 
@@ -133,56 +134,42 @@ fn refno_text(refno: e3d_io::refno::RefNo) -> String {
     RefU64::from_two_nums(refno.word0, refno.word1).to_string()
 }
 
-/// 管身行的直段三格（第三句 SQL 的行，与第二句的管身行**同序**——两句同一个作用域、同一个 `ORDER BY record_order`）。
-/// 不与 `GeomInstQuery` 合成一行 `serde(flatten)` 读：SurrealDB 的反序列化器过 flatten 缓冲时 `RefnoEnum` 这类 untagged 枚举
-/// 会报「untagged and internally tagged enums do not support enum input」，所以管身行读两遍、按序配对。
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+/// 管身行的直段三格。与记录本体在同一行里读回（[`DurablePageRow`]），两者不会错位。
+#[derive(Debug, Clone, Default, PartialEq)]
 struct TubeColumns {
-    #[serde(default)]
     tube_from: Option<String>,
-    #[serde(default)]
     tube_to: Option<String>,
-    #[serde(default)]
     tube_ordinal: Option<u32>,
 }
 
-/// 管身记录 + 同序的三格 → [`ModelRecord`]：`route_ordinal` 缺的按同 `(容器, from, to)` 内出现序补号；两端缺的没有 `tube`。
-fn pair_tube_records(tubes: Vec<GeomInstQuery>, metas: Vec<TubeColumns>) -> Vec<ModelRecord> {
-    let mut seen: HashMap<(String, String, String), u32> = HashMap::new();
-    tubes
-        .into_iter()
-        .zip(metas)
-        .map(|(inst, meta)| {
-            let tube = match (meta.tube_from, meta.tube_to) {
-                (Some(from), Some(to)) => {
-                    let container = inst.refno.to_string();
-                    let slot = seen
-                        .entry((container, from.clone(), to.clone()))
-                        .or_insert(0);
-                    let ordinal = meta.tube_ordinal.unwrap_or(*slot);
-                    *slot += 1;
-                    Some(TubeMeta { ordinal, from, to })
-                }
-                _ => None,
-            };
-            ModelRecord { inst, tube }
-        })
-        .collect()
+/// 同一个 `(容器, from, to)` 已经出现过几段——`route_ordinal` 没落盘的老行靠它补号。
+type TubeSeen = HashMap<(String, String, String), u32>;
+
+/// 一条管身记录的直段身份：`route_ordinal` 缺的按同 `(容器, from, to)` 内出现序补号；两端缺的没有 `tube`。
+/// 行必须按记录 id（分支槽位）的顺序喂进来；`seen` 跨页带着走——页的边落在一条分支中间时序号接着数，不从头再来。
+fn tube_identity(seen: &mut TubeSeen, inst: &GeomInstQuery, meta: TubeColumns) -> Option<TubeMeta> {
+    let (Some(from), Some(to)) = (meta.tube_from, meta.tube_to) else {
+        return None;
+    };
+    let slot = seen
+        .entry((inst.refno.to_string(), from.clone(), to.clone()))
+        .or_insert(0);
+    let ordinal = meta.tube_ordinal.unwrap_or(*slot);
+    *slot += 1;
+    Some(TubeMeta { ordinal, from, to })
 }
 
 /// 冷读一页多少条。整根一次取回会把响应体撑到几十 MB，SurrealDB 的 ws 单条响应撑不住，
 /// 报 `receiving from an empty and closed channel`（2026-11-07 现场：`23717/2` 34.1 MB、
 /// `24381/101405` 14.2 MB 都失败，7.4 MB 的 `23711/1` 正常）。5000 条一页实测 0.65 s / 2.11 MB。
-const DURABLE_READ_CHUNK: usize = 5000;
+pub(super) const DURABLE_READ_CHUNK: usize = 5000;
 
-async fn durable_model_records_of_root(
+pub(super) async fn durable_model_records_of_root(
     db: &Surreal<Any>,
     root: RefnoEnum,
 ) -> anyhow::Result<Vec<ModelRecord>> {
-    let packed = root.refno().0;
-    let owner = root.to_pe_key();
-    let insts = read_durable_in_chunks(db, root, DurableTable::InstRelate, packed, &owner).await?;
-    let tubes = read_durable_in_chunks(db, root, DurableTable::TubiRelate, packed, &owner).await?;
+    let insts = read_durable_in_chunks(db, root, DurableTable::InstRelate).await?;
+    let tubes = read_durable_in_chunks(db, root, DurableTable::TubiRelate).await?;
     let mut records = insts
         .into_iter()
         .map(|row| ModelRecord {
@@ -190,19 +177,47 @@ async fn durable_model_records_of_root(
             tube: None,
         })
         .collect::<Vec<_>>();
-    // 管身三格与管身记录必须同序配对，所以两路都按 `record_order` 分块读回（见 [`read_durable_in_chunks`]）。
-    let (tube_rows, metas) = tubes
-        .into_iter()
-        .map(|row| (row.inst, row.meta))
-        .unzip::<_, _, Vec<_>, Vec<_>>();
-    records.extend(pair_tube_records(tube_rows, metas));
+    // 管身行按记录 id（分支槽位）读回，补号才对得上（见 [`tube_identity`]）。
+    let mut seen = TubeSeen::new();
+    records.extend(tubes.into_iter().map(|row| {
+        let tube = tube_identity(&mut seen, &row.inst, row.meta);
+        ModelRecord {
+            inst: row.inst,
+            tube,
+        }
+    }));
     Ok(records)
 }
 
-/// 冷读的一页：记录本体 + 管身三格（只有 `tubi_relate` 有）。
+/// 冷读回来的一行：记录本体 + 管身三格（只有 `tubi_relate` 有）。
 struct DurableRow {
     inst: GeomInstQuery,
     meta: TubeColumns,
+}
+
+/// 冷读一页里的一行在库端的形状（[`durable_page_sql`] 外层那一句的投影）。
+///
+/// 记录本体整个放在 `row` 一格里**嵌套**着读，不用 `serde(flatten)` 摊平：SurrealDB 的反序列化器过 flatten 缓冲时
+/// `RefnoEnum` 这类 untagged 枚举会报「untagged and internally tagged enums do not support enum input」。
+#[derive(Debug, Deserialize)]
+struct DurablePageRow {
+    /// 这一行的记录 id。翻页的游标只认它，不拿 `refno`（= `in`）去拼：`tubi_relate` 的 id 是 `[分支, 槽位]`，
+    /// `in` 里没有槽位；`inst_relate` 的 id 也不保证就是 `in` 的那一串。
+    rid: Thing,
+    #[serde(default)]
+    tube_from: Option<String>,
+    #[serde(default)]
+    tube_to: Option<String>,
+    #[serde(default)]
+    tube_ordinal: Option<u32>,
+    row: GeomInstQuery,
+}
+
+/// 冷读的一页。
+struct DurablePage {
+    rows: Vec<DurableRow>,
+    /// 下一页从哪条记录之后读：页满时是这一页最后一行的记录 id；页不满就是这张表读到头了，为 `None`。
+    next: Option<Thing>,
 }
 
 /// 一张表的两种冷读形状。
@@ -221,98 +236,99 @@ impl DurableTable {
     }
 }
 
-/// 按 `record_order`（= 记录 id）分页冷读一根名下的全部行。
+/// 按记录 id 分页冷读一根名下一张表的全部行（两路作用域合在一起读，见 [`durable_page_sql`]）。
 ///
-/// 每页在**库端**带 `LIMIT`，并把上一页最后一条 `id` 当游标（`id > '<上一页末条>'`）——索引顺序与
-/// `ORDER BY id` 逐条相同（现场核对过 `START 40000` 与 `ORDER BY id` 同段，2026-11-07），
-/// 所以分页不改变行集与顺序，`/model/records` 的游标偏移不受影响。
-///
-/// 两条实测纪律（ams7333 的 `23717/2`，79409 行）：
-/// - **不带 `ORDER BY`**：整根 `ORDER BY` 要 3.3 s（排序整根），只加 `LIMIT` 是 3 ms。
-/// - **游标必须写成带引号的字符串**：`id > inst_relate:23717_179010`（record-id 字面量）
-///   每页 3.3 s，索引退化；`id > 'inst_relate:23717_179010'` 是 0.33 s。
+/// 一页一句、库端带 `LIMIT`，下一页从上一页最后一行的**记录 id** 之后读（[`read_durable_page`]）。读回来的就是
+/// 整根按记录 id 排的那个顺序——与不分页的 [`durable_records_sql`] 逐条相同，所以分页不改变行集与顺序，
+/// `/model/records` 的游标偏移不受影响。
 async fn read_durable_in_chunks(
     db: &Surreal<Any>,
     root: RefnoEnum,
     table: DurableTable,
-    packed: u64,
-    owner: &str,
+) -> anyhow::Result<Vec<DurableRow>> {
+    read_durable_in_chunks_with(db, root, table, DURABLE_READ_CHUNK, flat_read()).await
+}
+
+/// [`read_durable_in_chunks`] 的本体；页大小与读法明给，单测好用几行一页把翻页走一遍。
+async fn read_durable_in_chunks_with(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
+    table: DurableTable,
+    chunk: usize,
+    flat: bool,
 ) -> anyhow::Result<Vec<DurableRow>> {
     let mut out: Vec<DurableRow> = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut cursor: Option<Thing> = None;
     loop {
-        let sql = durable_page_sql(table, packed, owner, cursor.as_deref(), DURABLE_READ_CHUNK);
-        let mut response = db.query(sql).await?.check()?;
-        let insts: Vec<GeomInstQuery> = response.take(0)?;
-        // `inst_relate` 那一句只投一行记录，没有三格那一句；`tubi_relate` 才有。
-        let metas: Vec<TubeColumns> = match table {
-            DurableTable::InstRelate => Vec::new(),
-            DurableTable::TubiRelate => response.take(1)?,
-        };
-        anyhow::ensure!(
-            matches!(table, DurableTable::InstRelate) || insts.len() == metas.len(),
-            "durable {} rows of {root}: {} records but {} identity rows",
-            table.name(),
-            insts.len(),
-            metas.len()
-        );
-        if insts.is_empty() {
-            break;
+        let page = read_durable_page(db, root, table, cursor.as_ref(), chunk, flat).await?;
+        out.extend(page.rows);
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
         }
-        let last = insts
-            .last()
-            .map(|inst| inst.refno.to_string())
-            .expect("non-empty page has a last row");
-        let short_page = insts.len() < DURABLE_READ_CHUNK;
-        if metas.is_empty() {
-            out.extend(insts.into_iter().map(|inst| DurableRow {
-                inst,
-                meta: TubeColumns::default(),
-            }));
-        } else {
-            out.extend(
-                insts
-                    .into_iter()
-                    .zip(metas)
-                    .map(|(inst, meta)| DurableRow { inst, meta }),
-            );
-        }
-        if short_page {
-            break;
-        }
-        // `refno` 在 SQL 里是 `in AS refno`（`pe:<a>_<b>`），转成记录 id 要加表名前缀。
-        cursor = Some(format!("{}:{last}", table.name()));
     }
     Ok(out)
 }
 
-#[derive(Debug, Deserialize)]
-struct IdRow {
-    id: String,
-}
-
-fn record_id_cursor(id: &str) -> String {
-    id.replace(['⟨', '⟩', '<', '>'], "")
-}
-
-/// 与 [`durable_page_sql`] 同一窗口的记录 id。游标用这一列的最后一条，不用 `refno` 拼出来的 id。
-fn durable_id_page_sql(
+/// 读一页：`cursor` 之后、按记录 id 排的前 `limit` 行。
+///
+/// 两种翻法（整根的 [`read_durable_in_chunks`]、按窗口的 [`pull_durable_chunk`]）都只走这里，游标怎么取只此一处：
+/// 取这一页最后一行的记录 id（[`DurablePageRow::rid`]），原样写回下一页的 `id > <记录 id>`。
+async fn read_durable_page(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
     table: DurableTable,
-    packed: u64,
-    owner: &str,
-    cursor: Option<&str>,
+    cursor: Option<&Thing>,
     limit: usize,
-) -> String {
-    let cursor = cursor
-        .map(|cursor| format!(" AND id > {cursor}"))
-        .unwrap_or_default();
-    let [by_anc, by_owner] = durable_scope_reads(table.name(), "type::string(id) AS id", packed, owner);
-    let page = |sql: String| format!("{sql}{cursor} LIMIT {limit}");
-    format!(
-        "SELECT * FROM array::union(({}), ({}))",
-        page(by_anc),
-        page(by_owner)
-    )
+    flat: bool,
+) -> anyhow::Result<DurablePage> {
+    let literal = cursor.map(Thing::to_string);
+    let sql = durable_page_sql(
+        table,
+        root.refno().0,
+        &root.to_pe_key(),
+        literal.as_deref(),
+        limit,
+        flat,
+    );
+    let mut response = db.query(sql).await?.check()?;
+    let wire: Vec<DurablePageRow> = response.take(0)?;
+    ensure_page_is_past_cursor(table, root, cursor, wire.first().map(|row| &row.rid))?;
+    let next = if wire.len() < limit {
+        None
+    } else {
+        wire.last().map(|row| row.rid.clone())
+    };
+    let rows = wire
+        .into_iter()
+        .map(|row| DurableRow {
+            inst: row.row,
+            meta: TubeColumns {
+                tube_from: row.tube_from,
+                tube_to: row.tube_to,
+                tube_ordinal: row.tube_ordinal,
+            },
+        })
+        .collect();
+    Ok(DurablePage { rows, next })
+}
+
+/// 一页的第一行必须排在游标之后。库端没按游标滤（游标写成了它不认的形状——带引号的字符串、丢了槽位的管身 id
+/// 都是这样：语句不报错，只是每一页都从头读）时在这里报错，不让调用方拿着同一页一遍遍往下翻。
+fn ensure_page_is_past_cursor(
+    table: DurableTable,
+    root: RefnoEnum,
+    cursor: Option<&Thing>,
+    first: Option<&Thing>,
+) -> anyhow::Result<()> {
+    if let (Some(cursor), Some(first)) = (cursor, first) {
+        anyhow::ensure!(
+            first > cursor,
+            "durable {} page of {root} did not move past its cursor {cursor}: the first row is {first}",
+            table.name()
+        );
+    }
+    Ok(())
 }
 
 /// `/model/records` 的一页。`skip_consumed` 是这一根里被跳过、没有放进 `rows` 的行数
@@ -378,11 +394,11 @@ fn clone_record(record: &ModelRecord) -> ModelRecord {
 #[derive(Default)]
 struct DurableProgress {
     records: Vec<ModelRecord>,
-    inst_cursor: Option<String>,
+    inst_cursor: Option<Thing>,
     inst_done: bool,
-    tubi_cursor: Option<String>,
+    tubi_cursor: Option<Thing>,
     tubi_done: bool,
-    tube_seen: HashMap<(String, String, String), u32>,
+    tube_seen: TubeSeen,
 }
 
 impl DurableProgress {
@@ -398,11 +414,23 @@ fn durable_windows() -> &'static StdMutex<HashMap<u64, std::sync::Arc<Mutex<Dura
 
 /// 冷读一根的一个窗口。`skip == 0` 丢掉这根的进程内续读缓存，从库上重新读；
 /// `skip > 0` 接着上次的游标往后读，不再把前面的页重读一遍。
-async fn durable_model_records_window(
+pub(super) async fn durable_model_records_window(
     db: &Surreal<Any>,
     root: RefnoEnum,
     skip: usize,
     limit: usize,
+) -> anyhow::Result<RecordWindow> {
+    durable_model_records_window_with(db, root, skip, limit, DURABLE_READ_CHUNK, flat_read()).await
+}
+
+/// [`durable_model_records_window`] 的本体；库上一页多少条与读法明给，单测好用几行一页把续读走一遍。
+async fn durable_model_records_window_with(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
+    skip: usize,
+    limit: usize,
+    chunk: usize,
+    flat: bool,
 ) -> anyhow::Result<RecordWindow> {
     let key = root.refno().0;
     let slot = {
@@ -420,7 +448,7 @@ async fn durable_model_records_window(
     }
     let target = skip.saturating_add(limit);
     while progress.records.len() < target && !progress.finished() {
-        pull_durable_chunk(db, root, &mut progress).await?;
+        pull_durable_chunk(db, root, &mut progress, chunk, flat).await?;
     }
     let finished = progress.finished();
     let (start, end, skip_consumed, more) =
@@ -429,88 +457,59 @@ async fn durable_model_records_window(
     Ok(RecordWindow { rows, skip_consumed, more })
 }
 
+/// 往续读缓存里再读库上的一页：先把 `inst_relate` 读到头，再读 `tubi_relate`。
+/// 进度只在一页读成之后才往前挪——读失败的那一页不留痕，换一条连接重读是安全的（`model_read_pool`）。
 async fn pull_durable_chunk(
     db: &Surreal<Any>,
     root: RefnoEnum,
     progress: &mut DurableProgress,
+    chunk: usize,
+    flat: bool,
 ) -> anyhow::Result<()> {
-    let packed = root.refno().0;
-    let owner = root.to_pe_key();
     if !progress.inst_done {
-        let sql = durable_page_sql(
+        let page = read_durable_page(
+            db,
+            root,
             DurableTable::InstRelate,
-            packed,
-            &owner,
-            progress.inst_cursor.as_deref(),
-            DURABLE_READ_CHUNK,
-        );
-        let mut response = db.query(sql).await?.check()?;
-        let insts: Vec<GeomInstQuery> = response.take(0)?;
-        if insts.is_empty() {
-            progress.inst_done = true;
-            return Ok(());
-        }
-        let short = insts.len() < DURABLE_READ_CHUNK;
-        let next_cursor = insts.iter().map(|inst| format!("inst_relate:{}", inst.refno)).max();
-        if progress.inst_cursor.is_some() && next_cursor.as_ref() == progress.inst_cursor.as_ref() {
-            progress.inst_done = true;
-            return Ok(());
-        }
-        progress.records.extend(insts.into_iter().map(|inst| ModelRecord { inst, tube: None }));
-        if short {
-            progress.inst_done = true;
-        } else if let Some(next_cursor) = next_cursor {
-            progress.inst_cursor = Some(next_cursor);
-        } else {
-            progress.inst_done = true;
+            progress.inst_cursor.as_ref(),
+            chunk,
+            flat,
+        )
+        .await?;
+        progress
+            .records
+            .extend(page.rows.into_iter().map(|row| ModelRecord {
+                inst: row.inst,
+                tube: None,
+            }));
+        match page.next {
+            Some(next) => progress.inst_cursor = Some(next),
+            None => progress.inst_done = true,
         }
         return Ok(());
     }
     if progress.tubi_done {
         return Ok(());
     }
-    let sql = durable_page_sql(
+    let page = read_durable_page(
+        db,
+        root,
         DurableTable::TubiRelate,
-        packed,
-        &owner,
-        progress.tubi_cursor.as_deref(),
-        DURABLE_READ_CHUNK,
-    );
-    let mut response = db.query(sql).await?.check()?;
-    let insts: Vec<GeomInstQuery> = response.take(0)?;
-    let metas: Vec<TubeColumns> = response.take(1)?;
-    anyhow::ensure!(
-        insts.len() == metas.len(),
-        "durable tubi page of {root}: {} records but {} identity rows",
-        insts.len(),
-        metas.len()
-    );
-    if insts.is_empty() {
-        progress.tubi_done = true;
-        return Ok(());
+        progress.tubi_cursor.as_ref(),
+        chunk,
+        flat,
+    )
+    .await?;
+    for row in page.rows {
+        let tube = tube_identity(&mut progress.tube_seen, &row.inst, row.meta);
+        progress.records.push(ModelRecord {
+            inst: row.inst,
+            tube,
+        });
     }
-    let short = insts.len() < DURABLE_READ_CHUNK;
-    let last = insts.last().expect("non-empty tubi page").refno.to_string();
-    for (inst, meta) in insts.into_iter().zip(metas) {
-        let tube = match (meta.tube_from, meta.tube_to) {
-            (Some(from), Some(to)) => {
-                let container = inst.refno.to_string();
-                let slot = progress
-                    .tube_seen
-                    .entry((container, from.clone(), to.clone()))
-                    .or_insert(0);
-                let ordinal = meta.tube_ordinal.unwrap_or(*slot);
-                *slot += 1;
-                Some(TubeMeta { ordinal, from, to })
-            }
-            _ => None,
-        };
-        progress.records.push(ModelRecord { inst, tube });
-    }
-    if short {
-        progress.tubi_done = true;
-    } else {
-        progress.tubi_cursor = Some(format!("tubi_relate:{last}"));
+    match page.next {
+        Some(next) => progress.tubi_cursor = Some(next),
+        None => progress.tubi_done = true,
     }
     Ok(())
 }
@@ -636,7 +635,8 @@ fn durable_scope_reads_from(
     ]
 }
 
-/// 冷读一页的 SQL：`inst_relate` 一句、`tubi_relate` 的三格一句，调用方 `take(0)` / `take(1)`。
+/// 冷读一页的 SQL，一句：`cursor` 之后、按记录 id 排的前 `limit` 行，每行是 [`DurablePageRow`] 的形状
+/// （`rid` = 记录 id，`row` = 记录本体，管身行另带三格）。`flat` 见 [`geometry_predicates`]。
 ///
 /// 作用域仍是 [`durable_scope_reads`] 的两路（`anc CONTAINS` + `in =`），**分开读、各走各的索引、
 /// 再 `array::union`**，不写成一条 `anc CONTAINS … OR in = …`：优化器碰到 OR 再挂上别的 AND 谓词
@@ -648,10 +648,27 @@ fn durable_scope_reads_from(
 /// （6,772 根、overlay 上限 4）上一窗跑成 90 分钟、看着像卡死。与 [`render_spooled_scope_cleanup`]
 /// 同一条纪律。
 ///
-/// 分页（[`read_durable_in_chunks`]）把 `id > '<游标>'` 和 `LIMIT` 加到**每一路**上，再 `array::union`：
-/// 两路各自都在索引前缀上截断，并集的结果是「整根按 id 排的前 n 条」——因为两路的行都来自同一张表、
-/// 同一套 id 序，截断后再取并集与整根排序后截断等价（管身行在 `anc` 含自身时两路重合，
-/// `array::union` 去重，所以不会把同一行算两次）。
+/// # 一页怎么截
+///
+/// 两路各自带 `id > <游标>` 与 `LIMIT n`（各走各的索引，索引里同一个键下的行按记录 id 排，所以各自取到的是
+/// 本路游标之后 id 最小的 n 行），并起来（两路都命中的行 `array::union` 去重）最多 2n 行，**再按记录 id 排、
+/// 取前 n 行**。并集里 id 最小的 n 行就是两路合起来游标之后 id 最小的 n 行——任何一路没进并集的行，前面
+/// 都至少排着本路的 n 行——所以这一页不多不少，下一页的游标取这一页最后一行的 id 就行。
+///
+/// 外层那一步省不得。只做到「两路各自截断再并」时一页可能有 2n 行，而且不是按 id 排的：游标取到 `in = 根`
+/// 那一路的行上，子树那一路里 id 排在它前面、又没进这一页的行就再也读不到（丢行）；取到的 id 比上一页还靠前，
+/// 就在同一页上打转（2026-11-11，`model_record_reader_bench` 的四条用例）。
+///
+/// # 三条纪律
+///
+/// - **里层两路不带 `ORDER BY`**：整根排序要 3.3 s，只加 `LIMIT` 是 3 ms（2026-11-07，ams7333 的 `23717/2`，
+///   79,409 行）。外层排的只是并集那最多 2n 行，真库上量不出差别（2026-11-11 同一根，一页 5000 行的库端用时：
+///   首页 0.47–0.78 s 对 0.50–0.77 s，第 9 页 1.65–2.77 s 对 2.38–2.81 s，都在机器当时的抖动之内）。
+/// - **游标是记录 id 的字面量，不带引号**：`id > inst_relate:23717_178998`、`id > tubi_relate:[pe:24383_100028, 3]`。
+///   写成带引号的字符串，库不报错也不滤，每一页都从头读（2026-11-11 真库：`id > 'tubi_relate:[…, 2]'` 回的仍是
+///   头三行）。
+/// - **游标取这一行真正的记录 id**（外层投出来的 `rid`），不拿 `in` 去拼：管身的 id 是 `[分支, 槽位]`，拼出来的
+///   `tubi_relate:<分支>` 是另一种键，排在所有管身行前面，等于没滤（同日真库：回的仍是头三行）。
 ///
 /// [`render_spooled_scope_cleanup`]: super::model_db_adapter
 fn durable_page_sql(
@@ -660,46 +677,20 @@ fn durable_page_sql(
     owner: &str,
     cursor: Option<&str>,
     limit: usize,
-) -> String {
-    durable_page_sql_with(table, packed, owner, cursor, limit, flat_read())
-}
-
-/// [`durable_page_sql`] 的本体；`flat` 明给，单测好把两种写法并排对。
-fn durable_page_sql_with(
-    table: DurableTable,
-    packed: u64,
-    owner: &str,
-    cursor: Option<&str>,
-    limit: usize,
     flat: bool,
 ) -> String {
-    let (projection, meta_projection) = match table {
-        DurableTable::InstRelate => (inst_projection_for(owner, flat), None),
-        DurableTable::TubiRelate => (tubi_projection(owner), Some(tubi_meta_projection())),
+    let (projection, tube_columns) = match table {
+        DurableTable::InstRelate => (inst_projection_for(owner, flat), ""),
+        DurableTable::TubiRelate => (tubi_projection(owner), ", tube_from, tube_to, tube_ordinal"),
     };
-    // 记录 id 字面量才能滤掉已读行。带引号的字符串在这台 SurrealDB 上比较不生效，
-    // 下一页仍从第一行开始。`id > inst_relate:24383_100006` 实测 2 ms 且落到下一行。
     // 游标谓词排在哪儿见 [`durable_scope_reads_from`]。
     let [by_anc, by_owner] =
         durable_scope_reads_from(table.name(), &projection, packed, owner, cursor, flat);
-    let page = |sql: String| format!("{sql} LIMIT {limit}");
-    let rows = format!(
-        "SELECT * FROM array::union(({}), ({}))",
-        page(by_anc),
-        page(by_owner)
-    );
-    match meta_projection {
-        None => rows,
-        Some(meta) => {
-            let [meta_by_anc, meta_by_owner] =
-                durable_scope_reads_from(table.name(), &meta, packed, owner, cursor, flat);
-            format!(
-                "{rows};\nSELECT * FROM array::union(({}), ({}))",
-                page(meta_by_anc),
-                page(meta_by_owner)
-            )
-        }
-    }
+    format!(
+        "SELECT record_order AS rid{tube_columns}, $this AS row \
+         FROM array::union(({by_anc} LIMIT {limit}), ({by_owner} LIMIT {limit})) \
+         ORDER BY rid LIMIT {limit}"
+    )
 }
 
 fn inst_projection(owner: &str) -> String {
@@ -728,7 +719,8 @@ fn inst_projection_for(owner: &str, flat: bool) -> String {
 }
 
 /// 管身行多三格直段身份（方案 B T2）：`leave` / `arrive` 折成 `a_b`、`route_ordinal` 老行读成 NONE；只有
-/// `model_records_of_root` 消费它们，`records_of_root` 的 `GeomInstQuery` 不认这三格、原样忽略（同 `record_order`）。
+/// `model_records_of_root` 消费它们（分页那一句的外层把这三格单独投出来，见 [`durable_page_sql`]），
+/// `records_of_root` 的 `GeomInstQuery` 不认这三格、原样忽略（同 `record_order`）。
 fn tubi_projection(owner: &str) -> String {
     format!(
         "id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner, \
@@ -741,19 +733,11 @@ fn tubi_projection(owner: &str) -> String {
     )
 }
 
-fn tubi_meta_projection() -> String {
-    "id AS record_order, \
-     IF leave != NONE { record::id(leave) } ELSE { NONE } AS tube_from, \
-     IF arrive != NONE { record::id(arrive) } ELSE { NONE } AS tube_to, \
-     route_ordinal AS tube_ordinal"
-        .to_string()
-}
-
 /// 整根冷读的两句 SQL（不分页）：`inst_relate` 一句、`tubi_relate` 一句，各自 `ORDER BY record_order`
 /// （= 记录 id），调用方 `take(0)` / `take(1)`。
 ///
 /// 只服务 [`durable_records_of_root`]（房间重算等内部路径，一次要整根）。`/model/records` 走
-/// [`read_durable_in_chunks`] 分页，见那里的实测纪律。
+/// [`read_durable_in_chunks`] 分页，一页的写法与纪律见 [`durable_page_sql`]。
 fn durable_records_sql(packed: u64, owner: &str) -> String {
     let [inst_by_anc, inst_by_owner] =
         durable_scope_reads("inst_relate", &inst_projection(owner), packed, owner);
@@ -763,6 +747,18 @@ fn durable_records_sql(packed: u64, owner: &str) -> String {
         "SELECT * FROM array::union(({inst_by_anc}), ({inst_by_owner})) ORDER BY record_order;\n\
          SELECT * FROM array::union(({tubi_by_anc}), ({tubi_by_owner})) ORDER BY record_order;"
     )
+}
+
+/// 一根名下两张表各有多少行：两路作用域并起来、只数 id、不分页，`inst_relate` 一句、`tubi_relate` 一句。
+/// 冷读翻页的真库只读对拍拿它当准数（`model_record_reader_bench`）——谓词与翻页那一句同一份（[`durable_scope_reads`]）。
+#[cfg(test)]
+pub(super) fn durable_count_sql(packed: u64, owner: &str) -> String {
+    ["inst_relate", "tubi_relate"]
+        .map(|table| {
+            let [by_anc, by_owner] = durable_scope_reads(table, "id", packed, owner);
+            format!("SELECT count() AS n FROM array::union(({by_anc}), ({by_owner})) GROUP ALL;")
+        })
+        .join("\n")
 }
 
 /// 库上一条隐式管身行里房间层级树 `tubes=1` 要的那几格（`spatial_tree_tubes` 折成 `TubeRecord`；计划
@@ -1191,56 +1187,123 @@ mod tests {
         );
     }
 
-    /// 冷读分页的两条纪律，2026-11-07 现场量出来的（ams7333 的 `23717/2`，79409 行）：
+    /// 冷读一页的写法（[`super::durable_page_sql`] 的三条纪律，数字都是真库上量的）：
     ///
-    /// - **不带 `ORDER BY`**：整根 `ORDER BY record_order` 要 3.3 s（排序整根），只加 `LIMIT` 是 3 ms。
-    ///   分页后每页都是索引上的一次前缀扫描，所以整句里不许出现 `ORDER BY`。
-    /// - **游标必须写成带引号的字符串**：`id > inst_relate:23717_179010`（record-id 字面量）每页 3.3 s，
-    ///   索引退化；`id > 'inst_relate:23717_179010'` 是 0.33 s。
-    ///
-    /// 同时钉住：`LIMIT` 与游标必须落到**每一路**（`anc CONTAINS` 与 `in =`），否则截断只在并集之后做，
-    /// 库端还是会把整根读出来——那正是 `23717/2` 报 `empty and closed channel` 的原因。
+    /// - **里层两路不带 `ORDER BY`**：整根 `ORDER BY` 要 3.3 s（排序整根），只加 `LIMIT` 是 3 ms（2026-11-07，
+    ///   ams7333 的 `23717/2`，79,409 行）。整句里只许有一处 `ORDER BY`——并集之后、对那最多 2n 行的那一处。
+    /// - **`LIMIT` 与游标落到每一路**（`anc CONTAINS` 与 `in =`），否则截断只在并集之后做，库端还是会把整根读出来
+    ///   ——那正是 `23717/2` 报 `empty and closed channel` 的原因；并集之后**再**按记录 id 排、截到 n 行，
+    ///   一页才不多不少（只做前一半时会丢行、会在同一页上打转）。
+    /// - **游标是不带引号的记录 id 字面量**：带引号的字符串库不报错也不滤，每一页都从头读（2026-11-11 真库）。
+    ///   这条测试原来钉的是反过来的写法——当时量到的「0.33 s 对 3.3 s」，快的那个其实是没滤、原样回了第一页。
     #[test]
     fn durable_page_sql_pages_every_scope_without_ordering_the_whole_root() {
-        for table in [
-            super::DurableTable::InstRelate,
-            super::DurableTable::TubiRelate,
+        use super::DurableTable::{InstRelate, TubiRelate};
+        for (table, cursor) in [
+            (InstRelate, "inst_relate:9_10"),
+            (TubiRelate, "tubi_relate:[pe:9_10, 3]"),
         ] {
-            let sql =
-                super::durable_page_sql(table, 1234, "pe:1_2", Some("inst_relate:9_10"), 5000);
-            assert!(
-                !sql.contains("ORDER BY"),
-                "分页句不许排序整根（3.3 s → 3 ms）: {sql}"
-            );
-            assert_eq!(
-                sql.matches("LIMIT 5000").count(),
-                if matches!(table, super::DurableTable::TubiRelate) {
-                    4
-                } else {
-                    2
-                },
-                "LIMIT 必须落到每一路（tubi_relate 还有三格那一句）: {sql}"
-            );
-            assert_eq!(
-                sql.matches("AND id > 'inst_relate:9_10'").count(),
-                if matches!(table, super::DurableTable::TubiRelate) {
-                    4
-                } else {
-                    2
-                },
-                "游标必须带引号、且落到每一路: {sql}"
-            );
-            assert!(
-                !sql.contains("id > inst_relate:9_10"),
-                "不带引号的 record-id 字面量会让索引退化（0.33 s → 3.3 s）: {sql}"
-            );
+            for flat in [true, false] {
+                let sql = super::durable_page_sql(table, 1234, "pe:1_2", Some(cursor), 5000, flat);
+                assert!(!sql.contains(';'), "一页一句: {sql}");
+                assert!(
+                    sql.starts_with("SELECT record_order AS rid")
+                        && sql.contains(", $this AS row FROM array::union(("),
+                    "外层投出这一行的记录 id 与记录本体: {sql}"
+                );
+                assert_eq!(
+                    sql.contains(" AS rid, tube_from, tube_to, tube_ordinal, $this AS row "),
+                    matches!(table, TubiRelate),
+                    "管身行的三格在外层单独投出来，构件行没有: {sql}"
+                );
+                assert_eq!(
+                    sql.matches("ORDER BY").count(),
+                    1,
+                    "里层两路不许排序整根（3.3 s → 3 ms），只在并集之后排一次: {sql}"
+                );
+                assert!(
+                    sql.ends_with(")) ORDER BY rid LIMIT 5000"),
+                    "并集之后按记录 id 排、截到一页: {sql}"
+                );
+                assert_eq!(
+                    sql.matches(" LIMIT 5000), (").count()
+                        + sql.matches(" LIMIT 5000)) ORDER BY").count(),
+                    2,
+                    "LIMIT 必须落到每一路: {sql}"
+                );
+                assert_eq!(
+                    sql.matches("LIMIT 5000").count(),
+                    3,
+                    "两路各一处 + 并集之后一处: {sql}"
+                );
+                assert_eq!(
+                    sql.matches(&format!(" AND id > {cursor} AND ")).count(),
+                    2,
+                    "游标是不带引号的记录 id 字面量，且落到每一路: {sql}"
+                );
+                assert!(
+                    !sql.contains("id > '") && !sql.contains("id > \""),
+                    "带引号的游标库不报错也不滤，每一页都从头读: {sql}"
+                );
+            }
         }
 
         // 首屏没有游标：只有 `LIMIT`，没有 `id >`。
-        let first =
-            super::durable_page_sql(super::DurableTable::InstRelate, 1234, "pe:1_2", None, 10);
+        let first = super::durable_page_sql(InstRelate, 1234, "pe:1_2", None, 10, true);
         assert!(!first.contains("id >"), "首屏不该带游标: {first}");
-        assert_eq!(first.matches("LIMIT 10").count(), 2, "{first}");
+        assert_eq!(first.matches("LIMIT 10").count(), 3, "{first}");
+    }
+
+    /// 一页的第一行必须排在游标之后：相等、更靠前都是「库端没按游标滤」，报错而不是接着翻。
+    /// 管身的 id 按 `[分支, 槽位]` 逐格比，槽位按数比（10 在 9 后面）。
+    #[test]
+    fn a_page_must_start_after_its_cursor() {
+        use super::DurableTable::{InstRelate, TubiRelate};
+        use surrealdb::sql::{Id, Thing, Value};
+        let root: aios_core::RefnoEnum = "24384_26606".into();
+        let inst = |key: &str| Thing::from(("inst_relate", key));
+        let tube = |branch: &str, slot: i64| {
+            Thing::from((
+                "tubi_relate",
+                Id::from(vec![
+                    Value::from(Thing::from(("pe", branch))),
+                    Value::from(slot),
+                ]),
+            ))
+        };
+        let check = |table, cursor: &Thing, first: &Thing| {
+            super::ensure_page_is_past_cursor(table, root, Some(cursor), Some(first))
+        };
+
+        assert!(check(InstRelate, &inst("24384_100"), &inst("24384_101")).is_ok());
+        let stuck = check(InstRelate, &inst("24384_100"), &inst("24384_100")).unwrap_err();
+        assert!(
+            stuck
+                .to_string()
+                .contains("did not move past its cursor inst_relate:24384_100"),
+            "{stuck:#}"
+        );
+        assert!(check(InstRelate, &inst("24384_100"), &inst("24384_099")).is_err());
+
+        assert!(check(TubiRelate, &tube("24384_7", 9), &tube("24384_7", 10)).is_ok());
+        assert!(check(TubiRelate, &tube("24384_7", 10), &tube("24384_7", 9)).is_err());
+        assert!(check(TubiRelate, &tube("24384_7", 14), &tube("24384_8", 0)).is_ok());
+        // 拿分支拼出来的 `tubi_relate:<分支>` 是字符串键，排在所有 `[分支, 槽位]` 前面：库端等于没滤，
+        // 回来的第一行（头一条管身）反而在「上一页最后一行」之前——这里拦下的就是这种。
+        assert_eq!(
+            tube("24384_7", 3).to_string(),
+            "tubi_relate:[pe:24384_7, 3]"
+        );
+        assert!(Thing::from(("tubi_relate", "24384_7")) < tube("24384_1", 0));
+        assert!(check(TubiRelate, &tube("24384_7", 3), &tube("24384_1", 0)).is_err());
+
+        // 第一页没有游标、空页没有第一行：都不拦。
+        assert!(
+            super::ensure_page_is_past_cursor(InstRelate, root, None, Some(&inst("a"))).is_ok()
+        );
+        assert!(
+            super::ensure_page_is_past_cursor(InstRelate, root, Some(&inst("a")), None).is_ok()
+        );
     }
 
     /// A6（2026-11-10）：读行上的扁平副本只换了「包围盒与世界变换从哪取」，别的一个字不动；游标谓词紧跟索引谓词、
@@ -1249,8 +1312,8 @@ mod tests {
     fn the_flat_read_only_changes_where_inst_rows_take_their_box_and_transform_from() {
         use super::DurableTable::{InstRelate, TubiRelate};
         let cursor = Some("inst_relate:9_10");
-        let flat = super::durable_page_sql_with(InstRelate, 1234, "pe:1_2", cursor, 5000, true);
-        let deref = super::durable_page_sql_with(InstRelate, 1234, "pe:1_2", cursor, 5000, false);
+        let flat = super::durable_page_sql(InstRelate, 1234, "pe:1_2", cursor, 5000, true);
+        let deref = super::durable_page_sql(InstRelate, 1234, "pe:1_2", cursor, 5000, false);
         assert!(
             flat.contains("aabb_d ?? aabb.d AS world_aabb")
                 && flat.contains("world_trans_d ?? world_trans.d AS world_trans"),
@@ -1295,8 +1358,8 @@ mod tests {
             );
         }
         assert_eq!(
-            super::durable_page_sql_with(TubiRelate, 1234, "pe:1_2", cursor, 5000, true),
-            super::durable_page_sql_with(TubiRelate, 1234, "pe:1_2", cursor, 5000, false),
+            super::durable_page_sql(TubiRelate, 1234, "pe:1_2", cursor, 5000, true),
+            super::durable_page_sql(TubiRelate, 1234, "pe:1_2", cursor, 5000, false),
             "管身行没有副本"
         );
 
@@ -1365,7 +1428,7 @@ mod tests {
             .check()
             .unwrap();
         let root: aios_core::RefnoEnum = "24384_26606".into();
-        let (packed, owner) = (root.refno().0, root.to_pe_key());
+        let packed = root.refno().0;
         db.query(format!(
             r#"
           CREATE pe:⟨24384_26609⟩ SET old_pe = pe:⟨9_9⟩;
@@ -1400,57 +1463,40 @@ mod tests {
         .check()
         .unwrap();
 
-        // 与 `pull_durable_chunk` 同一个翻法：一页一句，游标取这一页最大的记录 id，不满一页就是读完了。
+        // 走真正的翻页（`read_durable_in_chunks_with`），页大小与读法明给。
         async fn read_all(
             db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-            packed: u64,
-            owner: &str,
-            limit: usize,
+            root: aios_core::RefnoEnum,
+            chunk: usize,
             flat: bool,
         ) -> Vec<serde_json::Value> {
-            let mut out = Vec::new();
-            let mut cursor: Option<String> = None;
-            for _ in 0..16 {
-                let sql = super::durable_page_sql_with(
-                    super::DurableTable::InstRelate,
-                    packed,
-                    owner,
-                    cursor.as_deref(),
-                    limit,
-                    flat,
-                );
-                let mut response = db.query(sql).await.unwrap().check().unwrap();
-                let rows: Vec<aios_core::GeomInstQuery> = response.take(0).unwrap();
-                if rows.is_empty() {
-                    break;
-                }
-                let short = rows.len() < limit;
-                cursor = rows
-                    .iter()
-                    .map(|row| format!("inst_relate:{}", row.refno))
-                    .max();
-                out.extend(rows.iter().map(|row| serde_json::to_value(row).unwrap()));
-                if short {
-                    break;
-                }
-            }
-            out
+            super::read_durable_in_chunks_with(
+                db,
+                root,
+                super::DurableTable::InstRelate,
+                chunk,
+                flat,
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| serde_json::to_value(&row.inst).unwrap())
+            .collect()
         }
-        let sorted = |rows: &[serde_json::Value]| {
-            let mut texts: Vec<String> = rows.iter().map(|row| row.to_string()).collect();
-            texts.sort();
-            texts
-        };
 
-        let whole_deref = read_all(&db, packed, &owner, 100, false).await;
-        let whole_flat = read_all(&db, packed, &owner, 100, true).await;
+        let whole_deref = read_all(&db, root, 100, false).await;
+        let whole_flat = read_all(&db, root, 100, true).await;
         assert_eq!(whole_deref.len(), 4, "悬空的那一行与别的根的行不在里面: {whole_deref:?}");
         assert_eq!(whole_flat, whole_deref, "一页读完：两种写法逐条相同");
         let generics: Vec<&str> = whole_flat
             .iter()
             .map(|row| row["generic"].as_str().unwrap())
             .collect();
-        assert_eq!(generics, ["FLOOR", "BOX", "CYLI", "EQUI"], "子树行按记录 id，根自己的几何在后");
+        assert_eq!(
+            generics,
+            ["EQUI", "FLOOR", "BOX", "CYLI"],
+            "两路合起来按记录 id 排：根自己的几何（`in = 根` 那一路读到的）排在它的 id 该在的位置"
+        );
         assert_eq!(
             whole_flat
                 .iter()
@@ -1459,19 +1505,172 @@ mod tests {
             1,
             "旧节点号照旧带出来: {whole_flat:?}"
         );
-        // 没有副本的老行读到的是指针指向的值：包围盒是 a 的、世界变换是 b 的。
-        let legacy = &whole_flat[2];
-        assert_eq!(legacy["world_trans"], whole_flat[1]["world_trans"]);
-        assert_eq!(legacy["world_aabb"], whole_flat[0]["world_aabb"]);
+        // 没有副本的老行读到的是指针指向的值：包围盒是 a 的（与 FLOOR 同）、世界变换是 b 的（与 BOX 同）。
+        let (floor, boxed, legacy) = (&whole_flat[1], &whole_flat[2], &whole_flat[3]);
+        assert_eq!(legacy["world_trans"], boxed["world_trans"]);
+        assert_eq!(legacy["world_aabb"], floor["world_aabb"]);
 
-        let paged_deref = read_all(&db, packed, &owner, 2, false).await;
-        let paged_flat = read_all(&db, packed, &owner, 2, true).await;
+        let paged_deref = read_all(&db, root, 2, false).await;
+        let paged_flat = read_all(&db, root, 2, true).await;
         assert_eq!(paged_flat, paged_deref, "两行一页：两种写法逐条相同");
         assert_eq!(
-            sorted(&paged_flat),
-            sorted(&whole_flat),
-            "翻着读不丢行、不重行"
+            paged_flat, whole_flat,
+            "两行一页与一页读完逐条相同：不丢行、不重行、顺序不变"
         );
+    }
+
+    /// 几行一页把两种翻法都走一遍，逐条对着不分页的整根读法（`durable_records_of_root`）。夹具里故意放：
+    /// 记录 id 与 `in` 不是同一串的行；只有 `in = 根` 那一路读得到的行，id 分别排在子树行的前面、中间、后面；
+    /// 两路都命中的行（只许出现一次）；别的根的行；两条分支的管身，槽位到 11（`[分支, 10]` 排在 `[分支, 9]` 后面），
+    /// 其中一段是根自己的、`anc` 没写（只有 `in = 根` 那一路读得到）。页大小从 1 到比整根还大都试。
+    #[tokio::test]
+    async fn paging_by_record_id_reads_both_scopes_in_order_without_loss_or_repeats() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("paged_cold_read").await.unwrap();
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let root: aios_core::RefnoEnum = "24384_70000".into();
+        let (packed, owner) = (root.refno().0, root.to_pe_key());
+        db.query(format!(
+            r#"
+          CREATE aabb:box SET d={{mins:[0,0,0],maxs:[1,1,1]}};
+          CREATE trans:world SET d={{translation:[0,0,0],rotation:[0,0,0,1],scale:[1,1,1]}};
+          FOR $i IN 0..7 {{
+            LET $k = 'c' + <string> $i;
+            CREATE type::thing('inst_relate', $k) SET in = type::thing('pe', '24384_8' + <string> $i),
+              anc = [{packed}], aabb = aabb:box, world_trans = trans:world, generic = 'BOX', booled_id = $k;
+          }};
+          -- 只有 `in = 根` 那一路读得到的三行：排在子树行的前面（a0）、中间（c3x）、后面（z9）
+          FOR $k IN ['a0', 'c3x', 'z9'] {{
+            CREATE type::thing('inst_relate', $k) SET in = {owner},
+              anc = [1], aabb = aabb:box, world_trans = trans:world, generic = 'EQUI', booled_id = $k;
+          }};
+          -- 两路都命中
+          CREATE inst_relate:c5x SET in = {owner}, anc = [{packed}],
+            aabb = aabb:box, world_trans = trans:world, generic = 'EQUI', booled_id = 'c5x';
+          -- 别的根的
+          CREATE inst_relate:c4x SET in = pe:⟨24384_999⟩, anc = [1],
+            aabb = aabb:box, world_trans = trans:world, generic = 'BOX', booled_id = 'c4x';
+          FOR $s IN 0..12 {{
+            CREATE type::thing('tubi_relate', [pe:⟨24384_71⟩, $s]) SET in = pe:⟨24384_71⟩,
+              out = type::thing('inst_geo', 't71_' + <string> $s), anc = [{packed}],
+              aabb = aabb:box, world_trans = trans:world, leave = pe:⟨24384_1⟩, arrive = pe:⟨24384_2⟩;
+          }};
+          FOR $s IN 0..3 {{
+            CREATE type::thing('tubi_relate', [pe:⟨24384_72⟩, $s]) SET in = pe:⟨24384_72⟩,
+              out = type::thing('inst_geo', 't72_' + <string> $s), anc = [{packed}],
+              aabb = aabb:box, world_trans = trans:world, leave = pe:⟨24384_1⟩, arrive = pe:⟨24384_2⟩;
+          }};
+          CREATE tubi_relate:[{owner}, 0] SET in = {owner}, out = inst_geo:t_own, anc = [1],
+            aabb = aabb:box, world_trans = trans:world, leave = pe:⟨24384_1⟩, arrive = pe:⟨24384_2⟩;
+        "#
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let tag = |inst: &aios_core::GeomInstQuery| inst.insts[0].geo_hash.clone();
+        let want: Vec<String> = super::durable_records_of_root(&db, root)
+            .await
+            .unwrap()
+            .iter()
+            .map(tag)
+            .collect();
+        let slots = |branch: &str, count: usize| {
+            (0..count)
+                .map(|slot| format!("{branch}_{slot}"))
+                .collect::<Vec<_>>()
+        };
+        let mut expected: Vec<String> = [
+            "a0", "c0", "c1", "c2", "c3", "c3x", "c4", "c5", "c5x", "c6", "z9",
+        ]
+        .map(String::from)
+        .to_vec();
+        expected.push("t_own".into());
+        expected.extend(slots("t71", 12));
+        expected.extend(slots("t72", 3));
+        assert_eq!(
+            want, expected,
+            "不分页的读法：构件行在前、管身在后，各按记录 id 排（根自己的 `[pe:24384_70000, 0]` 排在两条分支前面，槽位按数排）"
+        );
+
+        // 一页 12 行时，管身那张表第一页的最后一行是 `[pe:24384_71, 10]`：游标带着两位数的槽位。
+        for (chunk, flat) in [
+            (1, true),
+            (2, true),
+            (2, false),
+            (3, true),
+            (5, false),
+            (12, true),
+            (13, false),
+            (100, true),
+        ] {
+            // 整根
+            let mut whole = Vec::new();
+            for table in [
+                super::DurableTable::InstRelate,
+                super::DurableTable::TubiRelate,
+            ] {
+                whole.extend(
+                    super::read_durable_in_chunks_with(&db, root, table, chunk, flat)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|row| tag(&row.inst)),
+                );
+            }
+            assert_eq!(whole, want, "整根，一页 {chunk} 行，flat={flat}");
+
+            // 按窗口：窗口大小与库上一页的大小错开；`skip == 0` 那一次会丢掉上一轮的续读缓存。
+            for window in [1, 4, 100] {
+                let mut paged = Vec::new();
+                let mut ordinals = Vec::new();
+                let mut finished = false;
+                for _ in 0..(want.len() + 2) {
+                    let page = super::durable_model_records_window_with(
+                        &db,
+                        root,
+                        paged.len(),
+                        window,
+                        chunk,
+                        flat,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(page.rows.len() <= window);
+                    for record in &page.rows {
+                        paged.push(tag(&record.inst));
+                        if let Some(tube) = &record.tube {
+                            ordinals.push(tube.ordinal);
+                        }
+                    }
+                    if !page.more {
+                        finished = true;
+                        break;
+                    }
+                }
+                assert!(
+                    finished,
+                    "按窗口翻得完：一页 {chunk} 行、一窗 {window} 行，flat={flat}"
+                );
+                assert_eq!(
+                    paged, want,
+                    "按窗口，一页 {chunk} 行、一窗 {window} 行，flat={flat}"
+                );
+                assert_eq!(
+                    ordinals,
+                    [0].into_iter()
+                        .chain(0..12)
+                        .chain(0..3)
+                        .collect::<Vec<u32>>(),
+                    "页的边落在一条分支中间时序号接着数：一页 {chunk} 行、一窗 {window} 行"
+                );
+            }
+        }
     }
 
     /// `/model/records` 的直段元数据（方案 B T2）：管身行的 `leave` / `arrive` / `route_ordinal` 折成记录一级的 `tube{ordinal, from, to}`；

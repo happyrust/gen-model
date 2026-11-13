@@ -444,9 +444,20 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 > `/model/ensure` 处均同时适用于 `/model/generate`。
 - HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
 - 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
-  ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded
-  kv-mem 使用 `ProcessStore{durable:false}`，会把模型行与可选房间边逐根同事务写入本进程 store
-  （逐根回执不落库，记进进程内的生成根账本，ADR-079）。
+  ingest 中尚未完成的 durable 库使用 `ProjectionOnly`（就绪只看进程内投影，不走同步的逐根发布事务），
+  read-through 的 spawned/embedded kv-mem 使用 `ProcessStore{durable:false}`，会把模型行与可选房间边逐根同事务
+  写入本进程 store（逐根回执不落库，记进进程内的生成根账本，ADR-079）。
+- **基线没落的库，按需生成的结果也会写进库**（2026-11-11 用户定；此前这里写的是「只留投影」，与现在的代码对不上）：
+  持久层是外部那台库（`store_mode = rocksdb`）时，`ProjectionOnly` 只管「就绪以投影为准」，每个发布的根照样登记进
+  写后台、随后整根一笔落库（模型行，算得了房间的进程里连同房间边）；不盖水位、不等初始化，读者也不读它们
+  （基线没落的库不回读库，§4.12）。代价与去处：
+  - 初始化入口先把这个库的模型面清掉再建（`pe` 圈不到的行按残留行自己的 id 圈 Ref0、按位解码核对归属；清的时候
+    又落进来的再清一遍，最多三遍）——初始化直写是 `INSERT IGNORE`，不清旧行会赢。先清后建不丢东西：初始化把每一根
+    都重新生成，其间投影照常供数；
+  - 两条清理接口认得它们：§4.5.1D 的整库模型清理在这种库上连它们一并清（`database = "residue"`），
+    `DELETE /dbnums/{dbnum}/data` 在 `pe` 删光之后补一刀（`model_residue_rows`）；§4.5.1 的子树清理与 `force=true`
+    的先删在内存路由下仍只清投影，库上那几根留到重生成时被整根先删后插换掉；
+  - 回执里的 `durable = false` 说的是读者不能指望重启后还读得到，不是库里没有行。
 - 请求：`{ "refno": "24381/100677" }`，可选 `"force": true`。
 - 响应 200：`OnDemandModelResult` 原样，含 `generation_root`、`model_instance_count`（画得出来的实例数）与 `generated_instance_count`（生成写出的实例数，含画不出来的）。`status` 三种：
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
@@ -642,8 +653,9 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 
 同库并发 POST 在 `TaskRegistry` 的同一把锁内按 `(kind, dbnum)` get-or-create，只能有一个
 创建者启动 worker；其余请求返回同一个 task id、固定分母和当前状态。worker 自身运行在
-`scope_memory_only`，但该作用域只禁止写 durable 权威库，不再等价于“不写任何数据库”；
-read-through kv-mem 会复用逐根 process-store 事务。所有未 ready 根一次交给
+`scope_memory_only`：读源在内存、不等初始化队列、不盖水位，但它不等价于“不写任何数据库”——
+read-through kv-mem 会复用逐根 process-store 事务；ingest + 外部持久层下每个发布的根照样经写后台落库
+（§4.5「基线没落的库，按需生成的结果也会写进库」，2026-11-11）。所有未 ready 根一次交给
 `ModelRefreshPolicy::generate_roots_report_from_frozen_source`，不进入数据批次队列、不调用
 rebuild、不推进应用/模型水位。
 
@@ -700,9 +712,20 @@ rebuild、不推进应用/模型水位。
 - 闸门（任一不满足则 `409 conflict`、一行不删）：队列快照里该库有行；该库有在飞整库重建（§4.5.1A）或整库即时生成（§4.5.1B）；该库生成锁拿不到（有按需生成在飞）。
 - 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、交付台账、目录 memo。
 - 水位：只把模型半边归零（`model_sesno = 0` 及 `model_sesno_time` / `model_settled_at` / `model_lazy_roots` / `model_dead_roots` / `model_roots_observed_at = NONE`），与回退重建那一句的模型半边逐字相同；`state_revision` 加一。数据水位不动。
-- 路由：`route_for(dbnum)` 不是 `Database` 时不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里每个根渲一条 spool 墓碑。水位行在读透下不写。
+- 路由（回执 `database` 一格说库上那一侧做了什么）：
+  - `model_face`：`route_for(dbnum)` 是 `Database`，照上面两条清库上的模型面；
+  - `residue`（2026-11-11，GitHub #146）：读路由是 `Memory`、理由是基线没落（`data_watermark_unestablished`），而且持久层是
+    外部那台库。这种库没有已收尾的快照，库里的模型行只可能是残留——按需生成经写后台落的（§4.5）、初始化中途留下的——
+    而且本库 `pe` 圈不到它们。此前这一档回 `status = deleted`、`ref0s = []`，库上一行没删。现在范围另从残留行自己的 id
+    圈（`inst_relate` 取 id、`tubi_relate` 取 `in`）、逐个按位解码核对确实属于本库，与 `pe` 圈到的合在一起清，管身边另按
+    `dbnum` 列删（它的 id 是 `[分支, 槽位]`，Ref0 区间够不着），模型水位那半句照发。解到别的库的 Ref0 上就拒绝、
+    一行不删（这些行的 `dbnum` 列与 id 对不上，先人工核对）。清之前同样先摘写后台、攥着生成锁；
+  - `untouched`：其余——读透，或 `Memory` 路由的另外几档（任务在飞被闸门挡在前面；模型落后 / 水位缺席或倒挂时库里那份
+    是已收尾任务落过的旧快照，不归这条清理管）。不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里
+    每个根渲一条 spool 墓碑。这一档 `ref0s` 为空、`range_statements` 为 0 不是「清了、没东西」，是根本不动库。
+    水位行在读透下不写。
 - **`purge_meshes=true`（2026-10-22，库行「清理模型（整库）」的确认框那一格，默认勾上）**：连
-  **这个库引用过的**几何一起清——`Database` 路由删 `inst_geo` 行 + `.mesh`，其余路由只删投影指向的 `.mesh`——
+  **这个库引用过的**几何一起清——库上有行要清的两档（`model_face` / `residue`）删 `inst_geo` 行 + `.mesh`，`untouched` 只删投影指向的 `.mesh`——
   与 §4.5.1 那一格同一份实现（`mesh_purge`），先后都在 `fast_delete::wipe_dbnum_model_face` 里：闸门 → 生成锁
   → 收键（`inst_geo` 不按 Ref0 寻址，行一删掉就再也收不出来；收不动整趟中止、一行不删）→ 按 Ref0 区间删行
   → 删几何（反过来会先把模型还要用的几何删掉、而产物还在）。范围是整个库，比子树那一档更容易撞上共享网格
@@ -713,13 +736,20 @@ rebuild、不推进应用/模型水位。
 - 成功 `200`：
 
 ```json
-{"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
+{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
+```
+
+基线没落的库（`database = "residue"`）：`ref0s` 是 `pe` 圈到的与残留行自己圈出来的合在一起；只作废了投影的那一档是
+`"database":"untouched","ref0s":[],"range_statements":0`。
+
+```json
+{"dbnum":7997,"scope":"model_face","status":"deleted","database":"residue","ref0s":["16189","24381"],"range_statements":21,"elapsed_ms":310,"model_source_after":"memory"}
 ```
 
 勾了 `purge_meshes` 时同一次回执多四格（数字是这一趟的账，与 `elapsed_ms` 同口径）：
 
 ```json
-{"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory",
+{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory",
  "mesh_files_removed":389,"mesh_files_absent":0,"mesh_files_failed":0,"inst_geo_removed":389}
 ```
 
@@ -1402,20 +1432,54 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 
 - 数据批次**不自动重试**：`DATA_BATCH_PARK_AFTER = 1`（`batch_worker.rs:51`），失败一次即 park。新会话（文件右端 `end_sesno` 前进）、
   人工执行（`POST /api/v1/update/execute`）或重启进程（账本在进程内）才清账；清账不治病因，先修 §4.8.2 里那句 `reason`。
-- 账为空时整格为 `null`；否则按 dbnum（字符串键）一项：
+- **停法只有这一套，进来的原因有三种**（`cause`，`batch_worker::ParkCause`）：
+  - `data_batch`：数据窗口没收口；
+  - `model_only`：`ModelOnly` 失败，且没有一根还会按退避重试——失败的根都已判死（同一错误连败 5 次），或败在没有逐根的账可托付的地方。
+    有根还在按退避重试的 `ModelOnly` **不进这本账**（ADR-090 D1）；
+  - `whole_library_retry_limit`：**整库重排到次数上限**（2026-11-11）。模型水位从没盖过的库，稳态补偿每次重排都是整库
+    （起点 0 的 `ModelOnly`，7997 一遍约 8 分钟）；败在还会重试的根上时照上一条不停跑，但连着失败到
+    `model_whole_library_retry_limit`（`DbOption.toml`；环境变量 `AIOS_MODEL_WHOLE_LIBRARY_RETRY_LIMIT` 压过；缺省 **3**，`0` = 不限）
+    就停下等人。没到上限时的次数在 `/health.whole_library_retries`（下）。
+  - 三种谁先到谁算。缺省上限 3 小于判死线 5，所以从没盖过水位的库上先到的是第三种；盖过水位的库重试只重算欠账的根，
+    不数第三种。
+- 解除按原因给（`unblock`）：`data_batch` 是上面那三条；后两种的库数据多半已经追平，`update/execute` 对它回「已是最新」、
+  不入队也不清账，人工那一条是 `POST /api/v1/dbnums/{dbnum}/model/rebuild`（它排的任务不过 park 那道闸；成了账就清，不成仍停着），
+  另两条仍是新会话与重启。
+- 账为空时整格为 `null`；否则按 dbnum（字符串键）一项（这里的每一项都是「已经停了」的库）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `streak` | number | 同右端连续失败次数；成功 / 右端前进 / 人工执行清零 |
 | **`parked`** | bool | `streak >= DATA_BATCH_PARK_AFTER`（`:430-434`）：不再自动重跑，等清账 |
+| **`cause`** | string | `data_batch` / `model_only` / `whole_library_retry_limit`（见上） |
+| `unblock` | array | 这种原因的三条解除路 |
 | `end_sesno` | number | 失败那批的窗口右端；不前进 = 没人往这个库里存新会话 |
-| `reason` | string | 最近一次失败的一句话（`warnings.last()` 口径，`batch_failure_log.rs:16-24`；全文看 §4.8.2 的 `batch_failure` 记录） |
+| `reason` | string | 最近一次失败的一句话（`warnings.last()` 口径，`batch_failure_log.rs:16-24`；全文看 §4.8.2 的 `batch_failure` 记录）。到上限停的库，这一句写明「整库模型重排已连续失败 N 次，到上限」、最近一次败在哪、怎么解除 |
 | `first_at` / `last_at` | string | 本轮连败首次 / 最近一次失败时刻；右端前进时 `first_at` 重置（`:465-492`；时间格式未核） |
 
 ```json
 "batch_failures": {
-  "7997": { "streak": 1, "parked": true, "end_sesno": 92, "reason": "读取增量数据失败: …",
+  "7997": { "streak": 1, "parked": true, "cause": "data_batch",
+            "unblock": ["文件长出新会话（右端 sesno 前进）", "POST /api/v1/update/execute（显式重试，立即清零）", "重启进程（账本在进程内）"],
+            "end_sesno": 92, "reason": "读取增量数据失败: …",
             "first_at": "2026-10-27T10:15:00+08:00", "last_at": "2026-10-27T10:15:00+08:00" }
+}
+```
+
+`/health.whole_library_retries` — 整库重排连败的次数（进程内；没有这种失败时为 `null`）。与 `batch_failures` 分两格：那一格只列已经停了的库，
+这一格是「还在自动重试、第几次了」；`capped` 为真的库同时也在那一格里。两格同生共死：清账、右端前进一起清。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `failed_runs` | number | 同右端连着失败了几次整库重排（成了 / 右端前进 / 清账归零） |
+| `limit` | number | 记这一次时生效的上限；`0` = 不限 |
+| `capped` | bool | 到没到上限（到了就停，见 `batch_failures.<dbnum>.cause`） |
+| `end_sesno` / `reason` / `first_at` / `last_at` | | 同 `batch_failures` |
+
+```json
+"whole_library_retries": {
+  "7997": { "failed_runs": 2, "limit": 3, "capped": false, "end_sesno": 1139, "reason": "3 根生成失败 …",
+            "first_at": "2026-11-11T19:00:00+08:00", "last_at": "2026-11-11T19:09:00+08:00" }
 }
 ```
 
@@ -1459,7 +1523,9 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `streak` | number \| null | 同右端连败第几次；数据窗口已收口、失败只在模型侧时为 `null` |
 | `max_attempts` | number | `DATA_BATCH_PARK_AFTER`（= 1） |
 | **`parked`** | bool | `streak >= max_attempts`；`streak` 为 `null` 时为 `false` |
+| `park_cause` | string \| null | 这次失败让这个库停了时是哪种原因：`data_batch` / `model_only` / `whole_library_retry_limit`（§4.8.1）；没停为 `null` |
 | `auto_retry_left` | number \| null | `max_attempts - streak`（不小于 0）；`streak` 为 `null` 时为 `null` |
+| `whole_library_failed_runs` / `whole_library_retry_limit` | number \| null | 整库模型重排败在还会重试的根上时：同右端连续第几次、上限多少（`0` = 不限）。没到上限的那几次 `parked = false`；到上限的那一次 `parked = true`、`park_cause = whole_library_retry_limit`。别的失败两格都是 `null` |
 | `elapsed_ms` | number | |
 | `staging` | array | 该 dbnum 名下还挂着的暂存窗口，与 `/health` 的 `staging_windows` 同形；空 = 记录时已无窗口，非空 = 残留 |
 | `steps` | array | 每阶段一行 `{name, at, ms, ok}`；空 = 从没报过阶段；字段缺席 = 老版本记录 |
@@ -1473,18 +1539,19 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `at` | string | RFC3339 |
 | `dbnum` / `db_type` / `project` / `phase` | | |
 | `streak` / `max_attempts` | number | |
+| `cause` | string | 为什么停的：`data_batch` / `model_only` / `whole_library_retry_limit`（§4.8.1） |
 | `end_sesno` | number | 它不前进，就说明没人往这个库里存新会话 |
 | `file_path` | string \| null | |
 | `last_reason` | string | `warnings.last()` 口径；权威那句在同 dbnum 的 `batch_failure` 记录里 |
 | `first_at` / `last_at` | string | |
 | `auto_retry` | bool | 恒 `false` |
-| `unblock` | array | 三条解法：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」 |
+| `unblock` | array | 三条解法，按 `cause` 给。`data_batch`：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」；`model_only` 与 `whole_library_retry_limit`：人工那一条换成「修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（…成了账就清，不成仍停着）」 |
 | `unblock_note` | string | 「三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。」 |
 
 ```json
 { "records": [
     { "event": "batch_park", "at": "2026-10-27T10:15:01+08:00", "dbnum": 7997, "db_type": "DESI", "project": "HD",
-      "phase": "design", "streak": 1, "max_attempts": 1, "end_sesno": 92, "file_path": "...",
+      "phase": "design", "streak": 1, "max_attempts": 1, "cause": "data_batch", "end_sesno": 92, "file_path": "...",
       "last_reason": "读取增量数据失败: …", "first_at": "...", "last_at": "...", "auto_retry": false,
       "unblock": ["文件长出新会话（右端 sesno 前进）", "POST /api/v1/update/execute（显式重试，立即清零）", "重启进程（账本在进程内）"],
       "unblock_note": "三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。" },
@@ -1503,6 +1570,11 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   首次导入重新解析，端点没有剩余职责（服役期间无对外消费者，plant-ui 未接入）。
 - 调用该路径现在返回 404。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`
   （整库快删），操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
+  回执（`FastDeleteDbnumResult`：`dbnum` / `ref0s` / `pe_rows` / `noun_tables` / `range_statements` / `elapsed_ms`）
+  2026-11-11 起多一格 `model_residue_rows`（GitHub #146）：整库快删的范围取自本库 `pe` 行，`pe` 从来没圈到过的模型行
+  ——按需生成对基线没落的库落的（§4.5）、初始化中途留下的——它够不着，此前回成功、那些行原样留着。现在 `pe` 删光之后
+  补一刀：范围从残留行自己的 id 圈、逐个按位解码核对确实属于本库（解到别的库就报错、不删），这一格是清掉的行数
+  （`inst_relate` + `tubi_relate`，按 `dbnum` 列数）；没有残留为 `0`，不多发一句写库。
 - **`DELETE /dbnums/{dbnum}/data/above/{watermark}`（按水位删残留）随「恢复即整库
   重初始化」退役**（2026-09-10，决策 d-747）：削库一律改走
   `POST /dbnums/{dbnum}/data/reinitialize`——它排一条整库重建批次，清库在 worker
@@ -1847,13 +1919,15 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   fail closed 到内存读源（「缺席不是相等」，`:222-259`），报 `model_watermark_unavailable`。
 - **按根回读 durable 只给 `model_lagging`**（`ModelReadRoute::allows_durable_fallback`，`:124-130`，GitHub #74，2026-10-27）：
   数据到了 T、模型水位停在 S < T 时，库里那份是 S 时刻整库落过的完整旧快照，投影里没有回执的根（冷重启、初始化直写
-  不留投影）读它比读空集对。其余五档不许：读透的库从来不是权威；基线没落库里没有行；任务在飞时行可能写到一半；
+  不留投影）读它比读空集对。其余五档不许：读透的库从来不是权威；基线没落的库里没有已收尾的行（有也只是按需生成先写下的、
+  没有水位作保，§4.5）；任务在飞时行可能写到一半；
   水位缺席 / 倒挂说明库行不可信。
-- **`memory` 库上的 `POST /model/generate`（旧名 `/model/ensure`）**：不等初始化队列、不进 durable 队列。ingest 的临时
-  memory 路由只写进程内投影；read-through 则把同一候选投影逐根事务发布到 spawned/embedded
+- **`memory` 库上的 `POST /model/generate`（旧名 `/model/ensure`）**：不等初始化队列、不进数据批次队列、不盖水位。ingest 的
+  内存路由以进程内投影为准；持久层是外部那台库时，每个发布的根另由写后台整根落库（2026-11-11 用户定：基线没落的库，
+  按需生成的结果也会写进库，§4.5；内嵌 kv-mem 下只有投影）。read-through 则把同一候选投影逐根事务发布到 spawned/embedded
   kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
-  `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
-  不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
+  `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 读者不能指望这批行活过进程重启——重启后投影是空的，
+  基线没落的库又不回读库；它不是“没有写 process store”，也不是“库里没有行”）；`publication_status` 取 `ready` / `empty`。
 - **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；请求的根按祖先理解，
   投影里它名下盖过章的生成根逐根取；一根都没有回 `200` 空数组（ADR-086，2026-10-09 起；此前是 409
   `not_generated:`，客户端先 ensure 再查的顺序已随 plant-ui ADR-0030 取消）。
@@ -2834,7 +2908,7 @@ A 时不存在 → `kind: "created"`；B 时不存在 → `"deleted"`；两头�
   不再产生新行）。`room_recalc`（曾是队列跑空时收的一轮房间收敛）随房间流程退役
   （§4.7.2，ADR-073 D1，`task_registry.rs:32-34`）：不再产生新行，`GET /tasks?kind=room_recalc` 恒回空列表。
   **现行 kind**（`src/data_interface/task_registry.rs:19-31`）：`data_batch`、`model_rebuild`（人工触发的指定 dbnum 全量模型重建，§4.5.1A）、
-  `dbnum_model_ensure`（读透 / memory-routed 库的整库即时生成，只写进程内投影、不进 durable 队列，§4.5.1B）、
+  `dbnum_model_ensure`（读透 / memory-routed 库的整库即时生成，以进程内投影为准、不进数据批次队列，§4.5.1B）、
   `model_history`（只读源会话重建进专用历史 kv-mem，§4.15.7）、`room_rebuild`（「重新生成房间」，§4.4 / §4.7.3；
   它不是退役的 `room_recalc`）；各自的状态见所在节。
 - TaskId 由 `new_task_id(prefix)` 生成，格式 `{prefix}-{yyyyMMdd-HHmmss}-{6位进程内序号}`（`task_registry.rs:394-401`；原文写的

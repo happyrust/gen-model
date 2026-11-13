@@ -682,8 +682,12 @@ _Avoid_: resident generation（指文件 composite 时）、房间版本、房�
 _Avoid_: 房间任务、房间阶段、`rooms/rebuild`、RoomRecalcPanel（ADR-010 那种逐面板目标行，已退役）、房间队列、把 `PartialCoverage` 当失败、把回读库的几何当投影记录（它只活在整库重算这一步，不进投影、不发布）、把停放槽当账本（它是进程内的提示，正确性由 ③ 兜）、给管身范围查询加回库过滤
 
 **模型发布策略 (Model Publication Policy)**：
-与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 `mem` 档虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。
-_Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store 叫持久库、memory-only 等于 projection-only
+与“模型从哪里读”正交的判决：这一轮产物的就绪以什么为准、走不走同步的逐根发布事务。`ProjectionOnly` 用于 ingest 库尚未就绪时的内存路由——只以进程内投影为准，不走同步逐根发布、不等落库的 ACK；read-through 的 `mem` 档虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”，也不得把 `ProjectionOnly` 解释成“库里没有行”：外部持久层（`store_mode = rocksdb`）下每个发布的根照样登记进写后台、随后整根落库（见下一条）。
+_Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store 叫持久库、memory-only 等于 projection-only、`ProjectionOnly` 等于不落库、「这时数据库有唯一写者」（与现在的代码对不上：写后台登记不看读路由）
+
+**基线未落库的按需产物 (On-demand Rows Before The Baseline)**：
+基线还没落（`applied_sesno <= 0`）的库上，按需生成（`POST /model/generate`、整库即时生成）的结果除了进程内投影，在外部持久层下**也会写进库**：写后台登记不看读路由，每个发布的根随后整根一笔落库（模型行，算得了房间的进程里连同房间边）。2026-11-11 用户定：保留这个行为，文档照实写（此前的文档说「只留投影、不落 rocksdb」）。这些行不盖水位、读者不读（基线没落的库不回读库），`pe` 圈不到——所以有三处专门接它们：初始化入口先清后建（`dbnum_initialize::clear_model_face_before_initial_on`：按残留行自己的 id 圈 Ref0、按位解码核对归属，清的时候又落进来的再清一遍；`Initial` 是 `INSERT IGNORE`，不清旧行会赢）；整库模型清理在这种库上连它们一并清（`DELETE /dbnums/{dbnum}/model`，回执 `database = "residue"`）；整库删除在 `pe` 删光之后补一刀（`DELETE /dbnums/{dbnum}/data`，回执 `model_residue_rows`）。先清后建不丢东西：行是从文件算的，初始化把每一根都重新生成，其间投影照常供数。回执里的 `durable = false` 说的是读者不能指望重启后还读得到，不是库里没有行。
+_Avoid_: 把这些行当已发布的模型（没有水位为它们作保）、按 `pe` 圈它们（`pe` 一行都没有）、为了「只写内存」这个名字去拦写后台（用户定了不拦）、初始化时保留它们（`INSERT IGNORE` 下旧行会赢、已不存在的构件的行会一直留着）
 
 **完整根发布确认 (Root Publication ACK)**：
 当前进程内对“候选几何已经完整发布”的确认：源会话、几何条数、房间开关、resident generation 与介质必须匹配。`RootReceipt` 只证明几何候选投影存在；模型行/房间边/process-store 回执事务成功后才写 ACK。几何重生成、删除、源换代或 resident 换代先使旧 ACK 失效。ACK 不落控制面、不推进水位、进程退出即丢，因此不是第三枚房间水位。

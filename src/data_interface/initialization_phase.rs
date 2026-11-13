@@ -1877,4 +1877,55 @@ mod tests {
             "扫描期阻断仍挡整相"
         );
     }
+
+    /// ADR-094 D1 的另一半。上一条手拼的 `.scoped_to(..)` 只证明协调器认得「只挡一库」的阻断；数据批次
+    /// 失败时**生产代码真正挂上来的那一条**（`batch_worker::data_batch_failure_blocker`，失败收口与 panic
+    /// 隔离壳共用）也得是它。此前那两处拼的是 `.with_dbnum(..)`：一个库的批次一失败，协调器 `Blocked`，
+    /// 同一轮清单里别的库的数据行全部出不了队，要等下一次发现轮（文件事件或周期重扫）重装清单。
+    #[test]
+    fn a_failed_data_batch_blocks_only_its_own_dbnum() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [DataPhase::Design, DataPhase::Design], false, []);
+        assert!(coordinator.allows_dbnum(DataPhase::Design, epoch, Some(8000)));
+
+        coordinator.mark_failed(
+            epoch,
+            crate::data_interface::batch_worker::data_batch_failure_blocker(
+                DataPhase::Design,
+                7997,
+                "AvevaMarineSample",
+                "db-20261111-025512-000000",
+                "首次按需初始化失败: dbnum=7997 仍有 5086 行模型面残留",
+            )
+            .with_failure_record("db-20261111-025512-000000"),
+        );
+
+        let snapshot = coordinator.snapshot();
+        assert_eq!(
+            snapshot.status, "running",
+            "只挡一库的阻断不把整相判 blocked"
+        );
+        assert!(
+            coordinator.allows_dbnum(DataPhase::Design, epoch, Some(8000)),
+            "同相的兄弟库照常出队"
+        );
+        assert!(
+            !coordinator.allows_dbnum(DataPhase::Design, epoch, Some(7997)),
+            "肇事库自己被挡"
+        );
+        assert!(!coordinator.data_ready(), "阻断未解，数据面不算就绪");
+        // `/health` 那一份照旧点得出是谁、去哪儿取全文原因。
+        let blocker = snapshot.blocked_by.first().expect("one blocker");
+        assert_eq!(blocker.dbnum, Some(7997));
+        assert_eq!(blocker.project.as_deref(), Some("AvevaMarineSample"));
+        assert_eq!(
+            blocker.task_id.as_deref(),
+            Some("db-20261111-025512-000000")
+        );
+        assert_eq!(
+            blocker.reason_ref.as_deref(),
+            Some("db-20261111-025512-000000")
+        );
+    }
 }

@@ -264,9 +264,11 @@ impl ModelRefreshPolicy {
             generate_roots.as_slice()
         };
         let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
-        // memory 读源作用域（plan 2026-09-06 §8 R2）不碰 durable 权威库，也不等 ingest
-        // 初始化写者；发布目标另判：ingest fallback 只留投影，read-through 的 kv-mem
+        // memory 读源作用域（plan 2026-09-06 §8 R2）不等 ingest 初始化写者，也不把库当权威；发布目标另判：
+        // ingest fallback 不走同步的逐根发布、就绪只看投影（`ProjectionOnly`），read-through 的 kv-mem
         // 是本进程正式 process store，仍走逐根模型行 + 房间边 + 回执事务。
+        // 注意 `ProjectionOnly` 不等于库里没有行：外部持久层下，下面 `generate_and_persist_roots` 里的
+        // `ModelWriteBehind::publish` 照样把每个根登记进写后台、随后落库（2026-11-11 用户定：允许）。
         let memory_only = crate::data_interface::model_read_route::memory_only_for(dbnum);
         let publication_policy =
             crate::data_interface::model_read_route::publication_policy(memory_only);
@@ -530,8 +532,8 @@ impl ModelRefreshPolicy {
                         continue;
                     }
                 }
-                // ingest 初始化在飞时仍只留投影；read-through 的 kv-mem 是正式 process store，
-                // 必须继续走逐根模型行 + 房间边 + 回执事务。
+                // ingest 的内存路由不走这里的同步逐根发布（就绪只看投影；外部持久层下行由写后台另行落库）；
+                // read-through 的 kv-mem 是正式 process store，必须继续走逐根模型行 + 房间边 + 回执事务。
                 if !publication_policy.uses_process_store() {
                     continue;
                 }
