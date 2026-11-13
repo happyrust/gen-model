@@ -48,9 +48,11 @@
 //! SJOI 自成单元，法兰端板的负体切梁端，`plan_update` 的同库关节级联也推广到 SJOI ↔ SCTN——`aps7200_0001` 3→4
 //! （94 个 `SJOI` 单独改）开关关着也是 8 根（此前关 6 / 开 8）。**主关节 2026-11-12 落地**：带目录正体的 `PJOI` ↔ 认领它的 SCTN
 //! （柱被端板削短、主关节的原点落在梁线上）同样由 `plan_update` 的同库关节级联接住，挪 PNOD 也带上它名下的主关节
-//! ——见 `fast_model::unit_publish_cascade_target_tests` 的 aps7166 测试。仍只有本开关补得上的是 `SUBJ` → SCTN、
-//! 不带目录正体的 `PJOI`、标架没有样本的 SJOI（连接梁转了 ±90°、连的就是宿主自己）与 `CMPF.CFRA`。跨库那一格
-//! 两边都盖不住：
+//! ——见 `fast_model::unit_publish_cascade_target_tests` 的 aps7166 测试。**不成单元的关节同日落地**：没有目录正体、
+//! 只有负体的 SJOI / PJOI（`/MDS/FT54` 的端关节那一族）自己不画、却照样切认领它的型钢；改它、改它模板里的负体、
+//! 挪它的 PNOD / SNOD / 宿主，被它切的型钢都由 `plan_update` 点名（`increment::loose_joint_consumer_of`，aps7324
+//! 测试）。仍只有本开关补得上的同库形状是 `SCOJ` / `PCOJ` / `SUBJ` → SCTN（语料里没有带几何源的）、
+//! `FIXING ↔ STWALL`、`CMPF.CFRA`，以及梁不认领的关节（`CREF` 陈旧，回指对不上）。跨库那一格两边都盖不住：
 //! e3d-model 对 `CREF` 指到别的库的关节只记一条 note（`JointConsumer::OtherDatabase`）。
 
 use std::collections::{BTreeMap, BTreeSet};

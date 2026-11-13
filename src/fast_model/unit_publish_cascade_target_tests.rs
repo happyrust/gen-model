@@ -327,9 +327,10 @@ fn a_cascade_target_root_that_also_changed_itself_is_regenerated_whole_not_by_un
 /// 四种窗口里根 10 都只是被闭包直接命中：三条级联都关着；缺省配置（C2 关、C8 / P4 开）没有目标；三条都开着没有
 /// 目标；三条都开着、目标是**另一根**（20）。根 10 的任务每一种都带基线 S 的提示。
 ///
-/// 第二种是只有 C2 认得的依赖（`FIXING ↔ STWALL`、不带目录正体的关节……）在缺省配置下的样子：C2 关着不读边，
-/// 根 10 不在任何目标集里。这条规则靠级联的目标集认根，目标集里没有的它罩不住。（「带目录正体的 PJOI 与同根的梁」
-/// 原先也是这个样子；2026-11-12 起由 e3d-model 的关节级联在单元这一层接住，见本文件的真库测试。）
+/// 第二种是只有 C2 认得的依赖（`FIXING ↔ STWALL`、`SCOJ` / `SUBJ` 关节、跨库的结构连接……）在缺省配置下的样子：
+/// C2 关着不读边，根 10 不在任何目标集里。这条规则靠级联的目标集认根，目标集里没有的它罩不住。（「带目录正体的
+/// PJOI 与同根的梁」「不成单元却给梁出刀的关节与被它切的梁」原先也是这个样子；2026-11-12 起由 e3d-model 的关节
+/// 级联在单元这一层接住，见本文件的真库测试。）
 #[test]
 fn roots_outside_every_cascade_target_set_keep_their_unit_publish_hint() {
     // (用例, C2 开关, C8 / P4 开关, 三条都开时的级联目标根)
@@ -1523,6 +1524,832 @@ fn live_aps7166_a_primary_joint_and_the_column_it_cuts_are_planned_together() {
         None => println!("[PJOI] aps7166: 没有「自成单元而没有梁认领」的主关节，4b 没走"),
     }
 }
+
+/// 不成模型单元的关节（没有目录正体、只有负体）在缺省配置（C2 关）下的样子，aps7324 真库、假定窗。随整套跑；
+/// 语料不在本机就跳过。
+///
+/// aps7324 的 MDS 支架里有一族这样的关节——`/MDS/FT54A~D` 那 16 根竖放角钢 `JOIE` 端的主关节 `/MDS_Joint-for-FT54`：
+/// 目录件没有正体集、负体集里一把 NSCT。关节不画（不是模型单元），杆照样被它切（E3D 导出的杆逐根对过，e3d-model
+/// `tests/primary_joint_frame_real.rs`）。e3d-model 的关节级联原先只从「要重建或已删除的单元」出发，这种关节进不了
+/// 那个集合：只改它、只挪它的节点，被它切的型钢停在旧刀口。2026-11-12 起补了一条从候选出发的腿
+/// （`increment::loose_joint_consumer_of`），下面几件事都不靠 C2：
+///
+/// 1. 只改这只关节 → 被它切的型钢被 `plan_update` 点名，型钢所在的根在 regen 里、子计划里有这根型钢；关节自己
+///    不被点名（它没有东西可重建）；
+/// 2. 只挪它的节点（主关节的 PNOD、截面关节的 SNOD）→ 型钢同样被点名；
+/// 3. 只改型钢 → 不点名这只关节；
+/// 4. 不相关的改动不拉人：一只没有几何源的关节（梁从它那里什么都取不到）动了，认领它的型钢不被点名。
+///
+/// 「给型钢出刀」的依据取自生成这一侧：型钢建模时扣过负体，而这只关节在型钢的账上没有留下「不出刀」的痕迹
+/// （[`joint_cut_trace`] 的 `Applied`）。每一种都把一端当成一窗仅有的候选，喂给真的 `plan_update_with`
+/// （[`Site::hypothetical`]）。
+#[test]
+fn live_aps7324_a_joint_without_a_body_and_the_section_it_cuts_are_planned_together() {
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let file = aps.join("aps7324_0001");
+    if !file.is_file() {
+        eprintln!("skip: 语料不在本机（{}）", file.display());
+        return;
+    }
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let sesno = chain_steps(&file, 1).expect("aps7324 的会话链")[0].1;
+    let project = Project::open(&schema, &aps);
+    let site = Site::open(&project, &file, sesno);
+    let noun_of = |refno: RefNo| {
+        site.set
+            .element(refno)
+            .element_type()
+            .unwrap_or_else(|_| "?".into())
+    };
+    let owner_of = |refno: RefNo| -> Option<RefNo> {
+        site.set
+            .element(refno)
+            .owner()
+            .ok()
+            .flatten()
+            .map(|owner| owner.refno())
+    };
+
+    let sctn_hash = e3d_attlib::db1_hash("SCTN");
+    let mut engine = ReadOnlyEngine::open_at(&file, sesno).expect("open the DESI file");
+    let sections: Vec<RefNo> = engine
+        .scan_elements(ScanTier::Header)
+        .expect("scan element headers")
+        .filter_map(|scanned| scanned.ok())
+        .filter(|scanned| scanned.noun_hash == sctn_hash)
+        .map(|scanned| scanned.refno)
+        .collect();
+    drop(engine);
+
+    // 型钢两端不成单元、`CREF` 又回指这根型钢的 SJOI / PJOI：(关节, 型钢)。
+    let mut loose: Vec<(RefNo, RefNo)> = Vec::new();
+    for &beam in &sections {
+        if !is_model_unit(&site.set, beam) {
+            continue;
+        }
+        for joint in connection_partners(&site.set, beam, "SCTN") {
+            if matches!(noun_of(joint).as_str(), "SJOI" | "PJOI")
+                && !is_model_unit(&site.set, joint)
+            {
+                loose.push((joint, beam));
+            }
+        }
+    }
+    // 给型钢出刀的（关节带 `SPRE`，型钢的账上是「刀扣在梁上」）与不出刀的（没有 `SPRE`，账上是「没有几何源」；
+    // 关节挂在这根型钢自己名下的不算——改它本来就上卷到这根型钢）。建模贵，各封顶。
+    let has_spre = |joint: RefNo| matches!(site.set.element(joint).get_ref("SPRE"), Ok(Some(_)));
+    let cap = env_usize("AIOS_144_PAIRS_PER_CLASS", 24);
+    let mut cutting: Vec<(RefNo, RefNo)> = Vec::new();
+    let mut sourceless: Vec<(RefNo, RefNo)> = Vec::new();
+    let mut traces: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for &(joint, beam) in &loose {
+        if has_spre(joint) {
+            if cutting.len() >= cap {
+                continue;
+            }
+            let trace = joint_cut_trace(&site.set, beam, joint);
+            *traces.entry(trace.label()).or_default() += 1;
+            if trace == JointCutTrace::Applied {
+                cutting.push((joint, beam));
+            }
+        } else if sourceless.len() < 8
+            && owner_of(joint).and_then(owner_of) != Some(beam)
+            && joint_cut_trace(&site.set, beam, joint) == JointCutTrace::Skipped
+        {
+            sourceless.push((joint, beam));
+        }
+    }
+    println!(
+        "[关节·不成单元] aps7324@{sesno}: SCTN {} 根；型钢两端不成单元、CREF 回指的关节 {} 只；带 SPRE 的在型钢账上：\
+         {traces:?}；走假定窗的：给型钢出刀 {} 对，没有几何源 {} 对",
+        sections.len(),
+        loose.len(),
+        cutting.len(),
+        sourceless.len()
+    );
+    assert!(
+        cutting.len() >= 16,
+        "aps7324 里该有不成单元却给型钢出刀的关节（`/MDS/FT54A~D` 的端关节那一族，至少 16 对）：{traces:?}"
+    );
+
+    let (mut by_unit_when_c2_off, mut whole_root_when_c2_on) = (0usize, 0usize);
+    let (mut same_root, mut with_neighbour) = (0usize, 0usize);
+    let mut by_noun: BTreeMap<String, usize> = BTreeMap::new();
+    for &(joint, beam) in &cutting {
+        *by_noun.entry(noun_of(joint)).or_default() += 1;
+        let beam_root = *site
+            .root_chain(beam)
+            .first()
+            .unwrap_or_else(|| panic!("{beam}：型钢该在某个生成根下"));
+        // 关节与被它切的型钢在不在同一个生成根里。在同一个根里、这一窗这根又只有这一处改动时，修之前靠
+        // 「子计划为空 → 回退整根重算」歪打正着是对的；不在同一个根里、或同根另有改动，型钢就停在旧刀口。
+        same_root += usize::from(site.root_chain(joint).first() == Some(&beam_root));
+        // 1. 只改这只关节。
+        let (facts, named) = site.hypothetical(&[joint], false, beam_root, beam);
+        assert!(
+            named.contains(&key_of(beam)),
+            "只改不成单元的关节 {joint}：被它切的型钢 {beam} 该被点名：{named:?}"
+        );
+        // 1b. 同一窗里型钢的根另有一处改动（同根的另一根型钢）：子计划不空，修之前单元级发布只重建那一根、
+        // 被切的型钢不在里面；现在两根都在。
+        if let Some(&neighbour) = sections.iter().find(|&&other| {
+            other != beam
+                && is_model_unit(&site.set, other)
+                && site.root_chain(other).first() == Some(&beam_root)
+        }) {
+            with_neighbour += 1;
+            let (facts, named) = site.hypothetical(&[joint, neighbour], false, beam_root, beam);
+            assert!(
+                named.contains(&key_of(beam)) && named.contains(&key_of(neighbour)),
+                "改不成单元的关节 {joint} 与同根的另一根型钢 {neighbour}：被切的型钢 {beam} 与那一根都该被点名：{named:?}"
+            );
+            assert!(
+                !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+                "同根另有改动时，型钢 {beam} 的根 {beam_root} 的子计划里也要有这根型钢：{facts:?}"
+            );
+        }
+        assert!(
+            !named.contains(&key_of(joint)),
+            "不成单元的关节 {joint} 自己没有东西可重建，不该被点名：{named:?}"
+        );
+        assert!(
+            !facts.degraded && facts.in_regen && facts.subplan_names_implicated,
+            "只改不成单元的关节 {joint}：型钢 {beam} 的根 {beam_root} 在 regen 里、子计划里有这根型钢：{facts:?}"
+        );
+        assert!(!facts.cascaded, "C2 关着：这不是 gen-model 哪条级联的事");
+        // 同一窗 C2 开着：C2 不问关节成不成单元，照样从它的 `CREF` 读到这条边，型钢的根成了级联目标、整根重算。
+        // 数出来给 #34 的决策材料用。
+        let (on, _) = site.hypothetical(&[joint], true, beam_root, beam);
+        by_unit_when_c2_off += usize::from(facts.hinted);
+        whole_root_when_c2_on += usize::from(on.cascaded && !on.hinted);
+        assert!(
+            !(on.cascaded && on.hinted),
+            "C2 开着、型钢的根是级联目标时不许带单元级提示（GitHub #144）：{on:?}"
+        );
+        // 2. 只挪它的节点：主关节的站位读 PNOD 的 `NPOS`，截面关节的读 SNOD 的 `ZDIS` 与宿主的轴。
+        let node = owner_of(joint).unwrap_or_else(|| panic!("{joint}：关节该有属主"));
+        assert!(
+            matches!(noun_of(node).as_str(), "PNOD" | "SNOD"),
+            "{joint} 的属主 {node} 该是 PNOD / SNOD"
+        );
+        let (_, named) = site.hypothetical(&[node], false, beam_root, beam);
+        assert!(
+            named.contains(&key_of(beam)),
+            "只挪节点 {node}：它名下不成单元的关节 {joint} 切的型钢 {beam} 该被点名：{named:?}"
+        );
+        // 3. 只改型钢：关节没有东西可重建。
+        let (_, named) = site.hypothetical(&[beam], false, beam_root, beam);
+        assert!(
+            named.contains(&key_of(beam)) && !named.contains(&key_of(joint)),
+            "只改型钢 {beam}：点名它自己，不点名不成单元的关节 {joint}：{named:?}"
+        );
+    }
+    println!(
+        "[关节·不成单元] aps7324: 给型钢出刀的 {} 对（{by_noun:?}；关节与型钢同根 {same_root} 对，同根另有型钢可一起改 \
+         {with_neighbour} 对）假定窗都点名了型钢；只改关节的假定窗里，C2 关着时型钢的根走单元级发布 {by_unit_when_c2_off} 个；\
+         C2 开着时型钢的根成了级联目标、整根重算 {whole_root_when_c2_on} 个",
+        cutting.len()
+    );
+
+    // 4. 没有几何源的关节动了：认领它的型钢不该被点名。
+    for &(joint, beam) in &sourceless {
+        let beam_root = *site
+            .root_chain(beam)
+            .first()
+            .unwrap_or_else(|| panic!("{beam}：型钢该在某个生成根下"));
+        let (_, named) = site.hypothetical(&[joint], false, beam_root, beam);
+        assert!(
+            !named.contains(&key_of(beam)),
+            "没有几何源的关节 {joint} 动了，不该带出认领它的型钢 {beam}：{named:?}"
+        );
+    }
+    if sourceless.is_empty() {
+        println!("[关节·不成单元] aps7324: 没有「没有几何源、被型钢认领」的关节，第 4 步没走");
+    }
+}
+
+/// 量法（手动）：「不成单元的关节给梁出刀」这条腿接上之后，真实会话窗口上多点名了多少单元、规划慢了多少。
+///
+/// 走遍下面几本库的整条会话链（`AIOS_JOINT_LAST_STEPS=n` 只走每本库最后 n 步；候选数超过
+/// `AIOS_JOINT_MAX_CANDIDATES`、缺省两万的导入级大窗跳过；`AIOS_JOINT_MEASURE_FILES`（`;` 分隔的文件路径）整体替换
+/// 名单），每窗只做 `collect_window` + `plan_update_with`（生产同一个元数据门），从计划的级联记录里数：
+/// - **关节带出的梁**：每条记录恰好是一根原本不在计划里、被这条腿新带进来的梁；每一根在窗口两端各建一次，数
+///   「真的变了」的有几根（没变的是多算，不是错算）；
+/// - 其中由子树遍历带出来的（挪了关节的节点 / 宿主 / 上层容器）另记一格；
+/// - **关节失去目录正体**：窗口左端自成单元、右端不成单元的 SJOI / PJOI（清掉 `SPRE`、换成没有正体的目录件），
+///   这条腿把它放进重建集，执行时擦掉旧几何；
+/// - 指到别的库的（只在回执里点名）。
+///
+/// 每本库另记 `plan_update_with` 的合计耗时：同一批窗、同一条量法，拿接上之前的程序再跑一遍就是规划开销的对照。
+/// 前五本是正式后端监听 / 回放套件用的库，中间是带目录正体主关节多的，最后四本是有这种关节的 MDS 支架库。只打印。
+#[test]
+#[ignore = "manual live measurement: walks whole DESI session chains of the AMS / APS sample projects; needs the E3D template directory"]
+fn live_measure_what_the_bodiless_joint_cascade_adds_on_natural_windows() {
+    #[derive(Default)]
+    struct Tally {
+        windows: usize,
+        skipped: usize,
+        hit_windows: usize,
+        regenerate: usize,
+        plan_millis: u128,
+        /// 这条腿新带进来的梁，窗口两端各建一次：变了 / 没变 / 有一端建不出来。
+        beams: usize,
+        beams_changed: usize,
+        beams_same: usize,
+        beams_unknown: usize,
+        /// 子树遍历（节点 / 宿主 / 上层容器挪了）登记的梁数——含本来就在计划里的。
+        via_subtree: usize,
+        lost_body: usize,
+        foreign: usize,
+    }
+    impl Tally {
+        fn add(&mut self, other: &Self) {
+            self.windows += other.windows;
+            self.skipped += other.skipped;
+            self.hit_windows += other.hit_windows;
+            self.regenerate += other.regenerate;
+            self.plan_millis += other.plan_millis;
+            self.beams += other.beams;
+            self.beams_changed += other.beams_changed;
+            self.beams_same += other.beams_same;
+            self.beams_unknown += other.beams_unknown;
+            self.via_subtree += other.via_subtree;
+            self.lost_body += other.lost_body;
+            self.foreign += other.foreign;
+        }
+        fn line(&self, cap: usize) -> String {
+            format!(
+                "{} 窗（另 {} 窗候选超 {cap} 跳过），计划重建合计 {} 件，plan_update 合计 {} ms；这条腿命中 {} 窗：\
+                 关节带出梁 {} 根（两端各建一次：变了 {} / 没变 {} / 建不出 {}），子树遍历登记 {} 根，\
+                 关节失去目录正体 {} 只，指到别的库 {} 条",
+                self.windows,
+                self.skipped,
+                self.regenerate,
+                self.plan_millis,
+                self.hit_windows,
+                self.beams,
+                self.beams_changed,
+                self.beams_same,
+                self.beams_unknown,
+                self.via_subtree,
+                self.lost_body,
+                self.foreign
+            )
+        }
+    }
+    let started = std::time::Instant::now();
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let last = env_usize("AIOS_JOINT_LAST_STEPS", 0);
+    let cap = env_usize("AIOS_JOINT_MAX_CANDIDATES", 20_000);
+    let files: Vec<PathBuf> = match std::env::var("AIOS_JOINT_MEASURE_FILES") {
+        Ok(value) => value
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => [
+            "ams7997_0001",
+            "ams7998_0001",
+            "ams8000_0001",
+            "ams251095_0001",
+            "ams251137_0001",
+            "ams7999_0001",
+            "ams251183_0001",
+        ]
+        .iter()
+        .map(|name| ams.join(name))
+        .chain(
+            [
+                "aps7166_0001",
+                "aps7200_0001",
+                "aps7324_0001",
+                "aps7350_0001",
+                "aps250104_0001",
+                "aps250102_0001",
+                "aps7329_0001",
+            ]
+            .iter()
+            .map(|name| aps.join(name)),
+        )
+        .chain(
+            ["ams7329_0001", "ams7324_0001", "ams7350_0001"]
+                .iter()
+                .map(|name| ams.join(name)),
+        )
+        .collect(),
+    };
+    let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    let mut total = Tally::default();
+    for file in &files {
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !file.is_file() {
+            println!("[关节·不成单元] skip {name}: 文件不在");
+            continue;
+        }
+        let steps = match chain_steps(file, last) {
+            Ok(steps) => steps,
+            Err(reason) => {
+                println!("[关节·不成单元] skip {name}: {reason}");
+                continue;
+            }
+        };
+        let project_dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let project = projects
+            .entry(project_dir.clone())
+            .or_insert_with(|| Project::open(&schema, &project_dir));
+        let mut tally = Tally::default();
+        // 这本库整条链上节点（PNOD / SNOD）被改写的方式（账本的原话）→ 次数：`NPOS` / `ZDIS` 真动过几回。
+        let mut node_changes: BTreeMap<String, usize> = BTreeMap::new();
+        for (base_sesno, target_sesno) in steps {
+            let window = match e3d_model::increment::collect_window(file, base_sesno, target_sesno)
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    println!(
+                        "[关节·不成单元]   {name} {base_sesno}→{target_sesno}: 收窗口失败：{error}"
+                    );
+                    continue;
+                }
+            };
+            let candidates = window.diff.changes.len();
+            if candidates > cap {
+                tally.skipped += 1;
+                continue;
+            }
+            tally.windows += 1;
+            if candidates == 0 {
+                continue;
+            }
+            let (Some(base), Some(target)) = (
+                project.set_at(file, base_sesno),
+                project.set_at(file, target_sesno),
+            ) else {
+                println!("[关节·不成单元]   {name} {base_sesno}→{target_sesno}: 两端开不了");
+                continue;
+            };
+            let planning = std::time::Instant::now();
+            let plan = plan_update_with(
+                &base,
+                &target,
+                &window,
+                PlanLimits::default(),
+                change_metadata_tier,
+            );
+            tally.plan_millis += planning.elapsed().as_millis();
+            tally.regenerate += plan.regenerate.len();
+            for entry in plan.ledger.entries() {
+                if matches!(entry.noun.as_str(), "PNOD" | "SNOD")
+                    && entry.kind == e3d_model::ledger::ChangeKind::AttributesModified
+                {
+                    let detail: String = entry.detail.chars().take(80).collect();
+                    *node_changes
+                        .entry(format!("{}：{detail}", entry.noun))
+                        .or_default() += 1;
+                }
+            }
+            let (mut beams, mut changed, mut same, mut unknown) = (0usize, 0usize, 0usize, 0usize);
+            let mut via_subtree = 0usize;
+            for incident in &plan.report.cascades {
+                if incident.detail.starts_with("这只关节不成模型单元") {
+                    beams += 1;
+                    let beam = incident
+                        .detail
+                        .split("指着它的梁 ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(' ').next())
+                        .and_then(crate::data_interface::cross_db_handoff::parse_refno);
+                    match beam.and_then(|beam| unit_changed(&base, &target, beam)) {
+                        Some(true) => changed += 1,
+                        Some(false) => same += 1,
+                        None => unknown += 1,
+                    }
+                } else if let Some(rest) =
+                    incident.detail.split("子树里不成单元的关节另带出 ").nth(1)
+                {
+                    via_subtree += rest
+                        .split(' ')
+                        .next()
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or(0);
+                }
+            }
+            // 窗口左端自成单元、右端不成单元的 SJOI / PJOI：只有「关节失去目录正体」那一句会把它放进重建集。
+            let lost_body = plan
+                .regenerate
+                .iter()
+                .map(|&(word0, word1)| RefNo::new(word0, word1))
+                .filter(|&refno| {
+                    matches!(
+                        target.element(refno).element_type().as_deref(),
+                        Ok("SJOI" | "PJOI")
+                    ) && !is_model_unit(&target, refno)
+                        && is_model_unit(&base, refno)
+                })
+                .count();
+            let foreign = plan
+                .report
+                .notes
+                .iter()
+                .filter(|note| note.detail.starts_with("不成单元的关节的 CREF 指到别的库"))
+                .count();
+            if beams + via_subtree + lost_body + foreign > 0 {
+                tally.hit_windows += 1;
+                println!(
+                    "[关节·不成单元]   {name} {base_sesno}→{target_sesno}: 候选 {candidates}，计划重建 {} 件；关节带出梁 \
+                     {beams} 根（两端各建一次：变了 {changed}、没变 {same}、建不出 {unknown}），子树遍历登记 \
+                     {via_subtree} 根，关节失去目录正体 {lost_body} 只，指到别的库 {foreign} 条",
+                    plan.regenerate.len()
+                );
+                // 这一窗里关节 / 节点到底改了什么（账本的原话，同样的合并计数）：看带出来的梁是不是白建。
+                let mut causes: BTreeMap<String, usize> = BTreeMap::new();
+                for entry in plan.ledger.entries() {
+                    if matches!(entry.noun.as_str(), "PJOI" | "SJOI" | "PNOD" | "SNOD") {
+                        let detail: String = entry.detail.chars().take(100).collect();
+                        *causes
+                            .entry(format!("{} {}：{detail}", entry.noun, entry.kind.label()))
+                            .or_default() += 1;
+                    }
+                }
+                let mut causes: Vec<(String, usize)> = causes.into_iter().collect();
+                causes.sort_by(|left, right| right.1.cmp(&left.1));
+                for (cause, count) in causes.into_iter().take(8) {
+                    println!("[关节·不成单元]     账本：{count} × {cause}");
+                }
+            }
+            tally.beams += beams;
+            tally.beams_changed += changed;
+            tally.beams_same += same;
+            tally.beams_unknown += unknown;
+            tally.via_subtree += via_subtree;
+            tally.lost_body += lost_body;
+            tally.foreign += foreign;
+        }
+        println!("[关节·不成单元] == {name}: {}", tally.line(cap));
+        let mut node_changes: Vec<(String, usize)> = node_changes.into_iter().collect();
+        node_changes.sort_by(|left, right| right.1.cmp(&left.1));
+        for (change, count) in node_changes.into_iter().take(6) {
+            println!("[关节·不成单元]    节点属性修改 {count} × {change}");
+        }
+        total.add(&tally);
+    }
+    println!(
+        "[关节·不成单元] ==== 合计（{:.0} 秒）{}",
+        started.elapsed().as_secs_f64(),
+        total.line(cap)
+    );
+    assert!(total.windows > 0, "一窗都没量到——目录或模板目录不对");
+}
+
+/// 普查（手动）：自己成模型单元、刀却落在**另一件**单元上的那些件——改它，吃它刀的宿主会不会被 `plan_update` 点名。
+///
+/// 关节级联管的是「梁从 JOIS / JOIE 指的关节取负体」。建模里另有几处宿主向自己名下的件收刀，那些件自己都是模型
+/// 单元（改它们上卷到它们自己为止）：
+/// - `WALL` ← 名下带 `DESP` 的 `FIXING`（墙上的套管 / 开孔件，`elmodl::collect_host_fixings`）；
+/// - `GWALL` ← 名下带 `DESP` 的 `SBFI`（墙上套管，`elmodl::collect_host_sleeves`）；
+/// - `SCTN` ← 名下的 `FITT` / `CMFI`（成员链，`elmodl::collect_member_joint_negatives`）。
+///
+/// 每一类从几本库里取样（每类最多 `AIOS_144_PAIRS_PER_CLASS` 对，缺省 60），把那一件当成一窗仅有的候选喂给真的
+/// `plan_update_with`，数：宿主被点名的、没被点名的（其中宿主的根在 regen 里、子计划不空、里面没有宿主——单元级
+/// 发布只重建点名的那一件，宿主留在旧刀口上），以及宿主建模时确实扣过负体的。只打印、不下断言：这是给新票用的数，
+/// 不是这张票修的东西。
+#[test]
+#[ignore = "manual live census: reads real DESI files of the AMS / APS sample projects; needs the E3D template directory"]
+fn live_census_units_whose_cutters_land_on_another_unit() {
+    fn descend(
+        set: &Arc<DbSet>,
+        at: RefNo,
+        wanted: &str,
+        out: &mut Vec<RefNo>,
+        budget: &mut usize,
+    ) {
+        let Ok(members) = set.element(at).members() else {
+            return;
+        };
+        for member in members {
+            if *budget == 0 {
+                return;
+            }
+            *budget -= 1;
+            let Ok(noun) = member.element_type() else {
+                continue;
+            };
+            if noun == wanted {
+                if matches!(member.get_double_array("DESP"), Ok(Some(desp)) if desp.len() >= 10) {
+                    out.push(member.refno());
+                }
+            } else {
+                descend(set, member.refno(), wanted, out, budget);
+            }
+        }
+    }
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let cap = env_usize("AIOS_144_PAIRS_PER_CLASS", 60);
+    // (工程目录, 库, 宿主 noun, 收刀的件 noun, 件是不是宿主的直属成员)
+    let classes: [(&Path, &str, &str, &str, bool); 5] = [
+        (ams.as_path(), "ams1112_0001", "WALL", "FIXING", false),
+        (ams.as_path(), "ams1112_0001", "GWALL", "SBFI", false),
+        (aps.as_path(), "aps250110_0001", "WALL", "FIXING", false),
+        (ams.as_path(), "ams7997_0001", "SCTN", "FITT", true),
+        (aps.as_path(), "aps250110_0001", "SCTN", "FITT", true),
+    ];
+    let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    let mut sites: BTreeMap<PathBuf, Site> = BTreeMap::new();
+    for (project_dir, name, host_noun, part_noun, direct) in classes {
+        let file = project_dir.join(name);
+        if !file.is_file() {
+            println!("[宿主收刀] skip {name}: 文件不在");
+            continue;
+        }
+        let Ok(steps) = chain_steps(&file, 1) else {
+            println!("[宿主收刀] skip {name}: 会话链读不出");
+            continue;
+        };
+        let sesno = steps[0].1;
+        let project = projects
+            .entry(project_dir.to_path_buf())
+            .or_insert_with(|| Project::open(&schema, project_dir));
+        let site = sites
+            .entry(file.clone())
+            .or_insert_with(|| Site::open(project, &file, sesno));
+        let host_hash = e3d_attlib::db1_hash(host_noun);
+        let mut engine = ReadOnlyEngine::open_at(&file, sesno).expect("open the DESI file");
+        let hosts: Vec<RefNo> = engine
+            .scan_elements(ScanTier::Header)
+            .expect("scan element headers")
+            .filter_map(|scanned| scanned.ok())
+            .filter(|scanned| scanned.noun_hash == host_hash)
+            .map(|scanned| scanned.refno)
+            .collect();
+        drop(engine);
+        // (件, 宿主)
+        let mut pairs: Vec<(RefNo, RefNo)> = Vec::new();
+        let mut hosts_with_parts = 0usize;
+        for &host in &hosts {
+            if !is_model_unit(&site.set, host) {
+                continue;
+            }
+            let mut parts = Vec::new();
+            if direct {
+                if let Ok(members) = site.set.element(host).members() {
+                    parts.extend(
+                        members
+                            .filter(|member| {
+                                matches!(member.element_type().as_deref(), Ok(noun) if noun == part_noun)
+                            })
+                            .map(|member| member.refno()),
+                    );
+                }
+            } else {
+                let mut budget = 20_000usize;
+                descend(&site.set, host, part_noun, &mut parts, &mut budget);
+            }
+            parts.retain(|part| is_model_unit(&site.set, *part));
+            hosts_with_parts += usize::from(!parts.is_empty());
+            pairs.extend(parts.into_iter().map(|part| (part, host)));
+        }
+        let (mut named_host, mut not_named, mut left_out, mut host_cut) =
+            (0usize, 0usize, 0usize, 0usize);
+        let mut example: Option<String> = None;
+        let step = (pairs.len() / cap.max(1)).max(1);
+        let sampled: Vec<(RefNo, RefNo)> = pairs.iter().copied().step_by(step).take(cap).collect();
+        for &(part, host) in &sampled {
+            let Some(&host_root) = site.root_chain(host).first() else {
+                continue;
+            };
+            let (facts, named) = site.hypothetical(&[part], false, host_root, host);
+            if named.contains(&key_of(host)) {
+                named_host += 1;
+                continue;
+            }
+            not_named += 1;
+            left_out += usize::from(facts.leaves_implicated_out());
+            let cuts = negatives_applied_on(&site.set, host);
+            host_cut += usize::from(cuts > 0);
+            if example.is_none() {
+                example = Some(format!(
+                    "{part_noun} {part} → {host_noun} {host}（宿主的根 {host_root}，宿主建模时扣过 {cuts} 把负体）：\
+                     plan_update 点名 {named:?}；{facts:?}"
+                ));
+            }
+        }
+        println!(
+            "[宿主收刀] {name}@{sesno} {host_noun} ← {part_noun}: 宿主 {} 件，其中名下有这种件的 {hosts_with_parts} 件，\
+             共 {} 对；取样 {} 对：改这一件时宿主被点名 {named_host}，没被点名 {not_named}（其中宿主的根在 regen 里、\
+             子计划不空、里面没有宿主 {left_out}；宿主建模时确实扣过负体 {host_cut}）",
+            hosts.len(),
+            pairs.len(),
+            sampled.len()
+        );
+        if let Some(example) = example {
+            println!("[宿主收刀]   例：{example}");
+        }
+    }
+}
+
+/// 量法（手动）：真实会话窗口里，「收刀的件被点名、吃它刀的宿主墙没被点名」出现过几处，宿主的形状两端到底变没变。
+///
+/// 只看 [`live_census_units_whose_cutters_land_on_another_unit`] 里依据最硬的两类——`WALL` ← 带 `DESP` 的 `FIXING`、
+/// `GWALL` ← 带 `DESP` 的 `SBFI`（墙上的套管 / 开孔件，墙的洞照着它的 `DESP` 开）。走整条会话链
+/// （`AIOS_HOSTCUT_LAST_STEPS=n` 只走最后 n 步；候选数超过 `AIOS_HOSTCUT_MAX_CANDIDATES`、缺省两万的导入窗跳过；
+/// `AIOS_HOSTCUT_MEASURE_FILES`（`;` 分隔的文件路径）整体替换名单，缺省是 ams1112），每窗只做 `collect_window` +
+/// `plan_update_with`；计划里要重建或要删除的这种件，沿属主链找到宿主墙，宿主没被点名的记一处，宿主在窗口两端各建
+/// 一次比形状（`AIOS_HOSTCUT_COMPARE` 封顶，缺省 300）。「形状变了」的每一处都是：单元级发布只重建了套管，墙上的洞
+/// 停在旧尺寸 / 旧位置。只打印，不下断言。
+#[test]
+#[ignore = "manual live measurement: walks whole DESI session chains of the AMS sample project; needs the E3D template directory"]
+fn live_measure_host_walls_left_on_old_holes_on_natural_windows() {
+    #[derive(Default)]
+    struct Tally {
+        windows: usize,
+        skipped: usize,
+        hit_windows: usize,
+        /// 件被点名（重建 / 删除）、宿主墙没被点名的处数，与其中宿主两端各建一次的结论。
+        left: usize,
+        changed: usize,
+        same: usize,
+        unknown: usize,
+        not_compared: usize,
+        /// 件被点名、宿主也被点名的处数（今天就对）。
+        both_named: usize,
+    }
+    fn host_wall(set: &Arc<DbSet>, part: RefNo, part_noun: &str) -> Option<RefNo> {
+        let wanted = match part_noun {
+            "FIXING" => "WALL",
+            "SBFI" => "GWALL",
+            _ => return None,
+        };
+        let element = set.element(part);
+        if !matches!(element.get_double_array("DESP"), Ok(Some(desp)) if desp.len() >= 10) {
+            return None;
+        }
+        let mut current = element.owner().ok().flatten()?;
+        for _ in 0..12 {
+            let noun = current.element_type().ok()?;
+            if noun == wanted {
+                return Some(current.refno());
+            }
+            // 建模下钻时不进同类件（`collect_host_fixings` / `collect_host_sleeves`）：套在另一只里面的不算。
+            if noun == part_noun {
+                return None;
+            }
+            current = current.owner().ok().flatten()?;
+        }
+        None
+    }
+    let started = std::time::Instant::now();
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let last = env_usize("AIOS_HOSTCUT_LAST_STEPS", 0);
+    let cap = env_usize("AIOS_HOSTCUT_MAX_CANDIDATES", 20_000);
+    let mut compare_left = env_usize("AIOS_HOSTCUT_COMPARE", 300);
+    let files: Vec<PathBuf> = match std::env::var("AIOS_HOSTCUT_MEASURE_FILES") {
+        Ok(value) => value
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => vec![ams.join("ams1112_0001")],
+    };
+    let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    for file in &files {
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !file.is_file() {
+            println!("[宿主收刀·自然窗] skip {name}: 文件不在");
+            continue;
+        }
+        let steps = match chain_steps(file, last) {
+            Ok(steps) => steps,
+            Err(reason) => {
+                println!("[宿主收刀·自然窗] skip {name}: {reason}");
+                continue;
+            }
+        };
+        let project_dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let project = projects
+            .entry(project_dir.clone())
+            .or_insert_with(|| Project::open(&schema, &project_dir));
+        let mut tally = Tally::default();
+        for (base_sesno, target_sesno) in steps {
+            let window = match e3d_model::increment::collect_window(file, base_sesno, target_sesno)
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    println!(
+                        "[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 收窗口失败：{error}"
+                    );
+                    continue;
+                }
+            };
+            let candidates = window.diff.changes.len();
+            if candidates > cap {
+                tally.skipped += 1;
+                continue;
+            }
+            tally.windows += 1;
+            if candidates == 0 {
+                continue;
+            }
+            let (Some(base), Some(target)) = (
+                project.set_at(file, base_sesno),
+                project.set_at(file, target_sesno),
+            ) else {
+                println!("[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 两端开不了");
+                continue;
+            };
+            let plan = plan_update_with(
+                &base,
+                &target,
+                &window,
+                PlanLimits::default(),
+                change_metadata_tier,
+            );
+            let named: BTreeSet<(u32, u32)> = plan
+                .regenerate
+                .iter()
+                .chain(plan.remove.iter())
+                .copied()
+                .collect();
+            // 宿主 → 这一窗点了名的件数；重建的件在 target 端找宿主，删掉的在 base 端找。
+            let mut hosts: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+            for (units, side) in [(&plan.regenerate, &target), (&plan.remove, &base)] {
+                for &(word0, word1) in units {
+                    let part = RefNo::new(word0, word1);
+                    let Ok(noun) = side.element(part).element_type() else {
+                        continue;
+                    };
+                    if let Some(host) = host_wall(side, part, &noun) {
+                        *hosts.entry(key_of(host)).or_default() += 1;
+                    }
+                }
+            }
+            let (mut left, mut changed, mut same, mut unknown, mut not_compared, mut both) =
+                (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+            for (&host, &parts) in &hosts {
+                if named.contains(&host) {
+                    both += parts;
+                    continue;
+                }
+                let host = RefNo::new(host.0, host.1);
+                if !target.element(host).exists().unwrap_or(false) {
+                    continue;
+                }
+                left += parts;
+                if compare_left == 0 {
+                    not_compared += parts;
+                    continue;
+                }
+                compare_left -= 1;
+                match unit_changed(&base, &target, host) {
+                    Some(true) => changed += parts,
+                    Some(false) => same += parts,
+                    None => unknown += parts,
+                }
+            }
+            if left > 0 {
+                tally.hit_windows += 1;
+                println!(
+                    "[宿主收刀·自然窗]   {name} {base_sesno}→{target_sesno}: 候选 {candidates}，计划重建 {} 件；套管 / 开孔件\
+                     被点名而宿主墙没被点名 {left} 处（宿主两端各建一次：形状变了 {changed}、没变 {same}、建不出 \
+                     {unknown}、没比 {not_compared}）；宿主也被点名 {both} 处",
+                    plan.regenerate.len()
+                );
+            }
+            tally.left += left;
+            tally.changed += changed;
+            tally.same += same;
+            tally.unknown += unknown;
+            tally.not_compared += not_compared;
+            tally.both_named += both;
+        }
+        println!(
+            "[宿主收刀·自然窗] == {name}: {} 窗（另 {} 窗候选超 {cap} 跳过）；套管 / 开孔件被点名的：宿主墙也被点名 {} 处，\
+             宿主墙没被点名 {} 处、分在 {} 窗（宿主两端各建一次：形状变了 {}、没变 {}、建不出 {}、没比 {}）；用时 {:.0} 秒",
+            tally.windows,
+            tally.skipped,
+            tally.both_named,
+            tally.left,
+            tally.hit_windows,
+            tally.changed,
+            tally.same,
+            tally.unknown,
+            tally.not_compared,
+            started.elapsed().as_secs_f64()
+        );
+    }
+}
+
 /// 量法（手动）：主关节接进 e3d-model 的关节级联之后，真实会话窗口上多点名了多少单元。
 ///
 /// 走遍下面几本库的整条会话链（`AIOS_PJOI_LAST_STEPS=n` 只走每本库最后 n 步；候选数超过
@@ -2365,6 +3192,383 @@ fn live_measure_what_regenerating_cascade_targets_whole_costs() {
     }
     println!(
         "[#144 量] ==== 合计（{:.0} 秒）{}",
+        started.elapsed().as_secs_f64(),
+        grand.line()
+    );
+    assert!(grand.windows > 0, "一窗都没量到——目录或模板目录不对");
+}
+
+// ───────────────────────────── 量法：D10 在自然窗口上（手动） ─────────────────────────────
+
+/// D10 没点名的根卡在哪一条：`window_root_plan` 里 `classify_no_model_only_root` 的拒因（英文定句）按句首归格。
+/// 措辞改了就落到最后一格，数不会丢。
+fn receipt_only_rejection_class(reason: &str) -> &'static str {
+    if reason.starts_with("root is not a settled") {
+        "S 端没有这根"
+    } else if reason.starts_with("root is not directly hit") {
+        "不是闭包直接命中的"
+    } else if reason.starts_with("root is a target of a cascade") {
+        "是级联的目标"
+    } else if reason.starts_with("touched, but no candidate") {
+        "归不到候选"
+    } else {
+        "名下有要重建或只改站位的候选"
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct ReceiptOnlyTally {
+    windows: usize,
+    /// 规划退化的窗：整窗不分桶，每个持久根整根重算。
+    degraded_windows: usize,
+    /// 非退化窗的 regen 根（三条级联都开着）。
+    regen: usize,
+    /// 其中子计划为空：没有 D10 的话执行体回退整根重算。
+    empty_subplan: usize,
+    /// D10 点名的根（只推回执）与它们名下的元素数（T 端）。
+    receipt_only: usize,
+    receipt_only_elements: usize,
+    /// 点名的根里子计划不空的：执行体照子计划局部重建，不走只推回执那条路。
+    receipt_only_with_subplan: usize,
+    /// 点名的根里，结构连接级联关着（缺省配置）时也在 `regen` 里的——今天白算的整根重算。
+    receipt_only_regen_today: usize,
+    /// 两端整根各生成一次比过的根 / 其中有「形状变了却不在子计划里」的根 / 那样的件数 / 生成失败的根。
+    compared: usize,
+    compared_changed_roots: usize,
+    changed_units: usize,
+    compare_failed: usize,
+    compare_secs: f64,
+    /// 子计划为空却没被点名的根，按拒因分格。
+    rejected_empty: BTreeMap<&'static str, usize>,
+}
+
+impl ReceiptOnlyTally {
+    fn add(&mut self, other: &Self) {
+        self.windows += other.windows;
+        self.degraded_windows += other.degraded_windows;
+        self.regen += other.regen;
+        self.empty_subplan += other.empty_subplan;
+        self.receipt_only += other.receipt_only;
+        self.receipt_only_elements += other.receipt_only_elements;
+        self.receipt_only_with_subplan += other.receipt_only_with_subplan;
+        self.receipt_only_regen_today += other.receipt_only_regen_today;
+        self.compared += other.compared;
+        self.compared_changed_roots += other.compared_changed_roots;
+        self.changed_units += other.changed_units;
+        self.compare_failed += other.compare_failed;
+        self.compare_secs += other.compare_secs;
+        for (class, count) in &other.rejected_empty {
+            *self.rejected_empty.entry(*class).or_default() += *count;
+        }
+    }
+
+    fn line(&self) -> String {
+        let rejected = if self.rejected_empty.is_empty() {
+            "无".to_string()
+        } else {
+            self.rejected_empty
+                .iter()
+                .map(|(class, count)| format!("{class} {count}"))
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        format!(
+            "{} 窗（退化 {} 窗）；非退化窗 regen 根 {}，其中子计划为空 {}；D10 点名只推回执 {} 根（名下元素 {}；\
+             子计划不空 {}；结构连接级联关着时今天也在 regen 里 {}）；两端整根比过 {} 根（{:.0} 秒），\
+             有「形状变了却不在子计划里」的 {} 根 {} 件，生成失败 {} 根；子计划为空却没点名的：{rejected}",
+            self.windows,
+            self.degraded_windows,
+            self.regen,
+            self.empty_subplan,
+            self.receipt_only,
+            self.receipt_only_elements,
+            self.receipt_only_with_subplan,
+            self.receipt_only_regen_today,
+            self.compared,
+            self.compare_secs,
+            self.compared_changed_roots,
+            self.changed_units,
+            self.compare_failed
+        )
+    }
+}
+
+/// 量法（手动）：三条级联都开着时，单元级发布的 D10（只被 `no_model` 候选碰到的根只推回执）在自然窗口上点名
+/// 多少根、点得对不对。把结构连接级联的缺省翻开（GitHub #34），连带后果就是 D10 第一次在缺省配置下生效
+/// ——这条量法给的是翻之前要看的数。
+///
+/// 逐库走会话链的最后 `AIOS_D10_MEASURE_STEPS_PER_DB` 步（缺省 12，0 = 整条链），每一步把 C2 / C8 / P4 都摁开，跑
+/// 生产同款的 `WindowRootSources::collect` → `impact` → `plan_window_roots` → `no_model_only`：
+///
+/// - **收益**：D10 点名的根数与名下元素数。这些根今天（C2 关，D10 不分桶）子计划为空、回退整根重算，算出来的
+///   几何与 S 端逐字相同；有 D10 点名的窗再把 C2 摁关规划一遍，核对它们今天确实在 `regen` 里。
+/// - **风险**：点名的根在窗口两端各整根生成一次（`AIOS_D10_MEASURE_COMPARE_ROOTS` 封顶，缺省 150；每窗最多
+///   `AIOS_D10_MEASURE_COMPARE_PER_WINDOW`，缺省 8；名下元素超过 3000 的不比），「形状变了却不在子计划里」的件数
+///   应当是 0——不是 0 就是 D10 把一根该重算的只推了回执。今天这种根靠 E3D 盖的戳做闭包种子整根重算收住；
+///   D10 生效之后只有级联的目标集挡得住它。
+/// - 顺带把「子计划为空却没被点名」的根按拒因分格，看白算的整根重算还剩多少、卡在哪一条。
+///
+/// 只读文件、不碰库、不下数值断言（点名多少是语料的性质）。库的名单与
+/// [`live_measure_what_regenerating_cascade_targets_whole_costs`] 相同，`AIOS_D10_MEASURE_FILES`（`;` 分隔的文件
+/// 路径）可整体替换；`AIOS_D10_MEASURE_BUDGET_SECS`（缺省 3600）到了就不再开新窗。结果打到 stdout（`--nocapture`）。
+#[test]
+#[ignore = "manual live measurement: walks real DESI session chains; needs the E3D sample projects and template directory"]
+fn live_measure_what_the_receipt_only_bucket_does_with_all_three_cascades_on() {
+    use std::time::Instant;
+
+    let schema = DirectSchema::open_from_env().expect("E3D template directory");
+    let ams = env_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+    let aps = env_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+    let files: Vec<PathBuf> = match std::env::var("AIOS_D10_MEASURE_FILES") {
+        Ok(value) => value
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => MEASURE_AMS_FILES
+            .iter()
+            .map(|name| ams.join(name))
+            .chain(MEASURE_APS_FILES.iter().map(|name| aps.join(name)))
+            .collect(),
+    };
+    let per_db = env_usize("AIOS_D10_MEASURE_STEPS_PER_DB", 12);
+    let budget_secs = env_usize("AIOS_D10_MEASURE_BUDGET_SECS", 3600) as f64;
+    let mut compare_left = env_usize("AIOS_D10_MEASURE_COMPARE_ROOTS", 150);
+    let compare_per_window = env_usize("AIOS_D10_MEASURE_COMPARE_PER_WINDOW", 8);
+    let unit_types = resolve_delivery_unit_types(&[]);
+    let started = Instant::now();
+    println!(
+        "[D10 量] 开关（配置）：unit_level_publish={} skip_metadata_only={}；本量法把 C2 / C8 / P4 都摁开，\
+         每库最后 {per_db} 步",
+        crate::options::model_unit_level_publish(),
+        crate::options::model_skip_metadata_only_changes()
+    );
+    assert!(
+        crate::options::model_unit_level_publish(),
+        "单元级发布关着：按根归因的候选表不收，D10 一根都点不了名，这条量法量不出东西"
+    );
+
+    let mut projects: BTreeMap<PathBuf, Project> = BTreeMap::new();
+    let mut grand = ReceiptOnlyTally::default();
+    let mut budget_exhausted = false;
+    for file in &files {
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !file.is_file() {
+            println!("[D10 量] skip {name}: 文件不在");
+            continue;
+        }
+        let steps = match chain_steps(file, per_db) {
+            Ok(steps) => steps,
+            Err(reason) => {
+                println!("[D10 量] skip {name}: {reason}");
+                continue;
+            }
+        };
+        let project_dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let project = projects
+            .entry(project_dir.clone())
+            .or_insert_with(|| Project::open(&schema, &project_dir));
+        let mut totals = ReceiptOnlyTally::default();
+        for (base_sesno, target_sesno) in steps {
+            let label = format!("{name} {base_sesno}→{target_sesno}");
+            if started.elapsed().as_secs_f64() > budget_secs {
+                budget_exhausted = true;
+                break;
+            }
+            let (Some(base), Some(target)) = (
+                project.set_at(file, base_sesno),
+                project.set_at(file, target_sesno),
+            ) else {
+                println!("[D10 量] skip {label}: 两端钉不住");
+                continue;
+            };
+            let (base_index, target_index) = match (
+                scan_index(file, Some(base_sesno)),
+                scan_index(file, Some(target_sesno)),
+            ) {
+                (Ok(base_index), Ok(target_index)) => (base_index, target_index),
+                (Err(error), _) | (_, Err(error)) => {
+                    println!("[D10 量] skip {label}: 索引扫不出：{error:#}");
+                    continue;
+                }
+            };
+            let roots_s: Vec<PersistedRoot> =
+                match enumerate_generation_roots(&base, &base_index.roots, &unit_types) {
+                    Ok(roots) => roots.iter().map(PersistedRoot::from).collect(),
+                    Err(error) => {
+                        println!("[D10 量] skip {label}: S 端根枚举失败：{error:#}");
+                        continue;
+                    }
+                };
+            // 生产同款的规划；结构连接级联按给的摁，C8 / P4 摁开。
+            let collect_with = |structural_connection: bool| {
+                let _c2 =
+                    crate::options::StructuralConnectionCascadeOverride::set(structural_connection);
+                let _c8 = crate::options::CableEndpointCascadeOverride::set(true);
+                let _p4 = crate::options::DesignReferenceCascadeOverride::set(true);
+                WindowRootSources::collect(
+                    file,
+                    base_sesno,
+                    target_sesno,
+                    &base,
+                    &target,
+                    &unit_types,
+                    &[],
+                )
+            };
+            let sources = match collect_with(true) {
+                Ok(sources) => sources,
+                Err(error) => {
+                    println!("[D10 量] skip {label}: 规划失败：{error:#}");
+                    continue;
+                }
+            };
+            let impact = sources.impact(&roots_s);
+            let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+            totals.windows += 1;
+            if plan.degraded.is_some() {
+                totals.degraded_windows += 1;
+                continue;
+            }
+            totals.regen += plan.regen.len();
+            let settled: BTreeSet<RefnoEnum> = roots_s.iter().map(|root| root.refno).collect();
+            let classification = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+
+            // 每个 regen 根的子计划（生产同一个函数）。
+            let sets = window_plan_sets(
+                base_index.dbnum,
+                file,
+                base_sesno,
+                target_sesno,
+                &sources.plan,
+                None,
+            );
+            let mut subplans: BTreeMap<(u32, u32), RootSubplan> = BTreeMap::new();
+            for root in &plan.regen {
+                let refno = refno_to_e3d(root.root);
+                match restrict_plan_to_root(&sets, refno, &base_index.owners, &target_index.owners)
+                {
+                    Ok(subplan) => {
+                        if subplan.is_empty() {
+                            totals.empty_subplan += 1;
+                        }
+                        subplans.insert(key_of(refno), subplan);
+                    }
+                    Err(error) => {
+                        println!("[D10 量] {label}: 根 {refno} 切不出子计划：{error:#}");
+                    }
+                }
+            }
+            for (root, reason) in &classification.rejected {
+                let empty = subplans
+                    .get(&key_of(refno_to_e3d(*root)))
+                    .is_some_and(RootSubplan::is_empty);
+                if empty {
+                    *totals
+                        .rejected_empty
+                        .entry(receipt_only_rejection_class(reason))
+                        .or_default() += 1;
+                }
+            }
+            if classification.roots.is_empty() {
+                continue;
+            }
+
+            // 点名的根名下的元素数（T 端）。
+            let named_keys: BTreeSet<(u32, u32)> = classification
+                .roots
+                .iter()
+                .map(|root| key_of(refno_to_e3d(*root)))
+                .collect();
+            let mut members: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+            for &(word0, word1) in target_index.owners.keys() {
+                let element = RefNo::new(word0, word1);
+                for root in roots_on_owner_chain(&target_index.owners, &named_keys, element) {
+                    *members.entry(key_of(root)).or_default() += 1;
+                }
+            }
+            // 今天（结构连接级联关着）这些根在不在 regen 里。
+            let regen_today: Option<BTreeSet<RefnoEnum>> = match collect_with(false) {
+                Ok(today) => {
+                    let impact_today = today.impact(&roots_s);
+                    let plan_today = plan_window_roots(&today.roots_t, &roots_s, &impact_today);
+                    Some(plan_today.regen.iter().map(|root| root.root).collect())
+                }
+                Err(error) => {
+                    println!("[D10 量] {label}: 结构连接级联关着那一态规划失败：{error:#}");
+                    None
+                }
+            };
+
+            let mut elements_here = 0usize;
+            let mut compared_here = 0usize;
+            let mut changed_here = 0usize;
+            for root in &classification.roots {
+                let refno = refno_to_e3d(*root);
+                let key = key_of(refno);
+                let under = members.get(&key).copied().unwrap_or(0);
+                elements_here += under;
+                totals.receipt_only += 1;
+                totals.receipt_only_elements += under;
+                if regen_today
+                    .as_ref()
+                    .is_some_and(|regen| regen.contains(root))
+                {
+                    totals.receipt_only_regen_today += 1;
+                }
+                let Some(subplan) = subplans.get(&key) else {
+                    continue;
+                };
+                if !subplan.is_empty() {
+                    totals.receipt_only_with_subplan += 1;
+                }
+                if compare_left == 0 || compared_here >= compare_per_window || under > 3000 {
+                    continue;
+                }
+                compare_left -= 1;
+                compared_here += 1;
+                let tick = Instant::now();
+                let diff = whole_root_diff(&base, &target, refno, subplan);
+                totals.compare_secs += tick.elapsed().as_secs_f64();
+                match diff {
+                    Ok(diff) => {
+                        totals.compared += 1;
+                        if !diff.stale.is_empty() {
+                            totals.compared_changed_roots += 1;
+                            totals.changed_units += diff.stale.len();
+                            changed_here += diff.stale.len();
+                            println!(
+                                "[D10 量] {label}: 根 {refno} 被点名只推回执（名下元素 {under}），可是{}",
+                                diff.line()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        totals.compare_failed += 1;
+                        println!("[D10 量] {label}: 根 {refno} 整根生成失败：{error}");
+                    }
+                }
+            }
+            println!(
+                "[D10 量] {label}: regen {} 根，D10 点名只推回执 {} 根（名下元素 {elements_here}），\
+                 两端整根比过 {compared_here} 根、形状变了却不在子计划里 {changed_here} 件",
+                plan.regen.len(),
+                classification.roots.len()
+            );
+        }
+        println!("[D10 量] == {name}: {}", totals.line());
+        grand.add(&totals);
+        if budget_exhausted {
+            println!("[D10 量] 时间预算 {budget_secs:.0} 秒用完，后面的库没走");
+            break;
+        }
+    }
+    println!(
+        "[D10 量] ==== 合计（{:.0} 秒）{}",
         started.elapsed().as_secs_f64(),
         grand.line()
     );

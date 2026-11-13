@@ -1874,9 +1874,10 @@ impl WindowRootSources {
     /// 规则 5）、D10 的条件 3（[`classify_no_model_only_roots`]）是同一条规则的第三处。
     ///
     /// 只认**开着**的级联：关着的那条没读过边，目标集是空的。C2 默认关（GitHub #34），只有 C2 认得的依赖
-    /// （`FIXING ↔ STWALL`、不带目录正体的关节、跨库的结构连接）在缺省配置下不在这张名单里——那一半这条规则罩不住。
-    /// 「带目录正体的 `PJOI` 与它 `CREF` 的梁」原先也在那一半里；2026-11-12 起 e3d-model `plan_update` 自己的关节级联
-    /// 接上了主关节，两端都由它在单元这一层点名，不再靠这条规则，也不靠 C2。
+    /// （`FIXING ↔ STWALL`、`SCOJ` / `SUBJ` 关节、跨库的结构连接）在缺省配置下不在这张名单里——那一半这条规则罩不住。
+    /// 「带目录正体的 `PJOI` 与它 `CREF` 的梁」「不成单元却给梁出刀的关节（没有目录正体、只有负体）与被它切的梁」
+    /// 原先也在那一半里；2026-11-12 起 e3d-model `plan_update` 自己的关节级联接上了这两种，对端由它在单元这一层
+    /// 点名，不再靠这条规则，也不靠 C2。
     pub(crate) fn unit_publish_cascade_targets(&self, plan: &WindowRootPlan) -> Vec<String> {
         let cascaded = self.cascaded_roots();
         plan.regen
