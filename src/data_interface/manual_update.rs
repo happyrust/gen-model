@@ -3586,8 +3586,7 @@ impl AiosDBManager {
         // Direct initializers do not run the automatic watcher's sweep. Install
         // the same full Catalogue/identity manifests first; watch_dbnums only
         // chooses DESI work and must not remove dependencies of that work.
-        self.prepare_dependency_manifests_for_initialization()
-            .await?;
+        self.prepare_dependency_manifests_for_initialization()?;
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
