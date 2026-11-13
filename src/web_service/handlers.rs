@@ -661,6 +661,9 @@ fn model_capabilities() -> Value {
         // 打包取网格（spec §4.11.4）：有这两格 = 有 `POST /api/v1/meshes/batch`，数值是它的两条上限。
         "mesh_batch_max_keys": crate::web_service::mesh_batch::MAX_MESH_BATCH_KEYS,
         "mesh_batch_max_bytes": crate::web_service::mesh_batch::MAX_MESH_BATCH_BYTES,
+        // 清几何不带走别的根、别的库共用的东西（GitHub #142，spec §4.1 / §4.5.1）。恒为 true，不是开关：
+        // 旧后端没有这一格 = 没修，客户端在那上面发强制重新生成 / 带 purge_meshes 的清理之前要先警告。
+        "mesh_purge_keeps_shared": crate::data_interface::mesh_purge::KEEPS_SHARED,
         "room_complete_publication_ack": true,
         "room_rebuild_executor": if crate::options::data_face().is_read_through() {
             "memory"
@@ -7629,6 +7632,31 @@ mod tests {
                 .count(),
             2,
             "connected and disconnected health responses must advertise the same capabilities"
+        );
+    }
+
+    /// `capabilities.mesh_purge_keeps_shared`（spec §4.1，GitHub #142）：清几何不带走别的根、别的库共用的东西。
+    /// 键名和取值是给前端的契约——它没有这一格就在「强制重新生成」之前先警告，所以名字不许改、值恒为 `true`；
+    /// 值取自 `mesh_purge` 里立在那两道闸旁边的声明，不在这里另写一个 `true`（闸撤了声明跟着撤，这一格也跟着变）。
+    #[test]
+    fn health_declares_that_purging_geometry_keeps_what_other_scopes_share() {
+        let capabilities = model_capabilities();
+        assert_eq!(capabilities["mesh_purge_keeps_shared"], true);
+        assert!(crate::data_interface::mesh_purge::KEEPS_SHARED);
+
+        let source = include_str!("handlers.rs");
+        let block = source
+            .split_once("fn model_capabilities() -> Value {")
+            .expect("model_capabilities exists")
+            .1
+            .split_once("fn room_feature_status(")
+            .expect("model_capabilities end exists")
+            .0;
+        assert!(
+            block.contains(
+                "\"mesh_purge_keeps_shared\": crate::data_interface::mesh_purge::KEEPS_SHARED,"
+            ),
+            "这一格必须取自 mesh_purge 的声明，不许写死: {block}"
         );
     }
 

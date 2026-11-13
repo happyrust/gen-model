@@ -1,3 +1,19 @@
+## 2026-11-11
+
+### 清几何不再删别的范围还挂着的共用几何行（GitHub #142，查 #76 时查出）
+
+- **为什么**：「重新生成模型」的先删、带 `purge_meshes` 的清理模型 / 整库清理、升级清库，在删完本范围产物行之后对范围引用过的每个网格键发 `DELETE inst_geo:⟨键⟩`（2026-10-22，#60）。键里有标准图元的键，而标准图元的 `inst_geo` 行按形状全库共用（所有 BOX 一行，圆柱按段数一行，隐式管身用的也是同一套圆柱键）；`geo_relate` / `tubi_relate` 是 `out` 指着 `inst_geo` 的边，SurrealDB 删节点会把它身上的边一起删掉、不报错。重生成任意一台带 BOX 的设备，全库别的 BOX 的 `geo_relate` 行就没了；带 CYLI 的，同键的管身 `tubi_relate` 行也没了（冷读、重启之后那些支管没有管身）。#76「只改 NAME 再改回，恢复后多一条 `Pos`」的另一半就是它：夹具逐根 `force` 建基线，每灌一根把别的根的 `Pos` 删一遍，增量重算只是把该有的行写了回来。回放复现（未修的二进制）：7998 会话 542 上 `geo_relate` 7 → 1；7997 会话 385 上对一个螺栓小件 `force` 重生成，`tubi_relate` 4635 → 1745、`geo_relate` 15531 → 11686。
+- **改**：`data_interface::mesh_purge` 两道。① 标准图元的键不进删除集：投影里只收烘焙实体的非管身记录，库上 `inst_relate` 里模型面写的、带 `out` 的行不再交出 `insts_flat.geo_hash`（与「管身单位圆柱永不删」同一条理由）。② `delete_inst_geo_rows` 只删没有 `geo_relate` / `tubi_relate` 入边的行，留下的键连 `.mesh` 一起留，日志点名（`MeshPurgeReport::in_use_kept`）；这一道不看键是怎么进删除集的。规格 §4.5.1 / §4.5.1D 同步。
+- **验证**：`cargo test --lib -- mesh_purge` 15 条通过，其中新增 6 条 `mem://` 用例（行由 `render_records` 写）：`deleting_an_inst_geo_row_takes_every_edge_that_points_at_it`（引擎连带删边，根因的记录）、`purging_one_scope_leaves_the_rows_other_scopes_hang_on_shared_primitive_meshes`（收键 → 删本范围行 → 清几何，另两片范围的行一条不少）、`an_inst_geo_row_with_edges_still_pointing_at_it_is_kept_with_its_mesh_file`（共用键硬塞进删除集也删不掉、文件还在）、两个收集口的口径三条。修后二进制的回放：7998 上同一步 `geo_relate` 7 → 7，夹具 `geometry` 例名下的模型面载荷基线与恢复后相同；7997 上同一步 `tubi_relate` 4635、`geo_relate` 15531 都不变，再强制重生成一根支管自己，它的管身行照旧写回。真机没有验。
+- **没动**：烘焙网格照旧按 #60 D1 的口径清（不做跨范围引用计数）；HTTP 回执的四格；`delete_model_subtree` / 整库清理的锁序与「收键 → 删库行 → 删几何」；已经被带走的行不会自己回来（没被窗口碰到的根不写行），要补得整库重建或逐根重新生成。
+
+### `/health` 的能力清单多一格 `mesh_purge_keeps_shared`（GitHub #142）
+
+- **为什么**：上一条修的是「清几何连带删别人的行」，可客户端分不出一台后端修没修。前端在加「落后节点一键更新」，点了可能走强制重新生成；在没修的后端上，那一下会把别的根、别的库挂在同一行几何上的 `geo_relate` / `tubi_relate` 行一起删掉。
+- **改**：`capabilities` 多一格布尔量 `mesh_purge_keeps_shared`，恒为 `true`，和 `mesh_batch_max_keys` 放在一起；值取自 `mesh_purge::KEEPS_SHARED`——立在那两道闸旁边的一句声明，不是开关，HTTP 层不另写一个 `true`。规格 §4.1 写明含义与「旧后端没有这个键 = 没修」，§4.5.1 加一句指回它。
+- **验证**：`mesh_purge::tests::the_keeps_shared_declaration_stands_on_both_gates`（声明与两道闸同在，撤了哪一道这一条就红）、`handlers::tests::health_declares_that_purging_geometry_keeps_what_other_scopes_share`（键名、取值、取值来自声明而不是写死）通过；库单测整套（在隔离工作树里跑的）3121 过，红的 3 条与这次无关（两条是主工作区别人未提交改动里的旧冲突，一条是那棵工作树缺 `vendor\shared`）。
+- **没动**：别的能力格；清几何的行为（上一条）。
+
 ## 2026-11-08
 
 ### 投影删除只有一个入口：锁序、受影响根闭包、退役与作废（ADR-097）

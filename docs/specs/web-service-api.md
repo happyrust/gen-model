@@ -122,6 +122,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
     "mesh_formats": ["mesh", "glb"],
     "mesh_batch_max_keys": 1024,
     "mesh_batch_max_bytes": 33554432,
+    "mesh_purge_keeps_shared": true,
     "room_complete_publication_ack": true,
     "room_rebuild_executor": "memory"
   },
@@ -167,6 +168,12 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   格式与实际路由同源公布。`room_complete_publication_ack=true` 表示 ready 根已包含 process-store
   模型行/房间边/数据库回执的完整确认；`room_rebuild_executor` 在读透形态为 `memory`，摄入形态为
   `durable`。
+  `mesh_purge_keeps_shared`（2026-11-11，GitHub #142）恒为 `true`，不是开关：这个后端清几何时不带走别的根、别的库
+  共用的东西——「重新生成模型」（`force=true`）的先删、带 `purge_meshes` 的清理模型 / 整库清理、存储架构升级清库，都不删
+  标准图元与管身按形状共用的 `inst_geo` 行，也不删还有 `geo_relate` / `tubi_relate` 边指着的 `inst_geo` 行及其 `.mesh`
+  （两道闸见 §4.5.1）。**旧后端没有这个键 = 没修**：在那样的后端上做上面任何一件事，会把别的根、别的库挂在同一行几何上的
+  `geo_relate` / `tubi_relate` 行一起删掉，而且不报错（冷读、重启之后那些支管没有管身）。客户端在发强制重新生成、
+  带 `purge_meshes` 的清理之前应当先看这一格，没有就先警告。
 - `dabacon_tags`：启动时对项目目录全部主数据库做的一次只读聚合。`latest` 按数据库
   统计最新 session tag，`history` 汇总全部保留 session；`issues` 最多 20 条，
   `issues_truncated` 说明其余数量。启动先登记 pending，实际文件扫描放进后台，
@@ -558,10 +565,16 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   产物行删完之后，连这片范围引用过的内容寻址几何一起清：库里的 `inst_geo` 行（摄入形态）与盘上的 `.mesh`
   （三种形态）——这一档此前承诺的「不删 `inst_geo`、不删磁盘 `.mesh`」只对不勾这一格的调用成立。收键 /
   删行 / 删几何的先后都在 `AiosDBManager::clear_model_scope` 里（HTTP 层只传开关）：键集在删行之前收
-  （`inst_relate` 的 `booled_id` 与 `insts_flat.geo_hash`，摄入形态另收库上那一份；`tubi_relate.out` 的管身单位圆柱按段数全项目共用、重生成写回的还是同一个键，**不收不删**），
+  （`inst_relate` 的 `booled_id` 与 `insts_flat.geo_hash`，摄入形态另收库上那一份；`tubi_relate.out` 的管身单位圆柱按段数全项目共用、重生成写回的还是同一个键，**不收不删**；
+  **标准图元（BOX / CYLI 一类）的键同理不收不删**——全库的 BOX 共用一行 `inst_geo`，圆柱用的就是管身那一套键；投影里只收烘焙实体的记录，
+  库上模型面写的、带 `out` 的 `inst_relate` 行不交出 `geo_hash`，2026-11-11，GitHub #142），
   收不动整趟中止、一行不删（错误按 §4.5 的分型：库查询失败 `503`、其余 `500`）；几何在行之后删。
   网格是内容寻址的，同一个键可能被范围外的模型复用，**不做跨范围引用计数**（2026-10-22 定）：别处还在
-  用的那份随这次没了，等那片范围自己重新生成时写回；这片范围重生成后还在用的行与文件由生成写回。
+  用的那份随这次没了，等那片范围自己重新生成时写回；这片范围重生成后还在用的行与文件由生成写回。这句话说的是烘焙网格
+  （一件一份的成品网格，库上没有 `inst_geo` 行）。**库上还有 `geo_relate` / `tubi_relate` 边指着的 `inst_geo` 行不删，它的 `.mesh` 也留着**
+  （2026-11-11，GitHub #142）：这两张表是 `out` 指着 `inst_geo` 的边，SurrealDB 删节点会把它身上的边一起删掉——删了就是把别的根、
+  别的库的 `geo_relate` / `tubi_relate` 行一起删了，而且不报错。留下的键只进日志（「别处还在用留下 N 个」），不进回执。
+  带着这两道闸的后端在 `/health` 的 `capabilities` 里声明 `mesh_purge_keeps_shared=true`（§4.1）；没有这一格的旧后端仍会连带删。
   **单位几何 `1` / `2` / `3`（`BOXI_GEO_HASH` / `TUBI_GEO_HASH` / 单位球）永不删**：全项目所有管段共用，而且没有
   生成路径会把文件写回来。回执多四格 `mesh_files_removed` / `mesh_files_absent`（本来就不在盘上）/
   `mesh_files_failed`（字符集非法或删除失败，逐条 `log::warn!`）/ `inst_geo_removed`（发出删除的行数，按键数计；
@@ -694,7 +707,8 @@ rebuild、不推进应用/模型水位。
   → 收键（`inst_geo` 不按 Ref0 寻址，行一删掉就再也收不出来；收不动整趟中止、一行不删）→ 按 Ref0 区间删行
   → 删几何（反过来会先把模型还要用的几何删掉、而产物还在）。范围是整个库，比子树那一档更容易撞上共享网格
   （同一个内容寻址键被别的库复用），不做跨范围引用计数：别的库还在用的那份随这次没了，等它自己重生成时写回。
-  单位几何 `1` / `2` / `3` 与管身单位圆柱（`tubi_relate.out`）永不删。回执多四格 `mesh_files_removed` / `mesh_files_absent` /
+  单位几何 `1` / `2` / `3`、管身单位圆柱（`tubi_relate.out`）与标准图元的键永不删；别的库还有边指着的 `inst_geo` 行连同它的 `.mesh` 也不删
+  （§4.5.1，2026-11-11）。回执多四格 `mesh_files_removed` / `mesh_files_absent` /
   `mesh_files_failed` / `inst_geo_removed`，口径同 §4.5.1；不勾时这四格不出现。
 - 成功 `200`：
 
