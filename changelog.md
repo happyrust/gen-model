@@ -41,6 +41,15 @@
 - **改**：`wipe_dbnum_rows_on` 在删任何东西之前先发一段——整库模型清理的同一栏 `composite_deletes`（管身行按 `dbnum` 列与按 Ref0 的复合键区间两种圈法，各三句：删盒、删变换、删行；几何边按复合键区间）。必须排在 `pe` 顶点被删之前。`RestartInitializationData`（重启初始化数据，不清模型面）不发这一段；`render_delete_phases` 渲出的三段语句逐字不变。
 - **顺带**：整库删除自己就删得到 `pe` 圈不到的管身行了，#146 在它后面补的那一刀（`model_residue_rows`）只会再数到 `inst_relate`。既有测试 `the_fast_delete_follow_up_clears_model_rows_the_pe_ranges_never_reached` 的两个数跟着改（残留 2 → 1）。规格 `docs/specs/web-service-api.md` 整库快删一节同步。没有在真库上做过一次真的回退重建。
 
+### `rvm-check`：`--projects-dir` 与配置的 `project_path` 不是同一个目录时出声、留痕（GitHub #145）
+
+- **为什么**：`--projects-dir` 读起来像「换一套项目目录来核对」，实际只换了一部分——预检、E3D 导出基准的会话、生成时找被引用的库（`<项目>/<码>000`）用它；枚举根、模型树、根所在的设计库文件由 `DirectTreeService::open(项目名, MDB)` 按配置的 `project_path`（加 `project_search_paths`）找，不看它。两处指向内容不同的两份项目数据时，一次核对里根的设计库来自一份、基准和被引用的库来自另一份，比出来的差异照常判档、照常入库，启动时和结果里都没有提示（2026-11-09 踩过一次：一个根多出 1 件 0.384 mm 的差异，先被当成模型回归查）。
+- **改**：`rvm_check::prepare` 里把显式给的目录与配置的第一顺位搜索根按字面归一后比较（`config::project_dir_mismatch_of`，归一沿用搜索根去重的 `normalize_path_input` + `path_key`：首尾空白与引号、斜杠方向、大小写、末尾分隔符，不碰文件系统），不一致就在 `RunSpec.project_dir_mismatch` 里记下两个目录。批量入口（`batch::run`）开跑之前在 stderr 告警一次，子进程不重复；`summary.json` 多一格 `project_dir_mismatch`、`summary.txt` 表前多一句、每根的 `run.json` 多同一格、入库的 `rvm_check_run` 行多同一格。页面单节点核对走同一段准备：预检的 `notes`、报告的 `warnings`（不管停在哪一步）里是同一句，入库的运行行带同一格。`--projects-dir` 的帮助文本与指南 `docs/guides/rvm-check-batch.md` 写清它管什么、不管什么。
+- **不拒绝运行**：只比字面，同一份数据的两种写法（一边网络路径、一边本地路径，联接与它的目标）也会被当成不一致；拒绝会误伤这种部署。给的目录是配置里排在后面的搜索根时告警里多说一句（项目若正是在那个根下找到的，两边读的是同一份）。
+- **一致或没给时**：不出声，上面几处都没有这一格——`summary.json` / `run.json` / 入库的行与改动前逐字段相同。
+- **验证**：`config::…::an_explicit_projects_dir_is_compared_literally_with_the_configured_project_path`（不一致告警、同一目录的不同写法不告警、没给不比、留痕的形状）、`batch::…::a_batch_run_with_mismatched_project_dirs_leaves_a_trace_in_every_product`、`store::…::a_run_row_carries_the_project_dir_mismatch_only_when_there_is_one`、`rvm_check::…::a_projects_dir_other_than_the_configured_one_rides_the_spec_into_the_stored_run`。没有真跑一次不一致的批量。
+- **没动**：让 `--projects-dir` 真正进到根枚举（要扩 `MdbReadProvider` 与闭包缓存的键，或另加指定配置文件的参数），票面列为要维护者先定的事；`--project-name` / `--mdb` 那一族同类的不一致（票面第 8 条）。
+
 ## 2026-11-11
 
 ### 清几何不再删别的范围还挂着的共用几何行（GitHub #142，查 #76 时查出）

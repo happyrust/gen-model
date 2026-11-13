@@ -421,6 +421,11 @@ pub struct RootRecord {
     /// 构件级结果，只给入库用（落 `rvm_check_element`）；交给入库线程之后就放掉，不进 `run.json`。
     #[serde(skip)]
     pub elements: Option<Vec<super::element::ElementCheck>>,
+    /// 跑这个作业的那一次，`--projects-dir` 与配置的 `project_path` 不是同一个目录（GitHub #145）：两个目录各是什么。
+    /// 这种运行比出来的差异可能不是模型造成的。一致时没有这一格，`run.json` 与改动前逐字节相同；续跑读回来的
+    /// 记录带的是它当时那一次的，不是这一次的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir_mismatch: Option<super::ProjectDirMismatch>,
 }
 
 /// 一个作业是哪种比对单元。
@@ -958,6 +963,12 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
     check_modes(opts)?;
     let need_e3d = !opts.list_units && opts.stage.exports() && opts.baseline_dir.is_none();
     let spec = prepare_connection(&opts.connection, need_e3d).map_err(anyhow::Error::msg)?;
+    // `--projects-dir` 与配置的 `project_path` 不是同一个目录（GitHub #145）：整批开跑之前说一次。不拒绝——
+    // 同一份数据有两种合法写法的部署字面上也不一样；留痕在每根的 `run.json`、`summary.json` 与入库的运行行里。
+    // 子进程（[`run_child`]）也走同一段准备，不重复打。
+    if let Some(mismatch) = &spec.project_dir_mismatch {
+        eprintln!("{}", mismatch.warning());
+    }
     if need_e3d {
         ensure!(
             spec.tools.launcher_found,
@@ -1308,6 +1319,8 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                         record.message = format!("处理根时 panic：{}", super::panic_text(&*panic));
                         record
                     });
+                    // 这一次是不是在两处目录不一致的情形下跑的，随每根的记录走（`run.json`、入库的运行行）。
+                    record.project_dir_mismatch = spec.project_dir_mismatch.clone();
                     // 内存分项统一在这里拼：产物都已落盘，字节数才是这一轮的真实值。
                     record.memory = Some(MemoryBreakdown::collect(&record));
                     if let Err(error) = write_json(&job.dir.join("run.json"), &record) {
@@ -1341,6 +1354,7 @@ pub fn run(opts: &BatchOptions) -> Result<BatchOutcome> {
                 let mut record = RootRecord::new(&jobs[index]);
                 record.status = status::COMPARE_FAILED.to_string();
                 record.message = "没有跑到这个根".to_string();
+                record.project_dir_mismatch = spec.project_dir_mismatch.clone();
                 if let Some(store) = &store {
                     store.submit(record.run_facts(&batch_id, &spec));
                 }
@@ -1587,6 +1601,7 @@ impl RootRecord {
             scope: None,
             element_checks: None,
             elements: None,
+            project_dir_mismatch: None,
         }
     }
 
@@ -1731,6 +1746,8 @@ impl RootRecord {
             finished_at,
             // 构件级结果不在这里抄一份：调用方用 [`Self::take_element_facts`] 整份搬过去。
             elements: None,
+            // 取记录自己的，不取 `spec` 的：续跑补入库的记录说的是它当时那一次。
+            project_dir_mismatch: self.project_dir_mismatch.clone(),
         }
     }
 
@@ -2648,6 +2665,10 @@ struct Summary {
     gen_seconds: f64,
     export_seconds: f64,
     compare_seconds: f64,
+    /// 这一批的 `--projects-dir` 与配置的 `project_path` 不是同一个目录（GitHub #145）：两个目录各是什么。
+    /// 一致时没有这一格，`summary.json` 与改动前逐字节相同。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_dir_mismatch: Option<super::ProjectDirMismatch>,
     dbs: Vec<DbSummary>,
     roots: Vec<RootRecord>,
 }
@@ -2734,6 +2755,7 @@ impl Summary {
             gen_seconds: total_seconds(gen_seconds),
             export_seconds: total_seconds(export_seconds),
             compare_seconds: total_seconds(compare_seconds),
+            project_dir_mismatch: spec.project_dir_mismatch.clone(),
             dbs: dbs.into_values().collect(),
             roots,
         }
@@ -2741,6 +2763,11 @@ impl Summary {
 
     fn table(&self) -> String {
         let mut out = String::new();
+        // 两处目录不一致的那句话排在表前面：只看 `summary.txt` 的人也要先看到它。
+        if let Some(mismatch) = &self.project_dir_mismatch {
+            out.push_str(&mismatch.warning());
+            out.push_str("\n\n");
+        }
         out.push_str(&format!(
             "{:<8} {:<16} {:<6} {:<14} {:>7} {:>7} {:>6} {:>7} {:>7} {:>5} {:>8} {:>8} {:>8} {:>8} {:>8}\n",
             "tag", "ref", "noun", "status", "both", "exact", "off", "only_b", "only_g", "kdiff",
@@ -2979,7 +3006,77 @@ mod tests {
             e3d_mdb: "/ALL".to_string(),
             refno: String::new(),
             tools: super::super::resolve_tools(),
+            project_dir_mismatch: None,
         }
+    }
+
+    /// GitHub #145：`--projects-dir` 与配置的 `project_path` 不是同一个目录的那一批，从产物里看得出来——
+    /// `summary.json` 一格、`summary.txt` 表前一句、每根的 `run.json` 一格、入库的运行行一格；一致的那一批这几处
+    /// 都没有这一格（产物与改动前逐字节相同）。续跑读回来的记录带的是它自己那一次的。
+    #[test]
+    fn a_batch_run_with_mismatched_project_dirs_leaves_a_trace_in_every_product() {
+        let mut record = RootRecord::new(&root_job(7999, "1/2"));
+        record.status = status::PASS.to_string();
+
+        // 一致：哪儿都没有这一格。
+        let consistent = run_spec();
+        let summary = Summary::build(
+            &options(),
+            &consistent,
+            &[7999],
+            "test",
+            "b/t",
+            vec![record.clone()],
+        );
+        let value = serde_json::to_value(&summary).unwrap();
+        assert!(value.get("project_dir_mismatch").is_none(), "{value}");
+        assert!(value["roots"][0].get("project_dir_mismatch").is_none());
+        assert!(!summary.table().contains("--projects-dir"));
+        assert_eq!(
+            record.run_facts("b/t", &consistent).project_dir_mismatch,
+            None
+        );
+
+        // 不一致：工人在写 `run.json` 之前把这一笔盖到记录上（这里照做一遍），汇总从 spec 取。
+        let mismatch = super::super::ProjectDirMismatch {
+            projects_dir: r"E:\old-copy\Projects".to_string(),
+            configured_roots: vec![r"D:\AVEVA\Projects".to_string()],
+        };
+        let mismatched = RunSpec {
+            project_dir_mismatch: Some(mismatch.clone()),
+            ..run_spec()
+        };
+        record.project_dir_mismatch = mismatched.project_dir_mismatch.clone();
+        let expected = serde_json::json!({
+            "projects_dir": r"E:\old-copy\Projects",
+            "configured_roots": [r"D:\AVEVA\Projects"],
+        });
+        let run_json = serde_json::to_value(&record).unwrap();
+        assert_eq!(run_json["project_dir_mismatch"], expected);
+        let summary = Summary::build(
+            &options(),
+            &mismatched,
+            &[7999],
+            "test",
+            "b/t",
+            vec![record.clone()],
+        );
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["project_dir_mismatch"], expected);
+        assert_eq!(value["roots"][0]["project_dir_mismatch"], expected);
+        let table = summary.table();
+        assert!(
+            table.starts_with("警告：")
+                && table.contains(r"E:\old-copy\Projects")
+                && table.contains(r"D:\AVEVA\Projects"),
+            "{table}"
+        );
+
+        // `run.json` 读回来还在；入库的事实取记录自己的——这次的 spec 是一致的也不改写它。
+        let read_back: RootRecord = serde_json::from_value(run_json).unwrap();
+        assert_eq!(read_back.project_dir_mismatch, Some(mismatch.clone()));
+        let facts = read_back.run_facts("b/t", &consistent);
+        assert_eq!(facts.project_dir_mismatch, Some(mismatch));
     }
 
     #[test]

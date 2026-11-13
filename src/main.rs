@@ -262,6 +262,14 @@ struct RvmCheckArgs {
     #[arg(long, value_name = "DIR")]
     install_dir: Option<PathBuf>,
     /// 项目父目录（缺省 DbOption.toml 的 project_path）。
+    ///
+    /// **它只管一部分**：预检的路径检查、项目的 evars 文件、E3D 导出基准的会话，以及生成时按库号找被引用的库
+    /// （`<项目>/<码>000`）。枚举根（WORLD 下的 SITE / APPLDW）、模型树、根所在的设计库文件由配置的
+    /// `project_path`（加 `project_search_paths`）决定，**不看这个参数**。
+    ///
+    /// 给的目录与配置的 `project_path` 不是同一个目录时（只比字面：斜杠方向、大小写、末尾分隔符不算差别），
+    /// 启动时在 stderr 告警，`summary.json` / `summary.txt` / 每根的 `run.json` 与入库的运行行里记下两个目录。
+    /// 两处若是内容不同的两份项目数据，根的设计库来自一份、基准和被引用的库来自另一份，比出来的差异不可信。
     #[arg(long, value_name = "DIR")]
     projects_dir: Option<String>,
     /// 项目目录名（缺省 DbOption.toml 的 project_name）。

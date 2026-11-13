@@ -46,11 +46,38 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | `--min-commit-free-gb` | 可提交内存余量低于此值就杀生成子进程（缺省 1.5） |
 | `--gen-timeout-secs` / `--e3d-timeout-secs` | 单根生成 / 单次 E3D 会话超时（缺省 1200 / 3600） |
 | `--install-dir` | `des.exe` 所在目录，要能跑 `-tty`（默认的 e3d31-runtime 在 TTY 下会崩） |
-| `--projects-dir` / `--project-name` / `--e3d-project` / `--mdb` | 缺省取 `DbOption.toml`（`project_path` / `project_name` / 目录扫出的项目码 / `mdb_name`） |
+| `--projects-dir` | 项目父目录，缺省取 `DbOption.toml` 的 `project_path`。**只管一部分**，见下面「`--projects-dir` 管什么、不管什么」 |
+| `--project-name` / `--e3d-project` / `--mdb` | 缺省取 `DbOption.toml`（`project_name` / 目录扫出的项目码 / `mdb_name`） |
 | `--username` / `--password` | E3D 账号；密码不给时读 `RVM_CHECK_PASSWORD`。只进登录串，不进任何落盘文件 |
 
 启动脚本按 `DbOption.toml` 的 `[rvm_check] e3d_launcher` 找，缺省是可执行文件同目录或当前目录下的
 `scripts/e3d/run_ams_c_entrymacro.bat`。
+
+### `--projects-dir` 管什么、不管什么
+
+它读起来像「换一套项目目录来核对」，实际只换了一部分（GitHub #145）：
+
+| 用在哪 | 目录从哪来 |
+|---|---|
+| 枚举根（WORLD 下的 SITE / APPLDW）、模型树、根所在的设计库文件 | 配置的 `project_path`（加 `project_search_paths`）。**不看 `--projects-dir`** |
+| 预检的路径检查、项目的 evars 文件 | `--projects-dir` |
+| E3D 导出基准的会话 | `--projects-dir` |
+| 生成时按库号找被引用的库（目录库等） | `--projects-dir` 下的 `<项目名>/<码>000`；这个目录存在就用它，不存在才退回根的库文件所在目录 |
+
+两处指向同一份数据时没有问题。指向内容不同的两份时（比如一份是较早的项目副本），一次核对里根的设计库来自一份、
+基准和被引用的库来自另一份，比出来的差异照常判档、照常入库，与真的模型差异分不开。所以：
+
+- **不一致时启动就告警**（stderr 一条，整批只打一次）：给的目录与配置的 `project_path` 不是同一个目录时，写出两个目录
+  各是什么、各管哪一段。只比字面——斜杠方向、大小写、末尾分隔符、首尾引号不算差别——不碰文件系统，所以同一份数据的
+  两种写法（一边网络路径、一边本地路径，或联接与它的目标）也会告警；**告警不拒绝**就是为这种部署留的余地。
+  给的目录是配置里排在后面的搜索根时，告警里会多说一句：项目若正是在那个根下找到的，两边读的是同一份。
+- **产物里留痕**：`summary.json` 多一格 `project_dir_mismatch`（`{ "projects_dir": …, "configured_roots": [project_path, 其余搜索根…] }`），
+  `summary.txt` 表前多一句同样的告警，每根的 `run.json` 多同一格，入库的 `rvm_check_run` 行多同一格。
+  续跑（`--resume`）跳过的根，`run.json` 里记的是它当时那一次的。
+- **一致，或没给 `--projects-dir`**：不出声，这几处都没有这一格，产物与以前逐字节相同。
+
+要换一套项目数据来核对，改配置的 `project_path`（或用另一份 `DbOption.toml`），不要只换 `--projects-dir`。
+页面上的单节点核对走同一段准备代码：预检的 `notes` 与报告的 `warnings` 里是同一句，入库的运行行带同一格。
 
 ## 根的终态
 
@@ -65,6 +92,8 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 跑完的那些已经在库里。`--resume` 续跑时，跳过的根 / 单元里库里还没有的会补进去（上次加了 `--no-store`、
 当时库连不上、或中途断了），已经在库里的不动。`--no-store` 关掉；库连不上或 `store_mode` 为 mem
 时告警后照跑，产物目录里的 JSON 仍是完整的一份。表是 SCHEMALESS 的，首次用到时建表建索引。
+两处项目目录不一致的运行（上面「`--projects-dir` 管什么、不管什么」），`rvm_check_run` 那一行多一格
+`project_dir_mismatch`；一致的运行、加这一格之前写进来的行没有它。
 
 前两张表到单元为止；第三张 `rvm_check_element` 到构件：一个带几何的构件一行，**通过的也有**，记录 id
 由 refno 得出（见下面「构件级结果」）。

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::data_interface::project_paths::{normalize_path_input, path_key};
 use crate::options::RvmCheckSection;
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,105 @@ pub struct ToolSearch {
     pub configured: RvmCheckSection,
     pub exe_dir: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
+}
+
+/// 显式给的项目父目录（命令行 `--projects-dir` / 页面「项目父目录」）与配置的 `project_path` 不是同一个目录时的
+/// 那一笔（GitHub #145）。
+///
+/// 两边管的不是一回事，一次核对里各管一段：
+/// - **配置的搜索根**（`project_path` 在前，后面是 `project_search_paths`）：枚举根（WORLD 下的 SITE / APPLDW）、
+///   模型树、根所在的设计库文件。这一段**不看**显式给的目录——模型树由 `DirectTreeService::open(项目名, MDB)` 开，
+///   往下读的是全局配置。
+/// - **显式给的目录**：预检的路径检查、项目的 evars 文件、E3D 导出基准的会话、生成时按库号找被引用的库
+///   （`<项目>/<码>000`，目录库等）。
+///
+/// 两处指向同一份数据时没有问题。指向内容不同的两份时（比如一份是较早的项目副本），根的设计库来自一份、基准和
+/// 被引用的库来自另一份，比出来的差异照常判档、照常入库，与真的模型差异分不开（2026-11-09 踩过一次：一个根多出
+/// 1 件 0.384 mm 的差异，先被当成模型回归查）。所以不一致时要出声、要留痕；不拒绝运行——同一份数据有两种合法写法的
+/// 部署（一边网络路径、一边本地路径）字面上也不一样。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectDirMismatch {
+    /// 显式给的目录（修掉首尾空白与引号、斜杠方向，别的原样）。
+    pub projects_dir: String,
+    /// 配置的搜索根，按优先级：`project_path` 在前，后面是 `project_search_paths`。
+    pub configured_roots: Vec<String>,
+}
+
+impl ProjectDirMismatch {
+    /// 显式给的目录字面上是不是配置里排在后面的搜索根之一。是的话，项目若正是在那个根下找到的，两边读的其实是
+    /// 同一份——这里不碰文件系统，判不了，只在告警里说一句。
+    pub fn names_a_later_root(&self) -> bool {
+        let given = path_key(Path::new(&self.projects_dir));
+        self.configured_roots
+            .iter()
+            .skip(1)
+            .any(|root| path_key(Path::new(root)) == given)
+    }
+
+    /// 给人看的那一句：两个目录各是什么、各管哪一段、该怎么办。批量打到 stderr、写进 `summary.txt`；
+    /// 页面进预检的 `notes` 与报告的 `warnings`。
+    pub fn warning(&self) -> String {
+        let configured = self
+            .configured_roots
+            .first()
+            .map(String::as_str)
+            .unwrap_or("（未配置）");
+        let later = if self.configured_roots.len() > 1 {
+            format!(
+                "（其后的搜索根：{}）",
+                self.configured_roots[1..].join("、")
+            )
+        } else {
+            String::new()
+        };
+        let maybe_same = if self.names_a_later_root() {
+            "（这个目录是配置里排在后面的搜索根之一：项目若正是在它下面找到的，两边读的是同一份，这一条可以不理。）"
+        } else {
+            ""
+        };
+        format!(
+            "警告：项目父目录（--projects-dir）{} 与配置的 project_path {}{later} 不是同一个目录。\
+             这次核对里两边各管一段：枚举根、模型树、根所在的设计库文件按配置找，不看 --projects-dir；\
+             预检、E3D 导出基准的会话、生成时找被引用的库（<项目>/<码>000）用 --projects-dir。\
+             两处若是内容不同的两份项目数据，比出来的差异里会混进不是模型造成的那一种，而且与真的模型差异分不开\
+             ——让两边指向同一份再跑（去掉 --projects-dir，或把配置的 project_path 改成这个目录）。{maybe_same}",
+            self.projects_dir, configured
+        )
+    }
+}
+
+/// 显式给的项目父目录与配置的第一顺位搜索根（`project_path`）字面上是不是同一处；不是就给出那一笔。
+///
+/// 只在**显式给了**的时候比：没给时用的就是配置的值，不存在「不一致」。归一规则与搜索根去重同一套
+/// （[`normalize_path_input`] + [`path_key`]：首尾空白与引号、斜杠方向、大小写、末尾分隔符），**只看字面、不碰
+/// 文件系统**——根可能是掉线的 UNC，`canonicalize` 会在调用方线程上等一个 OS 超时（`mdb_closure::collect_search_roots`
+/// 的说明）。代价是联接、8.3 短名、网络路径与本地路径这类「字面不同、实为一处」的写法会被当成不一致：告警不拒绝，
+/// 就是为它们留的余地。配置里一个搜索根都没有时无从比较，不出声。
+pub fn project_dir_mismatch_of(
+    given: &str,
+    configured_roots: &[PathBuf],
+) -> Option<ProjectDirMismatch> {
+    if given.trim().trim_matches('"').is_empty() {
+        return None;
+    }
+    let given = normalize_path_input(given);
+    let first = configured_roots.first()?;
+    if path_key(&given) == path_key(first) {
+        return None;
+    }
+    Some(ProjectDirMismatch {
+        projects_dir: given.display().to_string(),
+        configured_roots: configured_roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect(),
+    })
+}
+
+/// 配置的搜索根（`mdb_closure::search_roots`：`[project_path] ++ project_search_paths`，字面去重、保持先后）。
+/// 只读配置，不碰文件系统。
+pub fn configured_search_roots() -> Vec<PathBuf> {
+    crate::data_interface::mdb_closure::search_roots(&aios_core::get_db_option())
 }
 
 pub fn resolve_tools() -> ResolvedTools {
@@ -191,6 +291,74 @@ mod tests {
         assert!(resolved.launcher_found);
         assert_eq!(resolved.timeout, Duration::from_secs(1200));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GitHub #145：显式给的项目父目录与配置的 `project_path` 不是同一处才出声；同一目录的不同写法
+    /// （斜杠方向、大小写、末尾分隔符、引号）不算；没给不比；配置里没有搜索根无从比。
+    #[test]
+    fn an_explicit_projects_dir_is_compared_literally_with_the_configured_project_path() {
+        let roots = [
+            PathBuf::from(r"D:\AVEVA\Projects"),
+            PathBuf::from(r"\\files\share\projects"),
+        ];
+        // 没给：用的就是配置的值。
+        assert_eq!(project_dir_mismatch_of("", &roots), None);
+        assert_eq!(project_dir_mismatch_of("  \"\"  ", &roots), None);
+        // 同一目录的不同写法。
+        let same_spellings: &[&str] = if cfg!(windows) {
+            &[
+                r"D:\AVEVA\Projects",
+                r"D:\AVEVA\Projects\",
+                "D:/AVEVA/Projects/",
+                r"d:\aveva\projects",
+                "  \"D:\\AVEVA\\Projects\"  ",
+            ]
+        } else {
+            &[r"D:\AVEVA\Projects", "  \"D:\\AVEVA\\Projects\"  "]
+        };
+        for same in same_spellings {
+            assert_eq!(
+                project_dir_mismatch_of(same, &roots),
+                None,
+                "同一目录的另一种写法不该算不一致: {same}"
+            );
+        }
+        // 另一个目录：给出两边各是什么。
+        let other = project_dir_mismatch_of(r"E:\old-copy\Projects", &roots).expect("不一致");
+        assert_eq!(other.projects_dir, r"E:\old-copy\Projects");
+        assert_eq!(
+            other.configured_roots,
+            vec![
+                r"D:\AVEVA\Projects".to_string(),
+                r"\\files\share\projects".to_string()
+            ]
+        );
+        assert!(!other.names_a_later_root());
+        let warning = other.warning();
+        assert!(
+            warning.starts_with("警告：")
+                && warning.contains(r"E:\old-copy\Projects")
+                && warning.contains(r"D:\AVEVA\Projects")
+                && warning.contains(r"\\files\share\projects")
+                && warning.contains("枚举根、模型树、根所在的设计库文件按配置找")
+                && warning.contains("E3D 导出基准的会话")
+                && !warning.contains("可以不理"),
+            "{warning}"
+        );
+        // 给的是配置里排在后面的搜索根：照样算不一致（项目从哪个根读到的这里判不了），告警里多说一句。
+        let later = project_dir_mismatch_of(r"\\files\share\projects", &roots).expect("不一致");
+        assert!(later.names_a_later_root());
+        assert!(later.warning().contains("可以不理"), "{}", later.warning());
+        // 配置里一个搜索根都没有：无从比较。
+        assert_eq!(project_dir_mismatch_of(r"E:\old-copy\Projects", &[]), None);
+        // 留痕的形状：两格，原样的路径。
+        assert_eq!(
+            serde_json::to_value(&other).unwrap(),
+            serde_json::json!({
+                "projects_dir": r"E:\old-copy\Projects",
+                "configured_roots": [r"D:\AVEVA\Projects", r"\\files\share\projects"],
+            })
+        );
     }
 
     #[test]

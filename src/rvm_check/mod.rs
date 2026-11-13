@@ -30,7 +30,9 @@ mod export_macro;
 pub mod report;
 pub mod store;
 
-pub use config::{ProjectDefaults, ResolvedTools, project_defaults, resolve_tools};
+pub use config::{
+    ProjectDefaults, ProjectDirMismatch, ResolvedTools, project_defaults, resolve_tools,
+};
 pub use report::{
     Judgement, RvmCheckReport, RvmCounts, RvmMismatch, RvmTimingsMs, RvmVerdict, failed_report,
     judge_compare, judge_report, judge_report_full, verdict_message,
@@ -79,6 +81,9 @@ pub struct RunSpec {
     pub e3d_mdb: String,
     pub refno: String,
     pub tools: ResolvedTools,
+    /// 显式给的项目父目录与配置的 `project_path` 不是同一个目录时的那一笔（GitHub #145）；一致或没给为 `None`。
+    /// [`prepare`] 里算好，批量与页面各自拿它告警、留痕。
+    pub project_dir_mismatch: Option<ProjectDirMismatch>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -183,6 +188,10 @@ fn prepare(input: &RunInput, require_refno: bool) -> Result<RunSpec, String> {
         String::new()
     };
     let project_dir = projects_dir.join(&project_name);
+    // 显式给的项目父目录只换掉预检、E3D 会话、找被引用库这一段；枚举根与模型树照旧按配置找（GitHub #145）。
+    // 两边不是同一个目录就记下来——这里不出声：批量的子进程也走这一段，告警由批量入口打一次，页面走报告。
+    let project_dir_mismatch =
+        config::project_dir_mismatch_of(&input.projects_dir, &config::configured_search_roots());
     Ok(RunSpec {
         install_dir,
         project_evar: project_dir.join(format!("evars{project_name}.bat")),
@@ -195,6 +204,7 @@ fn prepare(input: &RunInput, require_refno: bool) -> Result<RunSpec, String> {
         e3d_mdb,
         refno,
         tools: resolve_tools(),
+        project_dir_mismatch,
     })
 }
 
@@ -220,6 +230,10 @@ pub fn preflight(spec: &RunSpec, try_login: bool) -> PreflightReport {
     ];
     if !running_des.is_empty() {
         notes.push(format!("当前正在运行：{}", running_des.join("，")));
+    }
+    // 页面在预检这一步就看得到（GitHub #145）；不让预检失败——同一份数据有两种合法写法的部署字面上也不一样。
+    if let Some(mismatch) = &spec.project_dir_mismatch {
+        notes.push(mismatch.warning());
     }
 
     let mut login_ok = None;
@@ -345,6 +359,7 @@ impl ExecuteOutcome {
             started_at,
             finished_at: chrono::Local::now(),
             elements: self.elements.clone(),
+            project_dir_mismatch: spec.project_dir_mismatch.clone(),
         }
     }
 }
@@ -420,7 +435,23 @@ fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Op
 }
 
 /// 整段比对。调用方放在 `spawn_blocking` 里。返回的报告已经是终态。
+///
+/// 项目父目录与配置的 `project_path` 不一致时（GitHub #145），不管停在哪一步，报告的 `warnings` 里都带上那一句：
+/// 这种运行比出来的差异可能不是模型造成的，看报告的人要先知道。
 pub fn execute(
+    tree: &DirectTreeService,
+    tasks: &TaskRegistry,
+    task_id: &str,
+    spec: &RunSpec,
+) -> ExecuteOutcome {
+    let mut outcome = execute_steps(tree, tasks, task_id, spec);
+    if let Some(mismatch) = &spec.project_dir_mismatch {
+        outcome.report.warnings.push(mismatch.warning());
+    }
+    outcome
+}
+
+fn execute_steps(
     tree: &DirectTreeService,
     tasks: &TaskRegistry,
     task_id: &str,
@@ -1403,6 +1434,91 @@ mod tests {
         let spec = prepare_connection(&input(), true).unwrap();
         assert_eq!(spec.password, "secret-value");
         assert_eq!(spec.install_dir, PathBuf::from(r"E:\e3d\install"));
+    }
+
+    /// GitHub #145：显式给的项目父目录与配置的 `project_path` 不是同一个目录，准备好的参数里带着这一笔——批量的
+    /// 子进程走的那一支也带着（它不告警，只随记录走），入库的事实里也有；没给、或给的就是配置的那个目录，没有。
+    /// 比较本身（同一目录的不同写法、排在后面的搜索根、留痕的形状）钉在 `config` 的单测里；这里钉的是接线。
+    #[test]
+    fn a_projects_dir_other_than_the_configured_one_rides_the_spec_into_the_stored_run() {
+        let roots = config::configured_search_roots();
+        let Some(configured) = roots.first() else {
+            // 这台机器的配置里一个搜索根都没有：无从比较。
+            assert_eq!(
+                prepare_preflight(&input()).unwrap().project_dir_mismatch,
+                None
+            );
+            return;
+        };
+        let mut given = input();
+        given.projects_dir = String::new();
+        assert_eq!(
+            prepare_preflight(&given).unwrap().project_dir_mismatch,
+            None,
+            "没给：用的就是配置的值"
+        );
+        given.projects_dir = format!("  {}  ", configured.display());
+        assert_eq!(
+            prepare_preflight(&given).unwrap().project_dir_mismatch,
+            None,
+            "给的就是配置的那个目录"
+        );
+
+        let other = std::env::temp_dir().join("rvm-check-145-another-projects-dir");
+        given.projects_dir = other.display().to_string();
+        let spec = prepare_preflight(&given).unwrap();
+        let mismatch = spec.project_dir_mismatch.clone().expect("不一致");
+        assert_eq!(mismatch.projects_dir, other.display().to_string());
+        assert_eq!(
+            mismatch.configured_roots,
+            roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prepare_connection(&given, false)
+                .unwrap()
+                .project_dir_mismatch,
+            Some(mismatch.clone())
+        );
+
+        let outcome = ExecuteOutcome::failed(
+            failed_report(STAGE_RESOLVE, "24381/1", "x", Default::default()),
+            other,
+        );
+        assert_eq!(
+            outcome
+                .run_facts("rvm-check-t", "P", &spec, None)
+                .project_dir_mismatch,
+            Some(mismatch)
+        );
+
+        // 页面的两处出口：预检的说明、报告的告警（不管停在哪一步）。两处都要起进程 / 开模型树，按源码钉。
+        let source = include_str!("mod.rs");
+        let preflight_body = source
+            .split_once("pub fn preflight(")
+            .expect("preflight")
+            .1
+            .split_once("fn try_login_now(")
+            .expect("try_login_now follows")
+            .0;
+        assert!(
+            preflight_body.contains("notes.push(mismatch.warning());"),
+            "预检的说明里要有这一句"
+        );
+        let execute_body = source
+            .split_once("pub fn execute(")
+            .expect("execute")
+            .1
+            .split_once("fn execute_steps(")
+            .expect("execute_steps follows")
+            .0;
+        assert!(
+            execute_body.contains("execute_steps(tree, tasks, task_id, spec)")
+                && execute_body.contains("outcome.report.warnings.push(mismatch.warning());"),
+            "报告的告警加在所有出口之外：{execute_body}"
+        );
     }
 
     #[test]

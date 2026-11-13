@@ -192,6 +192,11 @@ pub struct RunRow {
     pub started_at: Option<String>,
     pub finished_at: String,
     pub finished_unix_ms: i64,
+    /// 这次运行的项目父目录与配置的 `project_path` 不是同一个目录（GitHub #145）：两个目录各是什么。
+    /// 这种运行比出来的差异可能不是模型造成的。一致的运行、加这一格之前写进来的行没有它——一致时不落这一格，
+    /// 行与改动前逐字段相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir_mismatch: Option<super::ProjectDirMismatch>,
 }
 
 /// `rvm_check_mismatch` 的一行。
@@ -353,6 +358,8 @@ pub struct RunFacts {
     /// 构件级结果（落 `rvm_check_element`）。比对没出结果（某一步没跑完）、或作业目录里没有那份结果
     /// （加这张表之前的老产物）时为 `None`：不写、也不清那张表。
     pub elements: Option<ElementFacts>,
+    /// 项目父目录与配置的 `project_path` 不一致时的那一笔（[`RunRow::project_dir_mismatch`]）。
+    pub project_dir_mismatch: Option<super::ProjectDirMismatch>,
 }
 
 pub const SOURCE_PAGE: &str = "page";
@@ -644,6 +651,7 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
         started_at: facts.started_at.clone(),
         finished_at,
         finished_unix_ms,
+        project_dir_mismatch: facts.project_dir_mismatch.clone(),
     };
     (run, rows)
 }
@@ -2135,7 +2143,43 @@ mod tests {
             started_at: None,
             finished_at: chrono::Local::now(),
             elements: None,
+            project_dir_mismatch: None,
         }
+    }
+
+    /// GitHub #145：项目父目录与配置的 `project_path` 不一致的运行，库里那一行带着两个目录；一致的运行不落这一格
+    /// （行与改动前逐字段相同），加这一格之前写进来的行照样读得回。
+    #[test]
+    fn a_run_row_carries_the_project_dir_mismatch_only_when_there_is_one() {
+        let consistent = facts("r-consistent", "24383/1", "pass", Vec::new());
+        let (row, _) = build_rows(&consistent);
+        assert_eq!(row.project_dir_mismatch, None);
+        let value = serde_json::to_value(&row).unwrap();
+        assert!(
+            value.get("project_dir_mismatch").is_none(),
+            "一致的运行不落这一格: {value}"
+        );
+        // 加这一格之前的行（没有这个键）照样读得回。
+        let old: RunRow = serde_json::from_value(value).unwrap();
+        assert_eq!(old.project_dir_mismatch, None);
+
+        let mismatch = crate::rvm_check::ProjectDirMismatch {
+            projects_dir: r"E:\old-copy\Projects".to_string(),
+            configured_roots: vec![r"D:\AVEVA\Projects".to_string()],
+        };
+        let mut mismatched = facts("r-mismatched", "24383/1", "fail", Vec::new());
+        mismatched.project_dir_mismatch = Some(mismatch.clone());
+        let (row, _) = build_rows(&mismatched);
+        let value = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            value["project_dir_mismatch"],
+            serde_json::json!({
+                "projects_dir": r"E:\old-copy\Projects",
+                "configured_roots": [r"D:\AVEVA\Projects"],
+            })
+        );
+        let back: RunRow = serde_json::from_value(value).unwrap();
+        assert_eq!(back.project_dir_mismatch, Some(mismatch));
     }
 
     #[test]
