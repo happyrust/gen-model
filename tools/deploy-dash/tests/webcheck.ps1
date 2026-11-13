@@ -1,5 +1,6 @@
 # 网页面板接口检查（14 项）：页面、令牌、单服务启停、CORS、老推程序接口的 403。
 # 对着一个 mock 代理跑：deploy-dash-agent.exe --root <Root> --listen 127.0.0.1:<Port> --mock
+# mock 根先用 mock-root.ps1 备好，不带 -UpgradeKey：「没开升级时老的推程序接口 403」那项要升级关着。
 param([int]$Port = 18691, [string]$Root = (Join-Path $PSScriptRoot '..\target\test-run\mock'), [string]$Service = 'rs_server')
 $ErrorActionPreference = 'Stop'
 $base = "http://127.0.0.1:$Port"
