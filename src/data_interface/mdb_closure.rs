@@ -50,6 +50,9 @@ pub struct MdbDeclaration {
     pub access: std::collections::BTreeMap<u32, super::mdb_membership::DbAccess>,
     /// 读 SYS 时该让人看见的事（DBSET 展开问题、跳过的候选）。
     pub problems: Vec<String>,
+    /// CURD 里没能落成成员的声明数（`UnboundDeclaration::undecoded`）。非零 = `databases` 不是 MDB 的
+    /// 全部成员，见 `MdbMembership::declaration_complete`。
+    pub undecoded: usize,
 }
 
 impl MdbDeclaration {
@@ -163,6 +166,7 @@ pub fn reload_declaration(
         databases: read.databases,
         access: read.access,
         problems: read.problems,
+        undecoded: read.undecoded,
     }))
 }
 
@@ -189,6 +193,7 @@ pub fn seed_declaration(project: &str, mdb: &str, entries: &[(Option<&str>, u32,
         databases,
         access: Default::default(),
         problems: Vec::new(),
+        undecoded: 0,
     });
 }
 

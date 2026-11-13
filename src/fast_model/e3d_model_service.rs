@@ -1351,6 +1351,8 @@ struct ProjectDbFile {
 
 type ProjectDbFiles = Arc<HashMap<(String, u32), ProjectDbFile>>;
 type DependencySessions = Arc<std::sync::Mutex<BTreeMap<(u32, u32), u32>>>;
+/// 当前 MDB 的成员库号全集（[`mdb_member_dbnums`]）。`None` = 说不出全集，一律按不知道处理。
+type MdbMemberDbnums = Option<Arc<BTreeSet<u32>>>;
 
 fn project_db_key(project: &str, dbnum: u32) -> (String, u32) {
     (project.trim().to_ascii_lowercase(), dbnum)
@@ -2010,6 +2012,10 @@ pub struct E3dModelService {
     pins: Vec<DbPin>,
     locator: InMemoryCataLocator,
     project_files: ProjectDbFiles,
+    /// 当前 MDB 的成员库号全集，`build_set` 交给 [`E3dDbResolver`] 判断引用是不是指到了 MDB 之外。
+    /// 与 `locator` 分开记：`locator` 只有绑到文件的库，初始化时还会换成冻结的依赖清单，
+    /// 拿它当成员清单会把「是成员但没读到」误判成「不在 MDB 里」。
+    mdb_dbnums: MdbMemberDbnums,
     dependency_sessions: DependencySessions,
     mesh_dir: PathBuf,
     /// Digest of the durable file-generation token for a file update round.
@@ -2033,6 +2039,7 @@ mod initialization_target_tests;
 struct E3dDbResolver {
     locator: InMemoryCataLocator,
     project_files: ProjectDbFiles,
+    mdb_dbnums: MdbMemberDbnums,
     target_dbnum: u32,
     preferred_project: Option<String>,
     template_dir: PathBuf,
@@ -2069,6 +2076,23 @@ impl DbFileResolver for E3dDbResolver {
             db_type: Some(selected.db_type),
             sesno: Some(sesno),
         })
+    }
+
+    /// 判据：**当前 MDB 的成员清单读全了，而这个库号不在里面**（[`mdb_member_dbnums`]）。E3D 用这个 MDB
+    /// 打开时同样读不到它，指过去的引用在 E3D 里是 `Unknown Ref`；e3d-model 据此把那一件记成目录链断、
+    /// 不记失败（e3d-model #45）。
+    ///
+    /// 判断不了的一律答 `false`，引用照旧报「库没注册」：
+    ///
+    /// - 成员清单说不全（`mdb_dbnums` 是 `None`：声明里有没解出来的条目，或者这只 service 不是从 MDB 建的）；
+    /// - 库是成员，只是这边没读到——声明了没绑到文件、库类型认不出、文件打不开、初始化冻结的依赖清单里
+    ///   没有它。都是部署 / 配置问题，不能悄悄少画；
+    /// - 定位器认得的库号——给得出文件就谈不上读不到。
+    fn outside_mdb(&self, dbno: u32) -> bool {
+        self.mdb_dbnums
+            .as_ref()
+            .is_some_and(|members| !members.contains(&dbno))
+            && !self.locator.contains_dbnum(dbno)
     }
 }
 
@@ -2114,7 +2138,7 @@ impl E3dModelService {
     /// not stop a never-parsed project from generating.
     pub async fn from_current() -> anyhow::Result<Self> {
         let option = aios_core::get_db_option();
-        let (pins, locator, project_files) = current_mdb_source_inventory()?;
+        let (pins, locator, project_files, mdb_dbnums) = current_mdb_source_inventory()?;
         Ok(Self {
             uda: current_uda_catalog(),
             schema: DirectSchema::open_from_env()?,
@@ -2127,6 +2151,7 @@ impl E3dModelService {
                 .collect(),
             locator,
             project_files,
+            mdb_dbnums,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir: crate::options::meshes_dir_for(option),
             generation_identity: None,
@@ -3159,6 +3184,9 @@ impl E3dModelService {
             pins,
             locator,
             project_files: Arc::new(HashMap::new()),
+            // 显式文件清单不是 MDB 的成员清单：清单里没有的库是「没给」，说不出它在不在 MDB 里，
+            // 引用到它照旧报错。
+            mdb_dbnums: None,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir,
             generation_identity: None,
@@ -3683,6 +3711,7 @@ impl E3dModelService {
             Box::new(E3dDbResolver {
                 locator: self.locator.clone(),
                 project_files: self.project_files.clone(),
+                mdb_dbnums: self.mdb_dbnums.clone(),
                 target_dbnum,
                 preferred_project,
                 template_dir: self.schema.template_dir().to_path_buf(),
@@ -3766,8 +3795,35 @@ fn current_uda_catalog() -> Option<Arc<e3d_io::uda_catalog::UdaCatalog>> {
     }
 }
 
-fn current_mdb_source_inventory()
--> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator, ProjectDbFiles)> {
+/// 当前 MDB 的成员库号全集，给 [`E3dDbResolver`] 判断「引用指到的库在不在 MDB 里」。
+///
+/// 成员 = CURD 声明的库——**有没有绑到文件都算**，声明了没文件是部署问题，不是「不在 MDB 里」——加上已收下的
+/// 补充成员（ADR-095），再加上 `extra_element_dbnums` 配置里写的每一个号：写了却没收下（没文件、类型不对）
+/// 同样是配置问题。
+///
+/// `None` = 说不出全集：声明里有条目没能落成成员（[`mdb_membership::MdbMembership::declaration_complete`]），
+/// 清单可能少库，「不在清单里」就不等于「不在 MDB 里」。这时一律按不知道处理，引用到解析不出的库照旧报错。
+fn mdb_member_dbnums(
+    membership: &mdb_membership::MdbMembership,
+    configured_extras: &[u32],
+) -> MdbMemberDbnums {
+    membership.declaration_complete().then(|| {
+        Arc::new(
+            membership
+                .model_databases()
+                .map(|db| db.dbnum)
+                .chain(configured_extras.iter().copied())
+                .collect(),
+        )
+    })
+}
+
+fn current_mdb_source_inventory() -> anyhow::Result<(
+    Vec<DbPin>,
+    InMemoryCataLocator,
+    ProjectDbFiles,
+    MdbMemberDbnums,
+)> {
     let option = aios_core::get_db_option();
     let project = option.project_name.clone();
     let mdb = option.mdb_name.clone();
@@ -3776,6 +3832,14 @@ fn current_mdb_source_inventory()
         .unwrap_or_else(|| {
             mdb_membership::resolve(option, &project, &mdb).map(std::sync::Arc::new)
         })?;
+    // 成员清单与下面的文件清单出自同一份 membership：两边不会一个新一个旧。
+    let mdb_dbnums = mdb_member_dbnums(&membership, &crate::options::extra_element_dbnums());
+    if mdb_dbnums.is_none() {
+        log::warn!(
+            "MDB {mdb} 的声明没读全（有条目没能落成成员），分不出哪些库号不在 MDB 里：\
+             模型生成里引用到解析不出的库照旧一律报错"
+        );
+    }
     // 与上面成员清单的 `get()` 同一口径：拿最近一次权威解析（startup / SYST 刷新 /
     // 重挂 / 兜底都会刷新 `latest` 缓存）的监控目录计划。这里不是重做时刻，
     // `plan_watch_dirs` 会把搜索根真扫一遍——探针路径上每任务一次的远程 IO。
@@ -3836,11 +3900,12 @@ fn current_mdb_source_inventory()
         pins,
         InMemoryCataLocator::from_parts(HashMap::new(), files),
         Arc::new(project_files),
+        mdb_dbnums,
     ))
 }
 
 pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator)> {
-    let (pins, locator, _) = current_mdb_source_inventory()?;
+    let (pins, locator, _, _) = current_mdb_source_inventory()?;
     Ok((pins, locator))
 }
 
@@ -3869,7 +3934,7 @@ pub(crate) struct CatalogueFileChoice {
 
 impl CatalogueFileChoice {
     pub(crate) fn current() -> anyhow::Result<Self> {
-        let (_, locator, project_files) = current_mdb_source_inventory()?;
+        let (_, locator, project_files, _) = current_mdb_source_inventory()?;
         Ok(Self {
             locator,
             project_files,
@@ -5616,7 +5681,7 @@ mod tests {
             a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
         };
         let option = aios_core::get_db_option();
-        let (pins, locator, project_files) = current_mdb_source_inventory()?;
+        let (pins, locator, project_files, _) = current_mdb_source_inventory()?;
         // 设计库按所在项目分组：生成时 `preferred_project` 就是它。
         let mut library_projects: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for pin in pins
@@ -10864,6 +10929,7 @@ mod tests {
                     path: contextual.clone(),
                 },
             )])),
+            mdb_dbnums: None,
             target_dbnum: 7015,
             preferred_project: Some("ACP".into()),
             template_dir: PathBuf::from(r"D:\templates"),
@@ -10874,6 +10940,134 @@ mod tests {
         assert_eq!(pin.sesno, Some(42));
         assert_eq!(pin.db_type.as_deref(), Some("CATA"));
         assert!(pin.template.ends_with("catvir.dat"));
+    }
+
+    /// e3d-model #45 的服务端一半：引用指到的库在不在 MDB 里，由 resolver 按成员清单答给 `DbSet`。
+    ///
+    /// 口径照 SLYK 那 15 只 NOZZ 摆：设计库 5107，目录库 4360 在 MDB 里且有文件，6009 声明了却没绑到文件，
+    /// 4350 不在成员清单里（那 15 只的 `CATR` 第二跳就落在它上面）。
+    ///
+    /// - 4350：清单读全了、里面没有它 → 在 MDB 之外，e3d-model 记目录链断；
+    /// - 6009：是成员、只是没读到 → 不算在外面，引用照旧报「库没注册」（部署问题，不能悄悄少画）；
+    /// - 清单说不全（`None`）→ 哪个号都不敢说在外面；
+    /// - 经 `DbSet` 问到的就是这个答案（e3d-model 只问 `DbSet::outside_mdb`），读元素的报错本身不变。
+    #[test]
+    fn a_db_outside_the_mdb_member_list_is_outside_and_a_member_without_a_file_is_not() {
+        let locator = || {
+            InMemoryCataLocator::from_parts(
+                HashMap::new(),
+                HashMap::from([
+                    (
+                        5107,
+                        (
+                            "DESI".into(),
+                            "SLYK".into(),
+                            PathBuf::from(r"D:\selected\SLYK\acw5107_0001"),
+                        ),
+                    ),
+                    (
+                        4360,
+                        (
+                            "CATA".into(),
+                            "SLYK".into(),
+                            PathBuf::from(r"D:\selected\SLYK\acw4360_0001"),
+                        ),
+                    ),
+                ]),
+            )
+        };
+        let resolver = |mdb_dbnums: MdbMemberDbnums| E3dDbResolver {
+            locator: locator(),
+            project_files: Arc::new(HashMap::new()),
+            mdb_dbnums,
+            target_dbnum: 5107,
+            preferred_project: Some("SLYK".into()),
+            template_dir: PathBuf::from(r"D:\templates"),
+            sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        };
+        let members = || Some(Arc::new(BTreeSet::from([4360, 5107, 6009])));
+
+        let known = resolver(members());
+        assert!(known.outside_mdb(4350), "成员清单里没有 4350");
+        assert!(
+            !known.outside_mdb(6009),
+            "6009 是成员、只是没绑到文件：部署问题，不许算成 MDB 之外"
+        );
+        assert!(!known.outside_mdb(4360), "成员，文件也在");
+        assert!(!known.outside_mdb(5107));
+
+        let unknown = resolver(None);
+        for dbnum in [4350, 4360, 5107, 6009] {
+            assert!(
+                !unknown.outside_mdb(dbnum),
+                "成员清单说不全时 {dbnum} 不许算成 MDB 之外"
+            );
+        }
+
+        // 定位器认得的库号，哪怕成员清单里漏了它，也不算在外面：给得出文件就谈不上读不到。
+        let stale = resolver(Some(Arc::new(BTreeSet::from([5107]))));
+        assert!(!stale.outside_mdb(4360));
+        assert!(stale.outside_mdb(4350));
+
+        // e3d-model 问的是 `DbSet`：它把 resolver 的回答原样转述；读 4350 里的元素仍是「库没注册」。
+        let set = Arc::new(DbSet::with_resolver(
+            Arc::new(e3d_attlib::AttlibData::default()),
+            Box::new(known),
+        ));
+        assert!(set.outside_mdb(4350));
+        assert!(!set.outside_mdb(6009));
+        let error = set
+            .element(RefNo::new(20_734, 11_826))
+            .element_type()
+            .expect_err("4350 没有文件");
+        assert!(
+            matches!(
+                error,
+                e3d_io::db_element::DbElementError::DbNotRegistered { dbno: 4350 }
+            ),
+            "{error}"
+        );
+    }
+
+    /// 成员清单从 MDB 声明来：声明了没绑到文件的库照样是成员，`extra_element_dbnums` 里写的每一个号也是
+    /// （写了却没收下是配置问题）；声明里有条目没解出来，清单就说不全——交 `None`，不拿残缺的清单去判。
+    #[test]
+    fn the_member_list_keeps_unbound_declarations_and_refuses_an_incomplete_declaration() {
+        use crate::data_interface::mdb_membership::{
+            CATA_STYP, DESI_STYP, MdbDatabase, MdbMembership,
+        };
+        let db = |dbnum: u32, styp: i64, on_disk: bool| MdbDatabase {
+            dbnum,
+            styp,
+            proj: 0,
+            declared_project_code: None,
+            name: format!("*SLYK/{dbnum}"),
+            path: on_disk.then(|| PathBuf::from(format!(r"D:\selected\SLYK\acw{dbnum}_0001"))),
+            project: on_disk.then(|| "SLYK".to_string()),
+            shadowed: Vec::new(),
+        };
+        let membership = MdbMembership::test_with_databases(
+            "SLYK",
+            "/SLYK",
+            vec![
+                db(5107, DESI_STYP, true),
+                db(4360, CATA_STYP, true),
+                db(6009, CATA_STYP, false),
+            ],
+        );
+        let members = mdb_member_dbnums(&membership, &[251_049]).expect("声明读全了");
+        assert_eq!(
+            members.iter().copied().collect::<Vec<_>>(),
+            vec![4360, 5107, 6009, 251_049],
+            "声明了没文件的 6009、配置里写的 251049 都是成员"
+        );
+        assert!(!members.contains(&4350));
+
+        assert_eq!(
+            mdb_member_dbnums(&membership.test_with_undecoded(1), &[]),
+            None,
+            "声明里有一条没解出来：清单不全，不给"
+        );
     }
 
     /// GitHub #47：目录版本核对问「这个设计库读哪一份目录文件」，答案必须与 resolver 逐字相同——

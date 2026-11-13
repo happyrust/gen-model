@@ -151,6 +151,10 @@ pub struct MdbMembership {
     /// sandbox and plenty of deployments run `enable_log = false`, the logger
     /// is then never initialised, and not one of those lines ever appears.
     problems: Vec<String>,
+    /// CURD 里**没能落成成员**的声明数：`DB` 元素不在索引里、属性读不出、`DBNO` 解不出，或者 DBSET 展开时
+    /// 跳过了成员 / 可能少库（[`CurdExpansion::lost`]）。非零 = `databases` 不是 MDB 的全部成员，见
+    /// [`Self::declaration_complete`]。
+    undecoded: usize,
 }
 
 impl MdbMembership {
@@ -167,8 +171,27 @@ impl MdbMembership {
             extras: Vec::new(),
             access: BTreeMap::new(),
             problems: Vec::new(),
+            undecoded: 0,
         }
     }
+
+    /// 测试用：声明里有 `undecoded` 条没能落成成员（清单不全）。
+    #[cfg(test)]
+    pub(crate) fn test_with_undecoded(mut self, undecoded: usize) -> Self {
+        self.undecoded = undecoded;
+        self
+    }
+
+    /// `databases` 是不是 MDB 声明的**全部**成员。
+    ///
+    /// `false` = 声明里有条目没能落成成员（那几条只在 `[SYS 解析]` 的日志行里点了名），清单可能少库。
+    /// 这时「某个库号不在清单里」不等于「它不是 MDB 的成员」——拿不全的清单去判，会把读不出声明的库
+    /// 误当成 MDB 之外。消费者：模型生成判断引用是不是指到了 MDB 之外
+    /// （`e3d_model_service::mdb_member_dbnums`）。
+    pub fn declaration_complete(&self) -> bool {
+        self.undecoded == 0
+    }
+
     pub fn mdb(&self) -> &str {
         &self.mdb
     }
@@ -430,6 +453,7 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         extras,
         access: declaration.access.clone(),
         problems,
+        undecoded: declaration.undecoded,
     })
 }
 
@@ -533,6 +557,9 @@ pub struct UnboundDeclaration {
     /// 到 [`MdbMembership::access_of`]。绑定只换文件归属，不换声明语义。
     pub access: BTreeMap<u32, DbAccess>,
     pub problems: Vec<String>,
+    /// CURD 里没能落成 `databases` 一员的声明数：解不出库号的 `DB`，加上 DBSET 展开时跳过的成员 /
+    /// 可能少的库（[`CurdExpansion::lost`]）。随声明一路带到 [`MdbMembership::declaration_complete`]。
+    pub undecoded: usize,
 }
 
 /// Find the SYS file among `own_dirs` that declares `mdb` and read the
@@ -552,13 +579,14 @@ pub(crate) fn read_unbound_declaration(
     for sys in sys_candidates(own_dirs) {
         tried.push(sys.display().to_string());
         match read_declaration(&sys, project, &wanted, &[]) {
-            Ok(Some((databases, expansion_problems, access))) => {
+            Ok(Some((databases, expansion_problems, access, undecoded))) => {
                 problems.extend(expansion_problems);
                 return Ok(UnboundDeclaration {
                     sys,
                     databases,
                     access,
                     problems,
+                    undecoded,
                 });
             }
             Ok(None) => {
@@ -810,6 +838,10 @@ struct CurdExpansion {
     dbset_entries: usize,
     /// Anything the walk had to skip or approximate; a person should see these.
     problems: Vec<String>,
+    /// `problems` 里**可能让清单少库**的那几种各记一笔：带 `DBCRITERIA` 的 DBSET（E3D 还会按条件补库）、
+    /// 没有 `DBF` 的 DBL、没有 `DBSTF` 的 DBSTL、类型不对或不在索引里的成员。同一个库出现两次只是重复，
+    /// 不算。非零 = `entries` 不是 E3D 打开这个 MDB 时的全部库。
+    lost: usize,
 }
 
 /// `MDB.CURD` as E3D opens it: what core.dll's `CURRFU` pseudo-attribute yields
@@ -877,6 +909,7 @@ fn expand_one_dbset<E: CurdElements>(
         return Ok(());
     }
     if elements.has_db_criteria(dbset)? {
+        out.lost += 1;
         out.problems.push(format!(
             "{chain} 带 DBCRITERIA 动态条件；本实现只展开 DBL/DBSTL 静态成员，E3D 还会把满足条件的库补进来，\
              该 DBSET 可能少库"
@@ -884,6 +917,7 @@ fn expand_one_dbset<E: CurdElements>(
     }
     for member in elements.member_refnos(dbset)? {
         let member_id = format!("{}/{}", member.get_0(), member.get_1());
+        // 下面四种「已跳过」各算一笔 `lost`：跳过的那个成员本来可能带进一个库。
         match elements.element_type(member)?.as_deref() {
             Some("DBL") => match elements.get_ref(member, "DBF")? {
                 Some(db) => {
@@ -894,9 +928,12 @@ fn expand_one_dbset<E: CurdElements>(
                         });
                     }
                 }
-                None => out.problems.push(format!(
-                    "{chain} 成员 DBL {member_id} 没有 DBF 引用，已跳过"
-                )),
+                None => {
+                    out.lost += 1;
+                    out.problems.push(format!(
+                        "{chain} 成员 DBL {member_id} 没有 DBF 引用，已跳过"
+                    ));
+                }
             },
             Some("DBSTL") => match elements.get_ref(member, "DBSTF")? {
                 Some(nested) => {
@@ -904,16 +941,25 @@ fn expand_one_dbset<E: CurdElements>(
                         format!("{chain} > DBSET {}/{}", nested.get_0(), nested.get_1());
                     expand_one_dbset(elements, nested, &nested_chain, seen_dbs, seen_dbsets, out)?;
                 }
-                None => out.problems.push(format!(
-                    "{chain} 成员 DBSTL {member_id} 没有 DBSTF 引用，已跳过"
-                )),
+                None => {
+                    out.lost += 1;
+                    out.problems.push(format!(
+                        "{chain} 成员 DBSTL {member_id} 没有 DBSTF 引用，已跳过"
+                    ));
+                }
             },
-            Some(other) => out.problems.push(format!(
-                "{chain} 成员 {member_id} 类型 {other} 不是 DBL/DBSTL，已跳过"
-            )),
-            None => out.problems.push(format!(
-                "{chain} 成员 {member_id} 不在最新会话索引中，已跳过"
-            )),
+            Some(other) => {
+                out.lost += 1;
+                out.problems.push(format!(
+                    "{chain} 成员 {member_id} 类型 {other} 不是 DBL/DBSTL，已跳过"
+                ));
+            }
+            None => {
+                out.lost += 1;
+                out.problems.push(format!(
+                    "{chain} 成员 {member_id} 不在最新会话索引中，已跳过"
+                ));
+            }
         }
     }
     Ok(())
@@ -921,13 +967,21 @@ fn expand_one_dbset<E: CurdElements>(
 
 /// `Ok(None)` when the file parses but holds no MDB of that name — the caller
 /// moves on to the next candidate rather than failing. `Ok(Some)` carries the
-/// databases plus the problems the CURD expansion had to report.
+/// databases plus the problems the CURD expansion had to report, and how many
+/// declarations did not make it into the list ([`UnboundDeclaration::undecoded`]).
 fn read_declaration(
     sys: &Path,
     project: &str,
     wanted: &str,
     projects: &[(String, DirInventory)],
-) -> anyhow::Result<Option<(Vec<MdbDatabase>, Vec<String>, BTreeMap<u32, DbAccess>)>> {
+) -> anyhow::Result<
+    Option<(
+        Vec<MdbDatabase>,
+        Vec<String>,
+        BTreeMap<u32, DbAccess>,
+        usize,
+    )>,
+> {
     // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉进 `DbSet`
     // （模板 `sysvir.dat`）；Global Project 的 MDB 在本地 SYS、DB 声明在同目录 GLB，
     // `DbSet` 经文件头索引按 refno 自带的 dbno 惰性补开后者。MDB 元素按 SYS 的固定结构
@@ -1068,6 +1122,8 @@ fn read_declaration(
             root.get_1()
         )
     })?;
+    // DBSET 展开时可能少掉的库，与下面解不出库号的声明合起来就是「清单不全」的那一笔。
+    let lost_in_dbsets = expansion.lost;
     let mut problems = Vec::with_capacity(expansion.problems.len());
     for problem in expansion.problems {
         let message = format!(
@@ -1251,7 +1307,12 @@ fn read_declaration(
         skipped_databases,
         &counts_by_styp,
     ));
-    Ok(Some((databases, problems, access)))
+    Ok(Some((
+        databases,
+        problems,
+        access,
+        skipped_databases + lost_in_dbsets,
+    )))
 }
 
 /// Same-directory project administration files, keyed by the dbnum read from
@@ -2506,7 +2567,18 @@ mod tests {
             extras: Vec::new(),
             access: BTreeMap::new(),
             problems: Vec::new(),
+            undecoded: 0,
         }
+    }
+
+    /// 清单全不全只看「有没有声明没能落成成员」：声明了没绑到文件的库（`7323`）照样在清单里，不影响；
+    /// 有一条解不出来就不全了——这时不能拿「不在清单里」当「不是 MDB 的成员」。
+    #[test]
+    fn a_declaration_with_an_undecoded_entry_is_not_complete() {
+        let membership = membership();
+        assert!(membership.unresolved().any(|db| db.dbnum == 7323));
+        assert!(membership.declaration_complete());
+        assert!(!membership.test_with_undecoded(1).declaration_complete());
     }
 
     /// `mdb_scope` 阶段行只数元素库：字典库既不进 `dbnums` 也不进 `unbound`（与本期执行范围同一口径）；
@@ -3008,6 +3080,7 @@ mod tests {
         assert_eq!(refnos(&expansion), vec![r(2), r(1)]);
         assert_eq!(expansion.problems.len(), 1, "{:?}", expansion.problems);
         assert!(expansion.problems[0].contains("CURD[2] 24575/2"));
+        assert_eq!(expansion.lost, 0, "同一个库出现两次只是重复，清单没少库");
     }
 
     /// What E3D would do with these is fail or guess; here each is a reported
@@ -3035,6 +3108,8 @@ mod tests {
             assert!(problems.contains(required), "缺少 {required}:\n{problems}");
         }
         assert_eq!(expansion.problems.len(), 5, "{problems}");
+        // 这五种每一种都可能让清单少一个库：一处都不许漏记，否则「清单不全」就看不出来。
+        assert_eq!(expansion.lost, 5, "{problems}");
     }
 
     /// Entries that are neither DB nor DBSET — a missing element included —
