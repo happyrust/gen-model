@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -247,10 +248,14 @@ class ServiceLogShapeTests(unittest.TestCase):
 
     def test_the_log_lines_the_budget_parses_are_still_printed(self):
         for relative, fragments in self.SHAPES.items():
-            source = (ROOT / relative).read_text(encoding="utf-8")
+            # rustfmt 会把 `Operation::begin(` 之后的实参拆到下一行；只吞左括号后的空白，格式串里的空格照旧逐字比。
+            source = re.sub(r"\(\s+", "(", (ROOT / relative).read_text(encoding="utf-8"))
             for fragment in fragments:
                 with self.subTest(file=relative, fragment=fragment):
-                    self.assertIn(fragment, source, "服务日志的格式变了，scripts/increment_budget.py 的正则要一起改")
+                    self.assertTrue(
+                        fragment in source,
+                        f"{relative} 里找不到 {fragment!r}：服务日志的格式变了，scripts/increment_budget.py 的正则要一起改",
+                    )
 
     def test_the_generate_request_keeps_its_raw_stage_name_on_the_console(self):
         # console_label 给 http.model.generate 配了中文名，控制台那一行就不再是 `[http.model.generate]`。
