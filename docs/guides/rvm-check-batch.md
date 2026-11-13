@@ -48,6 +48,11 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | `--install-dir` | `des.exe` 所在目录，要能跑 `-tty`（默认的 e3d31-runtime 在 TTY 下会崩） |
 | `--projects-dir` | 项目父目录，缺省取 `DbOption.toml` 的 `project_path`。**只管一部分**，见下面「`--projects-dir` 管什么、不管什么」 |
 | `--project-name` / `--e3d-project` / `--mdb` | 缺省取 `DbOption.toml`（`project_name` / 目录扫出的项目码 / `mdb_name`） |
+
+`project_path` 两种写法都认（ADR-078）：指向**项目父目录**（项目目录是 `<project_path>/<project_name>`），
+或者**直接指向项目目录本身**（例如 `\\...\YCYK-E3D`）。后一种写法下 `projects_dir` 自动退回上一级，
+项目码仍从项目目录底下的 `<码>000` 扫出来；判定与服务侧的定位器同一口径（GitHub #141）。两种写法都对不上时
+照旧报「项目目录下没有 `<码>000`」，不猜。
 | `--username` / `--password` | E3D 账号；密码不给时读 `RVM_CHECK_PASSWORD`。只进登录串，不进任何落盘文件 |
 
 启动脚本按 `DbOption.toml` 的 `[rvm_check] e3d_launcher` 找，缺省是可执行文件同目录或当前目录下的

@@ -314,12 +314,15 @@ async fn an_on_demand_removal_waits_for_the_generation_lock_but_not_for_a_task()
 
     commit_root(store, root, &sources);
     let generation = lock_db_generation(root.dbno()).await;
-    let removal = remove_subtree(whole_roots(&[root]));
-    tokio::pin!(removal);
+    let removal = tokio::spawn(remove_subtree(whole_roots(&[root])));
+    // 生成锁被占着时，删除要排在它后面。以前这里睡 200 ms 再看任务完没完——机器一忙，
+    // 这个窗口本身就不稳（GitHub #152）。改成断言**语义事实**：给删除足够多的让出机会之后，
+    // 投影里的回执与记录都还没动。锁没放，删除就不该产生任何副作用；这跟它跑得多快无关。
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut removal)
-            .await
-            .is_err(),
+        !removal.is_finished(),
         "a publish call holding the generation lock still holds the removal up"
     );
     assert!(store.receipt(scope, root).is_some());
@@ -327,6 +330,7 @@ async fn an_on_demand_removal_waits_for_the_generation_lock_but_not_for_a_task()
     tokio::time::timeout(Duration::from_secs(5), removal)
         .await
         .expect("the removal goes ahead once the generation lock is free")
+        .expect("removal task")
         .expect("removal");
     assert!(store.receipt(scope, root).is_none());
 }
@@ -414,7 +418,11 @@ async fn a_removal_waits_for_a_generation_on_the_same_dbnum() {
         let generation = lock_db_generation(root.dbno()).await;
         let before = resident();
         let removal = tokio::spawn(remove_subtree(request));
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // 同库生成在飞时删除要排队。以前睡 200 ms 再断言任务没完（GitHub #152：机器忙时
+        // 这个窗口不稳）。改成让出足够多轮之后断言**投影一条没动**——锁还在，删除就不该有副作用。
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
         assert!(!removal.is_finished(), "同库在生成，删除要排队等");
         assert_eq!(resident(), before);
 

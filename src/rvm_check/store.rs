@@ -550,12 +550,18 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
         && !facts.message.is_empty()
     {
         // 比对跑完却一件都没配上：主键口径对不上，也要留一行能查到的原因。
+        //
+        // 「比对跑完了但一件都没配上」与「比对根本没跑完」要分开（GitHub #131）。两者的阶段名
+        // 都是 `compare`，区别在报错文本：比对器自己报的三句话（bbox 帧认不出、主键重复、
+        // e3d 名称重复）和 panic 是「没跑完」，`classify_failure` 已经能把它们认出来；
+        // 认成 `compare_failed` 才是「跑完了、只是没配上」。
         let mut row = base(0);
         row.category = CATEGORY_STAGE_FAILURE.to_string();
-        row.reason_kind = if facts.stage == super::STAGE_COMPARE {
+        let classified = classify_failure(&facts.stage, &facts.message);
+        row.reason_kind = if facts.stage == super::STAGE_COMPARE && classified == "compare_failed" {
             "compare_nothing_paired"
         } else {
-            classify_failure(&facts.stage, &facts.message)
+            classified
         }
         .to_string();
         row.reason = truncate_chars(&facts.message, MESSAGE_LIMIT);
@@ -2312,6 +2318,32 @@ mod tests {
         let (_, rows) = build_rows(&unpaired);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].reason_kind, "compare_nothing_paired");
+
+        // 「比对跑完了但一件都没配上」与「比对根本没跑完」是两回事（GitHub #131）：
+        // 两者的阶段名都是 `compare`，靠终态分——批量的 `compare-failed` 是没跑完，
+        // 走上面那条 stage_failure 分支，原因种类按报错文本分，不能冒充 `compare_nothing_paired`。
+        for (message, expected) in [
+            ("比对时 panic：index out of bounds", "compare_panic"),
+            (
+                "比对没有跑完：生成侧主键重复：Name(\"/A\")",
+                "compare_duplicate_key",
+            ),
+            ("比对没有跑完：其他比对失败", "compare_failed"),
+        ] {
+            let mut not_finished = facts("b-1/ams7999/1_7", "1/7", VERDICT_FAIL, Vec::new());
+            not_finished.stage = crate::rvm_check::STAGE_COMPARE.to_string();
+            not_finished.status = crate::rvm_check::batch::status::COMPARE_FAILED.to_string();
+            not_finished.message = message.to_string();
+            not_finished.counts = RvmCounts::default();
+            not_finished.centreline_only_baseline.clear();
+            let (_, rows) = build_rows(&not_finished);
+            assert_eq!(rows.len(), 1, "{message}");
+            assert_eq!(rows[0].reason_kind, expected, "{message}");
+            assert_ne!(
+                rows[0].reason_kind, "compare_nothing_paired",
+                "比对没跑完不能冒充「跑完了但没配上」：{message}"
+            );
+        }
 
         // 比对跑完、判红、差异在清单里：不另留 stage_failure。
         let red = facts(

@@ -174,9 +174,26 @@ pub fn resolve_tools_from(search: ToolSearch) -> ResolvedTools {
 
 pub fn project_defaults() -> ProjectDefaults {
     let option = aios_core::get_db_option();
-    let projects_dir = PathBuf::from(option.project_path.trim());
+    let configured_path = PathBuf::from(option.project_path.trim());
     let project_name = option.project_name.trim().to_string();
-    let project_dir = projects_dir.join(&project_name);
+    // ADR-078 允许 `project_path` 直接指向**项目目录本身**（例如 `\\...\YCYK-E3D`），
+    // 而不是它的上一级。服务侧的项目定位器一直认这种写法（`project_locator::locate_project_folder`
+    // 按文件夹名匹配，NOMAIN 摆法下根本身就是项目目录），rvm-check 以前硬拼
+    // `projects_dir.join(project_name)`，于是报「项目目录下没有 <码>000」（GitHub #141）。
+    //
+    // 判据只看磁盘事实，不看配置写法：
+    //   * `<project_path>/<project_name>` 存在 → 老写法（上一级目录），照旧；
+    //   * 否则 `<project_path>` 自己就是个项目目录（末尾那段等于 `project_name`，
+    //     或者底下直接有 `<码>000`）→ 认它，并把 projects_dir 退回它的上一级。
+    // 两种写法都没有时保持老行为，让调用方照旧报错——不猜。
+    let (projects_dir, project_dir) = match project_dir_from_configured(&configured_path, &project_name)
+    {
+        Some(pair) => pair,
+        None => {
+            let project_dir = configured_path.join(&project_name);
+            (configured_path.clone(), project_dir)
+        }
+    };
     let e3d_projects = suggest_e3d_projects(&project_dir);
     let e3d_project = e3d_projects.first().cloned();
     let mdb = normalize_mdb(option.mdb_name.trim());
@@ -189,6 +206,37 @@ pub fn project_defaults() -> ProjectDefaults {
         mdb,
         numeric_project_code: option.project_code.trim().to_string(),
     }
+}
+
+/// 从配置的 `project_path` 与 `project_name` 定出（项目父目录，项目目录）。
+///
+/// 返回 `None` 表示两种写法都对不上——调用方按老行为报错，不猜。
+fn project_dir_from_configured(configured: &Path, project_name: &str) -> Option<(PathBuf, PathBuf)> {
+    // 老写法优先：`<project_path>/<project_name>` 真是个目录就用它。
+    if !project_name.is_empty() {
+        let joined = configured.join(project_name);
+        if joined.is_dir() {
+            return Some((configured.to_path_buf(), joined));
+        }
+    }
+    // 新写法：`project_path` 自己就是项目目录。
+    if !project_name.is_empty() {
+        let last_segment_matches = configured
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(project_name));
+        if last_segment_matches {
+            let parent = configured.parent().map(Path::to_path_buf)?;
+            return Some((parent, configured.to_path_buf()));
+        }
+    }
+    // 兜底：`project_path` 底下直接有 `<码>000`（没有同名子目录），也算它本身就是项目目录。
+    // `project_name` 为空时也走这一条——此时靠目录内容认，不靠名字。
+    if !suggest_e3d_projects(configured).is_empty() {
+        let parent = configured.parent().map(Path::to_path_buf)?;
+        return Some((parent, configured.to_path_buf()));
+    }
+    None
 }
 
 pub fn suggest_e3d_projects(project_dir: &Path) -> Vec<String> {
@@ -366,5 +414,61 @@ mod tests {
         assert_eq!(normalize_mdb("ALL"), "/ALL");
         assert_eq!(normalize_mdb("/ALL"), "/ALL");
         assert_eq!(normalize_mdb("  "), "/ALL");
+    }
+
+    /// 老写法：`project_path` 是上一级目录，项目目录是 `<project_path>/<project_name>`。
+    /// 这是原有行为，不能被 #141 的改动动到。
+    #[test]
+    fn a_projects_dir_with_the_project_folder_inside_keeps_the_old_shape() {
+        let tmp = std::env::temp_dir().join(format!("rvm141-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let project = tmp.join("AvevaMarineSample");
+        std::fs::create_dir_all(project.join("ams000")).unwrap();
+        std::fs::create_dir_all(project.join("acp000")).unwrap();
+
+        let (projects_dir, project_dir) =
+            project_dir_from_configured(&tmp, "AvevaMarineSample").expect("老写法应当认得");
+        assert_eq!(projects_dir, tmp);
+        assert_eq!(project_dir, project);
+        // 项目码照旧从项目目录底下的 `<码>000` 扫出来。
+        let mut codes = suggest_e3d_projects(&project_dir);
+        codes.sort();
+        assert_eq!(codes, ["ACP", "AMS"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 新写法（#141）：`project_path` 直接指向项目目录本身。
+    /// 项目父目录要退回上一级，项目目录就是它自己，项目码仍能扫出来。
+    #[test]
+    fn a_project_path_pointing_at_the_project_itself_is_accepted() {
+        let tmp = std::env::temp_dir().join(format!("rvm141-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let project = tmp.join("YCYK-E3D");
+        std::fs::create_dir_all(project.join("acw000")).unwrap();
+
+        let (projects_dir, project_dir) =
+            project_dir_from_configured(&project, "YCYK-E3D").expect("新写法应当认得");
+        assert_eq!(projects_dir, tmp, "项目父目录应退回上一级");
+        assert_eq!(project_dir, project, "项目目录就是 project_path 本身");
+        assert_eq!(suggest_e3d_projects(&project_dir), ["ACW"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 两种写法都对不上时不猜：调用方照旧报「项目目录下没有 <码>000」。
+    #[test]
+    fn neither_shape_matching_is_not_guessed() {
+        let tmp = std::env::temp_dir().join(format!("rvm141-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        assert_eq!(
+            project_dir_from_configured(&tmp, "AvevaMarineSample"),
+            None,
+            "空目录既不是项目目录、底下也没有同名子目录"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

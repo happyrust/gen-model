@@ -243,6 +243,21 @@ pub fn batch_id_for(out_root: &Path) -> String {
 }
 
 /// 根的终态。`pass` / `empty` 是干净的；`exported` / `generated` 只在对应单步模式下出现。
+/// 比对器的报错前缀：比对这一步没跑完时，`vendor` 的 `rvm_compare` 把原因包在这句话后面。
+///
+/// 生成即比对时这段报错出在生成子进程里，父进程只拿得到非零退出码与 stderr 文本；靠这个前缀
+/// 把「生成失败」与「比对失败」分开（GitHub #131）。
+pub const COMPARE_DID_NOT_FINISH: &str = "比对没有跑完";
+
+/// 这个根的生成子进程 stderr 里有没有比对器报的「比对没有跑完」。
+///
+/// 扫整份文件而不是 `generation.message`（那是最后 600 字符的尾巴，前缀可能已被截掉）。
+/// 文件读不到时按「没有」处理——不因为读日志失败就把失败改归到比对段。
+fn stderr_says_compare_did_not_finish(job_dir: &Path) -> bool {
+    std::fs::read_to_string(job_dir.join("gen.stderr.log"))
+        .is_ok_and(|text| text.contains(COMPARE_DID_NOT_FINISH))
+}
+
 pub mod status {
     pub const PASS: &str = "pass";
     pub const EMPTY: &str = "empty";
@@ -2062,6 +2077,19 @@ fn process_root(
         let failed_status = match generation.exit.as_str() {
             Some(status::COMMIT_GUARD) => Some(status::COMMIT_GUARD),
             Some(status::TIMEOUT) => Some(status::TIMEOUT),
+            // 生成即比对时，比对段的报错出在生成子进程里（`run_child` 把比对器的错 `?` 出去，
+            // 进程就非零退出）。父进程只看得到退出码，以前一律记 `gen-failed`，看不出其实是
+            // 比对出的错（GitHub #131）。比对器的报错文本有固定前缀「比对没有跑完：」，
+            // 认出来就记比对失败，让 `failure_kind` 按 #123 的五种比对原因归类。
+            //
+            // 判据扫**整份** stderr，不用 `generation.message`：那只是最后 600 字符的尾巴，
+            // 前缀可能已经被截掉。
+            _ if generation.exit != serde_json::Value::from(0)
+                && fused.is_some()
+                && stderr_says_compare_did_not_finish(&job.dir) =>
+            {
+                Some(status::COMPARE_FAILED)
+            }
             _ if generation.exit != serde_json::Value::from(0) => Some(status::GEN_FAILED),
             _ if !produced => Some(status::GEN_FAILED),
             _ => None,
