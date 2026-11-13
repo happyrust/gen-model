@@ -22,6 +22,7 @@ use crate::e3d_query::{
     E3dDriver, E3dDriverSpec, E3dProcessEvidence, running_e3d_sessions, validate_refno,
 };
 
+pub mod baseline;
 pub mod batch;
 mod config;
 pub mod element;
@@ -30,6 +31,7 @@ mod export_macro;
 pub mod report;
 pub mod store;
 
+pub use baseline::{BaselineProvenance, BaselineVersionCheck, BaselineVersionMismatch};
 pub use config::{
     ProjectDefaults, ProjectDirMismatch, ResolvedTools, project_defaults, resolve_tools,
 };
