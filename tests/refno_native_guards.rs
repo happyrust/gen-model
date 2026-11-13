@@ -56,6 +56,13 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     &rest[..end]
 }
 
+/// 把源码里的空白全去掉，只留记号。护栏要的是「这条链式调用在不在」，不是「它写在一行里」——
+/// rustfmt 把 `self.reader.view()` 拆成三行之后，逐字匹配就红了（`direct_tree::is_current` 实测）。
+/// 去空白比对对 `self . reader . view ()` 与三行写法一视同仁，也不放松语义：链本身少一环照样红。
+fn without_space(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 #[test]
 fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
     let watcher = include_str!("../src/data_interface/increment_manager.rs");
@@ -104,8 +111,16 @@ fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
             "fn is_current("
         };
         let current = function_body(&code, signature);
-        assert!(current.contains("self.reader.view()"));
-        assert!(current.contains("Arc::ptr_eq("));
+        // 去空白比对：链式调用被 rustfmt 拆成多行不该让护栏红（见 `without_space` 的说明）。
+        let flat = without_space(current);
+        assert!(
+            flat.contains("self.reader.view()"),
+            "is_current 不再经共享读视图比 Arc 身份：{signature}"
+        );
+        assert!(
+            flat.contains("Arc::ptr_eq("),
+            "is_current 不再比 Arc 身份：{signature}"
+        );
         for forbidden in [
             "DbFileHeader::read(",
             "ReadOnlyEngine::open(",
@@ -134,7 +149,8 @@ fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
     // 属性服务不自己追踪 DICT 文件；共享读视图不枚举字典。
     let attributes = production(ELEMENT_ATTRIBUTES);
     let current = function_body(&attributes, "fn is_current(");
-    assert!(current.contains("self.reader.view()"));
+    // 去空白比对，理由同 `without_space`：链式调用换行不该让护栏红。
+    assert!(without_space(current).contains("self.reader.view()"));
     for forbidden in [
         "catalog",
         "DICT",
