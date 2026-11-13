@@ -2,8 +2,11 @@
 //! 交给那个库自己的任务重算它们的生成根。
 //!
 //! 谁会产生它：结构连接级联的跨库对端（[`StructuralConnectionCascade::far_end_cross_db`]，#33 在 AvevaPlantSample
-//! 量到 12 条 `FIXING.CREF ↔ GENSEC.JOIE`）与电缆端点级联的跨库引用者（[`CableEndpointCascade::foreign`]，C6 普查
-//! 196 条 `CABLE.STAREF` / `ENDREF` 跨库边）。它们的根在那个库的 `DbSet@T` 上，本窗的计划（`roots_T` 只有本库）装不下。
+//! 量到 12 条 `FIXING.CREF ↔ GENSEC.JOIE`）、电缆端点级联的跨库引用者（[`CableEndpointCascade::foreign`]，C6 普查
+//! 196 条 `CABLE.STAREF` / `ENDREF` 跨库边），以及设计侧一跳里带条件那一类的跨库引用者
+//! （[`DesignReferenceCascade::handoff_referrers`]，GitHub #143：被支撑的管件换了规格，别的库里经 `COMPRE` 指着它的
+//! 支撑件；APS 样例工程 234 条 `COMPRE` 边里 224 条跨库）。它们的根在那个库的 `DbSet@T` 上，本窗的计划（`roots_T`
+//! 只有本库）装不下。
 //!
 //! **形态与目录级联同一条路**（`model_coverage::enqueue_catalogue_cascade`，ADR-071 S4）：每个对端库一条 `ModelOnly`
 //! 任务，名单随行（[`DiscoveredBatch::regen_roots`]），目标会话 = 那个库的文件最新，`model_start_sesno` 也取它——
@@ -23,6 +26,7 @@
 //!
 //! [`StructuralConnectionCascade::far_end_cross_db`]: crate::data_interface::structural_connection::StructuralConnectionCascade::far_end_cross_db
 //! [`CableEndpointCascade::foreign`]: crate::data_interface::cable_endpoint::CableEndpointCascade::foreign
+//! [`DesignReferenceCascade::handoff_referrers`]: crate::data_interface::reverse_reference::DesignReferenceCascade::handoff_referrers
 //! [`DiscoveredBatch::regen_roots`]: crate::data_interface::batch_scheduler::DiscoveredBatch::regen_roots
 
 use std::collections::{BTreeMap, BTreeSet};

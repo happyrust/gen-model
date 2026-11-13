@@ -1707,6 +1707,9 @@ async fn cascade_stale_catalogue_windows(
     // 设计侧引用者在 MDB 每个设计库里找；这一组只认组里的库（GitHub #47），别组的库在别组那一遍里各算各的。
     cascade.roots.retain(|dbnum, _| members.contains_key(dbnum));
     cascade
+        .dependent_referrers
+        .retain(|dbnum, _| members.contains_key(dbnum));
+    cascade
         .design_referrers
         .retain(|dbnum, _| members.contains_key(dbnum));
     cascade

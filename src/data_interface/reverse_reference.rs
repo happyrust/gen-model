@@ -35,6 +35,15 @@
 //!
 //! 两者共用同一份「哪些表是反向引用表」的判据（[`reference_tables_of`]）与同一条点查
 //! （`ReadOnlyEngine::referrers_of`）；分开的是种子从哪来、结果排给谁。
+//!
+//! # 引用者读的是被引用件身上的格（GitHub #143）
+//!
+//! 多数引用边的引用者只关心被引用件「在哪 / 在不在」。[`DESIGN_CASCADE_TARGET_READS`] 上的不一样：引用者的几何读的是
+//! 被引用件**身上的某几格**——支撑件经 `COMPRE` 找到被支撑的构件，取它的 `LSTU` / `HSTU` 走到管子的目录件要外径。
+//! 两个入口各补一步：P4 只在那几格窗口两端取值不同时才让引用者重算（同库的上卷成根，别的库里的点名交给
+//! [`crate::data_interface::cross_db_handoff`]）；P3 的设计侧多走一跳——经那几张表命中的设计件，再问一次谁经
+//! 名单上的属性指着它。P4 超点查预算的窗（一窗动了上千个元素）这一类不跟着整窗放弃：名单上的反向表整张走一遍
+//! （成本只跟表的大小有关），别的库里的引用者照常点名——本库的根有整窗重算兜底，别的库里的没有。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -112,6 +121,11 @@ pub struct ReverseCascade {
     pub point_queries: usize,
     /// 读不出记录头的目录件（祖先链就此中断，其余照常）。
     pub unreadable: Vec<String>,
+    /// 再一跳找到的引用者，按设计库分（GitHub #143；它们也在 `design_referrers` 里、一样上卷）：经
+    /// [`DESIGN_CASCADE_TARGET_READS`] 里被读的那几张表（`LSTU` / `HSTU`）命中的设计件，各自又被谁经名单上的
+    /// 属性（`COMPRE`）指着——支撑件不直接引用管子的目录件，第 2 段那一跳点不到它。
+    #[serde(default)]
+    pub dependent_referrers: BTreeMap<u32, BTreeSet<String>>,
 }
 
 /// 一个被反查命中的生成根。
@@ -147,8 +161,14 @@ impl ReverseCascade {
                 self.degraded.keys().collect::<Vec<_>>()
             )
         };
+        let dependent_count: usize = self.dependent_referrers.values().map(BTreeSet::len).sum();
+        let dependents = if dependent_count == 0 {
+            String::new()
+        } else {
+            format!("（其中 {dependent_count} 个是再一跳找到的）")
+        };
         format!(
-            "反查：种子 {} → 目录闭包 {} → 设计引用者 {} → 生成根 {}{}（点查 {} 次{}{}）{degraded}",
+            "反查：种子 {} → 目录闭包 {} → 设计引用者 {}{dependents} → 生成根 {}{}（点查 {} 次{}{}）{degraded}",
             self.seeds.len(),
             self.catalogue_closure.len(),
             self.referrer_count(),
@@ -431,6 +451,28 @@ impl OpenDb {
         Ok(out)
     }
 
+    /// 同 [`Self::referrers_of`]，按表分开给：`(表名, 引用者)`，没有引用者的表不出。
+    fn referrers_by_table(
+        &mut self,
+        target: RefNo,
+        queries: &mut usize,
+    ) -> anyhow::Result<Vec<(String, Vec<RefNo>)>> {
+        let mut out = Vec::new();
+        for (name, hash) in &self.tables {
+            *queries += 1;
+            let found: Vec<RefNo> = self
+                .engine
+                .referrers_of(*hash, target)
+                .with_context(|| format!("dbnum {} table {name} target {target}", self.dbnum))?
+                .into_iter()
+                .collect();
+            if !found.is_empty() {
+                out.push((name.clone(), found));
+            }
+        }
+        Ok(out)
+    }
+
     /// 记录头：`(noun, owner)`；不在本库 / 读不出 → `None`。
     fn header(&mut self, refno: RefNo) -> Option<(String, RefNo)> {
         let view = self.engine.find_element(refno).ok().flatten()?;
@@ -599,8 +641,13 @@ pub fn expand_reverse_cascade(
     drop(catalogues);
     cascade.catalogue_closure = closure.iter().map(|k| text(unkey(*k))).collect();
 
-    // ---- 第 2 段：设计侧一跳 + 上卷 ----
+    // ---- 第 2 段：设计侧一跳 ----
     let targets: Vec<RefNo> = closure.into_iter().map(unkey).collect();
+    let mut referrers_by_db: BTreeMap<u32, BTreeSet<RefKey>> = BTreeMap::new();
+    // 经「引用者还要到被引用件身上去读的格」那几张表（`LSTU` / `HSTU`，[`DESIGN_CASCADE_TARGET_READS`]）命中的设计件。
+    let mut read_through: BTreeSet<RefKey> = BTreeSet::new();
+    // 带名单上那几个属性的反向表（`COMPRE`）的设计库：开着留给再一跳，别的查完就关。
+    let mut carriers: Vec<OpenDb> = Vec::new();
     for source in sources.iter().filter(|source| source.is_design()) {
         let mut db = OpenDb::open(source)?;
         if db.tables.is_empty() {
@@ -608,24 +655,73 @@ pub fn expand_reverse_cascade(
         }
         let mut referrers: BTreeSet<RefKey> = BTreeSet::new();
         for target in &targets {
-            referrers.extend(
-                db.referrers_of(*target, &mut cascade.point_queries)?
-                    .into_iter()
-                    .map(key),
-            );
+            for (table, found) in db.referrers_by_table(*target, &mut cascade.point_queries)? {
+                if is_target_read(&table) {
+                    read_through.extend(found.iter().copied().map(key));
+                }
+                referrers.extend(found.into_iter().map(key));
+            }
         }
         cascade.tables_used.insert(
             source.dbnum,
             db.tables.iter().map(|(name, _)| name.clone()).collect(),
         );
-        drop(db);
-        if referrers.is_empty() {
-            continue;
+        if !referrers.is_empty() {
+            referrers_by_db.insert(source.dbnum, referrers);
         }
+        if db
+            .tables
+            .iter()
+            .any(|(name, _)| target_reads_of(name).is_some())
+        {
+            carriers.push(db);
+        }
+    }
+
+    // ---- 第 2 段之二：再一跳（GitHub #143）----
+    // 上面经 `LSTU` / `HSTU` 命中的设计件（弯头、支管……）自己会重算；经 `COMPRE` 指着它们的支撑件读的是同一个
+    // 目录件（管外径），却不直接引用它，上面那一跳点不到。到带 `COMPRE` 表的设计库里按这些设计件再点查一次，查到的
+    // 支撑件并进它所在库的引用者，与别的引用者一样上卷、一样排工。没有设计件经那几张表命中，或没有哪个库带这张表
+    // （AMS 样例工程就是），这一段一次点查都不发。
+    if !read_through.is_empty() {
+        for db in &mut carriers {
+            let tables: Vec<(String, u32)> = db
+                .tables
+                .iter()
+                .filter(|(name, _)| target_reads_of(name).is_some())
+                .cloned()
+                .collect();
+            for component in read_through.iter().copied().map(unkey) {
+                for (name, hash) in &tables {
+                    cascade.point_queries += 1;
+                    let found = db.engine.referrers_of(*hash, component).with_context(|| {
+                        format!("dbnum {} table {name} target {component}", db.dbnum)
+                    })?;
+                    for referrer in found.into_iter().filter(RefNo::is_valid) {
+                        if referrers_by_db
+                            .entry(db.dbnum)
+                            .or_default()
+                            .insert(key(referrer))
+                        {
+                            cascade
+                                .dependent_referrers
+                                .entry(db.dbnum)
+                                .or_default()
+                                .insert(text(referrer));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(carriers);
+
+    // ---- 上卷 ----
+    for (dbnum, referrers) in referrers_by_db {
         let mut roots: BTreeMap<String, CascadeRoot> = BTreeMap::new();
         let mut unrooted = Vec::new();
         for referrer in referrers.iter().copied().map(unkey) {
-            match resolve_root(source.dbnum, referrer)? {
+            match resolve_root(dbnum, referrer)? {
                 Some(root) => {
                     roots.entry(root.root.to_pdms_str()).or_insert(CascadeRoot {
                         refno: root.root.to_pdms_str(),
@@ -636,17 +732,14 @@ pub fn expand_reverse_cascade(
                 None => unrooted.push(text(referrer)),
             }
         }
-        cascade.design_referrers.insert(
-            source.dbnum,
-            referrers.iter().map(|k| text(unkey(*k))).collect(),
-        );
+        cascade
+            .design_referrers
+            .insert(dbnum, referrers.iter().map(|k| text(unkey(*k))).collect());
         if !roots.is_empty() {
-            cascade
-                .roots
-                .insert(source.dbnum, roots.into_values().collect());
+            cascade.roots.insert(dbnum, roots.into_values().collect());
         }
         if !unrooted.is_empty() {
-            cascade.unrooted.insert(source.dbnum, unrooted);
+            cascade.unrooted.insert(dbnum, unrooted);
         }
     }
     Ok(cascade)
@@ -717,8 +810,83 @@ pub fn sources_in_dir(dir: &Path, db_types: &[&str]) -> anyhow::Result<Vec<Sourc
 ///
 /// 其余设计侧反向表（`GOBREF` `HTPREF` `HDBREF` `GRDREF` `TMRREF` `OWNREF` `CONNRE`…）今天的几何
 /// 一个都不读，[`DesignReferenceCascade`] 查了**只记账**（`edges_by_attribute`）。几何覆盖扩到读
-/// 它们那天，把名字加进这里就是全部改动——入口、护栏、账都已经在原位。
+/// 它们那天，把名字加进这里就是全部改动——入口、护栏、账都已经在原位。`COMPRE` 是例外：它的引用者读的是被引用件
+/// 身上的格，走带条件的那一张（[`DESIGN_CASCADE_TARGET_READS`]）。
 pub const DESIGN_CASCADE_ATTRIBUTES: [&str; 1] = ["POSREF"];
+
+/// 带条件的行为名单（GitHub #143）：`(引用属性, 引用者到被引用件身上去读的那几格)`。
+///
+/// [`DESIGN_CASCADE_ATTRIBUTES`] 上的引用者关心的是被引用件「在哪 / 在不在」，被引用件一进账本它就上卷。这一张上的
+/// 引用者读的是被引用件**身上的某几格**：只有这几格在窗口两端取值不同，引用者才重算；被引用件只是挪了位置、改了名，
+/// 引用者不动——不为保险多算。
+///
+/// `COMPRE`：支撑件（`ANCI` 一族）的管外径。e3d-io 目录求值的 `ATTRIB POD` 在设计件自己没有 `LSTU` 时经它的
+/// `COMPRE` 找到被支撑的构件，取那只构件的 `LSTU`（弯头、三通一类）或 `HSTU`（`BRAN`）走到管子的目录件要 `PARA[2]`
+/// （e3d-io `db_param_env.rs` 的 `catalogue_component_trace`）；外径决定支撑件整件沿 z 的平移。支撑件自己的 `COMPRE`
+/// 改指别处归元数据门管（GitHub #132，`model_impact::E3D_IO_DESIGN_SIDE_READS`）；这里管的是反方向——被指的那件换了
+/// 规格。名单与 e3d-io 的读点由测试 `the_conditional_list_matches_what_e3d_io_reads_on_the_referenced_component`
+/// 钉在一起。
+///
+/// 另一处不同：这一类的引用者多数在**别的设计库**里（APS 样例工程 234 条 `COMPRE` 边有 224 条，支撑库指着管道库），
+/// 所以跨库的不只计数，点名交给跨库交接（[`DesignReferenceCascade::handoff_referrers`]）。
+pub const DESIGN_CASCADE_TARGET_READS: [(&str, &[&str]); 1] = [("COMPRE", &["LSTU", "HSTU"])];
+
+/// `attribute` 在不在带条件的名单上：在就给引用者经它到被引用件身上去读的那几格。
+fn target_reads_of(attribute: &str) -> Option<&'static [&'static str]> {
+    DESIGN_CASCADE_TARGET_READS
+        .iter()
+        .find(|(name, _)| *name == attribute)
+        .map(|(_, reads)| *reads)
+}
+
+/// `table` 是不是带条件的名单上某个属性要到被引用件身上去读的格（`LSTU` / `HSTU`）。
+fn is_target_read(table: &str) -> bool {
+    DESIGN_CASCADE_TARGET_READS
+        .iter()
+        .any(|(_, reads)| reads.contains(&table))
+}
+
+/// 一格引用属性在窗口一端读出来的样子（带条件的名单两端比对用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceRead {
+    /// 元素不在这一端 / 它的 noun 没有这一格 / 这一格是空引用——对引用者是同一回事：经它走不到任何东西。
+    Absent,
+    /// 指着这个元素。
+    Target(RefNo),
+    /// 元素在、这一格也有，却读不出来。**不是**「没有」。
+    Unreadable,
+}
+
+/// 纯函数：同一个元素的同一组引用属性在窗口两端各读一遍（逐格对齐），有没有哪一格不同。
+///
+/// 任一端读不出来按「变了」算：读不出来时「没变」与「不知道」长得一样，宁多算不漏算。
+pub fn reference_reads_differ(base: &[ReferenceRead], target: &[ReferenceRead]) -> bool {
+    base.len() != target.len()
+        || base
+            .iter()
+            .zip(target)
+            .any(|(before, after)| before != after || matches!(before, ReferenceRead::Unreadable))
+}
+
+/// I/O：`element` 的 `attribute` 在这一端的 `DbSet` 上读出来的样子。
+pub fn read_reference(set: &Arc<DbSet>, element: RefNo, attribute: &str) -> ReferenceRead {
+    let element = set.element(element);
+    match element.exists() {
+        Ok(true) => {}
+        Ok(false) => return ReferenceRead::Absent,
+        Err(_) => return ReferenceRead::Unreadable,
+    }
+    match element.has_attribute(attribute) {
+        Ok(true) => {}
+        Ok(false) => return ReferenceRead::Absent,
+        Err(_) => return ReferenceRead::Unreadable,
+    }
+    match element.get_ref(attribute) {
+        Ok(Some(target)) => ReferenceRead::Target(target),
+        Ok(None) => ReferenceRead::Absent,
+        Err(_) => ReferenceRead::Unreadable,
+    }
+}
 
 /// 一窗最多发多少次点查（`变更元素数 × 要开的库里反向表总数`）。
 ///
@@ -760,9 +928,15 @@ pub struct DesignReferrerEdges {
     pub query_failures: usize,
     /// 打不开的成员库 → 原因。**不是**「这个库没有引用者」，是未知。
     pub unreadable_dbs: BTreeMap<u32, String>,
-    /// 本该发的点查次数超了 [`DESIGN_CASCADE_QUERY_BUDGET`]：一次都没发，`edges` 是空的但
-    /// **不是**「没有引用者」。库开过了、表清单读过了，所以 `tables_used` 仍是实的。
+    /// 本该发的点查次数超了 [`DESIGN_CASCADE_QUERY_BUDGET`]：一次都没发，`edges` 里没有点查出来的边但
+    /// **不是**「没有引用者」。库开过了、表清单读过了，所以 `tables_used` 仍是实的。带条件那一类的表这时整张
+    /// 走一遍（见下面两格），`edges` 里只有它们的边。
     pub over_budget: Option<usize>,
+    /// 超预算时补的那一手（GitHub #143，`walk_target_read_tables`）：带条件那一类
+    /// （[`DESIGN_CASCADE_TARGET_READS`]）的反向表整张走了几张。没超预算时是 0——那时这几张表与别的表一样点查。
+    pub target_read_tables_walked: usize,
+    /// 同上：一共走过多少条表项（留下来成边的只是被引用件在本窗变更元素里的那些）。
+    pub target_read_entries_walked: usize,
 }
 
 /// 一窗里要拿去反查的变更元素：账本里的 refno，去重，不分变更类型。
@@ -820,6 +994,7 @@ pub fn read_design_referrer_edges(
     let planned = sources.len() * open.iter().map(|db| db.tables.len()).sum::<usize>();
     if planned > budget {
         out.over_budget = Some(planned);
+        walk_target_read_tables(&mut open, sources, &mut out);
         return out;
     }
     for db in &mut open {
@@ -849,6 +1024,46 @@ pub fn read_design_referrer_edges(
     out
 }
 
+/// 超预算时补的一手（GitHub #143）：带条件那一类（[`DESIGN_CASCADE_TARGET_READS`]，今天只有 `COMPRE`）的反向表
+/// **整张走一遍**，留下被引用件是本窗变更元素的边；别的表照旧一次都不查。
+///
+/// 为什么不能跟着整窗一起放弃：超预算的窗，本库已发布的根全部重算（[`DesignReferenceCascade::degraded`]），本库里的
+/// 引用者由此盖住；可这一类的引用者多数在**别的设计库**里，那里没有谁替它们兜底——而「一窗动了上千个元素」正是
+/// 成批换规格的样子。整张走一遍的成本只跟表的大小有关、与变更元素数无关（APS 样例工程四张 `COMPRE` 表共 234 条），
+/// 所以不占点查预算。表打不开 / 走到一半读挂记一笔 `query_failures`（这一窗本来就判不了，账上多一个原因）。
+fn walk_target_read_tables(open: &mut [OpenDb], sources: &[RefNo], out: &mut DesignReferrerEdges) {
+    let changed: BTreeSet<RefKey> = sources.iter().copied().map(key).collect();
+    for db in open {
+        let tables: Vec<(String, u32)> = db
+            .tables
+            .iter()
+            .filter(|(name, _)| target_reads_of(name).is_some())
+            .cloned()
+            .collect();
+        for (name, hash) in tables {
+            let Some(mut table) = db.engine.reference_table(hash) else {
+                out.query_failures += 1;
+                continue;
+            };
+            out.target_read_tables_walked += 1;
+            for entry in table.iter() {
+                let Ok(entry) = entry else {
+                    out.query_failures += 1;
+                    break;
+                };
+                out.target_read_entries_walked += 1;
+                if entry.referrer.is_valid() && changed.contains(&key(entry.target)) {
+                    out.edges.push(DesignReferrerEdge {
+                        target: entry.target,
+                        attribute: name.clone(),
+                        referrer: entry.referrer,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// 一窗的设计侧通用一跳反查：账 + 要并进 `touched` 的引用者根。挂在 `WindowRootSources` 上
 /// （与 C2 `structural_connection`、C8 `cable_endpoint` 同一形状）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -871,6 +1086,16 @@ pub struct DesignReferenceCascade {
     /// 本窗口只排本库的工作（`roots_T` 就是本库的），排不了它们——这是在案的跨库缺口，
     /// 与 C8 「只查本库」留下的那 196 条同性质。记出来，不静默。
     pub foreign_referrers: BTreeMap<u32, usize>,
+    /// [`DESIGN_CASCADE_TARGET_READS`] 命中、且被引用件那几格在窗口两端取值不同的边数，按属性分（GitHub #143）。
+    /// 它们的引用者要重算：本库的上卷进 `referrer_roots`，别的库里的进 `handoff_referrers`。
+    pub target_reads_triggered: BTreeMap<String, usize>,
+    /// 同一张名单命中、但那几格两端取值相同的边数，按属性分——被引用件只改了引用者不读的东西，引用者不动。
+    pub target_reads_unchanged: BTreeMap<String, usize>,
+    /// 触发了的边里引用者在**别的**设计库的那些（去重，按出现序）：本窗的计划装不下它们的根，点名交给跨库交接
+    /// （[`crate::data_interface::cross_db_handoff`]，与 C2 的跨库对端、C8 的跨库引用者同一条路）。反查超预算
+    /// （`degraded`）的窗这一格照样是实的：那时这一类的表整张走一遍（[`DesignReferrerEdges::over_budget`]），
+    /// 本库的根靠整窗重算盖住，别的库里的只有这一份名单。
+    pub handoff_referrers: Vec<RefNo>,
     /// 判不了的原因：点查次数超预算 / 成员库打不开 / 表读挂。
     ///
     /// 调用方（[`crate::data_interface::window_root_plan::WindowImpact`]）据此**放弃凭证前移**
@@ -887,10 +1112,24 @@ impl DesignReferenceCascade {
 
     /// 纯函数：把点查出的边折成根集与账。`root_chain(引用者)` 给它 T 端 owner 链上的根
     /// （生产传 [`roots_on_owner_chain`]，测试可以手搓）。
+    ///
+    /// 没有窗口两端可比的调用方用这一个（探针、只看 `POSREF` 的测试）：[`DESIGN_CASCADE_TARGET_READS`] 上的属性
+    /// 一条都不触发、只记账。生产走 [`Self::collect`] → [`Self::from_edges_with`]。
     pub fn from_edges(
         edges: &DesignReferrerEdges,
         dbnum: u32,
+        root_chain: impl FnMut(RefNo) -> Vec<RefNo>,
+    ) -> Self {
+        Self::from_edges_with(edges, dbnum, root_chain, |_, _| false)
+    }
+
+    /// [`Self::from_edges`]，外加带条件那一类的判词：`target_reads_changed(被引用件, 那几格)` 回这几格在窗口两端
+    /// 取值是否不同（生产传 [`read_reference`] + [`reference_reads_differ`]）。同一个被引用件只问一次。
+    pub fn from_edges_with(
+        edges: &DesignReferrerEdges,
+        dbnum: u32,
         mut root_chain: impl FnMut(RefNo) -> Vec<RefNo>,
+        mut target_reads_changed: impl FnMut(RefNo, &[&str]) -> bool,
     ) -> Self {
         let mut out = Self {
             enabled: true,
@@ -901,17 +1140,42 @@ impl DesignReferenceCascade {
             unreadable_dbs: edges.unreadable_dbs.clone(),
             ..Self::default()
         };
+        // 带条件那一类的判词按（被引用件, 属性）记一次：一只构件被几只支撑件指着，两端只读一遍。
+        let mut verdicts: BTreeMap<(RefKey, &str), bool> = BTreeMap::new();
+        let mut handed_off: BTreeSet<RefKey> = BTreeSet::new();
         for edge in &edges.edges {
+            let attribute = edge.attribute.as_str();
             *out.edges_by_attribute
                 .entry(edge.attribute.clone())
                 .or_default() += 1;
-            if !DESIGN_CASCADE_ATTRIBUTES.contains(&edge.attribute.as_str()) {
+            let conditional = target_reads_of(attribute);
+            if let Some(reads) = conditional {
+                let changed = *verdicts
+                    .entry((key(edge.target), attribute))
+                    .or_insert_with(|| target_reads_changed(edge.target, reads));
+                let bucket = if changed {
+                    &mut out.target_reads_triggered
+                } else {
+                    &mut out.target_reads_unchanged
+                };
+                *bucket.entry(edge.attribute.clone()).or_default() += 1;
+                if !changed {
+                    continue;
+                }
+            } else if !DESIGN_CASCADE_ATTRIBUTES.contains(&attribute) {
                 continue;
             }
             if edge.referrer.dbno() != dbnum {
-                *out.foreign_referrers
-                    .entry(edge.referrer.dbno())
-                    .or_default() += 1;
+                if conditional.is_some() {
+                    // 带条件那一类的引用者多数在别的设计库里：点名交给那个库的任务，不只计数。
+                    if handed_off.insert(key(edge.referrer)) {
+                        out.handoff_referrers.push(edge.referrer);
+                    }
+                } else {
+                    *out.foreign_referrers
+                        .entry(edge.referrer.dbno())
+                        .or_default() += 1;
+                }
                 continue;
             }
             let roots = root_chain(edge.referrer);
@@ -923,12 +1187,19 @@ impl DesignReferenceCascade {
         }
         let mut reasons = Vec::new();
         if let Some(planned) = edges.over_budget {
-            reasons.push(format!(
+            let mut reason = format!(
                 "这一窗要发 {planned} 次点查（{} 个变更元素 × {} 个成员库的反向表），超过预算 \
                  {DESIGN_CASCADE_QUERY_BUDGET}，一次都没发",
                 edges.sources,
                 out.tables_used.len()
-            ));
+            );
+            if edges.target_read_tables_walked > 0 {
+                reason.push_str(&format!(
+                    "（带条件那一类的 {} 张表整张走了一遍、{} 条表项：别的库里的引用者照常交接）",
+                    edges.target_read_tables_walked, edges.target_read_entries_walked
+                ));
+            }
+            reasons.push(reason);
         }
         if !out.unreadable_dbs.is_empty() {
             reasons.push(format!(
@@ -947,6 +1218,9 @@ impl DesignReferenceCascade {
     ///
     /// `design_dbs` 是 MDB 的设计成员（`E3dModelService::design_sources()`）；本库无论在不在
     /// 里面都会被查，且**钉 T 端**——引用者的记录与表都在引用方那边，要问的就是 T 那一刻的表。
+    /// `base` / `target` 是本窗两端的 `DbSet`：带条件的名单（[`DESIGN_CASCADE_TARGET_READS`]）要在两端各读一遍
+    /// 被引用件——它是本窗的变更元素，在本库里，两端都钉着。
+    #[allow(clippy::too_many_arguments)]
     pub fn collect(
         plan: &UpdatePlan,
         dbnum: u32,
@@ -955,6 +1229,8 @@ impl DesignReferenceCascade {
         design_dbs: &[SourceDb],
         owners: &BTreeMap<(u32, u32), RefNo>,
         roots_t: &[GenerationRoot],
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
     ) -> Self {
         let sources = changed_elements(plan);
         if sources.is_empty() {
@@ -972,9 +1248,20 @@ impl DesignReferenceCascade {
                 (refno.word0, refno.word1)
             })
             .collect();
-        Self::from_edges(&edges, dbnum, |referrer| {
-            roots_on_owner_chain(owners, &root_keys, referrer)
-        })
+        Self::from_edges_with(
+            &edges,
+            dbnum,
+            |referrer| roots_on_owner_chain(owners, &root_keys, referrer),
+            |element, attributes| {
+                let read = |set: &Arc<DbSet>| -> Vec<ReferenceRead> {
+                    attributes
+                        .iter()
+                        .map(|attribute| read_reference(set, element, attribute))
+                        .collect()
+                };
+                reference_reads_differ(&read(base), &read(target))
+            },
+        )
     }
 
     /// 把引用者根并进 `touched`，回新增的个数。开关关 = 不动。
@@ -986,6 +1273,12 @@ impl DesignReferenceCascade {
             .iter()
             .filter(|root| touched.insert(**root))
             .count()
+    }
+
+    /// 要交给跨库交接的引用者（[`crate::data_interface::cross_db_handoff::elements_by_dbnum`] 的输入）：带条件那一类
+    /// 触发了、引用者却在别的设计库里的。开关关着是空的。
+    pub fn handoff_referrer_elements(&self) -> impl Iterator<Item = RefNo> + '_ {
+        self.handoff_referrers.iter().copied()
     }
 
     /// 回执里的一行观测。
@@ -1014,6 +1307,40 @@ impl DesignReferenceCascade {
             self.referrer_roots.len(),
             self.referrer_without_root,
         );
+        let target_reads = DESIGN_CASCADE_TARGET_READS
+            .iter()
+            .filter_map(|(attribute, reads)| {
+                let changed = self
+                    .target_reads_triggered
+                    .get(*attribute)
+                    .copied()
+                    .unwrap_or(0);
+                let unchanged = self
+                    .target_reads_unchanged
+                    .get(*attribute)
+                    .copied()
+                    .unwrap_or(0);
+                (changed + unchanged > 0).then(|| {
+                    format!(
+                        "{attribute}→{}:{changed} changed/{unchanged} unchanged",
+                        reads.join("|")
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !target_reads.is_empty() {
+            line.push_str(&format!(" target_reads=[{}]", target_reads.join(" ")));
+        }
+        if !self.handoff_referrers.is_empty() {
+            let mut by_db: BTreeMap<u32, usize> = BTreeMap::new();
+            for referrer in &self.handoff_referrers {
+                *by_db.entry(referrer.dbno()).or_default() += 1;
+            }
+            line.push_str(&format!(
+                "，{} 个引用者在别的设计库里（{by_db:?}），交给跨库交接",
+                self.handoff_referrers.len()
+            ));
+        }
         if !self.foreign_referrers.is_empty() {
             line.push_str(&format!(
                 "，{:?} 的引用者在别的设计库里、本窗口排不了（在案跨库缺口）",
@@ -1561,6 +1888,8 @@ mod tests {
             query_failures: 0,
             unreadable_dbs: BTreeMap::new(),
             over_budget: None,
+            target_read_tables_walked: 0,
+            target_read_entries_walked: 0,
         }
     }
 
@@ -1902,6 +2231,528 @@ mod tests {
         );
     }
 
+    // ---- GitHub #143：引用者读的是被引用件身上的格（`COMPRE` → `LSTU` / `HSTU`）----
+
+    /// 被支撑的管件换了规格（`LSTU` / `HSTU` 在窗口两端取值不同）→ 经 `COMPRE` 指着它的支撑件那个根进 `regen`，
+    /// 而它本来只会 `advance`（这一窗的闭包根本没碰到它）。问两端的就是名单上那两格。
+    #[test]
+    fn a_support_is_regenerated_when_the_component_it_points_at_changed_its_tube_reference() {
+        let mut asked: Vec<(RefNo, Vec<String>)> = Vec::new();
+        let cascade = DesignReferenceCascade::from_edges_with(
+            &queried(&[("COMPRE", design_refno(OWN_DB, 11))]),
+            OWN_DB,
+            design_root_chain,
+            |target, reads| {
+                asked.push((target, reads.iter().map(|read| read.to_string()).collect()));
+                true
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![(
+                design_refno(OWN_DB, 1),
+                vec!["LSTU".to_string(), "HSTU".to_string()]
+            )],
+            "问的是被引用件、名单上那两格，问一次"
+        );
+        assert_eq!(cascade.referrer_roots, BTreeSet::from([own(10)]));
+        assert_eq!(
+            cascade.target_reads_triggered,
+            BTreeMap::from([("COMPRE".to_string(), 1)])
+        );
+        assert!(cascade.target_reads_unchanged.is_empty());
+        assert!(cascade.handoff_referrers.is_empty());
+        assert!(cascade.degraded.is_none());
+        let line = cascade.summary_line(OWN_DB);
+        assert!(
+            line.contains("target_reads=[COMPRE→LSTU|HSTU:1 changed/0 unchanged]"),
+            "{line}"
+        );
+        assert!(line.contains("referrer_roots=1"), "{line}");
+
+        let plan = design_plan_with(&cascade);
+        assert_eq!(
+            plan.regen.iter().map(|root| root.root).collect::<Vec<_>>(),
+            vec![own(10), own(20)]
+        );
+        assert!(plan.advance.is_empty());
+    }
+
+    /// 不相关的改动不把支撑件拉进来：被支撑的管件只是挪了位置 / 改了名（那两格两端相同），边查得到、记了账，
+    /// 支撑件的根留在 `advance`——不为保险多算。
+    #[test]
+    fn a_component_that_changed_nothing_its_support_reads_leaves_the_support_alone() {
+        let cascade = DesignReferenceCascade::from_edges_with(
+            &queried(&[("COMPRE", design_refno(OWN_DB, 11))]),
+            OWN_DB,
+            |_| panic!("没触发的边不该去上卷引用者"),
+            |_, _| false,
+        );
+        assert_eq!(
+            cascade.edges_by_attribute,
+            BTreeMap::from([("COMPRE".to_string(), 1)])
+        );
+        assert_eq!(
+            cascade.target_reads_unchanged,
+            BTreeMap::from([("COMPRE".to_string(), 1)])
+        );
+        assert!(cascade.target_reads_triggered.is_empty());
+        assert!(cascade.referrer_roots.is_empty());
+        assert!(cascade.handoff_referrers.is_empty());
+        assert!(cascade.degraded.is_none());
+        let line = cascade.summary_line(OWN_DB);
+        assert!(
+            line.contains("target_reads=[COMPRE→LSTU|HSTU:0 changed/1 unchanged]"),
+            "{line}"
+        );
+
+        let plan = design_plan_with(&cascade);
+        assert_eq!(
+            plan.regen.iter().map(|root| root.root).collect::<Vec<_>>(),
+            vec![own(20)]
+        );
+        assert_eq!(plan.advance, vec![own(10)]);
+    }
+
+    /// 跨库：支撑件在别的设计库里（APS 样例工程 234 条 `COMPRE` 边里的 224 条）。本窗的计划装不下它的根
+    /// （`roots_T` 是本库的），所以不上卷、也不只是计数——点名交给跨库交接，按它所在的库分组。
+    #[test]
+    fn a_support_in_another_design_db_is_handed_off_to_that_db() {
+        let support = design_refno(PEER_DB, 11);
+        let other = design_refno(PEER_DB, 12);
+        let cascade = DesignReferenceCascade::from_edges_with(
+            &queried(&[("COMPRE", support), ("COMPRE", other), ("COMPRE", support)]),
+            OWN_DB,
+            |_| panic!("别的库的引用者不该拿本库的 owner 索引上卷"),
+            |_, _| true,
+        );
+        assert_eq!(
+            cascade.handoff_referrers,
+            vec![support, other],
+            "去重、按出现序"
+        );
+        assert!(
+            cascade.foreign_referrers.is_empty(),
+            "交接了的不记进「排不了」那一格"
+        );
+        assert!(cascade.referrer_roots.is_empty());
+        assert!(cascade.degraded.is_none());
+        assert_eq!(
+            crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                cascade.handoff_referrer_elements()
+            ),
+            BTreeMap::from([(PEER_DB, vec![support.to_string(), other.to_string()])])
+        );
+        let line = cascade.summary_line(OWN_DB);
+        assert!(line.contains("交给跨库交接"), "{line}");
+        assert!(!line.contains("在案跨库缺口"), "{line}");
+
+        // 没触发就不交接。
+        let quiet = DesignReferenceCascade::from_edges_with(
+            &queried(&[("COMPRE", support)]),
+            OWN_DB,
+            |_| panic!("别的库的引用者不该拿本库的 owner 索引上卷"),
+            |_, _| false,
+        );
+        assert!(quiet.handoff_referrers.is_empty());
+        assert!(quiet.foreign_referrers.is_empty());
+    }
+
+    /// 一只构件被几只支撑件指着：两端只读一遍（判词按被引用件记），每条边都按这一个判词走——同库的上卷，
+    /// 别的库里的交接。
+    #[test]
+    fn the_two_ends_are_read_once_per_referenced_element() {
+        let mut calls = 0usize;
+        let cascade = DesignReferenceCascade::from_edges_with(
+            &queried(&[
+                ("COMPRE", design_refno(OWN_DB, 11)),
+                ("COMPRE", design_refno(OWN_DB, 10)),
+                ("COMPRE", design_refno(PEER_DB, 5)),
+            ]),
+            OWN_DB,
+            design_root_chain,
+            |_, _| {
+                calls += 1;
+                true
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            cascade.target_reads_triggered,
+            BTreeMap::from([("COMPRE".to_string(), 3)])
+        );
+        assert_eq!(cascade.referrer_roots, BTreeSet::from([own(10)]));
+        assert_eq!(cascade.handoff_referrers, vec![design_refno(PEER_DB, 5)]);
+    }
+
+    /// 反查超预算的窗（一窗动了上千个元素——成批换规格就是这个样子）：点查一次都不发，整窗判不了、本库已发布的根
+    /// 全部重算；带条件那一类的表整张走出来的边照常过判词，别的库里的支撑件照常点名交接——那个库没有谁替它们兜底。
+    #[test]
+    fn an_over_budget_window_still_hands_off_the_supports_in_other_design_dbs() {
+        let support = design_refno(PEER_DB, 11);
+        let mut walked = queried(&[("COMPRE", support), ("COMPRE", design_refno(OWN_DB, 11))]);
+        walked.sources = 7_139;
+        walked.queries = 0;
+        walked.over_budget = Some(1_934_669);
+        walked.target_read_tables_walked = 4;
+        walked.target_read_entries_walked = 234;
+        let cascade =
+            DesignReferenceCascade::from_edges_with(&walked, OWN_DB, design_root_chain, |_, _| {
+                true
+            });
+        assert_eq!(cascade.handoff_referrers, vec![support]);
+        assert_eq!(cascade.referrer_roots, BTreeSet::from([own(10)]));
+        let reason = cascade.degraded.clone().expect("超预算仍然是判不了");
+        assert!(
+            reason.contains("一次都没发") && reason.contains("4 张表整张走了一遍、234 条表项"),
+            "{reason}"
+        );
+        let line = cascade.summary_line(OWN_DB);
+        assert!(
+            line.contains("交给跨库交接") && line.contains("判不了"),
+            "{line}"
+        );
+        // 本库：判不了 → 已发布的根全部重算，没有一个只前移。
+        let plan = design_plan_with(&cascade);
+        assert!(plan.advance.is_empty());
+        assert_eq!(plan.regen.len(), 2);
+
+        // 被引用件那两格没变：超预算也不交接（不为保险多算）。
+        let quiet =
+            DesignReferenceCascade::from_edges_with(&walked, OWN_DB, |_| Vec::new(), |_, _| false);
+        assert!(quiet.handoff_referrers.is_empty());
+        assert!(quiet.degraded.is_some());
+
+        // 没走过表（库里没有这一类的表）时原因不提这一句。
+        let mut bare = queried(&[]);
+        bare.over_budget = Some(35_695);
+        let reason = DesignReferenceCascade::from_edges(&bare, OWN_DB, design_root_chain)
+            .degraded
+            .expect("超预算就是判不了");
+        assert!(!reason.contains("整张走了一遍"), "{reason}");
+    }
+
+    /// 没有窗口两端可比的调用方（`from_edges`：探针与只看 `POSREF` 的测试）：带条件那一类一条都不触发、只记账；
+    /// `POSREF` 不看这个判词，照旧无条件上卷。
+    #[test]
+    fn without_the_two_ends_the_conditional_attributes_only_count() {
+        let cascade = DesignReferenceCascade::from_edges(
+            &queried(&[
+                ("COMPRE", design_refno(OWN_DB, 12)),
+                ("POSREF", design_refno(OWN_DB, 11)),
+            ]),
+            OWN_DB,
+            design_root_chain,
+        );
+        assert_eq!(
+            cascade.target_reads_unchanged,
+            BTreeMap::from([("COMPRE".to_string(), 1)])
+        );
+        assert!(cascade.target_reads_triggered.is_empty());
+        assert_eq!(
+            cascade.referrer_roots,
+            BTreeSet::from([own(10)]),
+            "POSREF 照旧无条件上卷"
+        );
+        assert_eq!(cascade.referrer_without_root, 0, "没触发的边不去上卷");
+
+        let posref_only = DesignReferenceCascade::from_edges_with(
+            &queried(&[("POSREF", design_refno(OWN_DB, 11))]),
+            OWN_DB,
+            design_root_chain,
+            |_, _| panic!("POSREF 不在带条件的名单上，不该问两端"),
+        );
+        assert_eq!(posref_only.referrer_roots, BTreeSet::from([own(10)]));
+        assert!(posref_only.target_reads_triggered.is_empty());
+        assert!(posref_only.target_reads_unchanged.is_empty());
+    }
+
+    /// 两端比对的口径：逐格比；读不出来的一格按「变了」算（「没变」与「不知道」长得一样时宁多算不漏算）；
+    /// 两端都没有这一格（桥架 `CTRAY` 既没有 `LSTU` 也没有 `HSTU`）不算变。
+    #[test]
+    fn the_two_end_comparison_treats_an_unreadable_read_as_changed() {
+        use ReferenceRead::{Absent, Target, Unreadable};
+        let spec = |id: u32| Target(design_refno(7000, id));
+        assert!(!reference_reads_differ(
+            &[spec(1), Absent],
+            &[spec(1), Absent]
+        ));
+        assert!(!reference_reads_differ(
+            &[Absent, Absent],
+            &[Absent, Absent]
+        ));
+        assert!(
+            reference_reads_differ(&[spec(1), Absent], &[spec(2), Absent]),
+            "换规格"
+        );
+        assert!(
+            reference_reads_differ(&[Absent, spec(1)], &[Absent, spec(2)]),
+            "支管换管头规格"
+        );
+        assert!(
+            reference_reads_differ(&[spec(1), Absent], &[Absent, Absent]),
+            "被删 / 清空"
+        );
+        assert!(
+            reference_reads_differ(&[Absent, Absent], &[spec(1), Absent]),
+            "新建"
+        );
+        assert!(reference_reads_differ(
+            &[Unreadable, Absent],
+            &[Unreadable, Absent]
+        ));
+        assert!(reference_reads_differ(
+            &[spec(1), Absent],
+            &[Unreadable, Absent]
+        ));
+    }
+
+    /// 名单与 e3d-io 的读点钉在一起：`ATTRIB POD` 经 `COMPRE` 走到被支撑的构件之后，在那只构件上读的入口属性
+    /// 恰好是名单上那两格，也只在这一处读。e3d-io 多读一格（或换了读法）这条就红——回来把名单补上，否则那一格
+    /// 变了支撑件不会跟着重算。
+    #[test]
+    fn the_conditional_list_matches_what_e3d_io_reads_on_the_referenced_component() {
+        assert_eq!(
+            DESIGN_CASCADE_TARGET_READS,
+            [("COMPRE", &["LSTU", "HSTU"][..])]
+        );
+        assert!(
+            !DESIGN_CASCADE_ATTRIBUTES.contains(&"COMPRE"),
+            "COMPRE 只走带条件的那一张：被支撑的构件挪位置不该让支撑件重算"
+        );
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/shared/e3d-io/src/db_param_env.rs"),
+        )
+        .expect("e3d-io src/db_param_env.rs 可读")
+        .replace("\r\n", "\n");
+        let production = match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => source.as_str(),
+        };
+        assert!(
+            production.contains("const COMPONENT_REFERENCE: &str = \"COMPRE\";"),
+            "e3d-io 不再把 COMPRE 记在 COMPONENT_REFERENCE 里"
+        );
+        assert!(
+            production.contains(
+                "let referenced = design.get_element(COMPONENT_REFERENCE).ok().flatten()?;"
+            ),
+            "被支撑的构件不再是经设计件的 COMPRE 取到的"
+        );
+        let marker = "component_via(&referenced, \"";
+        let reads: Vec<&str> = production
+            .match_indices(marker)
+            .map(|(at, matched)| {
+                let rest = &production[at + matched.len()..];
+                &rest[..rest.find('"').expect("closing quote")]
+            })
+            .collect();
+        assert_eq!(
+            reads,
+            ["LSTU", "HSTU"],
+            "e3d-io 在 COMPRE 的目标上读的入口属性变了"
+        );
+        assert_eq!(
+            production.matches("&referenced").count(),
+            reads.len(),
+            "被支撑的构件多了一处别的读法：核一遍读的是哪一格"
+        );
+    }
+
+    const APS_DIR: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000";
+
+    /// 一张反向表的全部表项 `(被引用件, 引用者)`；库打不开 / 没有这张表给空。
+    fn reference_table_entries(file: &Path, table: &str) -> Vec<(RefNo, RefNo)> {
+        let hash = e3d_attlib::db1_hash(table);
+        let Ok(mut engine) = ReadOnlyEngine::open(file) else {
+            return Vec::new();
+        };
+        if !engine.tables().iter().any(|entry| entry.name_hash == hash) {
+            return Vec::new();
+        }
+        let entries = match engine.reference_table(hash) {
+            Some(mut reference) => reference
+                .iter()
+                .filter_map(Result::ok)
+                .map(|entry| (entry.target, entry.referrer))
+                .collect(),
+            None => Vec::new(),
+        };
+        entries
+    }
+
+    /// P3 的再一跳（GitHub #143）：管子的目录件变了 → 引用它的管件（`LSTU` / `HSTU` 表）自己被点到；经 `COMPRE` 指着
+    /// 管件的支撑件读的是同一个目录件、却不直接引用它——要靠再一跳才点得到，而且落在它自己那个库的引用者里。
+    ///
+    /// 语料里没有「只改管子目录件」的自然窗口，手法与 `live_ams7000_…` 的退路相同：从文件里现成的一条链
+    /// （支撑件 —`COMPRE`→ 管件 —`LSTU` / `HSTU`→ 目录件）取那个目录件当假定的变更源。只读反向表，不要模板目录；
+    /// APS 样例工程不在本机就跳过。
+    #[test]
+    fn a_catalogue_change_reaches_the_supports_that_point_at_the_components_using_it() {
+        let dir = Path::new(APS_DIR);
+        if !dir.is_dir() {
+            println!("skip: the APS sample project is not installed");
+            return;
+        }
+        let sources = sources_in_dir(dir, &["DESI", "CATA"]).expect("sources");
+        let design_file = |dbnum: u32| {
+            sources
+                .iter()
+                .find(|source| source.is_design() && source.dbnum == dbnum)
+                .map(|source| source.file.clone())
+        };
+        let mut chain: Option<(RefNo, RefNo, RefNo, &str)> = None;
+        'search: for source in sources.iter().filter(|source| source.is_design()) {
+            for (component, support) in reference_table_entries(&source.file, "COMPRE") {
+                let Some(component_file) = design_file(component.dbno()) else {
+                    continue;
+                };
+                for read in ["LSTU", "HSTU"] {
+                    let found = reference_table_entries(&component_file, read)
+                        .into_iter()
+                        .find(|(_, referrer)| *referrer == component);
+                    if let Some((catalogue_item, _)) = found {
+                        chain = Some((support, component, catalogue_item, read));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let Some((support, component, catalogue_item, read)) = chain else {
+            println!(
+                "skip: no support in the corpus points at a component that carries LSTU / HSTU"
+            );
+            return;
+        };
+        println!(
+            "chain: support {} -COMPRE-> component {} -{read}-> catalogue item {}",
+            text(support),
+            text(component),
+            text(catalogue_item)
+        );
+
+        let seed = CatalogueSeed {
+            refno: catalogue_item,
+            noun: None,
+        };
+        let cascade = expand_reverse_cascade(&sources, &[seed], self_as_root).expect("cascade");
+        println!("{}", cascade.summary_line());
+        assert!(
+            cascade
+                .design_referrers
+                .get(&component.dbno())
+                .is_some_and(|referrers| referrers.contains(&text(component))),
+            "管件自己经 {read} 表被点到"
+        );
+        assert!(
+            cascade
+                .dependent_referrers
+                .get(&support.dbno())
+                .is_some_and(|referrers| referrers.contains(&text(support))),
+            "支撑件不直接引用目录件，只有再一跳点得到：{:?}",
+            cascade.dependent_referrers
+        );
+        assert!(
+            cascade
+                .design_referrers
+                .get(&support.dbno())
+                .is_some_and(|referrers| referrers.contains(&text(support))),
+            "再一跳找到的支撑件并进它所在库的引用者"
+        );
+        let support_root = refno_from_e3d(support).to_pdms_str();
+        assert!(
+            cascade
+                .roots
+                .get(&support.dbno())
+                .is_some_and(|roots| roots.iter().any(|root| root.refno == support_root)),
+            "…并且一样上卷成根（这里的 resolver 把引用者自己当根）"
+        );
+    }
+
+    /// 超预算时整张走一遍，与点查答的是同一件事（GitHub #143）：APS 样例工程里每张 `COMPRE` 表各取头一条边，把
+    /// 被引用件当变更源——预算给 0（必超）走出来的边，与预算放开点查出来的 `COMPRE` 边逐条相同；点查一次都不发，
+    /// 别的表一条边都不出。APS 样例工程不在本机就跳过。
+    #[test]
+    fn walking_the_conditional_tables_finds_the_same_edges_as_point_queries() {
+        let dir = Path::new(APS_DIR);
+        if !dir.is_dir() {
+            println!("skip: the APS sample project is not installed");
+            return;
+        }
+        let sources = sources_in_dir(dir, &["DESI"]).expect("sources");
+        let mut targets: Vec<RefNo> = sources
+            .iter()
+            .filter_map(|source| {
+                reference_table_entries(&source.file, "COMPRE")
+                    .into_iter()
+                    .next()
+                    .map(|(component, _)| component)
+            })
+            .collect();
+        targets.sort();
+        targets.dedup();
+        if targets.is_empty() {
+            println!("skip: no design database in the corpus carries a COMPRE table");
+            return;
+        }
+
+        let walked = read_design_referrer_edges(&targets, &sources, 0);
+        assert!(walked.over_budget.is_some(), "预算 0：必超");
+        assert_eq!(walked.queries, 0, "超预算：点查一次都不发");
+        assert!(walked.target_read_tables_walked > 0);
+        assert!(walked.target_read_entries_walked >= walked.edges.len());
+        assert!(
+            walked.edges.iter().all(|edge| edge.attribute == "COMPRE"),
+            "只走带条件那一类的表"
+        );
+        assert_eq!(walked.query_failures, 0);
+
+        let queried = read_design_referrer_edges(&targets, &sources, usize::MAX);
+        assert!(queried.over_budget.is_none());
+        assert_eq!(queried.target_read_tables_walked, 0, "没超预算不走整表");
+        let pairs = |edges: &DesignReferrerEdges| -> BTreeSet<(RefKey, RefKey)> {
+            edges
+                .edges
+                .iter()
+                .filter(|edge| edge.attribute == "COMPRE")
+                .map(|edge| (key(edge.target), key(edge.referrer)))
+                .collect()
+        };
+        println!(
+            "{} 个被引用件：整表走 {} 张 / {} 条表项，留下 {} 条边；点查 {} 次，COMPRE 边 {} 条",
+            targets.len(),
+            walked.target_read_tables_walked,
+            walked.target_read_entries_walked,
+            walked.edges.len(),
+            queried.queries,
+            pairs(&queried).len()
+        );
+        assert!(!pairs(&walked).is_empty());
+        assert_eq!(pairs(&walked), pairs(&queried));
+        assert_eq!(walked.edges.len(), pairs(&walked).len(), "没有重复的边");
+
+        // 走出来的边照常过判词：别的库里的支撑件被点名。
+        let own_db = targets[0].dbno();
+        let cascade =
+            DesignReferenceCascade::from_edges_with(&walked, own_db, |_| Vec::new(), |_, _| true);
+        assert!(cascade.degraded.is_some());
+        let foreign = walked
+            .edges
+            .iter()
+            .filter(|edge| edge.referrer.dbno() != own_db)
+            .map(|edge| key(edge.referrer))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            cascade
+                .handoff_referrers
+                .iter()
+                .copied()
+                .map(key)
+                .collect::<BTreeSet<_>>(),
+            foreign
+        );
+    }
+
     // ---- 真库（手动）：POSREF 反查与两态对拍 ----
 
     /// 语料里有 `POSREF` 表的设计库（P0 差表：DESI 31 库 / 7 109 条，目标 0 跨库）。
@@ -2206,16 +3057,17 @@ mod tests {
             assert!(windows_checked > 0);
         }
 
-        /// 探针（GitHub #132 的跨元素一层，手动）：支撑件（`ANCI` 一族）经 `COMPRE` 指着被支撑的构件，管外径取自
-        /// 那只构件的 `LSTU` / `HSTU`（e3d-io 目录求值的 `ATTRIB POD`）。被指的构件变了，支撑件要不要重算，今天谁来答？
+        /// 真库假定源（GitHub #143，手动；#132 时写成探针）：支撑件（`ANCI` 一族）经 `COMPRE` 指着被支撑的构件，管外径取自
+        /// 那只构件的 `LSTU` / `HSTU`（e3d-io 目录求值的 `ATTRIB POD`）。被指的构件换了规格，支撑件得跟着重算。
         ///
         /// 量三件事（只读，数是语料的性质，不下数值断言）：
         /// 1. 哪些设计库带 `COMPRE` 反向表、表里多少条边、多少条的两端不在同一个库；
         /// 2. 被指的构件是哪种形态：自己有 `LSTU`（形态 A）、没有 `LSTU` 但有 `HSTU`（形态 B，BRAN）、两样都没有；
-        /// 3. 假定每个被指的构件都变了，本模块的设计侧一跳（P4）逐库点查答出什么、做了什么。
+        /// 3. 假定每个被指的构件都换了规格，本模块的设计侧一跳（P4）逐库点查答出什么、做了什么。
         ///
-        /// 钉的只有今天的形状：`COMPRE` 不在 [`DESIGN_CASCADE_ATTRIBUTES`] 里，P4 查得回这些边（`edges_by_attribute`）
-        /// 却一个引用者的根都不上卷。哪天把它接上，这几条断言一起改。
+        /// 钉的是 [`DESIGN_CASCADE_TARGET_READS`] 接上之后的形状：以被指构件所在的库为本窗的库，同库支撑件的根一个不多
+        /// 一个不少地上卷，别的库里的支撑件点名交给跨库交接、在它自己那个库折得出根；被指的是桥架（两格都没有）不触发；
+        /// 同一个会话读两遍（「只挪了位置」）一条都不触发。
         ///
         /// 只读文件：`AIOS_APS_PROJECT_DIR`（缺省本机 APS 样例工程）+ `AIOS_E3D_TEMPLATE_DIR`。
         #[test]
@@ -2330,35 +3182,664 @@ mod tests {
                 println!("[#132]   {shape} × {count}");
             }
 
-            // 3. 假定每个被指的构件都变了：P4 逐库点查。预算放开——这里量的是答不答得出，不是成本。
+            // 3. 假定被指的构件此前没有 `LSTU` / `HSTU`、现在是文件里的样子（等于每只都换了规格），以它所在的库为本窗
+            //    的库：带条件那一类（[`DESIGN_CASCADE_TARGET_READS`]）该把同库的支撑件上卷成根、把别的库里的支撑件点名
+            //    交给跨库交接；被指的是桥架（两格都没有）不触发。预算放开——这里量的是答不答得出，不是成本。
             let mut targets: Vec<RefNo> = edges.iter().map(|(target, _)| *target).collect();
             targets.sort();
             targets.dedup();
-            let queried = read_design_referrer_edges(&targets, &sources, usize::MAX);
-            let own_db = targets[0].dbno();
-            let cascade = DesignReferenceCascade::from_edges(&queried, own_db, |_| Vec::new());
-            println!("[#132] {}", cascade.summary_line(own_db));
-            let seen = cascade
-                .edges_by_attribute
-                .get("COMPRE")
-                .copied()
-                .unwrap_or(0);
+            let everything = read_design_referrer_edges(&targets, &sources, usize::MAX);
+            let seen = everything
+                .edges
+                .iter()
+                .filter(|edge| edge.attribute == "COMPRE")
+                .count();
             println!(
-                "[#132] 假定 {} 个被指的构件都变了：P4 点查 {} 次，查回 COMPRE 引用者边 {seen} 条（表里 {} 条）；上卷的引用者根 {} 个",
+                "[#143] {} 个被指的构件：点查 {} 次，查回 COMPRE 引用者边 {seen} 条（表里 {} 条）",
                 targets.len(),
-                cascade.queries,
-                edges.len(),
-                cascade.referrer_roots.len()
-            );
-            assert!(
-                !DESIGN_CASCADE_ATTRIBUTES.contains(&"COMPRE"),
-                "COMPRE 进了行为名单：这条探针的结论要重写"
+                everything.queries,
+                edges.len()
             );
             assert_eq!(seen, edges.len(), "点查该找回表里的每一条边");
             assert!(
-                cascade.referrer_roots.is_empty(),
-                "COMPRE 今天只记账：P4 不该为它上卷任何根"
+                DESIGN_CASCADE_TARGET_READS
+                    .iter()
+                    .any(|(attribute, _)| *attribute == "COMPRE"),
+                "COMPRE 不在带条件的名单上：这条测试的结论要重写"
             );
+
+            // 每个涉及到的库（被指构件所在的库、支撑件所在的库）在文件最新会话上的属主索引与根集。
+            let unit_types = resolve_delivery_unit_types(&[]);
+            struct Lib {
+                owners: BTreeMap<(u32, u32), RefNo>,
+                roots_t: Vec<GenerationRoot>,
+                root_keys: BTreeSet<(u32, u32)>,
+            }
+            let lib_of = |dbnum: u32| -> Lib {
+                let source = sources
+                    .iter()
+                    .find(|source| source.dbnum == dbnum)
+                    .expect("库在语料里");
+                let sesno = ReadOnlyEngine::open(&source.file)
+                    .expect("open the design file")
+                    .session()
+                    .sesno;
+                let index = scan_index(&source.file, Some(sesno)).expect("scan index");
+                let set = open(&schema, &source.file, sesno);
+                let roots_t =
+                    enumerate_generation_roots(&set, &index.roots, &unit_types).expect("roots");
+                let root_keys = roots_t
+                    .iter()
+                    .map(|root| {
+                        let refno = refno_to_e3d(root.root);
+                        (refno.word0, refno.word1)
+                    })
+                    .collect();
+                Lib {
+                    owners: index
+                        .owners
+                        .iter()
+                        .map(|(key, owner)| (*key, *owner))
+                        .collect(),
+                    roots_t,
+                    root_keys,
+                }
+            };
+            // 「换了规格」的判词：S 端当它两格都没有，T 端读文件。
+            let changed = |element: RefNo, reads: &[&str]| {
+                let after: Vec<ReferenceRead> = reads
+                    .iter()
+                    .map(|read| read_reference(&all, element, read))
+                    .collect();
+                reference_reads_differ(&vec![ReferenceRead::Absent; after.len()], &after)
+            };
+
+            let mut by_db: BTreeMap<u32, Vec<RefNo>> = BTreeMap::new();
+            for target in &targets {
+                by_db.entry(target.dbno()).or_default().push(*target);
+            }
+            let mut libs: BTreeMap<u32, Lib> = BTreeMap::new();
+            let (mut triggered, mut untouched, mut same_db_roots, mut handed_off, mut queued_roots) =
+                (0usize, 0usize, 0usize, 0usize, 0usize);
+            for (own, own_targets) in &by_db {
+                let queried = read_design_referrer_edges(own_targets, &sources, usize::MAX);
+                if !libs.contains_key(own) {
+                    libs.insert(*own, lib_of(*own));
+                }
+                let lib = &libs[own];
+                let cascade = DesignReferenceCascade::from_edges_with(
+                    &queried,
+                    *own,
+                    |referrer| roots_on_owner_chain(&lib.owners, &lib.root_keys, referrer),
+                    |element, reads| changed(element, reads),
+                );
+                println!("[#143] {}", cascade.summary_line(*own));
+                assert!(cascade.degraded.is_none(), "{:?}", cascade.degraded);
+
+                // 期望逐条边正向算：一个不多一个不少。
+                let mut expected_roots: BTreeSet<RefnoEnum> = BTreeSet::new();
+                let mut expected_handoff: BTreeSet<RefNo> = BTreeSet::new();
+                for edge in &queried.edges {
+                    let behavioural = match edge.attribute.as_str() {
+                        "POSREF" => true,
+                        "COMPRE" => changed(edge.target, &["LSTU", "HSTU"]),
+                        _ => false,
+                    };
+                    if !behavioural {
+                        continue;
+                    }
+                    if edge.referrer.dbno() == *own {
+                        expected_roots.extend(
+                            roots_on_owner_chain(&lib.owners, &lib.root_keys, edge.referrer)
+                                .into_iter()
+                                .map(refno_from_e3d),
+                        );
+                    } else if edge.attribute == "COMPRE" {
+                        expected_handoff.insert(edge.referrer);
+                    }
+                }
+                assert_eq!(
+                    cascade.referrer_roots, expected_roots,
+                    "dbnum {own}: 同库支撑件的根"
+                );
+                assert_eq!(
+                    cascade
+                        .handoff_referrers
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                    expected_handoff,
+                    "dbnum {own}: 交给跨库交接的支撑件"
+                );
+                triggered += cascade
+                    .target_reads_triggered
+                    .get("COMPRE")
+                    .copied()
+                    .unwrap_or(0);
+                untouched += cascade
+                    .target_reads_unchanged
+                    .get("COMPRE")
+                    .copied()
+                    .unwrap_or(0);
+                same_db_roots += cascade.referrer_roots.len();
+                handed_off += cascade.handoff_referrers.len();
+
+                // 「只挪了位置」：同一个会话读两遍，那两格相同 → 一条都不触发，一只支撑件都不拉。
+                let quiet = DesignReferenceCascade::from_edges_with(
+                    &queried,
+                    *own,
+                    |_| Vec::new(),
+                    |element, reads| {
+                        let read: Vec<ReferenceRead> = reads
+                            .iter()
+                            .map(|name| read_reference(&all, element, name))
+                            .collect();
+                        reference_reads_differ(&read, &read)
+                    },
+                );
+                assert!(
+                    quiet.target_reads_triggered.is_empty(),
+                    "dbnum {own}: 同一个会话读两遍不该有哪一格不同：{:?}",
+                    quiet.target_reads_triggered
+                );
+                assert!(quiet.handoff_referrers.is_empty());
+
+                // 跨库的那一半：在支撑件所在的库把它们折成根——跨库交接排的就是这一份名单。
+                let handed = crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                    cascade.handoff_referrer_elements(),
+                );
+                for (peer, refnos) in handed {
+                    if !libs.contains_key(&peer) {
+                        libs.insert(peer, lib_of(peer));
+                    }
+                    let peer_lib = &libs[&peer];
+                    let elements: Vec<RefNo> = refnos
+                        .iter()
+                        .filter_map(|refno| {
+                            crate::data_interface::cross_db_handoff::parse_refno(refno)
+                        })
+                        .collect();
+                    assert_eq!(
+                        elements.len(),
+                        refnos.len(),
+                        "交接名单里的 refno 都拼得回来"
+                    );
+                    let folded = crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                        &peer_lib.owners,
+                        &peer_lib.roots_t,
+                        &elements,
+                    );
+                    let mut nouns: BTreeMap<String, usize> = BTreeMap::new();
+                    for root in &folded.roots {
+                        *nouns.entry(root.noun.clone()).or_default() += 1;
+                    }
+                    println!(
+                        "[#143] dbnum {own} → dbnum {peer}：{} 只支撑件折成 {} 个根 {nouns:?}，{} 只折不出根",
+                        elements.len(),
+                        folded.roots.len(),
+                        folded.unresolved.len()
+                    );
+                    assert!(
+                        !folded.roots.is_empty(),
+                        "dbnum {peer}: 交接过去的支撑件至少折得出一个根"
+                    );
+                    queued_roots += folded.roots.len();
+                }
+            }
+            println!(
+                "[#143] 合计：COMPRE 边触发 {triggered} 条、不触发 {untouched} 条（被指的构件两格都没有）；同库上卷 \
+                 {same_db_roots} 个根；跨库点名 {handed_off} 只支撑件、折成 {queued_roots} 个根"
+            );
+            assert_eq!(triggered + untouched, edges.len(), "每条边都有判词");
+            assert!(
+                triggered > 0,
+                "语料里至少有一只支撑件的被支撑构件带 LSTU / HSTU"
+            );
+        }
+
+        /// 量法（GitHub #143，手动）：接上之后真实会话里多算多少。
+        ///
+        /// 走遍「被支撑的构件」所在库的整条会话链（`AIOS_143_LAST_STEPS=n` 只走每个库最后 n 步），每一窗跑生产同一段
+        /// `WindowRootSources::collect`（设计成员 = 工程目录下全部 DESI 库，别的库按文件最新），数：
+        /// - 变更元素里被 `COMPRE` 指着的有多少条边，其中 `LSTU` / `HSTU` 真变了（触发）的、没变（不触发——收窄省下的）的；
+        /// - 触发的边给本窗多拉了几个同库的根（`regen` 的差）、点名了几只别的库里的支撑件、它们在那个库折成几个根；
+        /// - 反查判不了（超点查预算 / 成员库打不开）的窗有几个。
+        ///
+        /// 只打印，不下数值断言（数是语料的性质）；钉的只有不变量：这条级联只会往 `regen` 里加。
+        #[test]
+        #[ignore = "manual live measurement: walks whole session chains of the APS design databases that hold supported components; needs the E3D template directory"]
+        fn live_measure_what_the_component_reference_cascade_adds_on_natural_windows() {
+            let started = std::time::Instant::now();
+            let dir =
+                PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
+                }));
+            if !dir.is_dir() {
+                println!("skip: {} 不在本机", dir.display());
+                return;
+            }
+            let last_steps: usize = std::env::var("AIOS_143_LAST_STEPS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let sources = sources_in_dir(&dir, &["DESI"]).expect("DESI sources");
+            let unit_types = resolve_delivery_unit_types(&[]);
+            let hash = e3d_attlib::db1_hash("COMPRE");
+
+            // 被支撑的构件在哪些库里（反向表在支撑件那个库的文件里，键是被支撑的构件）。
+            let mut target_dbs: BTreeSet<u32> = BTreeSet::new();
+            for source in &sources {
+                let Ok(mut engine) = ReadOnlyEngine::open(&source.file) else {
+                    continue;
+                };
+                if !engine.tables().iter().any(|table| table.name_hash == hash) {
+                    continue;
+                }
+                if let Some(mut table) = engine.reference_table(hash) {
+                    target_dbs.extend(
+                        table
+                            .iter()
+                            .filter_map(Result::ok)
+                            .map(|entry| entry.target.dbno()),
+                    );
+                }
+            }
+            println!("[#143] 被支撑的构件所在的库：{target_dbs:?}");
+
+            #[derive(Default)]
+            struct Tally {
+                windows: usize,
+                degraded: usize,
+                with_edges: usize,
+                triggered: usize,
+                unchanged: usize,
+                added_roots: usize,
+                mixed: usize,
+                handed: usize,
+                queued_roots: usize,
+                regen: usize,
+            }
+            let mut total = Tally::default();
+            // 支撑件所在的库：文件最新会话上的属主索引与根集，折根用。
+            let mut peer_libs: BTreeMap<u32, (BTreeMap<(u32, u32), RefNo>, Vec<GenerationRoot>)> =
+                BTreeMap::new();
+            for dbnum in &target_dbs {
+                let Some(source) = sources.iter().find(|source| source.dbnum == *dbnum) else {
+                    println!("[#143] dbnum {dbnum} 不在工程目录里，跳过");
+                    continue;
+                };
+                let file = &source.file;
+                let label = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let mut engine = ReadOnlyEngine::open(file).expect("open the design file");
+                let mut sesnos: Vec<u32> = engine
+                    .sessions()
+                    .expect("sessions")
+                    .iter()
+                    .map(|session| session.session_id)
+                    .collect();
+                sesnos.sort_unstable();
+                sesnos.dedup();
+                let steps = engine
+                    .diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)
+                    .expect("diff steps");
+                let mut windows: Vec<(u32, u32)> = steps
+                    .iter()
+                    .map(|step| (step.from.sesno, step.to.sesno))
+                    .collect();
+                if last_steps > 0 && windows.len() > last_steps {
+                    windows = windows.split_off(windows.len() - last_steps);
+                }
+                drop(engine);
+
+                let mut tally = Tally::default();
+                for (base_sesno, target_sesno) in windows {
+                    let (base, target) = (
+                        open(&schema, file, base_sesno),
+                        open(&schema, file, target_sesno),
+                    );
+                    let base_index = scan_index(file, Some(base_sesno)).expect("scan base index");
+                    let roots_s: Vec<PersistedRoot> =
+                        enumerate_generation_roots(&base, &base_index.roots, &unit_types)
+                            .expect("enumerate base roots")
+                            .into_iter()
+                            .map(|root| PersistedRoot {
+                                refno: root.root,
+                                noun: root.noun,
+                            })
+                            .collect();
+                    let mut window = WindowRootSources::collect(
+                        file,
+                        base_sesno,
+                        target_sesno,
+                        &base,
+                        &target,
+                        &unit_types,
+                        &sources,
+                    )
+                    .expect("collect");
+                    let regen_of = |window: &WindowRootSources| -> BTreeSet<RefnoEnum> {
+                        let impact = window.impact(&roots_s);
+                        plan_window_roots(&window.roots_t, &roots_s, &impact)
+                            .regen
+                            .iter()
+                            .map(|root| root.root)
+                            .collect()
+                    };
+                    let cascade = window.design_reference.clone();
+                    let regen_on = regen_of(&window);
+                    tally.windows += 1;
+                    tally.regen += regen_on.len();
+                    if cascade.degraded.is_some() {
+                        tally.degraded += 1;
+                    }
+                    let triggered = cascade
+                        .target_reads_triggered
+                        .get("COMPRE")
+                        .copied()
+                        .unwrap_or(0);
+                    let unchanged = cascade
+                        .target_reads_unchanged
+                        .get("COMPRE")
+                        .copied()
+                        .unwrap_or(0);
+                    if triggered + unchanged == 0 {
+                        continue;
+                    }
+                    tally.with_edges += 1;
+                    tally.triggered += triggered;
+                    tally.unchanged += unchanged;
+
+                    // 对照：同一窗、引用者一个都不上卷。本窗没有 `POSREF` 边时它就是「不带 COMPRE」；有的话拆不开，
+                    // 记一笔、差值按上界读。
+                    let mut added = 0usize;
+                    if triggered > 0 && !cascade.referrer_roots.is_empty() {
+                        if cascade.edges_by_attribute.contains_key("POSREF") {
+                            tally.mixed += 1;
+                        }
+                        window.design_reference.referrer_roots.clear();
+                        let regen_off = regen_of(&window);
+                        assert!(
+                            regen_off.is_subset(&regen_on),
+                            "{label} {base_sesno}→{target_sesno}: 级联只该往 regen 里加"
+                        );
+                        added = regen_on.difference(&regen_off).count();
+                    }
+                    tally.added_roots += added;
+
+                    // 跨库的那一半在支撑件所在的库折成根。
+                    let handed = crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                        cascade.handoff_referrer_elements(),
+                    );
+                    let mut queued = 0usize;
+                    for (peer, refnos) in &handed {
+                        if !peer_libs.contains_key(peer) {
+                            let Some(peer_source) =
+                                sources.iter().find(|source| source.dbnum == *peer)
+                            else {
+                                continue;
+                            };
+                            let sesno = ReadOnlyEngine::open(&peer_source.file)
+                                .expect("open the peer design file")
+                                .session()
+                                .sesno;
+                            let index =
+                                scan_index(&peer_source.file, Some(sesno)).expect("scan index");
+                            let set = open(&schema, &peer_source.file, sesno);
+                            let roots = enumerate_generation_roots(&set, &index.roots, &unit_types)
+                                .expect("roots");
+                            peer_libs.insert(
+                                *peer,
+                                (
+                                    index
+                                        .owners
+                                        .iter()
+                                        .map(|(key, owner)| (*key, *owner))
+                                        .collect(),
+                                    roots,
+                                ),
+                            );
+                        }
+                        let (owners, roots) = &peer_libs[peer];
+                        let elements: Vec<RefNo> = refnos
+                            .iter()
+                            .filter_map(|refno| {
+                                crate::data_interface::cross_db_handoff::parse_refno(refno)
+                            })
+                            .collect();
+                        queued += crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                            owners, roots, &elements,
+                        )
+                        .roots
+                        .len();
+                    }
+                    tally.handed += cascade.handoff_referrers.len();
+                    tally.queued_roots += queued;
+                    println!(
+                        "[#143]   {label} {base_sesno}→{target_sesno}: regen={} COMPRE 触发 {triggered} / 不触发 \
+                         {unchanged}；同库多拉 {added} 根；跨库点名 {} 只 → {queued} 个根 {:?}{}",
+                        regen_on.len(),
+                        cascade.handoff_referrers.len(),
+                        handed.keys().collect::<Vec<_>>(),
+                        if cascade.degraded.is_some() {
+                            "；反查判不了"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                println!(
+                    "[#143] {label}: {} 窗（反查判不了 {}），regen 合计 {}；变更元素被 COMPRE 指着的 {} 窗：触发 {} 条 / \
+                     不触发 {} 条；同库多拉 {} 根（其中与 POSREF 同窗拆不开的 {} 窗）；跨库点名 {} 只 → {} 个根",
+                    tally.windows,
+                    tally.degraded,
+                    tally.regen,
+                    tally.with_edges,
+                    tally.triggered,
+                    tally.unchanged,
+                    tally.added_roots,
+                    tally.mixed,
+                    tally.handed,
+                    tally.queued_roots
+                );
+                total.windows += tally.windows;
+                total.degraded += tally.degraded;
+                total.with_edges += tally.with_edges;
+                total.triggered += tally.triggered;
+                total.unchanged += tally.unchanged;
+                total.added_roots += tally.added_roots;
+                total.mixed += tally.mixed;
+                total.handed += tally.handed;
+                total.queued_roots += tally.queued_roots;
+                total.regen += tally.regen;
+            }
+            println!(
+                "[#143] 合计 {} 个库 {} 窗（反查判不了 {}），regen 合计 {}；变更元素被 COMPRE 指着的 {} 窗：触发 {} 条 / \
+                 不触发 {} 条；同库多拉 {} 根（与 POSREF 同窗拆不开 {} 窗）；跨库点名 {} 只 → {} 个根；用时 {:.0} 秒",
+                target_dbs.len(),
+                total.windows,
+                total.degraded,
+                total.regen,
+                total.with_edges,
+                total.triggered,
+                total.unchanged,
+                total.added_roots,
+                total.mixed,
+                total.handed,
+                total.queued_roots,
+                started.elapsed().as_secs_f64()
+            );
+        }
+
+        /// 自然窗口（GitHub #143 的三条验收落在同一窗真实会话上，不是假定源）：`aps250132_0001` 36→37 这一窗动了二十几只
+        /// 被支撑件指着的管件，其中只有一只真换了规格（`LSTU` / `HSTU` 两端取值不同）。走生产同一段
+        /// `WindowRootSources::collect`（设计成员 = 工程目录下全部 DESI 库）：
+        /// - 换了规格的那一只：指着它的支撑件被点名——它在别的设计库里，进计划的跨库名单，在那个库折得出根；
+        /// - 其余的（挪了位置 / 改了别的属性）：指着它们的支撑件一只都不点名；
+        /// - 逐条边拿两端的直读核对，一只不多一只不少。
+        ///
+        /// 数是语料的性质，只钉形状：两种边都在、名单与逐条核对的结果相同。APS 样例工程不在本机就跳过。
+        #[test]
+        fn live_aps_a_natural_window_names_only_the_supports_of_the_respecified_component() {
+            let dir =
+                PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
+                }));
+            let file = dir.join("aps250132_0001");
+            if !file.is_file() {
+                println!("skip: {} 不在本机", file.display());
+                return;
+            }
+            let (base_sesno, target_sesno) = (36u32, 37u32);
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let sources = sources_in_dir(&dir, &["DESI"]).expect("DESI sources");
+            let unit_types = resolve_delivery_unit_types(&[]);
+            let dbnum = ReadOnlyEngine::open(&file)
+                .expect("open the design file")
+                .descriptor()
+                .db_mark;
+            let (base, target) = (
+                open(&schema, &file, base_sesno),
+                open(&schema, &file, target_sesno),
+            );
+            let window = WindowRootSources::collect(
+                &file,
+                base_sesno,
+                target_sesno,
+                &base,
+                &target,
+                &unit_types,
+                &sources,
+            )
+            .expect("collect");
+            let cascade = &window.design_reference;
+            println!("[#143] {}", cascade.summary_line(dbnum));
+            assert!(cascade.enabled, "设计引用级联默认开");
+            assert!(cascade.degraded.is_none(), "{:?}", cascade.degraded);
+
+            // 逐条边直读两端：被引用件的那两格变没变。
+            let changed = changed_elements(&window.plan);
+            let dbs = design_dbs_for_window(dbnum, &file, target_sesno, &sources);
+            let edges = read_design_referrer_edges(&changed, &dbs, DESIGN_CASCADE_QUERY_BUDGET);
+            let read = |set: &Arc<DbSet>, element: RefNo| -> Vec<ReferenceRead> {
+                ["LSTU", "HSTU"]
+                    .iter()
+                    .map(|name| read_reference(set, element, name))
+                    .collect()
+            };
+            let mut respecified: BTreeSet<RefNo> = BTreeSet::new();
+            let mut untouched: BTreeSet<RefNo> = BTreeSet::new();
+            let mut expected_handoff: BTreeSet<RefNo> = BTreeSet::new();
+            let mut left_alone: BTreeSet<RefNo> = BTreeSet::new();
+            for edge in edges.edges.iter().filter(|edge| edge.attribute == "COMPRE") {
+                if reference_reads_differ(&read(&base, edge.target), &read(&target, edge.target)) {
+                    respecified.insert(edge.target);
+                    if edge.referrer.dbno() != dbnum {
+                        expected_handoff.insert(edge.referrer);
+                    }
+                } else {
+                    untouched.insert(edge.target);
+                    left_alone.insert(edge.referrer);
+                }
+            }
+            println!(
+                "[#143] aps250132_0001 {base_sesno}→{target_sesno}: 变更元素 {} 个；被支撑件指着的管件里换了规格的 {} 只、\
+                 没换的 {} 只；该点名的支撑件 {} 只、不该点名的 {} 只",
+                changed.len(),
+                respecified.len(),
+                untouched.len(),
+                expected_handoff.len(),
+                left_alone.len()
+            );
+            assert!(
+                !respecified.is_empty() && !untouched.is_empty(),
+                "这一窗该两种都有（换了规格的 {} 只、没换的 {} 只）；语料变了就换一窗——量法 \
+                 live_measure_what_the_component_reference_cascade_adds_on_natural_windows 会逐窗列出来",
+                respecified.len(),
+                untouched.len()
+            );
+            assert!(
+                !expected_handoff.is_empty(),
+                "换了规格的管件有别的设计库里的支撑件指着"
+            );
+            let named: BTreeSet<RefNo> = cascade.handoff_referrers.iter().copied().collect();
+            assert_eq!(named, expected_handoff, "点名的支撑件一只不多一只不少");
+            assert!(
+                named.is_disjoint(&left_alone),
+                "被支撑的管件没换规格，指着它的支撑件不该被点名"
+            );
+
+            // 进计划的那一份名单（规划器原样放进 `cross_db_elements`）。
+            let planned = crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                window.cross_db_cascade_elements(),
+            );
+            for support in &expected_handoff {
+                assert!(
+                    planned
+                        .get(&support.dbno())
+                        .is_some_and(|list| list.contains(&support.to_string())),
+                    "支撑件 {support} 在计划的跨库名单里：{planned:?}"
+                );
+            }
+            for support in &left_alone {
+                assert!(
+                    !planned
+                        .get(&support.dbno())
+                        .is_some_and(|list| list.contains(&support.to_string())),
+                    "支撑件 {support} 不该在计划的跨库名单里"
+                );
+            }
+
+            // 跨库交接在支撑件所在的库（文件最新会话）把它们折成根——排工排的就是这一份。
+            let handed = crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                cascade.handoff_referrer_elements(),
+            );
+            for (peer, refnos) in &handed {
+                assert_ne!(*peer, dbnum, "交接的都在别的设计库里");
+                let peer_source = sources
+                    .iter()
+                    .find(|source| source.dbnum == *peer)
+                    .expect("支撑件所在的库在工程目录里");
+                let sesno = ReadOnlyEngine::open(&peer_source.file)
+                    .expect("open the peer design file")
+                    .session()
+                    .sesno;
+                let index = scan_index(&peer_source.file, Some(sesno)).expect("scan index");
+                let set = open(&schema, &peer_source.file, sesno);
+                let roots =
+                    enumerate_generation_roots(&set, &index.roots, &unit_types).expect("roots");
+                let owners: BTreeMap<(u32, u32), RefNo> = index
+                    .owners
+                    .iter()
+                    .map(|(key, owner)| (*key, *owner))
+                    .collect();
+                let elements: Vec<RefNo> = refnos
+                    .iter()
+                    .filter_map(|refno| crate::data_interface::cross_db_handoff::parse_refno(refno))
+                    .collect();
+                assert_eq!(elements.len(), refnos.len(), "名单里的 refno 都拼得回来");
+                let folded = crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                    &owners, &roots, &elements,
+                );
+                println!(
+                    "[#143] dbnum {dbnum} → dbnum {peer}：{} 只支撑件折成 {} 个根，{} 只折不出根",
+                    elements.len(),
+                    folded.roots.len(),
+                    folded.unresolved.len()
+                );
+                assert!(
+                    !folded.roots.is_empty(),
+                    "dbnum {peer}: 交接过去的支撑件折得出根"
+                );
+                assert!(
+                    folded.unresolved.is_empty(),
+                    "dbnum {peer}: {:?}",
+                    folded.unresolved
+                );
+            }
         }
     }
 }

@@ -742,7 +742,9 @@ pub struct WindowRootSources {
     /// `touched`；开关 `model_cable_endpoint_cascade` 关着时是 `CableEndpointCascade::off()`（零 I/O）。
     pub cable_endpoint: crate::data_interface::cable_endpoint::CableEndpointCascade,
     /// 设计侧通用一跳反查（换源计划 P4）：变更元素到 **MDB 每个设计库**的每张 kind-16 反向表点查
-    /// 引用者，`POSREF` 的引用者上卷成根由 [`Self::impact`] 并进 `touched`，其余属性只记账；
+    /// 引用者，`POSREF` 的引用者上卷成根由 [`Self::impact`] 并进 `touched`；`COMPRE` 的引用者（支撑件）只在
+    /// 被引用件的 `LSTU` / `HSTU` 两端取值不同时才算——同库的一样上卷，别的库里的随计划交给跨库交接
+    /// （[`Self::cross_db_cascade_elements`]，GitHub #143）；其余属性只记账。
     /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
     /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
     pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
@@ -1726,6 +1728,8 @@ impl WindowRootSources {
                 design_dbs,
                 &index.owners,
                 &roots_t,
+                base,
+                target,
             )
         } else {
             crate::data_interface::reverse_reference::DesignReferenceCascade::off()
@@ -1878,6 +1882,18 @@ impl WindowRootSources {
             .filter(|root| cascaded.contains(&root.root))
             .map(|root| root.root.to_pdms_str())
             .collect()
+    }
+
+    /// 三条级联命中、却落在**别的设计库**里的元素——跨库交接的输入（GitHub #34 前置 2 / #35 / #143）：C2 的跨库对端、
+    /// C8 的跨库引用者、P4 里带条件那一类触发了的跨库引用者（被支撑的管件换了规格，别的库里经 `COMPRE` 指着它的
+    /// 支撑件）。关着的级联那一份是空的。
+    pub(crate) fn cross_db_cascade_elements(&self) -> impl Iterator<Item = e3d_io::RefNo> + '_ {
+        self.structural_connection
+            .far_end_cross_db
+            .iter()
+            .map(|far_end| far_end.target)
+            .chain(self.cable_endpoint.foreign_referrer_elements())
+            .chain(self.design_reference.handoff_referrer_elements())
     }
 
     /// D10 的前置（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：三条级联 C2 / C8 / P4 **都开着**
@@ -2469,15 +2485,11 @@ pub(crate) async fn build_model_update_plan_from_window(
     out.unit_publish_base_sesno = unit_publish_base_sesno;
     out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;
     out.unit_publish_cascade_target_roots = unit_publish_cascade_target_roots;
-    // 跨库交接（GitHub #34 前置 2 / #35）：结构连接的跨库对端与电缆端点的跨库引用者随计划走，执行体在本窗落地之后
-    // 交给那个库的任务（`cross_db_handoff::hand_off`）。规划器自己不排工——预览与执行共用这一份计划。
+    // 跨库交接（GitHub #34 前置 2 / #35 / #143）：结构连接的跨库对端、电缆端点的跨库引用者、被支撑的管件换了规格时
+    // 别的库里的支撑件随计划走，执行体在本窗落地之后交给那个库的任务（`cross_db_handoff::hand_off`）。规划器自己
+    // 不排工——预览与执行共用这一份计划。
     out.cross_db_elements = crate::data_interface::cross_db_handoff::elements_by_dbnum(
-        sources
-            .structural_connection
-            .far_end_cross_db
-            .iter()
-            .map(|far_end| far_end.target)
-            .chain(sources.cable_endpoint.foreign_referrer_elements()),
+        sources.cross_db_cascade_elements(),
     );
     // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
     // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
@@ -4178,6 +4190,75 @@ mod tests {
             targets_of(&sources).is_empty(),
             "C2 关着：只有它认得的依赖不在名单里，这条规则罩不住"
         );
+    }
+
+    /// 跨库交接的输入里有 P4 带条件那一类的跨库引用者（GitHub #143）：被支撑的管件换了规格，别的设计库里经 `COMPRE`
+    /// 指着它的支撑件随计划点名，与 C2 的跨库对端、C8 的跨库引用者走同一份名单；规划器只放进计划、不排工。
+    #[test]
+    fn cross_db_cascade_elements_carry_the_supports_a_changed_component_hands_off() {
+        let make_sources = || WindowRootSources {
+            base_sesno: 1,
+            target_sesno: 2,
+            roots_s: Vec::new(),
+            roots_t: Vec::new(),
+            plan: UpdatePlan {
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                ledger: ChangeLedger::new(),
+                full_rebuild: None,
+                report: Default::default(),
+            },
+            closure: AffectedClosure {
+                refnos: BTreeSet::new(),
+                unreadable: Vec::new(),
+            },
+            index_keys: 0,
+            xgeometry_observed: 0,
+            xgeometry_unreadable: 0,
+            nested_roots: 0,
+            duplicate_coverage_elements: 0,
+            structural_connection: Default::default(),
+            cable_endpoint: Default::default(),
+            design_reference: Default::default(),
+            changes: Default::default(),
+            timings: Default::default(),
+            rigid: Default::default(),
+            removed_units: Vec::new(),
+        };
+        assert_eq!(make_sources().cross_db_cascade_elements().count(), 0);
+
+        // 24385 是库 8001 的 word0；本窗的库是 8000（24384）。
+        let support = e3d_io::RefNo::new(24385, 7);
+        let mut sources = make_sources();
+        sources.design_reference.enabled = true;
+        sources.design_reference.handoff_referrers = vec![support];
+        assert_eq!(
+            crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                sources.cross_db_cascade_elements()
+            ),
+            BTreeMap::from([(8001, vec![support.to_string()])])
+        );
+
+        let planner = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let planner = planner
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("planner production half")
+            .0;
+        assert!(
+            planner.contains(
+                "out.cross_db_elements = crate::data_interface::cross_db_handoff::elements_by_dbnum(\n        sources.cross_db_cascade_elements(),\n    );"
+            ),
+            "规划器把三条级联的跨库元素原样放进计划"
+        );
+        for producer in [
+            ".far_end_cross_db",
+            ".chain(self.cable_endpoint.foreign_referrer_elements())",
+            ".chain(self.design_reference.handoff_referrer_elements())",
+        ] {
+            assert!(planner.contains(producer), "{producer}");
+        }
     }
 
     /// ADR-080 实施约束 9 的守卫：`model_unit_level_publish` 关着时行为必须**逐位**等于今天——计划上没有基线、

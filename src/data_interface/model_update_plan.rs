@@ -173,10 +173,12 @@ pub struct ModelUpdatePlan {
     #[serde(default)]
     pub unit_publish_cascade_target_roots: Vec<String>,
     /// 跨库交接（GitHub #34 前置 2 / #35，2026-10-01）：本窗的级联命中、却落在**别的设计库**里的元素，按那个库分组
-    /// （`dbnum → a/b`，去重升序）——结构连接的跨库对端（`StructuralConnectionCascade::far_end_cross_db`）与电缆端点的
-    /// 跨库引用者（`CableEndpointCascade::foreign`）。它们的生成根属于那个库的任务，本窗的计划装不下：执行体在本窗
-    /// 落地之后交给 [`crate::data_interface::cross_db_handoff::hand_off`]，在那个库的文件最新会话上折根、排一条只带
-    /// 名单的 `ModelOnly`（与目录级联同一条路）。预览只展示、不排。两条级联开关都关着时恒空；旧恢复记录没有该字段。
+    /// （`dbnum → a/b`，去重升序）——结构连接的跨库对端（`StructuralConnectionCascade::far_end_cross_db`）、电缆端点的
+    /// 跨库引用者（`CableEndpointCascade::foreign`），以及被支撑的管件换了规格时别的库里经 `COMPRE` 指着它的支撑件
+    /// （`DesignReferenceCascade::handoff_referrers`，GitHub #143）。它们的生成根属于那个库的任务，本窗的计划装不下：
+    /// 执行体在本窗落地之后交给 [`crate::data_interface::cross_db_handoff::hand_off`]，在那个库的文件最新会话上折根、
+    /// 排一条只带名单的 `ModelOnly`（与目录级联同一条路）。预览只展示、不排。三条级联开关都关着时恒空；旧恢复记录
+    /// 没有该字段。
     #[serde(default)]
     pub cross_db_elements: BTreeMap<u32, Vec<String>>,
 }
