@@ -155,21 +155,27 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
     assert!(wipe > clear, "清库成功之后才清镜像");
 }
 
-/// `/health` 的欠账点名（issue #57）：`room_build.alignment_debt` 必须由第三条电平触发
-/// 同一个判据（`DurableAlignment::owed()`）产出，不许长出一个并行的简化判据——不然
-/// health 报的欠账和触发真正会补的欠账对不上（少报 = 以为收敛其实在欠；多报 = 以为欠账
-/// 触发却不来）。这一格不作数时（开关关着 / 非落盘 / 常驻没装上）必须是 `null`，
-/// 不能冒充零欠账。
+/// `/health` 的欠账点名（issue #57 / #165）：`owed_dbnums_in_scope` 与 `alignment_debt_health`
+/// 共用同一份欠账评估实现（`collect_alignment_debt`），并由第三条电平触发同一个判据
+/// （`DurableAlignment::owed()`）产出，不许长出并行的简化判据——不然 health 报的欠账、
+/// 清扫器真正会补的欠账与任务触发真正会补的欠账对不上。这一格不作数时（开关关着 / 非落盘 /
+/// 常驻没装上）必须是 `null`，不能冒充零欠账。
 #[test]
 fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
     let source = include_str!("../data_interface/room_recompute.rs");
     let face = source
-        .split_once("async fn alignment_debt_health(")
-        .expect("欠账点名面存在")
+        .split_once("struct AlignmentDebtSnapshot {")
+        .expect("共用欠账点名段存在")
         .1
         .split_once("\n/// 一段换代")
         .expect("欠账点名面边界")
         .0;
+    assert!(
+        face.contains("pub(crate) async fn owed_dbnums_in_scope()")
+            && face.contains("pub(crate) async fn alignment_debt_health()")
+            && face.matches("collect_alignment_debt()").count() >= 3,
+        "owed_dbnums_in_scope 与 alignment_debt_health 必须共用同一份欠账评估入口: {face}"
+    );
     assert!(
         face.contains("is_durable()"),
         "非落盘形态这一面不作数（水位行活不过重启）"

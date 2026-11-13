@@ -257,116 +257,58 @@ pub(crate) async fn durable_alignment(
 ///
 /// 欠账清扫器（[`sweep_room_alignment_debt`]）的名单源就是这里的 `owed_dbnums`：它要的是
 /// 「期望集内还欠着的库」那一段，不是给人看的那份 JSON。所以单独给一个函数，避免从 JSON 反解。
-pub(crate) async fn owed_dbnums_in_scope() -> Option<Vec<u32>> {
-    if !crate::options::store_mode().is_durable() {
-        return None;
-    }
-    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
-        Ok(Some(rooms)) => rooms,
-        Ok(None) | Err(_) => return None,
-    };
-    let resident = rooms.resident_generation();
-    let expected: Option<std::collections::BTreeSet<u32>> = rooms
-        .expected_dbnums()
-        .map(|dbnums| dbnums.iter().copied().collect());
-    let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
-        .await
-        .ok()?;
-    let mut registered_dbnums = std::collections::BTreeSet::new();
-    let mut owed = Vec::new();
-    for state in states {
-        registered_dbnums.insert(state.dbnum);
-        // 期望集外的库不扫：那是别的 MDB 的事，清扫器不该替它跑整库。
-        if let Some(scope) = &expected
-            && !scope.contains(&state.dbnum)
-        {
-            continue;
-        }
-        let alignment = DurableAlignment {
-            library: state.model_room_generation.clone(),
-            resident: resident.to_owned(),
-            stray: state.model_room_stray_generations.clone(),
-            stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
-        };
-        if alignment.owed().is_some() {
-            owed.push(state.dbnum);
-        }
-    }
-    if let Some(scope) = &expected {
-        for dbnum in scope.iter().copied() {
-            if registered_dbnums.contains(&dbnum) {
-                continue;
-            }
-            // 期望集内、水位行还没建：与 `durable_alignment` 读空行同一判法，欠一次。
-            let alignment = DurableAlignment {
-                library: None,
-                resident: resident.to_owned(),
-                stray: Vec::new(),
-                stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
-            };
-            if alignment.owed().is_some() {
-                owed.push(dbnum);
-            }
-        }
-    }
-    Some(owed)
+/// 房间欠账评估快照（期望集内 / 期望集外共用同一份判法）：
+/// [`owed_dbnums_in_scope`] 与 [`alignment_debt_health`] 共用这一个评估入口，
+/// 保证清扫器真正会补的名单与 `/health.room_build.alignment_debt` 点名的名单永不分叉。
+#[derive(Debug, Clone)]
+struct AlignmentDebtSnapshot {
+    resident: String,
+    expected: Option<BTreeSet<u32>>,
+    owed_in_scope: Vec<OwedLibraryDebt>,
+    owed_outside_scope: Vec<OwedLibraryDebt>,
 }
 
-pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
-    if !crate::options::store_mode().is_durable() {
-        return None;
-    }
-    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
-        Ok(Some(rooms)) => rooms,
-        Ok(None) | Err(_) => return None,
-    };
-    let resident = rooms.resident_generation();
-    let expected: Option<std::collections::BTreeSet<u32>> = rooms
-        .expected_dbnums()
-        .map(|dbnums| dbnums.iter().copied().collect());
-    let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
-        .await
-        .ok()?;
+#[derive(Debug, Clone)]
+struct OwedLibraryDebt {
+    dbnum: u32,
+    alignment: DurableAlignment,
+    reason: String,
+}
+
+fn evaluate_alignment_debt(
+    resident: &str,
+    expected: Option<BTreeSet<u32>>,
+    states: Vec<crate::data_interface::dbnum_state::DbnumState>,
+    mut stray_written_here: impl FnMut(u32) -> Vec<String>,
+) -> AlignmentDebtSnapshot {
     // 评估集 = 注册水位行 ∪ 期望集：触发侧 `durable_alignment(job.dbnum)` 对**水位行还没建**的库
     // 照样判欠（行缺 = 从没对齐过），这面不能因为它没注册就失声——否则「期望集内、库上一行都没有」
     // 这种第一类欠账从此隐身（2026-10-17 副本库实测：期望集 29 库零水位行，注册行全在集外）。
-    let mut registered_dbnums = std::collections::BTreeSet::new();
-    let mut owed_dbnums = Vec::new();
+    let mut registered_dbnums = BTreeSet::new();
+    let mut owed_in_scope = Vec::new();
     let mut owed_outside_scope = Vec::new();
-    let mut push_owed = |state_dbnum: u32,
-                         alignment: DurableAlignment,
-                         owed_dbnums: &mut Vec<serde_json::Value>,
-                         owed_outside_scope: &mut Vec<serde_json::Value>| {
+    let mut push_owed = |state_dbnum: u32, alignment: DurableAlignment| {
         if let Some(reason) = alignment.owed() {
-            let entry = serde_json::json!({
-                "dbnum": state_dbnum,
-                "library_generation": alignment.library,
-                "stray_generations": alignment.stray,
-                "owed": reason,
-                // 「为什么欠」的最近一次留底：进程内账本（`LAST_RECOMPUTE`），重启清零——
-                // `null` = 本进程以来这库还没跑过整库重算，不是没有原因的意思。
-                "last_attempt": recompute_attempt_for(state_dbnum),
-            });
+            let entry = OwedLibraryDebt {
+                dbnum: state_dbnum,
+                alignment,
+                reason,
+            };
             match &expected {
                 Some(scope) if !scope.contains(&state_dbnum) => owed_outside_scope.push(entry),
-                _ => owed_dbnums.push(entry),
+                _ => owed_in_scope.push(entry),
             }
         }
     };
     for state in states {
         registered_dbnums.insert(state.dbnum);
         let alignment = DurableAlignment {
-            library: state.model_room_generation.clone(),
+            library: state.model_room_generation,
             resident: resident.to_owned(),
-            stray: state.model_room_stray_generations.clone(),
-            stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
+            stray: state.model_room_stray_generations,
+            stray_written_here: stray_written_here(state.dbnum),
         };
-        push_owed(
-            state.dbnum,
-            alignment,
-            &mut owed_dbnums,
-            &mut owed_outside_scope,
-        );
+        push_owed(state.dbnum, alignment);
     }
     // 期望集内、水位行还没建的库：与 `durable_alignment` 读空行同一判法——`library: None` → 欠一次。
     if let Some(scope) = &expected {
@@ -378,14 +320,78 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
                 library: None,
                 resident: resident.to_owned(),
                 stray: Vec::new(),
-                stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
+                stray_written_here: stray_written_here(dbnum),
             };
-            push_owed(dbnum, alignment, &mut owed_dbnums, &mut owed_outside_scope);
+            push_owed(dbnum, alignment);
         }
     }
+    AlignmentDebtSnapshot {
+        resident: resident.to_owned(),
+        expected,
+        owed_in_scope,
+        owed_outside_scope,
+    }
+}
+
+async fn collect_alignment_debt() -> Option<AlignmentDebtSnapshot> {
+    if !crate::options::store_mode().is_durable() {
+        return None;
+    }
+    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) | Err(_) => return None,
+    };
+    let resident = rooms.resident_generation().to_owned();
+    let expected: Option<BTreeSet<u32>> = rooms
+        .expected_dbnums()
+        .map(|dbnums| dbnums.iter().copied().collect());
+    let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .ok()?;
+    let store = ModelMemoryStore::global();
+    Some(evaluate_alignment_debt(&resident, expected, states, |dbnum| {
+        store.stray_generations_written(dbnum)
+    }))
+}
+
+pub(crate) async fn owed_dbnums_in_scope() -> Option<Vec<u32>> {
+    Some(
+        collect_alignment_debt()
+            .await?
+            .owed_in_scope
+            .into_iter()
+            .map(|entry| entry.dbnum)
+            .collect(),
+    )
+}
+
+pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
+    let snapshot = collect_alignment_debt().await?;
+    let render_entry = |item: OwedLibraryDebt| {
+        serde_json::json!({
+            "dbnum": item.dbnum,
+            "library_generation": item.alignment.library,
+            "stray_generations": item.alignment.stray,
+            "owed": item.reason,
+            // 「为什么欠」的最近一次留底：进程内账本（`LAST_RECOMPUTE`），重启清零——
+            // `null` = 本进程以来这库还没跑过整库重算，不是没有原因的意思。
+            "last_attempt": recompute_attempt_for(item.dbnum),
+        })
+    };
+    let owed_dbnums: Vec<serde_json::Value> = snapshot
+        .owed_in_scope
+        .into_iter()
+        .map(render_entry)
+        .collect();
+    let owed_outside_scope: Vec<serde_json::Value> = snapshot
+        .owed_outside_scope
+        .into_iter()
+        .map(render_entry)
+        .collect();
     Some(serde_json::json!({
-        "resident_generation": resident,
-        "expected_dbnums": expected
+        "resident_generation": snapshot.resident,
+        "expected_dbnums": snapshot
+            .expected
             .map(|scope| scope.into_iter().collect::<Vec<_>>()),
         "owed_dbnums": owed_dbnums,
         "owed_outside_scope": owed_outside_scope,
@@ -1374,6 +1380,8 @@ async fn apply_targeted_room_update_for_dbnum(
                         foreign_dbnums,
                         |dbnum| recompute_dbnum_room_edges_now(dbnum, "startup_alignment"),
                         || async {
+                            let _task =
+                                crate::data_interface::batch_worker::lock_dbnum_task(dbnum).await;
                             if unresolved_elements_are_ignorable(
                                 dbnum,
                                 target_sesno,
@@ -1419,7 +1427,7 @@ async fn apply_targeted_room_update_for_dbnum(
                                     }
                                 }
                             }
-                            recompute_dbnum_room_edges_now(dbnum, "startup_alignment").await
+                            recompute_dbnum_room_edges_now_locked(dbnum, "startup_alignment").await
                         },
                     ).await;
                 }
@@ -1622,49 +1630,86 @@ pub(crate) async fn check_and_init_rooms_at_startup(
 /// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
 /// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
 ///
+/// 串行化契约：进入前按库拿 [`batch_worker::lock_dbnum_task`]（清扫器在外面已经用
+/// `try_lock_dbnum_task` 试过锁，走 [`recompute_dbnum_room_edges_now_locked`]），
+/// 避免 `startup_alignment` / `startup_full_init` / `POST /rooms/rebuild` 与欠账清扫器
+/// 或数据批次对同一个库并发重写房间边。
+///
 /// 这一轮在任务表里占一行 `room_rebuild`（计划 2026-10-24 W6）：此前它只在 stdout 有一句
 /// 「整库房间重算完成」，增量记录页对启动对齐 / 「重新生成房间」一无所知。`trigger` 是谁叫的
 /// （`startup_alignment` / `startup_full_init` / `rooms_rebuild`）；终态按「盖上对齐代号没有」定，
 /// `result.detail` 是留底账本（[`note_recompute_attempt`]）里与 stderr 同文的那一句。
 pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32, trigger: &'static str) -> bool {
-    use crate::data_interface::task_registry::{TaskRegistry, TaskState};
-    let registry = TaskRegistry::global();
-    let task_id = TaskRegistry::new_task_id("room");
+    let _task = crate::data_interface::batch_worker::lock_dbnum_task(dbnum).await;
+    recompute_dbnum_room_edges_now_locked(dbnum, trigger).await
+}
+
+/// 调用方已持有 `dbnum` 的 `lock_dbnum_task` 时使用的整库房间重算入口（登记任务表 + 重算）。
+async fn recompute_dbnum_room_edges_now_locked(dbnum: u32, trigger: &'static str) -> bool {
     let project = aios_core::get_db_option().project_name.clone();
-    let started_at = chrono::Local::now().to_rfc3339();
+    let outcome = recompute_dbnum_room_edges_untracked(dbnum).await;
+    record_room_rebuild_task(
+        crate::data_interface::task_registry::TaskRegistry::global(),
+        &project,
+        dbnum,
+        trigger,
+        &outcome,
+    );
+    outcome.stamped
+}
+
+#[derive(Debug, Clone)]
+struct LibraryRoomRecomputeOutcome {
+    stamped: bool,
+    detail: String,
+}
+
+fn record_room_rebuild_task(
+    registry: &crate::data_interface::task_registry::TaskRegistry,
+    project: &str,
+    dbnum: u32,
+    trigger: &'static str,
+    outcome: &LibraryRoomRecomputeOutcome,
+) {
+    use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+    let task_id = TaskRegistry::new_task_id("room");
     registry.insert_running_room_rebuild(
         &task_id,
-        &project,
+        project,
         dbnum,
         serde_json::json!({ "scope": "dbnum_full", "trigger": trigger }),
     );
+    registry.finish(
+        &task_id,
+        if outcome.stamped {
+            TaskState::Succeeded
+        } else {
+            TaskState::Failed
+        },
+        serde_json::json!({
+            "status": if outcome.stamped { "success" } else { "failed" },
+            "stamped": outcome.stamped,
+            "trigger": trigger,
+            "detail": outcome.detail,
+        }),
+    );
+}
+
+/// 执行单库整库房间重算并返回成败与一句话结果，**不写任务表**（由调用方决定是否登记或去重）。
+async fn recompute_dbnum_room_edges_untracked(dbnum: u32) -> LibraryRoomRecomputeOutcome {
+    let started_at = chrono::Local::now().to_rfc3339();
     let stamped = recompute_dbnum_room_edges_now_inner(dbnum).await;
     // 留底账本里比开工时刻新的那一笔才是这一轮的；没有（房间算不了、整轮跳过）就说没有。
-    let attempt = recompute_attempt_for(dbnum).filter(|attempt| attempt.at >= started_at);
-    let detail = attempt
-        .as_ref()
-        .map(|attempt| attempt.detail.clone())
+    let detail = recompute_attempt_for(dbnum)
+        .filter(|attempt| attempt.at >= started_at)
+        .map(|attempt| attempt.detail)
         .unwrap_or_else(|| {
             format!(
                 "整库房间重算跳过：{}",
                 crate::options::room_membership_off_reason()
             )
         });
-    registry.finish(
-        &task_id,
-        if stamped {
-            TaskState::Succeeded
-        } else {
-            TaskState::Failed
-        },
-        serde_json::json!({
-            "status": if stamped { "success" } else { "failed" },
-            "stamped": stamped,
-            "trigger": trigger,
-            "detail": detail,
-        }),
-    );
-    stamped
+    LibraryRoomRecomputeOutcome { stamped, detail }
 }
 
 async fn recompute_dbnum_room_edges_now_inner(dbnum: u32) -> bool {
@@ -1866,8 +1911,11 @@ async fn recompute_dbnum_room_edges_now_inner(dbnum: u32) -> bool {
 
 /// 清扫器每 tick 之间的间隔（秒）。缺省 60 s；`AIOS_ROOM_DEBT_SWEEP_SECS` 可覆盖。
 fn debt_sweep_interval() -> std::time::Duration {
-    let secs = std::env::var("AIOS_ROOM_DEBT_SWEEP_SECS")
-        .ok()
+    debt_sweep_interval_from(std::env::var("AIOS_ROOM_DEBT_SWEEP_SECS").ok().as_deref())
+}
+
+fn debt_sweep_interval_from(raw: Option<&str>) -> std::time::Duration {
+    let secs = raw
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(60);
@@ -1879,31 +1927,217 @@ fn debt_sweep_interval() -> std::time::Duration {
 /// 一次面板变化最坏 N 个库同时欠账（N = 期望集大小）。每 tick 2 个 = 不把整机 CPU 占满，
 /// 同时 29 库约 15 分钟收敛——足够把「陈旧」压到分钟级，又不至于和正常任务抢资源。
 fn debt_sweep_dbnums_per_tick() -> usize {
-    std::env::var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+    debt_sweep_dbnums_per_tick_from(
+        std::env::var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn debt_sweep_dbnums_per_tick_from(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|count| *count > 0)
         .unwrap_or(2)
 }
 
-/// 一个 tick 做的事：取欠账名单 → 逐个库补 → 记下这一 tick 的结果。
-///
-/// 门（与既有各条同源，不新造判据）：
-/// * `owed_dbnums_in_scope()` 回 `None` = 这一面不作数（开关关着 / 非落盘 / 常驻参照没装上），直接跳过；
-/// * 单库的 `try_lock_dbnum_task` 拿不到 = 那个库有任务在飞，跳过它（那个任务自己会处理）。
-///
-/// 单库失败不中断整轮：记进 `note_recompute_attempt`，名单上留着，下一 tick 再来。
-async fn sweep_once() -> SweepOutcome {
-    let Some(owed) = owed_dbnums_in_scope().await else {
+/// 连续补失败的退避上限（跳过的拍数）：连续失败 1 次后只靠轮转游标往后排（跳过 0 拍，
+/// 若没有别的欠账库则下一拍可再试）；第 2 次起跳过 1 → 2 → 4 → 8 → 10 拍。
+const DEBT_SWEEP_MAX_SKIP_TICKS: u32 = 10;
+
+/// 单库在清扫器里的连续失败与退避状态（进程内，补齐或从欠账名单消失即清零）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DebtSweepLibraryFailure {
+    /// 连续补失败次数（≥ 1）。
+    failures: u32,
+    /// 最近一次失败时对应的欠账原因（`DurableAlignment::owed()`）。
+    owed_reason: String,
+    /// 最近一次失败的一句话原因（`LibraryRoomRecomputeOutcome::detail`）。
+    last_detail: String,
+    /// 下一次允许清扫器再试的拍号（`tick_seq >= retry_at_tick` 放行）。
+    retry_at_tick: u64,
+}
+
+impl DebtSweepLibraryFailure {
+    /// 第 `failures` 次失败后要**跳过**几个后续 tick。
+    fn skip_ticks(failures: u32) -> u32 {
+        if failures <= 1 {
+            0
+        } else {
+            let shift = (failures - 2).min(4);
+            (1u32 << shift).min(DEBT_SWEEP_MAX_SKIP_TICKS)
+        }
+    }
+
+    /// 距离下一次允许重试还要跳过几个即将到来的 tick（在 `tick_seq` 刚跑完时看，下一拍是 `tick_seq + 1`）。
+    fn remaining_skip_ticks(&self, next_tick_seq: u64) -> u64 {
+        self.retry_at_tick.saturating_sub(next_tick_seq)
+    }
+}
+
+/// 清扫器跨拍状态：轮转游标 + 单库失败退避与任务表去重账。
+#[derive(Debug, Default)]
+struct DebtSweepState {
+    tick_seq: u64,
+    /// 上一拍最后一个真正动手重算的库号；下一拍从排在它后面的库绕一圈取。
+    last_cursor_dbnum: Option<u32>,
+    failures: std::collections::BTreeMap<u32, DebtSweepLibraryFailure>,
+}
+
+impl DebtSweepState {
+    /// 按 dbnum 升序去重后，从 `last_cursor_dbnum` 之后绕一圈排列本拍候选顺序。
+    fn ordered_candidates(&self, owed: impl IntoIterator<Item = u32>) -> Vec<u32> {
+        let sorted: Vec<u32> = owed
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let Some(cursor) = self.last_cursor_dbnum else {
+            return sorted;
+        };
+        let split = sorted.partition_point(|&dbnum| dbnum <= cursor);
+        let mut rotated = Vec::with_capacity(sorted.len());
+        rotated.extend_from_slice(&sorted[split..]);
+        rotated.extend_from_slice(&sorted[..split]);
+        rotated
+    }
+
+    /// 记下一次重算结果，返回「本次是否需要往任务表写一行 `room_rebuild`」以及当前连续失败次数。
+    ///
+    /// 去重口径（仅针对 `debt_sweep` 来源，不改启动对齐与手工 `POST /rooms/rebuild`）：
+    /// - 第一次失败写任务行；
+    /// - 同一个库在同一个欠账状态且失败原因不变时，后续重算失败只累加计数与退避、不追新任务行；
+    /// - 欠账状态或失败原因变化时，再写一行反映新状况；
+    /// - 恢复成功盖章时清掉失败账，并写一行成功任务行。
+    fn record_attempt(
+        &mut self,
+        dbnum: u32,
+        owed_reason: &str,
+        outcome: &LibraryRoomRecomputeOutcome,
+        tick_seq: u64,
+    ) -> (bool, u32) {
+        if outcome.stamped {
+            self.failures.remove(&dbnum);
+            return (true, 0);
+        }
+        match self.failures.get_mut(&dbnum) {
+            Some(prev) => {
+                let same_failure =
+                    prev.owed_reason == owed_reason && prev.last_detail == outcome.detail;
+                prev.failures = prev.failures.saturating_add(1);
+                prev.owed_reason = owed_reason.to_owned();
+                prev.last_detail = outcome.detail.clone();
+                let skip = DebtSweepLibraryFailure::skip_ticks(prev.failures);
+                prev.retry_at_tick = tick_seq.saturating_add(1).saturating_add(u64::from(skip));
+                (!same_failure, prev.failures)
+            }
+            None => {
+                let skip = DebtSweepLibraryFailure::skip_ticks(1);
+                self.failures.insert(
+                    dbnum,
+                    DebtSweepLibraryFailure {
+                        failures: 1,
+                        owed_reason: owed_reason.to_owned(),
+                        last_detail: outcome.detail.clone(),
+                        retry_at_tick: tick_seq.saturating_add(1).saturating_add(u64::from(skip)),
+                    },
+                );
+                (true, 1)
+            }
+        }
+    }
+
+    fn failures_health(&self) -> serde_json::Value {
+        let next_tick_seq = self.tick_seq.saturating_add(1);
+        let mut map = serde_json::Map::new();
+        for (&dbnum, entry) in &self.failures {
+            map.insert(
+                dbnum.to_string(),
+                serde_json::json!({
+                    "consecutive_failures": entry.failures,
+                    "backoff_remaining_ticks": entry.remaining_skip_ticks(next_tick_seq),
+                    "owed": entry.owed_reason,
+                    "last_detail": entry.last_detail,
+                }),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+}
+
+static DEBT_SWEEP_STATE: std::sync::LazyLock<std::sync::Mutex<DebtSweepState>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(DebtSweepState::default()));
+
+/// 一个 tick 的核心调度逻辑（参数化依赖，单测可直接喂假重算与独立任务表）：
+/// 1. 清理已不再欠账的库的失败退避账；
+/// 2. 按上一拍游标绕一圈排候选顺序；
+/// 3. 退避冷却中或 `try_lock_dbnum_task` 拿不到的库跳过且**不占 `limit` 名额**；
+/// 4. 真正动手重算的库计入 `limit`，游标推进到最后一个重算的库，任务表按连续同因失败去重。
+async fn sweep_candidates_with<F, Fut>(
+    state: &std::sync::Mutex<DebtSweepState>,
+    registry: &crate::data_interface::task_registry::TaskRegistry,
+    project: &str,
+    owed: Option<Vec<(u32, String)>>,
+    limit: usize,
+    mut recompute: F,
+) -> SweepOutcome
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = LibraryRoomRecomputeOutcome>,
+{
+    let Some(owed) = owed else {
         return SweepOutcome::skipped("不作数（开关关着 / 非落盘 / 常驻参照没装上）");
     };
-    if owed.is_empty() {
+    let owed_reasons: std::collections::BTreeMap<u32, String> = owed.into_iter().collect();
+    if owed_reasons.is_empty() {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failures
+            .clear();
         return SweepOutcome::skipped("零欠账");
     }
-    let limit = debt_sweep_dbnums_per_tick();
+
+    let (tick_seq, ordered, cooling) = {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.tick_seq = guard.tick_seq.saturating_add(1);
+        let tick_seq = guard.tick_seq;
+        guard
+            .failures
+            .retain(|dbnum, _| owed_reasons.contains_key(dbnum));
+        let ordered = guard.ordered_candidates(owed_reasons.keys().copied());
+        let mut cooling = std::collections::BTreeMap::new();
+        for &dbnum in &ordered {
+            if let Some(entry) = guard.failures.get(&dbnum) {
+                if tick_seq < entry.retry_at_tick {
+                    let remaining_inclusive = entry.retry_at_tick - tick_seq;
+                    cooling.insert(dbnum, (entry.failures, remaining_inclusive));
+                }
+            }
+        }
+        (tick_seq, ordered, cooling)
+    };
+
     let mut swept = Vec::new();
-    for dbnum in owed.into_iter().take(limit) {
-        // 有任务在飞的库跳过：那个任务自己会按任务路径处理，两边不抢。
+    let mut attempted = 0usize;
+    let mut last_attempted_dbnum = None;
+
+    for dbnum in ordered {
+        if attempted >= limit {
+            break;
+        }
+        if let Some(&(failures, remaining_ticks)) = cooling.get(&dbnum) {
+            swept.push(serde_json::json!({
+                "dbnum": dbnum,
+                "scope": "backoff",
+                "consecutive_failures": failures,
+                "backoff_remaining_ticks": remaining_ticks,
+                "verdict": format!("连续失败 {failures} 次，退避冷却还剩 {remaining_ticks} 拍"),
+            }));
+            continue;
+        }
+        // 有任务在飞的库跳过且不占每拍名额：那个任务自己会按任务路径处理，两边不抢。
         let Ok(_guard) = crate::data_interface::batch_worker::try_lock_dbnum_task(dbnum) else {
             swept.push(serde_json::json!({
                 "dbnum": dbnum,
@@ -1912,17 +2146,69 @@ async fn sweep_once() -> SweepOutcome {
             }));
             continue;
         };
-        let stamped = recompute_dbnum_room_edges_now(dbnum, "debt_sweep").await;
+
+        attempted += 1;
+        last_attempted_dbnum = Some(dbnum);
+        let outcome = recompute(dbnum).await;
+        let owed_reason = owed_reasons
+            .get(&dbnum)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let (should_log_task, consecutive_failures) = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_attempt(dbnum, owed_reason, &outcome, tick_seq);
+        if should_log_task {
+            record_room_rebuild_task(registry, project, dbnum, "debt_sweep", &outcome);
+        }
         swept.push(serde_json::json!({
             "dbnum": dbnum,
             "scope": "whole_library",
-            "verdict": if stamped { "盖上了" } else { "没盖上（欠账仍在）" },
+            "consecutive_failures": consecutive_failures,
+            "task_logged": should_log_task,
+            "verdict": if outcome.stamped { "盖上了" } else { "没盖上（欠账仍在）" },
         }));
     }
+
+    if let Some(cursor) = last_attempted_dbnum {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_cursor_dbnum = Some(cursor);
+    }
+
     SweepOutcome {
         skipped_reason: None,
         swept,
     }
+}
+
+/// 一个 tick 做的事：取欠账名单 → 逐个库补 → 记下这一 tick 的结果。
+///
+/// 门（与既有各条同源，不新造判据）：
+/// * `collect_alignment_debt()` 回 `None` = 这一面不作数（开关关着 / 非落盘 / 常驻参照没装上），直接跳过；
+/// * 单库的 `try_lock_dbnum_task` 拿不到 = 那个库有任务在飞，跳过它且不占每拍名额。
+///
+/// 单库失败不中断整轮：记进 `note_recompute_attempt`，按指数退避 + 轮转推进，连续同因失败不刷任务表。
+async fn sweep_once() -> SweepOutcome {
+    let owed = collect_alignment_debt().await.map(|snapshot| {
+        snapshot
+            .owed_in_scope
+            .into_iter()
+            .map(|item| (item.dbnum, item.reason))
+            .collect()
+    });
+    let limit = debt_sweep_dbnums_per_tick();
+    let project = aios_core::get_db_option().project_name.clone();
+    sweep_candidates_with(
+        &DEBT_SWEEP_STATE,
+        crate::data_interface::task_registry::TaskRegistry::global(),
+        &project,
+        owed,
+        limit,
+        recompute_dbnum_room_edges_untracked,
+    )
+    .await
 }
 
 /// 一次 tick 的结果，给 `/health.room_build.debt_sweep.last_swept` 用。
@@ -1942,23 +2228,105 @@ impl SweepOutcome {
     }
 }
 
+fn default_debt_sweep_book() -> serde_json::Value {
+    serde_json::json!({
+        "in_flight": false,
+        "last_tick_at": serde_json::Value::Null,
+        "last_swept": [],
+        "skipped": "还没跑过",
+        "last_panic": serde_json::Value::Null,
+        "failures": {},
+    })
+}
+
 /// 最近一次 tick 的留底（进程内，重启清零）。
 static LAST_SWEEP: std::sync::LazyLock<std::sync::Mutex<serde_json::Value>> =
-    std::sync::LazyLock::new(|| {
-        std::sync::Mutex::new(serde_json::json!({
-            "in_flight": false,
-            "last_tick_at": serde_json::Value::Null,
-            "last_swept": [],
-            "skipped": "还没跑过",
-        }))
-    });
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(default_debt_sweep_book()));
+
+/// 单拍 `in_flight` 守卫：开工立起，正常返回与 panic 展开都由 `Drop` 复位成 `false`，
+/// 防止单拍 panic 后 `/health.room_build.debt_sweep.in_flight` 永远卡在 `true`。
+struct DebtSweepFlightGuard<'a> {
+    book: &'a std::sync::Mutex<serde_json::Value>,
+}
+
+impl<'a> DebtSweepFlightGuard<'a> {
+    fn enter(book: &'a std::sync::Mutex<serde_json::Value>) -> Self {
+        book.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)["in_flight"] =
+            serde_json::json!(true);
+        Self { book }
+    }
+}
+
+impl Drop for DebtSweepFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.book
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)["in_flight"] =
+            serde_json::json!(false);
+    }
+}
+
+/// 执行一拍并把结果或 panic 留痕写进 `book`（接住 unwind，单拍炸掉不带走整个清扫循环）。
+async fn run_sweep_tick_in(
+    book: &std::sync::Mutex<serde_json::Value>,
+    state: &std::sync::Mutex<DebtSweepState>,
+    work: impl std::future::Future<Output = SweepOutcome>,
+) {
+    use futures::FutureExt as _;
+    let outcome = {
+        let _flight = DebtSweepFlightGuard::enter(book);
+        std::panic::AssertUnwindSafe(work).catch_unwind().await
+    };
+    let now = chrono::Local::now().to_rfc3339();
+    let failures = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .failures_health();
+    let mut slot = book
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slot["in_flight"] = serde_json::json!(false);
+    slot["last_tick_at"] = serde_json::json!(now);
+    slot["failures"] = failures;
+    match outcome {
+        Ok(outcome) => {
+            slot["last_swept"] = serde_json::json!(outcome.swept);
+            slot["skipped"] = match outcome.skipped_reason {
+                Some(reason) => serde_json::json!(reason),
+                None => serde_json::Value::Null,
+            };
+        }
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&'static str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic 载荷不是字符串，详见 stderr".to_owned());
+            log::error!("[房间欠账清扫] 单拍执行发生 panic，已接住并等待下一拍继续: {message}");
+            eprintln!("[房间欠账清扫] 单拍执行发生 panic，已接住并等待下一拍继续: {message}");
+            slot["last_swept"] = serde_json::json!([]);
+            slot["skipped"] = serde_json::json!(format!("单拍 panic：{message}"));
+            slot["last_panic"] = serde_json::json!({
+                "at": now,
+                "message": message,
+            });
+        }
+    }
+}
 
 /// `/health.room_build.debt_sweep` 那一格。
 pub(crate) fn debt_sweep_health() -> serde_json::Value {
-    LAST_SWEEP
+    let failures = DEBT_SWEEP_STATE
         .lock()
-        .map(|value| value.clone())
-        .unwrap_or_else(|_| serde_json::json!({ "in_flight": false, "last_swept": [], "skipped": "账本锁坏了" }))
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .failures_health();
+    let mut book = LAST_SWEEP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    book["failures"] = failures;
+    book
 }
 
 /// 起清扫器（只起一次）。形状照 `native_runtime` 的 `OnceLock` 那套。
@@ -1969,19 +2337,7 @@ pub(crate) fn ensure_debt_sweep_started() {
             let interval = debt_sweep_interval();
             loop {
                 tokio::time::sleep(interval).await;
-                if let Ok(mut book) = LAST_SWEEP.lock() {
-                    book["in_flight"] = serde_json::json!(true);
-                }
-                let outcome = sweep_once().await;
-                if let Ok(mut book) = LAST_SWEEP.lock() {
-                    book["in_flight"] = serde_json::json!(false);
-                    book["last_tick_at"] = serde_json::json!(chrono::Local::now().to_rfc3339());
-                    book["last_swept"] = serde_json::json!(outcome.swept);
-                    book["skipped"] = match outcome.skipped_reason {
-                        Some(reason) => serde_json::json!(reason),
-                        None => serde_json::Value::Null,
-                    };
-                }
+                run_sweep_tick_in(&LAST_SWEEP, &DEBT_SWEEP_STATE, sweep_once()).await;
             }
         });
     });
@@ -1993,38 +2349,32 @@ mod tests {
     use crate::fast_model::room_resident::PanelDelta;
     use e3d_model::ledger::{ChangeKind, LedgerEntry};
 
-    /// 清扫器的两个旋钮：缺省 60 s / 2 库；环境变量覆盖；非法值（0、非数字）退回缺省。
+    /// 清扫器的两个旋钮：缺省 60 s / 2 库；覆盖值（含首尾空白）；非法值（0、负数、非数字、空串）退回缺省。
     ///
-    /// 这条测的是「旋钮读得出、读坏了不炸」——清扫器本身要真实库，门禁里跑不了。
-    /// 旋钮错了会让整机每分钟全库重排（secs=0）或一轮不干活（per_tick=0），所以边界要钉住。
+    /// 纯函数接收 `Option<&str>`，不在多线程 `cargo test` 里 `set_var` / `remove_var` 改进程环境变量。
     #[test]
     fn debt_sweep_knobs_default_and_override() {
-        // SAFETY: 测试里改环境变量，单线程读写，作用域内不留残余。
-        unsafe {
-            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_SECS");
-            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK");
-        }
-        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(60));
-        assert_eq!(debt_sweep_dbnums_per_tick(), 2);
+        assert_eq!(debt_sweep_interval_from(None), std::time::Duration::from_secs(60));
+        assert_eq!(debt_sweep_dbnums_per_tick_from(None), 2);
 
-        unsafe {
-            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_SECS", "15");
-            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK", "5");
-        }
-        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(15));
-        assert_eq!(debt_sweep_dbnums_per_tick(), 5);
+        assert_eq!(
+            debt_sweep_interval_from(Some(" 15 ")),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(debt_sweep_dbnums_per_tick_from(Some(" 5 ")), 5);
 
-        // 0 与非数字都退回缺省：0 会让清扫器空转或死循环，不能照抄。
-        unsafe {
-            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_SECS", "0");
-            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK", "abc");
-        }
-        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(60));
-        assert_eq!(debt_sweep_dbnums_per_tick(), 2);
-
-        unsafe {
-            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_SECS");
-            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK");
+        // 0 与非数字都退回缺省：0 会让清扫器空转或一轮不干活，不能照抄。
+        for bad in ["", "   ", "0", "-3", "abc"] {
+            assert_eq!(
+                debt_sweep_interval_from(Some(bad)),
+                std::time::Duration::from_secs(60),
+                "bad interval={bad:?}"
+            );
+            assert_eq!(
+                debt_sweep_dbnums_per_tick_from(Some(bad)),
+                2,
+                "bad per_tick={bad:?}"
+            );
         }
     }
 
@@ -2036,6 +2386,397 @@ mod tests {
         assert_eq!(health["last_tick_at"], serde_json::Value::Null);
         assert_eq!(health["last_swept"], serde_json::json!([]));
         assert_eq!(health["skipped"], serde_json::json!("还没跑过"));
+        assert_eq!(health["last_panic"], serde_json::Value::Null);
+        assert_eq!(health["failures"], serde_json::json!({}));
+    }
+
+    /// 问题 1a：排在前面的库持续补不上时，轮转 + 退避保证后面的欠账好库下一拍就能被扫到。
+    #[tokio::test]
+    async fn debt_sweep_reaches_trailing_libraries_when_leading_ones_keep_failing() {
+        use crate::data_interface::task_registry::TaskRegistry;
+
+        let state = std::sync::Mutex::new(DebtSweepState::default());
+        let registry = TaskRegistry::default();
+        let mut owed = vec![
+            (8880, "欠一次整库重算".to_string()),
+            (8881, "欠一次整库重算".to_string()),
+            (8882, "欠一次整库重算".to_string()),
+            (8883, "欠一次整库重算".to_string()),
+        ];
+
+        // 第 1 拍（limit = 2）：尝试 8880、8881，两者持续失败。
+        let tick1 = sweep_candidates_with(&state, &registry, "P", Some(owed.clone()), 2, |dbnum| async move {
+            LibraryRoomRecomputeOutcome {
+                stamped: dbnum >= 8882,
+                detail: format!("dbnum={dbnum} 根清单取不出"),
+            }
+        })
+        .await;
+        let attempted1: Vec<u32> = tick1
+            .swept
+            .iter()
+            .filter(|item| item["scope"] == "whole_library")
+            .map(|item| item["dbnum"].as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(attempted1, vec![8880, 8881]);
+
+        // 第 2 拍（limit = 2）：8880、8881 仍排在欠账名单最前面，但因轮转游标（指在 8881）且处于退避期，
+        // 8882、8883 立刻轮到并补齐。
+        let tick2 = sweep_candidates_with(&state, &registry, "P", Some(owed.clone()), 2, |dbnum| async move {
+            LibraryRoomRecomputeOutcome {
+                stamped: dbnum >= 8882,
+                detail: if dbnum >= 8882 {
+                    "整库重算完成并盖章".to_string()
+                } else {
+                    format!("dbnum={dbnum} 根清单取不出")
+                },
+            }
+        })
+        .await;
+        let attempted2: Vec<(u32, String)> = tick2
+            .swept
+            .iter()
+            .filter(|item| item["scope"] == "whole_library")
+            .map(|item| {
+                (
+                    item["dbnum"].as_u64().unwrap() as u32,
+                    item["verdict"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            attempted2,
+            vec![
+                (8882, "盖上了".to_string()),
+                (8883, "盖上了".to_string()),
+            ],
+            "前排坏库不得饿死后排好库: {:?}",
+            tick2.swept
+        );
+
+        // 8882、8883 已盖章退场，再跑一拍验证 8880、8881 退避到期（1 拍冷却已过）后仍会重试，不是永久放弃。
+        owed.retain(|(dbnum, _)| *dbnum < 8882);
+        let tick3 = sweep_candidates_with(&state, &registry, "P", Some(owed), 2, |dbnum| async move {
+            LibraryRoomRecomputeOutcome {
+                stamped: false,
+                detail: format!("dbnum={dbnum} 根清单取不出"),
+            }
+        })
+        .await;
+        let attempted3: Vec<u32> = tick3
+            .swept
+            .iter()
+            .filter(|item| item["scope"] == "whole_library")
+            .map(|item| item["dbnum"].as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(attempted3, vec![8880, 8881], "退避到期后坏库照常重试");
+    }
+
+    /// 问题 1b：有任务在飞（`try_lock_dbnum_task` 拿不到）被跳过的库不占每拍的 `limit` 名额。
+    #[tokio::test]
+    async fn debt_sweep_skipped_in_flight_libraries_do_not_consume_tick_limit() {
+        use crate::data_interface::task_registry::TaskRegistry;
+
+        let _held_a = crate::data_interface::batch_worker::lock_dbnum_task(8884).await;
+        let _held_b = crate::data_interface::batch_worker::lock_dbnum_task(8885).await;
+
+        let state = std::sync::Mutex::new(DebtSweepState::default());
+        let registry = TaskRegistry::default();
+        let owed = vec![
+            (8884, "欠一次".to_string()),
+            (8885, "欠一次".to_string()),
+            (8890, "欠一次".to_string()),
+            (8891, "欠一次".to_string()),
+            (8892, "欠一次".to_string()),
+        ];
+
+        let outcome = sweep_candidates_with(&state, &registry, "P", Some(owed), 2, |_dbnum| async {
+            LibraryRoomRecomputeOutcome {
+                stamped: true,
+                detail: "整库重算完成并盖章".to_string(),
+            }
+        })
+        .await;
+
+        let skipped: Vec<u32> = outcome
+            .swept
+            .iter()
+            .filter(|item| item["scope"] == "skipped")
+            .map(|item| item["dbnum"].as_u64().unwrap() as u32)
+            .collect();
+        let whole_lib: Vec<u32> = outcome
+            .swept
+            .iter()
+            .filter(|item| item["scope"] == "whole_library")
+            .map(|item| item["dbnum"].as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(skipped, vec![8884, 8885], "被锁住的库记 skipped");
+        assert_eq!(
+            whole_lib,
+            vec![8890, 8891],
+            "跳过的库不占名额，真正重算满 2 个才停"
+        );
+    }
+
+    /// 问题 2：持续同因失败不刷爆任务表——只在首次失败、原因/欠账状态变化、或恢复成功时写任务行，
+    /// 同时失败次数与退避状态如实反映在 health 的 `failures` 里。
+    #[tokio::test]
+    async fn debt_sweep_deduplicates_repeated_identical_failures_in_task_registry_and_exposes_health() {
+        use crate::data_interface::task_registry::{
+            TASK_KIND_ROOM_REBUILD, TaskRegistry, TaskState,
+        };
+
+        let state = std::sync::Mutex::new(DebtSweepState::default());
+        let registry = TaskRegistry::default();
+        let book = std::sync::Mutex::new(default_debt_sweep_book());
+
+        // 拍 1：首次失败 -> 写 1 条失败任务行，首次失败仅轮转不额外跳过拍（remaining = 0）。
+        run_sweep_tick_in(
+            &book,
+            &state,
+            sweep_candidates_with(
+                &state,
+                &registry,
+                "P",
+                Some(vec![(6920, "代号 g0 ≠ g1".to_string())]),
+                2,
+                |_| async {
+                    LibraryRoomRecomputeOutcome {
+                        stamped: false,
+                        detail: "读不出水位行: timeout".to_string(),
+                    }
+                },
+            ),
+        )
+        .await;
+        assert_eq!(registry.list(None, Some(TASK_KIND_ROOM_REBUILD), 50).len(), 1);
+        {
+            let snap = book.lock().unwrap().clone();
+            assert_eq!(snap["failures"]["6920"]["consecutive_failures"], 1);
+            assert_eq!(snap["failures"]["6920"]["backoff_remaining_ticks"], 0);
+        }
+
+        // 拍 2：再次尝试仍是同一欠账+同一失败原因 -> 不新增任务行，失败次数涨到 2，接下来跳过 1 拍（拍 3 冷却）。
+        run_sweep_tick_in(
+            &book,
+            &state,
+            sweep_candidates_with(
+                &state,
+                &registry,
+                "P",
+                Some(vec![(6920, "代号 g0 ≠ g1".to_string())]),
+                2,
+                |_| async {
+                    LibraryRoomRecomputeOutcome {
+                        stamped: false,
+                        detail: "读不出水位行: timeout".to_string(),
+                    }
+                },
+            ),
+        )
+        .await;
+        assert_eq!(
+            registry.list(None, Some(TASK_KIND_ROOM_REBUILD), 50).len(),
+            1,
+            "同一欠账状态下同样原因连续失败不得重复写任务行"
+        );
+        {
+            let snap = book.lock().unwrap().clone();
+            assert_eq!(snap["failures"]["6920"]["consecutive_failures"], 2);
+            assert_eq!(snap["failures"]["6920"]["backoff_remaining_ticks"], 1);
+        }
+
+        // 拍 3 跳过冷却，拍 4 到期重试且失败原因变了 -> 写第 2 条失败任务行，失败次数涨到 3，接下来跳过 2 拍（拍 5、6）。
+        for _ in 0..2 {
+            run_sweep_tick_in(
+                &book,
+                &state,
+                sweep_candidates_with(
+                    &state,
+                    &registry,
+                    "P",
+                    Some(vec![(6920, "代号 g0 ≠ g1".to_string())]),
+                    2,
+                    |_| async {
+                        LibraryRoomRecomputeOutcome {
+                            stamped: false,
+                            detail: "根清单取不出: missing file".to_string(),
+                        }
+                    },
+                ),
+            )
+            .await;
+        }
+        assert_eq!(
+            registry.list(None, Some(TASK_KIND_ROOM_REBUILD), 50).len(),
+            2,
+            "失败原因变化时要补记一条新任务行"
+        );
+        {
+            let snap = book.lock().unwrap().clone();
+            assert_eq!(snap["failures"]["6920"]["consecutive_failures"], 3);
+            assert_eq!(snap["failures"]["6920"]["backoff_remaining_ticks"], 2);
+        }
+
+        // 拍 5、6 跳过冷却，拍 7 重试恢复成功 -> 写第 3 条（成功）任务行，且清空 failures 账。
+        for _ in 0..3 {
+            run_sweep_tick_in(
+                &book,
+                &state,
+                sweep_candidates_with(
+                    &state,
+                    &registry,
+                    "P",
+                    Some(vec![(6920, "代号 g0 ≠ g1".to_string())]),
+                    2,
+                    |_| async {
+                        LibraryRoomRecomputeOutcome {
+                            stamped: true,
+                            detail: "整库重算完成并盖章：根 3、成员边 5".to_string(),
+                        }
+                    },
+                ),
+            )
+            .await;
+        }
+        let rows = registry.list(None, Some(TASK_KIND_ROOM_REBUILD), 50);
+        assert_eq!(rows.len(), 3, "恢复成功时写成功任务行");
+        assert_eq!(rows[0].state, TaskState::Succeeded);
+        let snap = book.lock().unwrap().clone();
+        assert_eq!(snap["failures"], serde_json::json!({}), "恢复后失败退避账清零");
+    }
+
+    /// 问题 3：单拍 panic 后 `in_flight` 由守卫复位成 `false`，留痕进 health，且下一拍照常执行。
+    #[tokio::test]
+    async fn debt_sweep_recovers_after_single_tick_panic_and_resets_in_flight() {
+        use crate::data_interface::task_registry::TaskRegistry;
+
+        let book = std::sync::Mutex::new(default_debt_sweep_book());
+        let state = std::sync::Mutex::new(DebtSweepState::default());
+        let registry = TaskRegistry::default();
+
+        // 第一拍在异步体内先确认 in_flight 已被守卫置为 true，随后触发 panic。
+        run_sweep_tick_in(&book, &state, async {
+            assert_eq!(
+                book.lock().unwrap()["in_flight"],
+                serde_json::json!(true),
+                "进入单拍时守卫应立起 in_flight"
+            );
+            panic!("模拟单拍意外炸掉");
+        })
+        .await;
+
+        let after_panic = book.lock().unwrap().clone();
+        assert_eq!(
+            after_panic["in_flight"],
+            serde_json::json!(false),
+            "panic 展开后守卫必须复位 in_flight"
+        );
+        assert!(
+            after_panic["skipped"]
+                .as_str()
+                .is_some_and(|s| s.contains("模拟单拍意外炸掉")),
+            "skipped 留痕: {after_panic}"
+        );
+        assert_eq!(
+            after_panic["last_panic"]["message"],
+            serde_json::json!("模拟单拍意外炸掉")
+        );
+
+        // 第二拍照常继续补账，last_swept 正常更新，last_panic 历史留痕保留备查。
+        run_sweep_tick_in(
+            &book,
+            &state,
+            sweep_candidates_with(
+                &state,
+                &registry,
+                "P",
+                Some(vec![(6921, "欠一次".to_string())]),
+                2,
+                |_| async {
+                    LibraryRoomRecomputeOutcome {
+                        stamped: true,
+                        detail: "整库重算完成并盖章".to_string(),
+                    }
+                },
+            ),
+        )
+        .await;
+
+        let after_next = book.lock().unwrap().clone();
+        assert_eq!(after_next["in_flight"], serde_json::json!(false));
+        assert_eq!(after_next["skipped"], serde_json::Value::Null);
+        assert_eq!(after_next["last_swept"][0]["dbnum"], serde_json::json!(6921));
+        assert_eq!(
+            after_next["last_swept"][0]["verdict"],
+            serde_json::json!("盖上了")
+        );
+        assert_eq!(
+            after_next["last_panic"]["message"],
+            serde_json::json!("模拟单拍意外炸掉"),
+            "曾发生过的 panic 在 last_panic 留痕不静默抹掉"
+        );
+    }
+
+    /// 顺手第 1 项与第 4 项：共用欠账评估纯函数行为一致，且整库重算入口统一串行拿 `lock_dbnum_task`。
+    #[test]
+    fn evaluate_alignment_debt_splits_scope_and_recompute_locks_dbnum_task() {
+        use crate::data_interface::dbnum_state::DbnumState;
+
+        let snapshot = evaluate_alignment_debt(
+            "gen-now",
+            Some(BTreeSet::from([7001, 7002, 7003])),
+            vec![
+                // 已对齐：不欠
+                DbnumState {
+                    dbnum: 7001,
+                    model_room_generation: Some("gen-now".into()),
+                    ..Default::default()
+                },
+                // 代号旧：期望集内欠
+                DbnumState {
+                    dbnum: 7002,
+                    model_room_generation: Some("gen-old".into()),
+                    ..Default::default()
+                },
+                // 期望集外代号旧：进 outside_scope
+                DbnumState {
+                    dbnum: 7999,
+                    model_room_generation: Some("gen-old".into()),
+                    ..Default::default()
+                },
+            ],
+            |_| Vec::new(),
+        );
+        // 7003 在期望集内且缺水位行，也必须被点进 owed_in_scope。
+        let in_scope: Vec<u32> = snapshot.owed_in_scope.iter().map(|d| d.dbnum).collect();
+        let outside: Vec<u32> = snapshot.owed_outside_scope.iter().map(|d| d.dbnum).collect();
+        assert_eq!(in_scope, vec![7002, 7003]);
+        assert_eq!(outside, vec![7999]);
+
+        let source = include_str!("room_recompute.rs");
+        let entry_body = function_body(
+            source,
+            "pub(crate) async fn recompute_dbnum_room_edges_now(",
+        );
+        assert!(
+            entry_body.contains("lock_dbnum_task(dbnum).await"),
+            "startup_alignment / startup_full_init / rooms_rebuild 共用的整库重算入口必须持库任务锁: {entry_body}"
+        );
+        let targeted_startup = source
+            .split_once("async fn apply_targeted_room_update_for_dbnum(")
+            .expect("startup targeted updater")
+            .1
+            .split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
+            .expect("end of startup targeted updater")
+            .0;
+        let lock_pos = targeted_startup
+            .find("lock_dbnum_task(dbnum).await")
+            .expect("启动针对性房间增量写本库前也要持库任务锁");
+        let write_pos = targeted_startup
+            .find("recompute_dbnum_room_edges(")
+            .expect("targeted write");
+        assert!(lock_pos < write_pos);
     }
 
     fn entry(noun: &str, kind: ChangeKind, id: u32) -> LedgerEntry {
