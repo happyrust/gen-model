@@ -113,7 +113,11 @@ pub(super) fn normalize_snapshot_json(value: Value) -> Value {
     }
 }
 
-pub(super) fn build_confirmed_record_slot_key(form_id: &str, current_node: &str, operator_id: &str) -> String {
+pub(super) fn build_confirmed_record_slot_key(
+    form_id: &str,
+    current_node: &str,
+    operator_id: &str,
+) -> String {
     format!(
         "{}::{}::{}",
         form_id.trim(),
@@ -597,8 +601,14 @@ pub(super) async fn create_record(
                 .bind(("slot_key", slot_key.clone()))
                 .bind(("snapshot_hash", snapshot_hash.clone()))
                 .bind(("record_revision", record_revision.clone()))
-                .bind(("model_context", encode_review_passthrough_field(&request.model_context)))
-                .bind(("clearance_snapshot", encode_review_passthrough_field(&request.clearance_snapshot))),
+                .bind((
+                    "model_context",
+                    encode_review_passthrough_field(&request.model_context),
+                ))
+                .bind((
+                    "clearance_snapshot",
+                    encode_review_passthrough_field(&request.clearance_snapshot),
+                )),
             )
             .await
             {
@@ -738,9 +748,8 @@ pub(super) async fn create_record(
     // 的错误要 `take(0)` 才交出来——旧写法 `unwrap_or_default()` 把它压成空结果，于是
     // 写冲突一律显示成「数据库未返回确认记录」，真因看不见（RUS-244 驳回前保存就是这么
     // 丢的）。顺带按 SurrealDB 乐观事务的口径重试冲突：失败的写没有落库，重跑是安全的。
-    let write_outcome = crate::surreal_retry::retry_surreal_write_operation(
-        "review.records.write",
-        || {
+    let write_outcome =
+        crate::surreal_retry::retry_surreal_write_operation("review.records.write", || {
             let db = &db;
             let request = &request;
             let record_id = record_id.clone();
@@ -794,9 +803,8 @@ pub(super) async fn create_record(
                         .map_err(anyhow::Error::from)
                 })
             }
-        },
-    )
-    .await;
+        })
+        .await;
 
     match write_outcome {
         Ok(rows) => {
@@ -1166,7 +1174,6 @@ pub(super) async fn clear_records_by_task(
     }
 }
 
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1189,7 +1196,10 @@ mod tests {
         let db = surrealdb::engine::any::connect("mem://")
             .await
             .expect("mem 引擎应能启动（kv-mem feature）");
-        db.use_ns("review_probe").use_db(db_name).await.expect("use ns/db");
+        db.use_ns("review_probe")
+            .use_db(db_name)
+            .await
+            .expect("use ns/db");
         db
     }
 

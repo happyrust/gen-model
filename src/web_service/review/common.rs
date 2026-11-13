@@ -907,7 +907,9 @@ pub(super) struct TaskRecordContext {
     pub(super) approver_id: String,
 }
 
-pub(super) async fn lookup_task_record_context(id: &str) -> anyhow::Result<Option<TaskRecordContext>> {
+pub(super) async fn lookup_task_record_context(
+    id: &str,
+) -> anyhow::Result<Option<TaskRecordContext>> {
     #[derive(Debug, Deserialize)]
     struct TaskContextRow {
         form_id: Option<String>,
@@ -1407,9 +1409,9 @@ mod tests {
             .query("SELECT * FROM review_tasks ORDER BY title ASC")
             .await
             .expect("SELECT 应执行");
-        let rows: Vec<TaskRow> = response
-            .take(0)
-            .expect("整页 TaskRow 必须能经 serde 桥读出：一行 due_date 读不出会让整页为空、写操作 404");
+        let rows: Vec<TaskRow> = response.take(0).expect(
+            "整页 TaskRow 必须能经 serde 桥读出：一行 due_date 读不出会让整页为空、写操作 404",
+        );
         let tasks: Vec<ReviewTask> = rows.into_iter().map(TaskRow::to_review_task).collect();
         assert_eq!(tasks.len(), 3, "{tasks:?}");
         let by_id = |id: &str| {
@@ -1452,7 +1454,9 @@ mod tests {
         while i < bytes.len() {
             if source[i..].starts_with("r#\"") {
                 let start = i + 3;
-                let Some(len) = source[start..].find("\"#") else { break };
+                let Some(len) = source[start..].find("\"#") else {
+                    break;
+                };
                 out.push((line_of(i), source[start..start + len].to_string()));
                 i = start + len + 2;
             } else if bytes[i] == b'"' {
@@ -1527,7 +1531,10 @@ mod tests {
             }
         }
         println!("surrealql literals: parsed={parsed} format_templates_skipped={templates}");
-        assert!(parsed >= 40, "扫描器没认出足够的 SurrealQL 字面量（parsed={parsed}），扫描器本身坏了");
+        assert!(
+            parsed >= 40,
+            "扫描器没认出足够的 SurrealQL 字面量（parsed={parsed}），扫描器本身坏了"
+        );
         assert!(
             failures.is_empty(),
             "以下 SurrealQL 在本仓 2.1.4 fork 下解析失败（运行时会整条 500）：\n{}",
@@ -1929,7 +1936,12 @@ mod tests {
                 "SELECT * FROM review_workflow_history WHERE task_id = $task_id ORDER BY timestamp DESC",
                 "review_api.rs:2923",
             ),
-            ("tasks.rs", 1, "ORDER BY timestamp ASC", "review_api.rs:5644"),
+            (
+                "tasks.rs",
+                1,
+                "ORDER BY timestamp ASC",
+                "review_api.rs:5644",
+            ),
             // 驳回重流转列表。
             (
                 "tasks.rs",

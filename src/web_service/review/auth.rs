@@ -413,11 +413,9 @@ pub fn create_token(
             .unwrap_or(user_id)
             .to_string(),
         role: role.map(|s| s.to_string()),
-        // `review-internal-workflow` 不移植（计划 Q7）：外部驱动模式下 claims 不携带 workflow_mode。
-        workflow_mode: {
-            let _ = workflow_mode;
-            None
-        },
+        // 只有显式的 manual / internal 进 token。缺省和 external 都不写，提交/驳回据此 403。
+        workflow_mode: normalize_workflow_mode(workflow_mode)
+            .filter(|mode| mode == "manual" || mode == "internal"),
         legacy_form_id: None,
         exp,
         iat: now,

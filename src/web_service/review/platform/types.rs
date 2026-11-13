@@ -314,6 +314,12 @@ pub struct SyncWorkflowData {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotation_states: Option<Vec<serde_json::Value>>,
+    /// 当前单据是否停在驳回后的编制草稿。只增字段，旧客户端忽略。
+    pub returned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

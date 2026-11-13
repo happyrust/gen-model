@@ -389,10 +389,7 @@ async fn apply_workflow_mutation_transaction(
                     .bind(("form_id", write.form_id.clone()))
                     .bind(("project_id", write.project_id.clone()))
                     .bind(("requester_id", write.requester_id.clone()))
-                    .bind((
-                        "expected_current_node",
-                        write.expected_current_node.clone(),
-                    ))
+                    .bind(("expected_current_node", write.expected_current_node.clone()))
                     .bind(("expected_status", write.expected_status.clone()))
                     .bind(("next_node", write.next_node.clone()))
                     .bind(("status", write.next_status))
@@ -1477,7 +1474,17 @@ mod tests {
         );
         let task = review_task_with_owners("sh", "JH", "SH");
         assert!(
-            ensure_owner_matches("stop", &task, "sh", "external_proofreader_99", None, None, None, true).is_ok(),
+            ensure_owner_matches(
+                "stop",
+                &task,
+                "sh",
+                "external_proofreader_99",
+                None,
+                None,
+                None,
+                true
+            )
+            .is_ok(),
             "external stop keeps trusting PMS"
         );
     }
@@ -2615,6 +2622,21 @@ async fn query_workflow_data(
         .as_ref()
         .map(|form| normalize_review_form_status(form.status.as_str()));
 
+    let return_reason = task.as_ref().and_then(|item| {
+        item.return_reason
+            .clone()
+            .filter(|reason| !reason.trim().is_empty())
+    });
+    let last_action = match task.as_ref() {
+        Some(item) => latest_workflow_action(&item.id).await,
+        None => None,
+    };
+    let returned = match last_action.as_deref() {
+        Some("return") => true,
+        Some(_) => false,
+        None => return_reason.is_some(),
+    };
+
     let annotation_states = if let Some(ref tid) = task_id {
         match load_annotation_states_by_task(form_id, tid).await {
             Ok(states) if !states.is_empty() => {
@@ -2643,5 +2665,37 @@ async fn query_workflow_data(
         task_status,
         next_step,
         annotation_states,
+        returned,
+        return_reason,
+        last_action,
+    })
+}
+
+async fn latest_workflow_action(task_id: &str) -> Option<String> {
+    if task_id.trim().is_empty() || !review_workflow_history_schema_ready() {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct ActionRow {
+        action: Option<String>,
+    }
+    let db = fresh_review_db().await.ok()?;
+    let mut response = await_review_query(
+        "review.workflow.sync.latest_action",
+        db.query(
+            "SELECT action FROM review_workflow_history WHERE task_id = $task_id ORDER BY timestamp DESC LIMIT 1",
+        )
+        .bind(("task_id", task_id.to_string())),
+    )
+    .await
+    .ok()?;
+    let rows: Vec<ActionRow> = response.take(0).unwrap_or_default();
+    rows.into_iter().next().and_then(|row| {
+        let action = row.action.unwrap_or_default().trim().to_string();
+        if action.is_empty() {
+            None
+        } else {
+            Some(action)
+        }
     })
 }

@@ -51,8 +51,11 @@ impl PlatformConfig {
             return Self {
                 frontend_base_url: resolve_frontend_base_url(&config),
                 review_web_base_url,
-                web_public_base_url: get_nonempty_config_string(&config, "web_server.public_base_url")
-                    .or_else(|| get_nonempty_config_string(&config, "web_server.backend_url")),
+                web_public_base_url: get_nonempty_config_string(
+                    &config,
+                    "web_server.public_base_url",
+                )
+                .or_else(|| get_nonempty_config_string(&config, "web_server.backend_url")),
                 ..Self::default()
             };
         }

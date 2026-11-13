@@ -124,7 +124,7 @@ export async function run({ page, cfg, capture, log, state }) {
   }
   notes.push(`静态附件 200 / ${fileProbe.bytes} 字节`);
 
-  // ⑦ 提交到下一节点 jd。
+  // ⑦ 提交到下一节点 jd。外部模式会 403；走查进程需 PLANT_REVIEW_ALLOW_INTERNAL_WORKFLOW=1。
   const submitted = await apiFromPage(page, cfg, 'POST', `/api/review/tasks/${state.taskId}/submit`, state.sj.token, {
     comment: 'A4 走查：sj 提交到 jd',
     operatorId: cfg.designerId,

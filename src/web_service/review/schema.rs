@@ -69,7 +69,9 @@ mod tests {
     /// 每条测试自带一个干净的 `mem://`，并**直接调 [`apply_review_schema`]** 绕开
     /// 进程级 OnceCell——否则同一个测试进程里只有跑在最前面的那条真执行过 DDL。
     async fn fresh_db() -> Surreal<Any> {
-        let db = connect("mem://").await.expect("mem 引擎应能启动（kv-mem feature）");
+        let db = connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
         db.use_ns("review_schema_probe")
             .use_db("t1b")
             .await
@@ -168,10 +170,7 @@ mod tests {
             ),
             ("review_comments", vec!["idx_review_comments_annotation_id"]),
             ("review_attachment", vec!["idx_review_attachment_form_id"]),
-            (
-                "review_form_model",
-                vec!["idx_review_form_model_form_id"],
-            ),
+            ("review_form_model", vec!["idx_review_form_model_form_id"]),
             (
                 "review_workflow_history",
                 vec!["idx_workflow_task", "idx_workflow_form"],
@@ -202,9 +201,7 @@ mod tests {
         apply_review_schema(&db).await.expect("DDL");
 
         let create = |form_id: &str, status: &str| {
-            format!(
-                "CREATE review_forms CONTENT {{ form_id: '{form_id}', status: '{status}' }};"
-            )
+            format!("CREATE review_forms CONTENT {{ form_id: '{form_id}', status: '{status}' }};")
         };
 
         db.query(create("FORM-UNIQUE-1", "blank"))

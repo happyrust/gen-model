@@ -95,10 +95,7 @@ where
 }
 
 /// 普通查询：5s 超时 + 慢查询告警（旧端 `review_db::await_review_query`）。
-pub async fn await_review_query<F>(
-    operation: &'static str,
-    fut: F,
-) -> Result<surrealdb::Response>
+pub async fn await_review_query<F>(operation: &'static str, fut: F) -> Result<surrealdb::Response>
 where
     F: IntoFuture<Output = std::result::Result<surrealdb::Response, surrealdb::Error>>,
 {
@@ -220,9 +217,9 @@ impl ReviewPersistence {
             Self::Ready {
                 store_mode,
                 ephemeral_override: false,
-            } => format!(
-                "  校审持久层：{store_mode}（与模型数据同一个 ns·db，跨重启保留；ADR-075）"
-            ),
+            } => {
+                format!("  校审持久层：{store_mode}（与模型数据同一个 ns·db，跨重启保留；ADR-075）")
+            }
             Self::Ready {
                 store_mode,
                 ephemeral_override: true,
@@ -395,10 +392,25 @@ mod tests {
     #[test]
     fn each_store_mode_lands_on_the_arm_its_durability_dictates() {
         let durable = StoreMode::RocksDb;
-        assert!(matches!(review_persistence_for(durable, false), ReviewPersistence::Ready { ephemeral_override: false, .. }));
+        assert!(matches!(
+            review_persistence_for(durable, false),
+            ReviewPersistence::Ready {
+                ephemeral_override: false,
+                ..
+            }
+        ));
         let ephemeral = StoreMode::Mem;
-        assert!(matches!(review_persistence_for(ephemeral, false), ReviewPersistence::Refused(_)));
-        assert!(matches!(review_persistence_for(ephemeral, true), ReviewPersistence::Ready { ephemeral_override: true, .. }));
+        assert!(matches!(
+            review_persistence_for(ephemeral, false),
+            ReviewPersistence::Refused(_)
+        ));
+        assert!(matches!(
+            review_persistence_for(ephemeral, true),
+            ReviewPersistence::Ready {
+                ephemeral_override: true,
+                ..
+            }
+        ));
         // 逃生门只对 mem 有意义，不该把 rocksdb 标成「放行来的」。
         assert!(matches!(
             review_persistence_for(StoreMode::RocksDb, true),
@@ -413,10 +425,7 @@ mod tests {
     /// 为什么、怎么改；少任何一件，运维就只能去读代码。
     #[test]
     fn the_refusal_banner_says_which_medium_which_routes_why_and_how_to_fix() {
-        let banner = ReviewPersistenceRefusal {
-            store_mode: "mem",
-        }
-        .banner();
+        let banner = ReviewPersistenceRefusal { store_mode: "mem" }.banner();
 
         assert!(banner.contains("mem"), "{banner}");
         assert!(banner.contains("拒绝启用"), "{banner}");
@@ -443,9 +452,7 @@ mod tests {
     /// 而不是 404（404 和「这一版还没移植」分不开，前端只会去怀疑后端地址配错）。
     #[tokio::test]
     async fn the_refusal_router_answers_every_review_path_with_503_and_a_reason() {
-        let refusal = ReviewPersistenceRefusal {
-            store_mode: "mem",
-        };
+        let refusal = ReviewPersistenceRefusal { store_mode: "mem" };
         let app: Router<()> = refusal.router();
 
         for (method, uri) in [
@@ -493,10 +500,7 @@ mod tests {
     /// 不在校审域里的路径不许被拒绝路由吞掉——它是替换校审域，不是替换整个服务。
     #[tokio::test]
     async fn the_refusal_router_does_not_swallow_anything_outside_the_review_domain() {
-        let app: Router<()> = ReviewPersistenceRefusal {
-            store_mode: "mem",
-        }
-        .router();
+        let app: Router<()> = ReviewPersistenceRefusal { store_mode: "mem" }.router();
         let response = app
             .oneshot(
                 Request::builder()
@@ -513,10 +517,7 @@ mod tests {
     /// 都要点到介质名与逃生门，否则日志与响应各说各话。
     #[test]
     fn the_one_line_message_carries_the_medium_and_the_escape_hatch() {
-        let message = ReviewPersistenceRefusal {
-            store_mode: "mem",
-        }
-        .message();
+        let message = ReviewPersistenceRefusal { store_mode: "mem" }.message();
         assert!(message.contains("mem"), "{message}");
         assert!(message.contains("rocksdb"), "{message}");
         assert!(
@@ -575,7 +576,10 @@ mod tests {
             review_persistence_for(StoreMode::RocksDb, false),
             review_persistence_for(StoreMode::Mem, true),
         ] {
-            assert!(matches!(verdict, ReviewPersistence::Ready { .. }), "{verdict:?}");
+            assert!(
+                matches!(verdict, ReviewPersistence::Ready { .. }),
+                "{verdict:?}"
+            );
         }
     }
 }

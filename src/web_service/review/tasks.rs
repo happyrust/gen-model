@@ -30,7 +30,8 @@ use super::platform::{
         evaluate_annotation_check,
     },
     derive_review_form_status_from_task_status, mark_review_form_deleted,
-    review_form::find_active_task_row_by_form_id, sync_review_form_with_task_status,
+    review_form::find_active_task_row_by_form_id,
+    sync_review_form_with_task_status,
 };
 
 /// 把 `review_form_model` 里某个 `form_id` 的构件集整体换成 `$model_refnos`（删旧插新）。
@@ -980,7 +981,9 @@ async fn resave_existing_task(
         .bind(("actor_name", requester_name))
         .bind((
             "comment",
-            Some("设计端重新保存编校审单（form_id 复用，构件 / 描述 / 附件以本次为准）".to_string()),
+            Some(
+                "设计端重新保存编校审单（form_id 复用，构件 / 描述 / 附件以本次为准）".to_string(),
+            ),
         ));
     if let Some(attachments) = request.attachments.clone() {
         query = query.bind(("attachments", attachments));
@@ -1592,11 +1595,40 @@ async fn delete_task(
 // Handlers - 审核操作
 // ============================================================================
 
+fn internal_workflow_allowed(claims: &TokenClaims) -> bool {
+    if matches!(claims.workflow_mode.as_deref(), Some("manual" | "internal")) {
+        return true;
+    }
+    std::env::var("PLANT_REVIEW_ALLOW_INTERNAL_WORKFLOW")
+        .ok()
+        .is_some_and(|value| value.trim() == "1")
+}
+
+fn external_workflow_forbidden(claims: &TokenClaims) -> Option<Response> {
+    if internal_workflow_allowed(claims) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "success": false,
+                "error_message": "外部流程模式下流转由 PMS 驱动",
+                "error_code": "WORKFLOW_MODE_EXTERNAL",
+            })),
+        )
+            .into_response(),
+    )
+}
+
 /// POST /api/review/tasks/:id/start-review - 开始审核（兼容旧 API，映射到 jd 节点）
 async fn start_review(
     Extension(claims): Extension<TokenClaims>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = external_workflow_forbidden(&claims) {
+        return response;
+    }
     // 堵旁门：start-review 会把任务从 sj 推进到 jd，此前不校验操作者，等于绕过
     // submit_to_next_node 的节点负责人校验直接推进状态机。这里补上同源授权。
     if let Err((status, message)) = authorize_task_write(&id, &claims).await {
@@ -1611,9 +1643,12 @@ async fn start_review(
                 message: None,
                 error_message: Some(message),
             }),
-        );
+        )
+            .into_response();
     }
-    update_task_status(id, "in_review".to_string(), Some("jd".to_string()), None).await
+    update_task_status(id, "in_review".to_string(), Some("jd".to_string()), None)
+        .await
+        .into_response()
 }
 
 /// POST /api/review/tasks/:id/approve - 通过审核（兼容旧 API，映射到 approved + pz 节点）
@@ -2156,6 +2191,9 @@ async fn submit_to_next_node(
     Path(id): Path<String>,
     Json(request): Json<SubmitToNextRequest>,
 ) -> Response {
+    if let Some(response) = external_workflow_forbidden(&claims) {
+        return response;
+    }
     let started = std::time::Instant::now();
     info!(
         "[REVIEW_API.submit_to_next_node] start task_id={} actor_id={} actor_role={:?} comment_len={}",
@@ -2426,7 +2464,10 @@ async fn return_to_node(
     Extension(claims): Extension<TokenClaims>,
     Path(id): Path<String>,
     Json(request): Json<ReturnRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = external_workflow_forbidden(&claims) {
+        return response;
+    }
     let started = std::time::Instant::now();
     info!(
         "[REVIEW_API.return_to_node] start task_id={} target_node={} actor_id={} actor_role={:?} reason_len={}",
@@ -2470,7 +2511,8 @@ async fn return_to_node(
                             message: None,
                             error_message: Some(format!("任务不存在或已删除: {}", id)),
                         }),
-                    );
+                    )
+                        .into_response();
                 }
             }
         }
@@ -2490,7 +2532,8 @@ async fn return_to_node(
                     message: None,
                     error_message: Some(format!("查询任务失败: {}", e)),
                 }),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -2526,7 +2569,8 @@ async fn return_to_node(
                     owner_source,
                 )),
             }),
-        );
+        )
+            .into_response();
     }
 
     // 2. 验证目标节点
@@ -2549,7 +2593,8 @@ async fn return_to_node(
                 message: None,
                 error_message: Some(format!("无法从「{}」驳回到「{}」", from_name, to_name)),
             }),
-        );
+        )
+            .into_response();
     }
 
     // 3. 更新任务节点和驳回原因
@@ -2617,7 +2662,8 @@ async fn return_to_node(
                 message: None,
                 error_message: Some(e),
             }),
-        );
+        )
+            .into_response();
     }
 
     let from_name = get_node_display_name(&current_node);
@@ -2642,6 +2688,7 @@ async fn return_to_node(
             error_message: None,
         }),
     )
+        .into_response()
 }
 
 /// 工作流历史响应
@@ -2784,7 +2831,6 @@ async fn get_workflow_history(Path(id): Path<String>) -> impl IntoResponse {
         }),
     )
 }
-
 
 // ============================================================================
 // Tests

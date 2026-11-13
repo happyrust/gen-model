@@ -886,7 +886,12 @@ fn dedup_latest_round(states: Vec<AnnotationStateView>) -> Vec<AnnotationStateVi
 mod tests {
     use super::*;
 
-    fn make_state(annotation_id: &str, review_round: u32, resolution: &str, decision: &str) -> AnnotationStateView {
+    fn make_state(
+        annotation_id: &str,
+        review_round: u32,
+        resolution: &str,
+        decision: &str,
+    ) -> AnnotationStateView {
         AnnotationStateView {
             form_id: "FORM-TEST".to_string(),
             task_id: "task-test".to_string(),
@@ -910,10 +915,10 @@ mod tests {
         // 模拟数据库返回：已按 review_round DESC 排序
         // r2(fixed) 在前，r1(open) 在后
         let states = vec![
-            make_state("ann-1", 2, "fixed", "pending"),  // 最新轮次，应保留
-            make_state("ann-1", 1, "open", "pending"),   // 旧轮次，应去重
-            make_state("ann-2", 2, "fixed", "agreed"),   // 另一个批注的最新轮次
-            make_state("ann-2", 1, "open", "pending"),   // 旧轮次，应去重
+            make_state("ann-1", 2, "fixed", "pending"), // 最新轮次，应保留
+            make_state("ann-1", 1, "open", "pending"),  // 旧轮次，应去重
+            make_state("ann-2", 2, "fixed", "agreed"),  // 另一个批注的最新轮次
+            make_state("ann-2", 1, "open", "pending"),  // 旧轮次，应去重
         ];
 
         let result = dedup_latest_round(states);
@@ -930,9 +935,7 @@ mod tests {
     #[test]
     fn dedup_handles_single_round() {
         // 只有单轮次的情况
-        let states = vec![
-            make_state("ann-1", 1, "open", "pending"),
-        ];
+        let states = vec![make_state("ann-1", 1, "open", "pending")];
 
         let result = dedup_latest_round(states);
 
@@ -955,7 +958,7 @@ mod tests {
             make_state("ann-c", 3, "fixed", "agreed"),
             make_state("ann-a", 2, "fixed", "pending"),
             make_state("ann-b", 2, "fixed", "pending"),
-            make_state("ann-a", 1, "open", "pending"),  // 旧轮次，去重
+            make_state("ann-a", 1, "open", "pending"), // 旧轮次，去重
         ];
 
         let result = dedup_latest_round(states);

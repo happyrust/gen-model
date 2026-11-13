@@ -1030,7 +1030,10 @@ mod tests {
         let db = surrealdb::engine::any::connect("mem://")
             .await
             .expect("mem 引擎应能启动（kv-mem feature）");
-        db.use_ns("review_probe").use_db(db_name).await.expect("use ns/db");
+        db.use_ns("review_probe")
+            .use_db(db_name)
+            .await
+            .expect("use ns/db");
         db
     }
 
@@ -1194,17 +1197,28 @@ mod tests {
     #[test]
     fn previewable_attachment_magic_checks_cover_pdf_images_and_word() {
         assert!(attachment_content_matches_extension("pdf", b"%PDF-1.7\n"));
-        assert!(attachment_content_matches_extension("pdf", b"   %PDF-1.4\n"));
-        assert!(!attachment_content_matches_extension("pdf", b"<html>not pdf</html>"));
+        assert!(attachment_content_matches_extension(
+            "pdf",
+            b"   %PDF-1.4\n"
+        ));
+        assert!(!attachment_content_matches_extension(
+            "pdf",
+            b"<html>not pdf</html>"
+        ));
 
-        assert!(attachment_content_matches_extension("docx", &[0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]));
+        assert!(attachment_content_matches_extension(
+            "docx",
+            &[0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]
+        ));
         assert!(!attachment_content_matches_extension("docx", b"not a zip"));
 
         assert!(attachment_content_matches_extension(
             "doc",
             &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00]
         ));
-        assert!(!attachment_content_matches_extension("doc", b"{\\rtf1\\ansi fake doc}"));
+        assert!(!attachment_content_matches_extension(
+            "doc",
+            b"{\\rtf1\\ansi fake doc}"
+        ));
     }
 }
-

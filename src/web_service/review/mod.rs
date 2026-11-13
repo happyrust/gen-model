@@ -139,8 +139,7 @@ pub async fn health() -> Response {
 /// `/api/v1/health` 的断连账本（`surreal_retry::record_sul_db_disconnect`）不在这里记：
 /// 那本账归站点探针，校审探针被外部轮询时不该给它灌水。
 async fn probe_review_store() -> Result<(), HealthProbeError> {
-    match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, aios_core::SUL_DB.query("RETURN 1;")).await
-    {
+    match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, aios_core::SUL_DB.query("RETURN 1;")).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(surrealdb::Error::Api(surrealdb::error::Api::ConnectionUninitialised))) => Err(
             HealthProbeError::Unreachable("持久层连接尚未建立（SUL_DB 未 connect）".into()),
@@ -338,7 +337,9 @@ mod sdk_compat_probe {
     }
 
     async fn probe_db() -> Surreal<Any> {
-        let db = connect("mem://").await.expect("mem 引擎应能启动（kv-mem feature）");
+        let db = connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
         db.use_ns("review_probe")
             .use_db("sdk_compat")
             .await
@@ -380,7 +381,10 @@ mod sdk_compat_probe {
         assert_eq!(row.id.tb, "review_tasks");
         assert_eq!(record_id_to_string(&row.id), "task-123");
         assert_eq!(row.title, "probe");
-        assert_eq!(row.status, None, "未 SET 的字段必须落成 None 而不是反序列化失败");
+        assert_eq!(
+            row.status, None,
+            "未 SET 的字段必须落成 None 而不是反序列化失败"
+        );
         assert_eq!(row.priority, 2);
         assert_eq!(row.components[0]["refno"], "24381/145018");
         assert!(
@@ -433,7 +437,10 @@ mod sdk_compat_probe {
             .await
             .expect("SELECT 应执行");
         let row: Option<ProbeRow> = hit.take(0).expect("take::<Option<_>> 命中");
-        assert_eq!(row.map(|r| record_id_to_string(&r.id)).as_deref(), Some("task-456"));
+        assert_eq!(
+            row.map(|r| record_id_to_string(&r.id)).as_deref(),
+            Some("task-456")
+        );
 
         let mut miss = db
             .query("SELECT * FROM type::thing('review_tasks', $key);")
@@ -468,8 +475,9 @@ mod sdk_compat_probe {
             .bind(("key", "task-789"))
             .await
             .expect("SELECT 应执行");
-        let datetime_rows: Vec<serde_json::Value> =
-            only_datetime.take(0).expect("只含 datetime 的行可以读成 JSON");
+        let datetime_rows: Vec<serde_json::Value> = only_datetime
+            .take(0)
+            .expect("只含 datetime 的行可以读成 JSON");
         let created_at = &datetime_rows[0]["created_at"];
         assert!(
             created_at.is_string(),

@@ -803,7 +803,11 @@ async fn test_workflow_verify_blank_form_without_task_soft_blocks_active() {
     assert_eq!(data.task_status.as_deref(), Some("blank"));
     assert_eq!(data.next_step, None);
     assert_eq!(data.recommended_action, "block");
-    assert!(data.reason.contains("表单尚未保存编校审数据"), "{}", data.reason);
+    assert!(
+        data.reason.contains("表单尚未保存编校审数据"),
+        "{}",
+        data.reason
+    );
 
     // 非 active 动作对空白主单据同样 soft block，同一 block_code。
     let (status, payload) = post_verify(serde_json::json!({
@@ -854,7 +858,11 @@ async fn test_workflow_verify_matches_sync_outcome_for_active() {
     assert!(!verify_data.passed);
     assert_eq!(sync_status, StatusCode::CONFLICT, "{}", sync.message);
     assert_eq!(verify_data.passed, sync_status.is_success());
-    assert!(sync.message.contains("尚未创建活动 review task"), "{}", sync.message);
+    assert!(
+        sync.message.contains("尚未创建活动 review task"),
+        "{}",
+        sync.message
+    );
     assert!(
         super::review_form::find_task_by_form_id(blank_form)
             .await
@@ -989,7 +997,11 @@ async fn test_workflow_verify_missing_form_returns_404_for_every_action() {
         "actor": { "id": "SJ", "name": "SJ", "roles": "sj" }
     }))
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "active 对不存在的主单据不再按空白放行");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "active 对不存在的主单据不再按空白放行"
+    );
     assert_eq!(payload.code, 404);
     assert!(payload.data.is_none());
     assert!(payload.message.contains("未找到 review form"));
@@ -1052,7 +1064,10 @@ async fn test_workflow_agree_external_mode_rejects_non_owner() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload.code, 200);
     let data = payload.data.expect("verify data");
-    assert!(!data.passed, "external agree by a non-owner must be blocked: {data:?}");
+    assert!(
+        !data.passed,
+        "external agree by a non-owner must be blocked: {data:?}"
+    );
     assert_eq!(data.action, "agree");
     assert_eq!(data.block_code.as_deref(), Some("OWNER_MISMATCH"));
     assert_eq!(data.current_node.as_deref(), Some("jd"));
@@ -1109,7 +1124,11 @@ async fn test_workflow_actor_must_match_token_holder() {
     assert_eq!(verify.code, 403);
     assert_eq!(verify.error_code.as_deref(), Some("ACTOR_MISMATCH"));
     assert!(verify.data.is_none());
-    assert!(verify.message.contains("JH") && verify.message.contains("SJ"), "{}", verify.message);
+    assert!(
+        verify.message.contains("JH") && verify.message.contains("SJ"),
+        "{}",
+        verify.message
+    );
 
     let (status, sync) = post_sync(body).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1182,8 +1201,14 @@ async fn test_workflow_verify_agree_returns_annotation_gate_block_without_mutati
         Some("jd")
     );
     assert_eq!(annotation_check["summary"]["pending_review"], 1);
-    assert_eq!(annotation_check["blockers"][0]["annotation_id"], "ann-verify-pending-1");
-    assert_eq!(annotation_check["blockers"][0]["state_code"], "pending_review");
+    assert_eq!(
+        annotation_check["blockers"][0]["annotation_id"],
+        "ann-verify-pending-1"
+    );
+    assert_eq!(
+        annotation_check["blockers"][0]["state_code"],
+        "pending_review"
+    );
 
     let task_after = super::review_form::find_task_by_form_id(form_id)
         .await
@@ -1349,7 +1374,10 @@ async fn test_obb_only_open_annotation_blocks_agree() {
     let annotation_check = payload.annotation_check.expect("annotation_check");
     assert_eq!(annotation_check["summary"]["total"], 1);
     assert_eq!(annotation_check["summary"]["open"], 1);
-    assert_eq!(annotation_check["blockers"][0]["annotation_id"], "ann-obb-open-1");
+    assert_eq!(
+        annotation_check["blockers"][0]["annotation_id"],
+        "ann-obb-open-1"
+    );
     assert_eq!(annotation_check["blockers"][0]["annotation_type"], "obb");
 
     // 独立闸门接口：显式只查 obb 也认
@@ -1363,7 +1391,12 @@ async fn test_obb_only_open_annotation_blocks_agree() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let check: serde_json::Value = serde_json::from_slice(&bytes).expect("check body");
     assert_eq!(check["success"], true);
     assert_eq!(check["data"]["passed"], false);
@@ -1426,7 +1459,11 @@ async fn test_annotation_gate_sees_records_hung_on_sibling_task_of_same_form() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let data = payload.data.expect("verify data");
-    assert!(!data.passed, "记录挂在同 form 的旧 task 上也必须进闸门：{}", data.reason);
+    assert!(
+        !data.passed,
+        "记录挂在同 form 的旧 task 上也必须进闸门：{}",
+        data.reason
+    );
     assert_eq!(data.block_code.as_deref(), Some("ANNOTATION_CHECK_FAILED"));
     assert_eq!(
         payload.annotation_check.expect("annotation_check")["blockers"][0]["annotation_id"],
@@ -1778,7 +1815,11 @@ async fn test_sync_agree_blocks_on_pending_annotation() {
         payload.error_code.as_deref(),
         Some("ANNOTATION_CHECK_FAILED")
     );
-    assert!(payload.message.contains("待确认批注"), "{}", payload.message);
+    assert!(
+        payload.message.contains("待确认批注"),
+        "{}",
+        payload.message
+    );
     assert!(payload.data.is_none());
     let annotation_check = payload.annotation_check.expect("annotation_check");
     assert_eq!(
@@ -1940,9 +1981,23 @@ fn tasks_app() -> Router<()> {
 
 /// 设计端 token（`review_auth_middleware` 校验的那枚；与 PMS S2S 同一密钥、同一 `create_token`）。
 fn designer_token(project_id: &str, user_id: &str) -> String {
-    create_token(project_id, user_id, Some(user_id), Some("sj"), None)
-        .expect("designer token")
-        .0
+    designer_token_with_mode(project_id, user_id, None)
+}
+
+fn designer_token_with_mode(
+    project_id: &str,
+    user_id: &str,
+    workflow_mode: Option<&str>,
+) -> String {
+    create_token(
+        project_id,
+        user_id,
+        Some(user_id),
+        Some("sj"),
+        workflow_mode,
+    )
+    .expect("designer token")
+    .0
 }
 
 async fn tasks_request(
@@ -2113,7 +2168,8 @@ async fn test_create_task_resave_in_sj_updates_fields_and_form_models() {
         "size": 10,
         "mimeType": "image/png"
     }]);
-    let (status, first) = tasks_request("POST", "/api/review/tasks", &token, Some(first_body)).await;
+    let (status, first) =
+        tasks_request("POST", "/api/review/tasks", &token, Some(first_body)).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["success"], true);
     let task_id = first["task"]["id"].as_str().expect("task id").to_string();
@@ -2135,7 +2191,11 @@ async fn test_create_task_resave_in_sj_updates_fields_and_form_models() {
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["success"], true);
-    assert_eq!(second["task"]["id"], task_id.as_str(), "同 form_id 不新建任务");
+    assert_eq!(
+        second["task"]["id"],
+        task_id.as_str(),
+        "同 form_id 不新建任务"
+    );
     assert_eq!(second["task"]["title"], "包B");
     assert_eq!(second["task"]["modelName"], "包B");
     assert_eq!(second["task"]["description"], "第二次保存改了构件");
@@ -2147,7 +2207,11 @@ async fn test_create_task_resave_in_sj_updates_fields_and_form_models() {
         vec!["24381/2", "24381/3", "24381/3"]
     );
     assert_eq!(active_task_ids(form_id).await, vec![task_id.clone()]);
-    assert_eq!(task_attachment_ids(&task_id).await, vec!["att-1"], "请求没带 attachments → 保留");
+    assert_eq!(
+        task_attachment_ids(&task_id).await,
+        vec!["att-1"],
+        "请求没带 attachments → 保留"
+    );
 
     // GET /api/review/tasks/{id} 读回的是新值
     let (status, fetched) =
@@ -2195,14 +2259,22 @@ async fn test_create_task_resave_off_sj_node_is_rejected_without_writes() {
         "POST",
         "/api/review/tasks",
         &token,
-        Some(create_task_body(form_id, "改了标题", "改了描述", &["24381/9"])),
+        Some(create_task_body(
+            form_id,
+            "改了标题",
+            "改了描述",
+            &["24381/9"],
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{payload}");
     assert_eq!(payload["success"], false);
     assert!(payload.get("task").is_none(), "409 不回任务：{payload}");
     let message = payload["error_message"].as_str().expect("error_message");
-    assert!(message.contains("jd") && message.contains("校对"), "{message}");
+    assert!(
+        message.contains("jd") && message.contains("校对"),
+        "{message}"
+    );
     assert!(message.contains("不可修改"), "{message}");
 
     let task = super::review_form::find_task_by_form_id(form_id)
@@ -2388,7 +2460,12 @@ async fn test_review_forms_project_id_survives_create_task_and_internal_submit()
         "POST",
         "/api/review/tasks",
         &token,
-        Some(create_task_body(form_id, "改名后的数据包", "", &["24381/1"])),
+        Some(create_task_body(
+            form_id,
+            "改名后的数据包",
+            "",
+            &["24381/1"],
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resaved}");
@@ -2400,10 +2477,11 @@ async fn test_review_forms_project_id_survives_create_task_and_internal_submit()
 
     // 内部流转 submit（sj → jd）走 apply_internal_workflow_mutation_transaction，同样保留
     let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+    let internal_token = designer_token_with_mode("P-REAL", "SJ", Some("manual"));
     let (status, submitted) = tasks_request(
         "POST",
         &format!("/api/review/tasks/{task_id}/submit"),
-        &token,
+        &internal_token,
         Some(serde_json::json!({ "comment": "送审" })),
     )
     .await;
@@ -2419,4 +2497,29 @@ async fn test_review_forms_project_id_survives_create_task_and_internal_submit()
     assert_eq!(task.current_node, "jd");
 
     cleanup_form_bundle(form_id).await;
+}
+
+/// 外部模式（claims 不带 workflow_mode）不能走设计端 submit / return / start-review。
+#[tokio::test]
+async fn test_external_workflow_mode_blocks_internal_transitions() {
+    let token = designer_token("P-REAL", "SJ");
+    for (path, body) in [
+        (
+            "/api/review/tasks/task-external-gate/submit",
+            serde_json::json!({ "comment": "送审" }),
+        ),
+        (
+            "/api/review/tasks/task-external-gate/return",
+            serde_json::json!({ "targetNode": "sj", "reason": "退回" }),
+        ),
+        (
+            "/api/review/tasks/task-external-gate/start-review",
+            serde_json::json!({}),
+        ),
+    ] {
+        let (status, payload) = tasks_request("POST", path, &token, Some(body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} {payload}");
+        assert_eq!(payload["error_code"], "WORKFLOW_MODE_EXTERNAL");
+        assert_eq!(payload["error_message"], "外部流程模式下流转由 PMS 驱动");
+    }
 }

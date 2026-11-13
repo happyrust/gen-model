@@ -426,7 +426,15 @@ mod tests {
         let payload = json_body(response).await;
         assert_eq!(
             sorted_keys(&payload),
-            ["code", "data", "message", "page", "page_size", "reason", "total"]
+            [
+                "code",
+                "data",
+                "message",
+                "page",
+                "page_size",
+                "reason",
+                "total"
+            ]
         );
         assert_eq!(payload["code"], 200);
         assert_eq!(payload["message"], "ok");
@@ -465,7 +473,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let payload = json_body(response).await;
-        assert_eq!(sorted_keys(&payload), ["data", "reason", "success", "total"]);
+        assert_eq!(
+            sorted_keys(&payload),
+            ["data", "reason", "success", "total"]
+        );
         assert_eq!(payload["success"], true);
         assert_eq!(payload["data"], serde_json::json!([]));
         assert_eq!(payload["total"], 0);

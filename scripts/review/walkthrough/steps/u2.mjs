@@ -194,7 +194,7 @@ export async function run({ page, cfg, capture, log, state }) {
   const states = await apiFromPage(page, cfg, 'GET', `/api/review/annotation-states?form_id=${encodeURIComponent(state.formId)}&task_id=${encodeURIComponent(state.taskId)}`, auth.token);
   if (!states.ok || !states.json?.states?.some(s => s.annotationId === annotationId)) return { ok: false, detail: '处理状态复读缺失' };
 
-  // ⑧ approve 或 return。两条都在契约表里，按 REVIEW_U2_DECISION 选一条走。
+  // ⑧ approve 或 return。两条都在契约表里，按 REVIEW_U2_DECISION 选一条走。外部模式会 403，需 PLANT_REVIEW_ALLOW_INTERNAL_WORKFLOW=1。
   const decision = cfg.u2Decision === 'return'
     ? await apiFromPage(page, cfg, 'POST', `/api/review/tasks/${state.taskId}/return`, auth.token, {
       targetNode: 'sj',

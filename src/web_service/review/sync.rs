@@ -6,11 +6,7 @@
 //! 文件归 T2（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）。
 
 use axum::{
-    Json, Router,
-    extract::Extension,
-    http::StatusCode,
-    middleware,
-    response::IntoResponse,
+    Json, Router, extract::Extension, http::StatusCode, middleware, response::IntoResponse,
     routing::post,
 };
 use log::{info, warn};
@@ -21,7 +17,9 @@ use super::auth::{REVIEW_AUTH_CONFIG, TokenClaims, review_auth_middleware};
 use super::comments::AnnotationComment;
 use super::common::*;
 use super::platform::sync_review_form_with_task_status;
-use super::records::{ConfirmedRecordWithMeta, ReviewRecordRow, confirmed_record_with_meta_from_row};
+use super::records::{
+    ConfirmedRecordWithMeta, ReviewRecordRow, confirmed_record_with_meta_from_row,
+};
 
 // ============================================================================
 // Routes
@@ -280,7 +278,8 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
         // 检查任务是否已存在
         let exists = match await_review_query(
             "review.sync.import.exists",
-            db.query(IMPORT_TASK_EXISTS_SQL).bind(("id", task.id.clone())),
+            db.query(IMPORT_TASK_EXISTS_SQL)
+                .bind(("id", task.id.clone())),
         )
         .await
         {
@@ -489,4 +488,3 @@ mod tests {
         assert!(rows.is_empty(), "{rows:?}");
     }
 }
-

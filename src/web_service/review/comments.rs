@@ -665,7 +665,11 @@ pub(super) fn normalize_optional_scope(value: &Option<String>) -> Option<String>
         .map(ToString::to_string)
 }
 
-pub(super) fn patch_annotation_array<F>(items: &mut [Value], annotation_id: &str, apply: &mut F) -> bool
+pub(super) fn patch_annotation_array<F>(
+    items: &mut [Value],
+    annotation_id: &str,
+    apply: &mut F,
+) -> bool
 where
     F: FnMut(&mut serde_json::Map<String, Value>) -> bool,
 {
@@ -1031,4 +1035,3 @@ pub(super) async fn update_annotation_severity(
         }
     }
 }
-

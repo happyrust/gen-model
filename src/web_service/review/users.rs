@@ -6,11 +6,7 @@
 //! 文件归 T2（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）。
 
 use axum::{
-    Json, Router,
-    extract::Query,
-    http::StatusCode,
-    middleware,
-    response::IntoResponse,
+    Json, Router, extract::Query, http::StatusCode, middleware, response::IntoResponse,
     routing::get,
 };
 use log::{info, warn};
@@ -159,7 +155,6 @@ pub(super) fn current_user_from_claims(claims: &super::auth::TokenClaims) -> Use
         })
 }
 
-
 /// GET /api/users - 获取用户列表
 pub(super) async fn list_users(Query(query): Query<UserListQuery>) -> impl IntoResponse {
     info!("Listing users");
@@ -235,7 +230,6 @@ pub(super) async fn get_reviewers() -> impl IntoResponse {
         }),
     )
 }
-
 
 // ============================================================================
 // Tests
