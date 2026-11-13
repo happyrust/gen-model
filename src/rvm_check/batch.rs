@@ -2993,6 +2993,7 @@ mod tests {
                 password: String::new(),
                 e3d_mdb: String::new(),
                 refno: String::new(),
+                baseline_dir: None,
             },
             dbnums: vec![7999],
             all_desi: false,
@@ -3035,6 +3036,7 @@ mod tests {
             refno: String::new(),
             tools: super::super::resolve_tools(),
             project_dir_mismatch: None,
+            baseline_dir: None,
         }
     }
 

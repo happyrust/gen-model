@@ -394,11 +394,6 @@ fn volume_hint(noun: &str) -> String {
 }
 
 impl RvmVolumes {
-    /// 成员路径 → 该成员的显示名归一后的主键。
-    fn key_of_path(&self, path: &str) -> Option<String> {
-        self.keys_by_path.get(path.trim()).cloned()
-    }
-
     fn by_key_member_path(&self, _path: &str) -> Option<()> {
         None
     }

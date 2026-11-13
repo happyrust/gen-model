@@ -160,7 +160,15 @@ impl BaselineVersionCheck {
 /// 认不出给 `None`（不拿它去比，免得把 `unknown` 当成一个版本）。
 pub fn normalize_e3d_version(raw: &str) -> Option<String> {
     let text = raw.trim().to_ascii_lowercase();
-    let digits: String = text
+    // 先剥 `e3d` 前缀：`e3d210` 里的 `3` 属于前缀，不能跟 `210` 连成 `3210`。
+    // 剥完再取第一个词——`E3D 2.1` 剥成 `2.1`、`e3d210（…2.10…）` 剥成 `210（…`，
+    // 后者按括号切开只留 `210`。
+    let body = text.strip_prefix("e3d").unwrap_or(&text).trim();
+    let first_word = body
+        .split(|ch: char| ch.is_whitespace() || ch == '（' || ch == '(' || ch == '，' || ch == ',')
+        .find(|word| !word.is_empty())
+        .unwrap_or("");
+    let digits: String = first_word
         .chars()
         .filter(|ch| ch.is_ascii_digit() || *ch == '.')
         .collect();
@@ -168,7 +176,6 @@ pub fn normalize_e3d_version(raw: &str) -> Option<String> {
         return None;
     }
     let trimmed = digits.trim_matches('.').to_string();
-    // 已经写成 `e3d210` 的：去掉点之后就是它。
     let compact: String = trimmed.chars().filter(|ch| *ch != '.').collect();
     match compact.as_str() {
         "210" | "21" => Some("e3d210".to_string()),
@@ -194,10 +201,15 @@ pub fn project_e3d_version() -> String {
 fn version_from_provenance_text(text: &str) -> Option<String> {
     for line in text.lines() {
         let line = line.trim();
-        let rest = line
+        // 不是版本行的（标题、空行、别的字段）跳过——以前这里用 `?`，第一行不匹配就整个函数返回
+        // `None`，后面真正的版本行再也看不到。
+        let Some(rest) = line
             .strip_prefix("E3D 版本")
             .or_else(|| line.strip_prefix("E3D版本"))
-            .or_else(|| line.strip_prefix("e3d 版本"))?;
+            .or_else(|| line.strip_prefix("e3d 版本"))
+        else {
+            continue;
+        };
         let rest = rest.trim_start_matches([':', '：']).trim();
         if let Some(version) = normalize_e3d_version(rest) {
             return Some(version);
