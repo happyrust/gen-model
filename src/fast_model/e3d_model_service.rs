@@ -56,6 +56,10 @@ mod orientation_increment_regression_tests;
 #[path = "orientation_source_diff_fixture.rs"]
 mod orientation_source_diff_fixture;
 
+#[cfg(test)]
+#[path = "unit_publish_cascade_target_tests.rs"]
+mod unit_publish_cascade_target_tests;
+
 /// 刚体前移执行体（ADR-066 B6）一轮的结果：哪些根走成便宜路（`completed`），哪些是「回执已在 T」
 /// 的窗口重放（`replayed`——投影一字未动、按已完成计，见 [`republish_gate`]），哪些回退整根重算
 /// （`fallbacks`，带原因）。回退永远正确、只是不省。用 pdms `a/b` 串标识根，方便与 `UnitTask` 对齐。
@@ -988,6 +992,9 @@ impl<'a> UnitDeltaProducer<'a> {
         // 选根比 `plan_update` 看得更远（结构连接 / 电缆端点 / 设计引用级联、目录级联、带过来的
         // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空默认就不是
         // 「没变」，是局部清单覆盖不到的理由——空 delta 盖一个 T 章正是 Q4 那种静默缺件。
+        // 子计划**不空**的级联目标根同样覆盖不到（级联要它重算的那一件不在子计划里），那一种这里看不出来，
+        // 由规划器挡：它不给级联目标根带单元级提示（`WindowRootSources::unit_publish_cascade_targets`，
+        // GitHub #144），所以走不到这里。
         //
         // 唯一的例外（D10）：规划器判这根**只被 `no_model` 候选碰到**（闭包直接命中、非级联、S 端安定、
         // 名下候选全是两票门放行的），且这里对账本复核也成立——那空子计划读作「DESI 侧没有一件几何要变」，

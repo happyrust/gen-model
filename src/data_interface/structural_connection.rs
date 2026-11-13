@@ -1301,5 +1301,786 @@ mod tests {
                 );
             }
         }
+
+        // ---- GitHub #34 复核（2026-11-11）：关节 ↔ 梁两个方向 ----
+        //
+        // e3d-model 这两个月把关节负体接上了：GENSEC 扣 FIXING 的（09-28），SCTN 扣 SJOI / PJOI 的（10-15 起；
+        // 11-10 `036e89d` 主关节 PJOI 的朝向照 Core3D 现算，三本库 48 根杆的切口跟着变）。「关节变了，被它切的梁
+        // 要不要重算」因此是正确性问题，两个方向都要有真库的证据。自然窗口有的用自然窗口；语料里没有「只改 PJOI」
+        // 的一步，那一类用假定源——与 C8 `live_zdj7200_…`、P4 `live_every_posref_table_…` 同一手法。
+
+        const APS_PROJECT_DIR: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000";
+        const AMS_PROJECT_DIR: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000";
+
+        fn project_dir(env: &str, default: &str) -> PathBuf {
+            PathBuf::from(std::env::var(env).unwrap_or_else(|_| default.into()))
+        }
+
+        /// 一个库在某个会话上的静态现场：`DbSet`、属主索引、生产同口径的根集。
+        struct Site {
+            set: Arc<DbSet>,
+            owners: Arc<BTreeMap<(u32, u32), RefNo>>,
+            roots_t: Vec<GenerationRoot>,
+            root_keys: BTreeSet<(u32, u32)>,
+        }
+
+        fn site(schema: &DirectSchema, file: &Path, sesno: u32) -> Site {
+            let set = open(schema, file, sesno);
+            let index = scan_index(file, Some(sesno)).expect("scan index");
+            let roots_t =
+                enumerate_generation_roots(&set, &index.roots, &resolve_delivery_unit_types(&[]))
+                    .expect("enumerate roots");
+            let root_keys = roots_t
+                .iter()
+                .map(|root| {
+                    let refno = refno_to_e3d(root.root);
+                    (refno.word0, refno.word1)
+                })
+                .collect();
+            Site {
+                set,
+                owners: index.owners.clone(),
+                roots_t,
+                root_keys,
+            }
+        }
+
+        /// `element` 属主链上的根，自下而上（第一个就是最近的根）。
+        fn root_chain(site: &Site, element: RefNo) -> Vec<RefnoEnum> {
+            roots_on_owner_chain(&site.owners, &site.root_keys, element)
+                .into_iter()
+                .map(refno_from_e3d)
+                .collect()
+        }
+
+        /// 库里全部会级联的结构连接边（回指成立、过 `STRU` 门），用生产同一段 `read_edges_of` 读。
+        /// 对端在别的库的边也留着（这份 `DbSet` 只挂了一个库，回指读不到，调用方单独点名）。
+        fn cascading_edges(site: &Site) -> Vec<ConnectionEdge> {
+            let mut edges = Vec::new();
+            for &(word0, word1) in site.owners.keys() {
+                // 读挂的元素不是这条门要量的（生产把它记进 `unreadable_sources`）。
+                let _ = read_edges_of(
+                    &site.set,
+                    RefNo::new(word0, word1),
+                    WindowSide::Target,
+                    &mut edges,
+                );
+            }
+            edges.retain(|edge| edge.cascades() || edge.target.dbno() != edge.source.dbno());
+            edges
+        }
+
+        /// 假定 `source` 这一件在一窗里改了（账本里只有它一条），按生产同一段折出两态各自的 `regen`。
+        ///
+        /// 闭包直接命中的根 = 它属主链上的全部根（祖先闭包对单个种子就是它的祖先）；开关开着再并上 C2 的对端根——
+        /// 与 `WindowRootSources::collect` 同一个开关分支、与 `impact` 同一次 `expand_touched`。`touched` 按构造全在
+        /// `roots_T` 里，所以它就是 `regen = touched ∩ roots_T`。返回 `(开着的账, regen 开, regen 关)`。
+        fn regen_if_changed(
+            site: &Site,
+            source: RefNo,
+            noun: &str,
+        ) -> (
+            StructuralConnectionCascade,
+            BTreeSet<RefnoEnum>,
+            BTreeSet<RefnoEnum>,
+        ) {
+            let mut ledger = e3d_model::ledger::ChangeLedger::default();
+            ledger.record(
+                source,
+                &e3d_model::element_diff::ElementDiff {
+                    refno: source.to_string(),
+                    noun: noun.into(),
+                    type_changed: None,
+                    owner_changed: None,
+                    members: None,
+                    attributes: vec!["POS".into()],
+                    opaque: false,
+                },
+            );
+            ledger.dispose(source, e3d_model::ledger::Disposition::RolledUp);
+            let plan = UpdatePlan {
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                ledger,
+                full_rebuild: None,
+                report: e3d_model::increment::IncrementReport::default(),
+            };
+            let direct: BTreeSet<RefnoEnum> = root_chain(site, source).into_iter().collect();
+            let run = |on: bool| {
+                let _switch = crate::options::StructuralConnectionCascadeOverride::set(on);
+                let cascade = if crate::options::model_structural_connection_cascade() {
+                    StructuralConnectionCascade::collect(
+                        &plan,
+                        &site.set,
+                        &site.set,
+                        &site.owners,
+                        &site.roots_t,
+                    )
+                } else {
+                    StructuralConnectionCascade::off()
+                };
+                let mut touched = direct.clone();
+                cascade.expand_touched(&mut touched);
+                (cascade, touched)
+            };
+            let (on, regen_on) = run(true);
+            let (off, regen_off) = run(false);
+            assert!(on.enabled && !off.enabled);
+            (on, regen_on, regen_off)
+        }
+
+        /// 一类边（`持属性端.属性->对端`）在一个库里的账。
+        #[derive(Debug, Default, Clone, PartialEq, Eq)]
+        struct EdgeAccount {
+            /// 会级联的同库边数。
+            edges: usize,
+            /// 开关关着时，对端**最近的根**不在 `regen` 里的边数——嵌套根各管各的几何，这些对端不会重算。
+            uncovered_when_off: usize,
+            /// 其中连对端属主链上任何一个根都不在 `regen` 里的（外层根整棵重算也罩不住）。
+            disjoint_when_off: usize,
+            /// 下面四格只打印、不进表（量「开关开着一次改动多重算多少」）：逐边多出来的根数之和 / 单条边最多；
+            /// 关着时 `regen` 的根名下的元素数之和 / 多出来的根名下的元素数之和（元素按最近的根归属）。
+            added_roots: usize,
+            added_roots_max: usize,
+            elements_off: usize,
+            elements_added: usize,
+        }
+
+        /// 假定源，两个方向一起走：库里每一条会级联的同库结构连接边，假定持属性的那一端单独改了。
+        /// 持属性端是关节（`PJOI` / `SJOI` / `SUBJ` / `FIXING` 的 `CREF`）就是「关节变了 → 被它切的梁」，
+        /// 是梁（`SCTN` / `GENSEC` / `STWALL` / `WALL` 的 `JOIS` / `JOIE`）就是「梁变了 → 它的关节」。
+        ///
+        /// 契约（每条边都断言）：开关开，对端属主链上的**每一个**根都在 `regen` 里；开关关，`regen` 恰好是变更元素
+        /// 自己链上的根；开着只多出对端根。
+        ///
+        /// 账（打印，再与下面的表逐格相等）：开关关着时对端最近的根不在 `regen` 里的边数——这些边只有本开关接得住
+        /// （e3d-model `plan_update` 自己的同库关节级联只管 FIXING ↔ GENSEC 与带目录正体的 SJOI ↔ SCTN，而且它在
+        /// 单元一层，这里量的是根这一层）。四本库各代表一种形状：
+        /// - `aps7200_0001`：钢结构，关节与梁常在不同的根下——`PJOI` / `SJOI` 两族都有只靠开关的边；
+        /// - `aps7324_0001`：MDS 支架（`/MDS/FT54…` 那 48 根杆所在的库之一）——关节与被切的杆同在一个 FRMW 根下，
+        ///   关着也整根重算；
+        /// - `ams251183_0001`：正式后端所在工程（AMS）里跨根边最多的库；
+        /// - `ams8000_0001`：正式后端监听的库，1244 条边全部同根。
+        ///
+        /// 会话钉死（2026-11-11 各库的最新会话）：这些库还在被人用，钉住了以后多出来的会话不动这张表。
+        ///
+        /// 只读文件：`AIOS_APS_PROJECT_DIR` / `AIOS_AMS_PROJECT_DIR`（缺省本机样例工程）+ `AIOS_E3D_TEMPLATE_DIR`。
+        /// 语料不在本机时跳过（见 [`corpus_ready`]）。
+        #[test]
+        fn live_a_changed_joint_pulls_its_beam_into_regen_and_a_changed_beam_pulls_its_joints() {
+            let aps = project_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+            let ams = project_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+            // (库文件, 钉住的会话)
+            let files = [
+                (aps.join("aps7200_0001"), 11u32),
+                (aps.join("aps7324_0001"), 1366),
+                (aps.join("aps7350_0001"), 211),
+                (ams.join("ams251183_0001"), 15),
+                (ams.join("ams8000_0001"), 1143),
+            ];
+            let paths: Vec<&Path> = files.iter().map(|(file, _)| file.as_path()).collect();
+            if !corpus_ready("关节 ↔ 梁的假定源", &paths) {
+                return;
+            }
+            // (库, 边的类别, 会级联的同库边数, 开关关着对端最近的根不在 regen 里的, 其中根链无交集的)
+            // 2026-11-11 本机实测；第四列与同日 `cross_root_reference_census` 的「回指成立 ∧ 正向最近根不覆盖 ∧
+            // 在 STRU 下」逐格相同。
+            let expected: &[(&str, &str, usize, usize, usize)] = &[
+                ("aps7200_0001", "PJOI.CREF->SCTN", 22, 20, 0),
+                ("aps7200_0001", "PJOI.CREF->STWALL", 18, 0, 0),
+                ("aps7200_0001", "PJOI.CREF->WALL", 2, 0, 0),
+                ("aps7200_0001", "SCTN.JOIE->PJOI", 1, 0, 0),
+                ("aps7200_0001", "SCTN.JOIE->SJOI", 104, 64, 8),
+                ("aps7200_0001", "SCTN.JOIS->PJOI", 21, 18, 0),
+                ("aps7200_0001", "SCTN.JOIS->SJOI", 96, 66, 10),
+                ("aps7200_0001", "SJOI.CREF->SCTN", 200, 130, 18),
+                ("aps7200_0001", "STWALL.JOIE->PJOI", 9, 0, 0),
+                ("aps7200_0001", "STWALL.JOIS->PJOI", 9, 0, 0),
+                ("aps7200_0001", "WALL.JOIE->PJOI", 1, 0, 0),
+                ("aps7200_0001", "WALL.JOIS->PJOI", 1, 0, 0),
+                ("aps7324_0001", "FIXING.CREF->GENSEC", 322, 0, 0),
+                ("aps7324_0001", "GENSEC.JOIE->FIXING", 181, 0, 0),
+                ("aps7324_0001", "GENSEC.JOIS->FIXING", 141, 0, 0),
+                ("aps7324_0001", "PJOI.CREF->SCTN", 60, 0, 0),
+                ("aps7324_0001", "SCTN.JOIE->PJOI", 60, 0, 0),
+                ("aps7324_0001", "SCTN.JOIE->SJOI", 91, 0, 0),
+                ("aps7324_0001", "SCTN.JOIS->SJOI", 144, 0, 0),
+                ("aps7324_0001", "SJOI.CREF->SCTN", 235, 0, 0),
+                ("aps7350_0001", "FIXING.CREF->GENSEC", 326, 0, 0),
+                ("aps7350_0001", "GENSEC.JOIE->FIXING", 181, 0, 0),
+                ("aps7350_0001", "GENSEC.JOIS->FIXING", 145, 0, 0),
+                ("aps7350_0001", "PJOI.CREF->SCTN", 60, 0, 0),
+                ("aps7350_0001", "SCTN.JOIE->PJOI", 60, 0, 0),
+                ("aps7350_0001", "SCTN.JOIE->SJOI", 91, 0, 0),
+                ("aps7350_0001", "SCTN.JOIS->SJOI", 142, 0, 0),
+                ("aps7350_0001", "SJOI.CREF->SCTN", 233, 0, 0),
+                ("ams251183_0001", "PJOI.CREF->SCTN", 449, 4, 0),
+                ("ams251183_0001", "SCTN.JOIE->PJOI", 349, 135, 0),
+                ("ams251183_0001", "SCTN.JOIE->SJOI", 2, 0, 0),
+                ("ams251183_0001", "SCTN.JOIS->PJOI", 100, 75, 0),
+                ("ams251183_0001", "SCTN.JOIS->SJOI", 4, 0, 0),
+                ("ams251183_0001", "SJOI.CREF->SCTN", 6, 0, 0),
+                ("ams8000_0001", "PJOI.CREF->SCTN", 248, 0, 0),
+                ("ams8000_0001", "SCTN.JOIE->PJOI", 124, 0, 0),
+                ("ams8000_0001", "SCTN.JOIS->PJOI", 124, 0, 0),
+                ("ams8000_0001", "SCTN.JOIS->SUBJ", 374, 0, 0),
+                ("ams8000_0001", "SUBJ.CREF->SCTN", 374, 0, 0),
+            ];
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let mut measured: Vec<(String, String, EdgeAccount)> = Vec::new();
+            for (file, sesno) in &files {
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let site = site(&schema, file, *sesno);
+                let edges = cascading_edges(&site);
+                // 每个根名下的元素数（按最近的根归属，嵌套根不重复计）：量多出来的根有多大。
+                let mut population: BTreeMap<RefnoEnum, usize> = BTreeMap::new();
+                for &(word0, word1) in site.owners.keys() {
+                    if let Some(nearest) = root_chain(&site, RefNo::new(word0, word1))
+                        .into_iter()
+                        .next()
+                    {
+                        *population.entry(nearest).or_default() += 1;
+                    }
+                }
+                let weigh = |roots: &BTreeSet<RefnoEnum>| -> usize {
+                    roots
+                        .iter()
+                        .map(|root| population.get(root).copied().unwrap_or(0))
+                        .sum()
+                };
+                let mut accounts: BTreeMap<String, EdgeAccount> = BTreeMap::new();
+                let mut cross_db = 0usize;
+                for edge in &edges {
+                    if edge.target.dbno() != edge.source.dbno() {
+                        cross_db += 1;
+                        println!(
+                            "[#34]   跨库：{} {}.{} -> {}（dbnum {}）",
+                            edge.source_noun,
+                            edge.source,
+                            edge.attribute,
+                            edge.target,
+                            edge.target.dbno()
+                        );
+                        continue;
+                    }
+                    let far_noun = site
+                        .set
+                        .element(edge.target)
+                        .element_type()
+                        .unwrap_or_else(|_| "?".into());
+                    let label = format!("{}.{}->{far_noun}", edge.source_noun, edge.attribute);
+                    let (on, regen_on, regen_off) =
+                        regen_if_changed(&site, edge.source, &edge.source_noun);
+                    let own: BTreeSet<RefnoEnum> =
+                        root_chain(&site, edge.source).into_iter().collect();
+                    let far = root_chain(&site, edge.target);
+                    assert_eq!(
+                        regen_off, own,
+                        "{name} {label} {}: 开关关着 regen 只该有变更元素自己链上的根",
+                        edge.source
+                    );
+                    assert!(
+                        on.backref_ok >= 1,
+                        "{name} {label} {}: 开着该读到这条边",
+                        edge.source
+                    );
+                    for root in &far {
+                        assert!(
+                            regen_on.contains(root),
+                            "{name} {label} {} -> {}: 对端链上的根 {} 该在 regen 里",
+                            edge.source,
+                            edge.target,
+                            root.to_pdms_str()
+                        );
+                    }
+                    assert!(
+                        regen_on
+                            .iter()
+                            .all(|root| regen_off.contains(root) || on.far_end_roots.contains(root)),
+                        "{name} {label} {}: 开关开只能多出对端根",
+                        edge.source
+                    );
+                    let uncovered = far
+                        .first()
+                        .is_some_and(|nearest| !regen_off.contains(nearest));
+                    let disjoint =
+                        !far.is_empty() && far.iter().all(|root| !regen_off.contains(root));
+                    let added: BTreeSet<RefnoEnum> =
+                        regen_on.difference(&regen_off).copied().collect();
+                    let account = accounts.entry(label.clone()).or_default();
+                    account.edges += 1;
+                    account.uncovered_when_off += usize::from(uncovered);
+                    account.disjoint_when_off += usize::from(disjoint);
+                    account.added_roots += added.len();
+                    account.added_roots_max = account.added_roots_max.max(added.len());
+                    account.elements_off += weigh(&regen_off);
+                    account.elements_added += weigh(&added);
+                    // 每一类各点名头两条只有开关接得住的边，真机验证时好挑目标。
+                    if (uncovered && account.uncovered_when_off <= 2)
+                        || (disjoint && account.disjoint_when_off <= 2)
+                    {
+                        println!(
+                            "[#34]   例：{name} {label} {} -> {}{}：变更端的根 {:?}，对端的根 {:?}",
+                            edge.source,
+                            edge.target,
+                            if disjoint {
+                                "（根链无交集）"
+                            } else {
+                                ""
+                            },
+                            own.iter()
+                                .map(|root| root.to_pdms_str())
+                                .collect::<Vec<_>>(),
+                            far.iter()
+                                .map(|root| root.to_pdms_str())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+                println!(
+                    "[#34] {name}@{sesno}: 元素 {} 根 {} 会级联的边 {}（另有跨库 {cross_db} 条不在这条门里）",
+                    site.owners.len(),
+                    site.roots_t.len(),
+                    edges.len() - cross_db
+                );
+                for (label, account) in &accounts {
+                    println!(
+                        "[#34]   (\"{name}\", \"{label}\", {}, {}, {}),",
+                        account.edges, account.uncovered_when_off, account.disjoint_when_off
+                    );
+                    println!(
+                        "[#34]   量：{name} {label}: 逐边假定单独改，开着多出的根合计 {}（单条边最多 {}）；\
+                         名下元素 关着 {} / 多出 {}",
+                        account.added_roots,
+                        account.added_roots_max,
+                        account.elements_off,
+                        account.elements_added
+                    );
+                    measured.push((name.clone(), label.clone(), account.clone()));
+                }
+            }
+            let measured: Vec<(&str, &str, usize, usize, usize)> = measured
+                .iter()
+                .map(|(name, label, account)| {
+                    (
+                        name.as_str(),
+                        label.as_str(),
+                        account.edges,
+                        account.uncovered_when_off,
+                        account.disjoint_when_off,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                measured, expected,
+                "关节 ↔ 梁的账变了：库文件多了会话，或根枚举 / 结构表的口径动了——核一遍再改表"
+            );
+        }
+
+        /// 这一窗（开关关着）的根规划是否退化。`Some(原因)` = 闭包不可信、全部持久根重排——那样的窗两态必然相同，
+        /// 证明不了「关着也盖得住对端」。
+        fn window_degraded(
+            schema: &DirectSchema,
+            file: &Path,
+            base_sesno: u32,
+            target_sesno: u32,
+        ) -> Option<String> {
+            let unit_types = resolve_delivery_unit_types(&[]);
+            let (base, target) = (
+                open(schema, file, base_sesno),
+                open(schema, file, target_sesno),
+            );
+            let base_index = scan_index(file, Some(base_sesno)).expect("scan base index");
+            let roots_s: Vec<PersistedRoot> =
+                enumerate_generation_roots(&base, &base_index.roots, &unit_types)
+                    .expect("enumerate base roots")
+                    .into_iter()
+                    .map(|root| PersistedRoot {
+                        refno: root.root,
+                        noun: root.noun,
+                    })
+                    .collect();
+            let _switch = crate::options::StructuralConnectionCascadeOverride::set(false);
+            let sources = WindowRootSources::collect(
+                file,
+                base_sesno,
+                target_sesno,
+                &base,
+                &target,
+                &unit_types,
+                &[],
+            )
+            .expect("collect");
+            sources.impact(&roots_s).degraded_reason()
+        }
+
+        /// 自然窗口，反方向：**梁**那一端单独改了，关节的根要进 `regen`。
+        ///
+        /// 语料（AMS + APS 两个工程，2026-11-11 的 `cross_root_reference_census`）里这种形状、又没有退化的窗只有
+        /// `aps250209_0001` 15→16 与 16→17：`GENSEC.JOIS` / `JOIE` → FIXING，跨根单端边 86 / 35 条。另一个方向
+        /// （FIXING 单独改）没退化的窗就是 [`live_aps_one_ended_windows_pull_the_far_end_roots_into_regen`] 里的
+        /// `aps250110_0001` 29→30；`aps250108_0001` 15→16、`aps250112_0001` 18→19 也是 FIXING 单独改，但整窗退化
+        /// （候选数超过索引键的 30%，全部持久根重排），两态必然相同，证明不了什么，不收。
+        ///
+        /// 契约与那一条相同：开关开，回指成立的边不少于普查数、对端根全在 `regen`、只多出对端根、没有跨库对端；
+        /// 开关关，一条边都不读。这两窗开关关着对端根也已经全在 `regen` 里（两态集合相等）——要如实读：它们各自重排
+        /// 373 根，而库里一共 382 根，几乎是全库；梁改了、关节没改的小窗口语料里没有，逐边的证据在假定源那一条
+        /// （[`live_a_changed_joint_pulls_its_beam_into_regen_and_a_changed_beam_pulls_its_joints`]）。
+        #[test]
+        fn live_aps_windows_where_only_the_beam_changed_pull_the_joint_roots_into_regen() {
+            let dir = project_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+            let file = dir.join("aps250209_0001");
+            if !corpus_ready("aps250209 的梁端单独改动窗口", &[file.as_path()]) {
+                return;
+            }
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            // (S, T, 普查的「只改 GENSEC 一端」的跨根边数)
+            let table = [(15u32, 16u32, 86usize), (16, 17, 35)];
+            for (base_sesno, target_sesno, census_edges) in table {
+                let label = format!("aps250209_0001 {base_sesno}→{target_sesno}");
+                assert_eq!(
+                    window_degraded(&schema, &file, base_sesno, target_sesno),
+                    None,
+                    "{label}: 这一窗不该退化——退化的窗两态必然相同，放在这里就成了空转"
+                );
+                let ((on, regen_on), (off, regen_off)) =
+                    regen_both_ways(&schema, &file, base_sesno, target_sesno);
+                let on_set: BTreeSet<RefnoEnum> = regen_on.iter().copied().collect();
+                let off_set: BTreeSet<RefnoEnum> = regen_off.iter().copied().collect();
+                println!(
+                    "[#34] {label}（单独改 GENSEC）: {} | regen_on={} regen_off={}",
+                    on.summary_line(0),
+                    regen_on.len(),
+                    regen_off.len()
+                );
+                assert!(on.enabled && !off.enabled);
+                assert!(
+                    on.backref_ok >= census_edges,
+                    "{label}: 普查数出 {census_edges} 条只改 GENSEC 一端的跨根边，这里只读到 {}",
+                    on.backref_ok
+                );
+                assert!(!on.far_end_roots.is_empty(), "{label}: 对端根集不该为空");
+                for root in &on.far_end_roots {
+                    assert!(
+                        on_set.contains(root),
+                        "{label}: 关节的根 {} 该在 regen 里",
+                        root.to_pdms_str()
+                    );
+                }
+                assert!(
+                    on.far_end_cross_db.is_empty(),
+                    "{label}: 这一窗的边都在本库：{:?}",
+                    on.far_end_cross_db
+                );
+                assert!(off.far_end_roots.is_empty(), "{label}: 开关关不该读边");
+                assert_eq!(
+                    on_set, off_set,
+                    "{label}: 开关关着关节的根也已全在 regen 里，两态集合该相等"
+                );
+            }
+        }
+        /// 量法（手动）：开关打开之后一次增量的重算范围放大多少。
+        ///
+        /// 逐库走会话链的最后 `AIOS_C2_MEASURE_STEPS_PER_DB` 步（缺省 12，0 = 整条链），每一步两态各跑一遍生产同款的
+        /// `WindowRootSources::collect` → `impact` → `plan_window_roots`，记：`regen` 根数两态、多出来的根、这些根名下
+        /// 的元素数（按最近的根归属，嵌套根不重复计）、读了多少条边、规划耗时两态。库的名单缺省是正式后端监听的五个库
+        /// 加两个工程里结构连接边最多的那些；`AIOS_C2_MEASURE_FILES`（`;` 分隔的文件路径）可整体替换。
+        ///
+        /// 只读文件、不碰库、不下数值断言（放大多少是语料的性质）；只断言 `regen_off ⊆ regen_on` 与「多出来的全是
+        /// 对端根」。结果打印到 stdout（`--nocapture`）。
+        #[test]
+        #[ignore = "manual live measurement: walks real DESI session chains twice; needs the E3D sample projects and template directory"]
+        fn live_measure_how_much_the_cascade_widens_regen_on_real_windows() {
+            use std::time::Instant;
+
+            use e3d_io::ReadOnlyEngine;
+            use e3d_io::session::SessionSelector;
+
+            let aps = project_dir("AIOS_APS_PROJECT_DIR", APS_PROJECT_DIR);
+            let ams = project_dir("AIOS_AMS_PROJECT_DIR", AMS_PROJECT_DIR);
+            let files: Vec<PathBuf> = match std::env::var("AIOS_C2_MEASURE_FILES") {
+                Ok(value) => value.split(';').map(PathBuf::from).collect(),
+                Err(_) => [
+                    // 正式后端监听的五个库。
+                    "ams7997_0001",
+                    "ams7998_0001",
+                    "ams8000_0001",
+                    "ams251095_0001",
+                    "ams251137_0001",
+                    // AMS 里结构连接边多的库。
+                    "ams7999_0001",
+                    "ams7324_0001",
+                    "ams251183_0001",
+                    "ams251181_0001",
+                    "ams251180_0001",
+                    "ams251173_0001",
+                    "ams251172_0001",
+                    "ams251182_0001",
+                ]
+                .iter()
+                .map(|name| ams.join(name))
+                .chain(
+                    [
+                        "aps7200_0001",
+                        "aps7166_0001",
+                        "aps7324_0001",
+                        "aps250110_0001",
+                        "aps250108_0001",
+                        "aps250112_0001",
+                        "aps250209_0001",
+                    ]
+                    .iter()
+                    .map(|name| aps.join(name)),
+                )
+                .collect(),
+            };
+            let per_db: usize = std::env::var("AIOS_C2_MEASURE_STEPS_PER_DB")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(12);
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let unit_types = resolve_delivery_unit_types(&[]);
+
+            #[derive(Default)]
+            struct Totals {
+                windows: usize,
+                widened: usize,
+                regen_off: usize,
+                regen_on: usize,
+                elements_off: usize,
+                elements_added: usize,
+                edges: usize,
+                cross_db: usize,
+                millis_off: u128,
+                millis_on: u128,
+            }
+            let mut grand = Totals::default();
+            for file in &files {
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !file.is_file() {
+                    println!("[#34 量] skip {name}: 文件不在");
+                    continue;
+                }
+                let steps: Vec<(u32, u32)> = {
+                    let Ok(mut engine) = ReadOnlyEngine::open(file) else {
+                        println!("[#34 量] skip {name}: 打不开");
+                        continue;
+                    };
+                    let mut sesnos: Vec<u32> = match engine.sessions() {
+                        Ok(sessions) => sessions.iter().map(|session| session.session_id).collect(),
+                        Err(error) => {
+                            println!("[#34 量] skip {name}: 会话链读不出：{error}");
+                            continue;
+                        }
+                    };
+                    sesnos.sort_unstable();
+                    sesnos.dedup();
+                    if sesnos.len() < 2 {
+                        println!("[#34 量] skip {name}: 只有 {} 个会话", sesnos.len());
+                        continue;
+                    }
+                    match engine
+                        .diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)
+                    {
+                        Ok(steps) => {
+                            let all: Vec<(u32, u32)> = steps
+                                .iter()
+                                .map(|step| (step.from.sesno, step.to.sesno))
+                                .collect();
+                            let skip = if per_db == 0 {
+                                0
+                            } else {
+                                all.len().saturating_sub(per_db)
+                            };
+                            all.into_iter().skip(skip).collect()
+                        }
+                        Err(error) => {
+                            println!("[#34 量] skip {name}: diff_steps 失败：{error}");
+                            continue;
+                        }
+                    }
+                };
+                let mut totals = Totals::default();
+                for (base_sesno, target_sesno) in steps {
+                    let (base, target) = (
+                        open(&schema, file, base_sesno),
+                        open(&schema, file, target_sesno),
+                    );
+                    let roots_s: Vec<PersistedRoot> = match scan_index(file, Some(base_sesno))
+                        .and_then(|index| {
+                            enumerate_generation_roots(&base, &index.roots, &unit_types)
+                        }) {
+                        Ok(roots) => roots
+                            .into_iter()
+                            .map(|root| PersistedRoot {
+                                refno: root.root,
+                                noun: root.noun,
+                            })
+                            .collect(),
+                        Err(error) => {
+                            println!(
+                                "[#34 量] skip {name} {base_sesno}→{target_sesno}: S 端根枚举失败：{error:#}"
+                            );
+                            continue;
+                        }
+                    };
+                    let run = |on: bool| {
+                        let _switch = crate::options::StructuralConnectionCascadeOverride::set(on);
+                        let started = Instant::now();
+                        let sources = WindowRootSources::collect(
+                            file,
+                            base_sesno,
+                            target_sesno,
+                            &base,
+                            &target,
+                            &unit_types,
+                            &[],
+                        )?;
+                        let impact = sources.impact(&roots_s);
+                        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                        let millis = started.elapsed().as_millis();
+                        let regen: BTreeSet<RefnoEnum> =
+                            plan.regen.iter().map(|root| root.root).collect();
+                        anyhow::Ok((sources, regen, plan.degraded, millis))
+                    };
+                    let (on, off) = match (run(true), run(false)) {
+                        (Ok(on), Ok(off)) => (on, off),
+                        (Err(error), _) | (_, Err(error)) => {
+                            println!(
+                                "[#34 量] skip {name} {base_sesno}→{target_sesno}: 规划失败：{error:#}"
+                            );
+                            continue;
+                        }
+                    };
+                    let (sources_on, regen_on, degraded_on, millis_on) = on;
+                    let (_, regen_off, _, millis_off) = off;
+                    let cascade = &sources_on.structural_connection;
+                    assert!(
+                        regen_off.is_subset(&regen_on),
+                        "{name} {base_sesno}→{target_sesno}: 级联只该往 touched 里加"
+                    );
+                    let added: Vec<RefnoEnum> = regen_on.difference(&regen_off).copied().collect();
+                    assert!(
+                        added
+                            .iter()
+                            .all(|root| cascade.far_end_roots.contains(root)),
+                        "{name} {base_sesno}→{target_sesno}: 多出来的根必须都是对端根"
+                    );
+                    totals.windows += 1;
+                    totals.regen_off += regen_off.len();
+                    totals.regen_on += regen_on.len();
+                    totals.edges += cascade.edges;
+                    totals.cross_db += cascade.far_end_cross_db.len();
+                    totals.millis_off += millis_off;
+                    totals.millis_on += millis_on;
+                    if added.is_empty() && cascade.edges == 0 {
+                        continue;
+                    }
+                    // 元素数按最近的根归属（嵌套根不重复计）；只在读到边的窗上算，免得每窗多扫一遍索引。
+                    let (elements_off, elements_added) = match scan_index(file, Some(target_sesno))
+                    {
+                        Ok(index) => {
+                            let root_keys: BTreeSet<(u32, u32)> = sources_on
+                                .roots_t
+                                .iter()
+                                .map(|root| {
+                                    let refno = refno_to_e3d(root.root);
+                                    (refno.word0, refno.word1)
+                                })
+                                .collect();
+                            let (mut under_off, mut under_added) = (0usize, 0usize);
+                            for &(word0, word1) in index.owners.keys() {
+                                let nearest = roots_on_owner_chain(
+                                    &index.owners,
+                                    &root_keys,
+                                    RefNo::new(word0, word1),
+                                )
+                                .into_iter()
+                                .next()
+                                .map(refno_from_e3d);
+                                match nearest {
+                                    Some(root) if regen_off.contains(&root) => under_off += 1,
+                                    Some(root) if regen_on.contains(&root) => under_added += 1,
+                                    _ => {}
+                                }
+                            }
+                            (under_off, under_added)
+                        }
+                        Err(_) => (0, 0),
+                    };
+                    totals.elements_off += elements_off;
+                    totals.elements_added += elements_added;
+                    if !added.is_empty() {
+                        totals.widened += 1;
+                    }
+                    println!(
+                        "[#34 量] {name} {base_sesno}→{target_sesno}: regen 关 {} / 开 {}（+{}）；名下元素 关 {elements_off} / \
+                         多 {elements_added}；边 {} 回指成立 {} 对端根 {} 跨库 {}；规划 关 {millis_off}ms / 开 {millis_on}ms{}",
+                        regen_off.len(),
+                        regen_on.len(),
+                        added.len(),
+                        cascade.edges,
+                        cascade.backref_ok,
+                        cascade.far_end_roots.len(),
+                        cascade.far_end_cross_db.len(),
+                        degraded_on
+                            .map(|reason| format!("；这一窗退化：{reason}"))
+                            .unwrap_or_default()
+                    );
+                }
+                println!(
+                    "[#34 量] == {name}: {} 窗，其中 {} 窗多出根；regen 合计 关 {} / 开 {}；读到边的窗上名下元素 关 {} / 多 {}；\
+                     边 {} 跨库 {}；规划合计 关 {}ms / 开 {}ms",
+                    totals.windows,
+                    totals.widened,
+                    totals.regen_off,
+                    totals.regen_on,
+                    totals.elements_off,
+                    totals.elements_added,
+                    totals.edges,
+                    totals.cross_db,
+                    totals.millis_off,
+                    totals.millis_on
+                );
+                grand.windows += totals.windows;
+                grand.widened += totals.widened;
+                grand.regen_off += totals.regen_off;
+                grand.regen_on += totals.regen_on;
+                grand.elements_off += totals.elements_off;
+                grand.elements_added += totals.elements_added;
+                grand.edges += totals.edges;
+                grand.cross_db += totals.cross_db;
+                grand.millis_off += totals.millis_off;
+                grand.millis_on += totals.millis_on;
+            }
+            println!(
+                "[#34 量] ==== 合计 {} 窗，其中 {} 窗多出根；regen 关 {} / 开 {}（{:+.2}%）；读到边的窗上名下元素 关 {} / 多 {}；\
+                 边 {} 跨库 {}；规划 关 {}ms / 开 {}ms",
+                grand.windows,
+                grand.widened,
+                grand.regen_off,
+                grand.regen_on,
+                if grand.regen_off == 0 {
+                    0.0
+                } else {
+                    (grand.regen_on as f64 / grand.regen_off as f64 - 1.0) * 100.0
+                },
+                grand.elements_off,
+                grand.elements_added,
+                grand.edges,
+                grand.cross_db,
+                grand.millis_off,
+                grand.millis_on
+            );
+            assert!(grand.windows > 0, "一窗都没量到——目录或模板目录不对");
+        }
     }
 }

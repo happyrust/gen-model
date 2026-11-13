@@ -163,6 +163,15 @@ pub struct ModelUpdatePlan {
     /// 一字不改；旧恢复记录没有该字段。
     #[serde(default)]
     pub unit_publish_no_model_only_roots: Vec<String>,
+    /// 单元级发布要避开的根（`a/b`，GitHub #144，2026-11-11）：`work_items` 里哪些 `RegenRoot` 是本窗某条级联
+    /// （结构连接 C2 / 电缆端点 C8 / 设计引用 P4）的**目标**——别处变了、它名下另一件的几何要跟。这种根不带单元级
+    /// 提示、整根重算：它自己这一窗若也有改动，`plan_update(S→T)` 切给它的子计划不空，执行体只重建子计划里那几件，
+    /// 级联要它重算的那一件（被改动的关节切的梁、引用了被改动元素的件）不在其中——`plan_update` 不认识这条跨元素
+    /// 的依赖。与刚体前移（ADR-066 D1 规则 5）、D10 条件 3 同一条规则。只收**开着**的级联的目标集；单元级发布的
+    /// 窗口基线为 `None` 时恒空。`regen` 的子集加提示，`work_items` / `units` 一字不改；旧恢复记录没有该字段
+    /// （读成空名单，与修之前逐位相同）。
+    #[serde(default)]
+    pub unit_publish_cascade_target_roots: Vec<String>,
     /// 跨库交接（GitHub #34 前置 2 / #35，2026-10-01）：本窗的级联命中、却落在**别的设计库**里的元素，按那个库分组
     /// （`dbnum → a/b`，去重升序）——结构连接的跨库对端（`StructuralConnectionCascade::far_end_cross_db`）与电缆端点的
     /// 跨库引用者（`CableEndpointCascade::foreign`）。它们的生成根属于那个库的任务，本窗的计划装不下：执行体在本窗
@@ -895,6 +904,7 @@ fn build_cata_cascade_plan(
         transform_units: Vec::new(),
         unit_publish_base_sesno: None,
         unit_publish_no_model_only_roots: Vec::new(),
+        unit_publish_cascade_target_roots: Vec::new(),
         cross_db_elements: BTreeMap::new(),
     }
 }
@@ -1140,6 +1150,7 @@ pub(crate) async fn build_model_update_plan(
         transform_units: Vec::new(),
         unit_publish_base_sesno: None,
         unit_publish_no_model_only_roots: Vec::new(),
+        unit_publish_cascade_target_roots: Vec::new(),
         cross_db_elements: BTreeMap::new(),
     })
 }

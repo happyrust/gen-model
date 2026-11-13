@@ -1860,6 +1860,26 @@ impl WindowRootSources {
         out
     }
 
+    /// 单元级发布要避开的 regen 根（GitHub #144）：`plan.regen` 里是三条级联目标的那些（[`Self::cascaded_roots`]），
+    /// 按 `regen` 的顺序给 `a/b`。
+    ///
+    /// 级联把一根并进 `regen` 的理由——对端 / 被引用者变了、它名下另一件的几何要跟——在这根自己的 DESI 差分里
+    /// 看不见。这根自己这一窗若也有改动，`plan_update(S→T)` 切给它的子计划不空，执行体（`UnitDeltaProducer::produce`）
+    /// 只重建子计划里那几件，被牵连的那一件留在旧几何上；子计划为空时执行体本来就回退整根重算，那条路不靠这张
+    /// 名单。所以这种根不带单元级提示、整根重算——与刚体前移的 `expanded`（[`Self::rigid_motion`]，ADR-066 D1
+    /// 规则 5）、D10 的条件 3（[`classify_no_model_only_roots`]）是同一条规则的第三处。
+    ///
+    /// 只认**开着**的级联：关着的那条没读过边，目标集是空的。C2 默认关（GitHub #34），「带目录正体的 `PJOI` 与
+    /// 同根的梁」这类只有 C2 认得的依赖在缺省配置下不在这张名单里——那一半这条规则罩不住。
+    pub(crate) fn unit_publish_cascade_targets(&self, plan: &WindowRootPlan) -> Vec<String> {
+        let cascaded = self.cascaded_roots();
+        plan.regen
+            .iter()
+            .filter(|root| cascaded.contains(&root.root))
+            .map(|root| root.root.to_pdms_str())
+            .collect()
+    }
+
     /// D10 的前置（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：三条级联 C2 / C8 / P4 **都开着**
     /// 才分桶。理由：跨根设计引用（`JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF`）的引用者
     /// 只被盖戳这一形状，今天靠戳做种子整根 regen 收住；D10 把它变成只推回执之后，唯一能把引用者的根挡在
@@ -2173,6 +2193,33 @@ fn no_model_only_summary_line(
     )
 }
 
+/// warnings 里那一行「级联目标根整根重算」的账（GitHub #144）；名单空时调用方不出这一行。
+fn unit_publish_cascade_target_summary_line(
+    dbnum: u32,
+    targets: &[String],
+    regen: usize,
+) -> String {
+    const SHOWN: usize = 6;
+    let shown = targets
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = targets.len().saturating_sub(SHOWN);
+    format!(
+        "dbnum={dbnum}: unit-level publish (model_unit_level_publish) — cascade-target roots={} of \
+         regen={regen} [{shown}]{}; a cascade (C2 / C8 / P4) pulled them in for a reason their own DESI \
+         delta cannot see, so they carry no unit-level hint and are regenerated whole",
+        targets.len(),
+        if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        },
+    )
+}
+
 /// DESI 窗口 S→T 的模型计划，输入全部来自文件与进程内账本（P2-1 / ADR-079）。
 ///
 /// 非 DESI 库返回空计划：CATA 窗口仍走 `build_cata_cascade_plan`（`ref_rev` 反查，P2-3），
@@ -2393,6 +2440,22 @@ pub(crate) async fn build_model_update_plan_from_window(
     } else {
         Vec::new()
     };
+    // GitHub #144：级联（C2 / C8 / P4）的目标根不带单元级提示、整根重算。它自己这一窗若也有改动，切给它的子计划
+    // 不空，执行体只重建点名的那几件，级联要它重算的那一件不在其中。名单随计划走，`collect_unit_tasks` 据此不给
+    // 这些根提示；基线没带就不算。选根一个字不改（实施约束 6）。
+    let unit_publish_cascade_target_roots = if unit_publish_base_sesno.is_some() {
+        let targets = sources.unit_publish_cascade_targets(&plan);
+        if !targets.is_empty() {
+            warnings.push(unit_publish_cascade_target_summary_line(
+                dbnum,
+                &targets,
+                plan.regen.len(),
+            ));
+        }
+        targets
+    } else {
+        Vec::new()
+    };
     let mut out =
         plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, roots_s.len(), warnings);
     // The queue consumer still speaks in delivery-unit summaries.  The window
@@ -2405,6 +2468,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     out.transform_units = transform_units;
     out.unit_publish_base_sesno = unit_publish_base_sesno;
     out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;
+    out.unit_publish_cascade_target_roots = unit_publish_cascade_target_roots;
     // 跨库交接（GitHub #34 前置 2 / #35）：结构连接的跨库对端与电缆端点的跨库引用者随计划走，执行体在本窗落地之后
     // 交给那个库的任务（`cross_db_handoff::hand_off`）。规划器自己不排工——预览与执行共用这一份计划。
     out.cross_db_elements = crate::data_interface::cross_db_handoff::elements_by_dbnum(
@@ -4013,6 +4077,109 @@ mod tests {
         );
     }
 
+    /// GitHub #144：单元级发布要避开的根 = `plan.regen` 里三条级联（C2 / C8 / P4）的目标，按 `regen` 的顺序；
+    /// 只认开着的级联。名单是 `regen` 的子集加提示，不是另一个去向。
+    #[test]
+    fn unit_publish_cascade_targets_are_the_regen_roots_some_open_cascade_points_at() {
+        let roots_s = vec![
+            persisted(10, "FRMW"),
+            persisted(20, "FRMW"),
+            persisted(30, "FRMW"),
+        ];
+        let roots_t = vec![
+            root(10, "FRMW", GenerationRootKind::Normal),
+            root(20, "FRMW", GenerationRootKind::Normal),
+            root(30, "FRMW", GenerationRootKind::Normal),
+        ];
+        // 闭包直接命中 10 与 20；30 没被碰到。
+        let make_sources = || WindowRootSources {
+            base_sesno: 1,
+            target_sesno: 2,
+            roots_s: roots_s.clone(),
+            roots_t: roots_t.clone(),
+            plan: UpdatePlan {
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                ledger: ChangeLedger::new(),
+                full_rebuild: None,
+                report: Default::default(),
+            },
+            closure: AffectedClosure {
+                refnos: BTreeSet::from([(24384, 10), (24384, 20)]),
+                unreadable: Vec::new(),
+            },
+            index_keys: 100,
+            xgeometry_observed: 0,
+            xgeometry_unreadable: 0,
+            nested_roots: 0,
+            duplicate_coverage_elements: 0,
+            structural_connection: Default::default(),
+            cable_endpoint: Default::default(),
+            design_reference: Default::default(),
+            changes: Default::default(),
+            timings: Default::default(),
+            rigid: Default::default(),
+            removed_units: Vec::new(),
+        };
+        let targets_of = |sources: &WindowRootSources| {
+            let impact = sources.impact(&roots_s);
+            let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+            sources.unit_publish_cascade_targets(&plan)
+        };
+
+        // 没有级联命中：名单空。
+        assert!(targets_of(&make_sources()).is_empty());
+
+        // 三条级联各点一根已在 regen 里的：都点名，按 regen 的顺序。
+        for label in ["C2", "C8", "P4"] {
+            let mut sources = make_sources();
+            match label {
+                "C2" => {
+                    sources.structural_connection.enabled = true;
+                    sources.structural_connection.far_end_roots.insert(r(20));
+                }
+                "C8" => {
+                    sources.cable_endpoint.enabled = true;
+                    sources.cable_endpoint.referrer_roots.insert(r(20));
+                }
+                "P4" => {
+                    sources.design_reference.enabled = true;
+                    sources.design_reference.referrer_roots.insert(r(20));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                targets_of(&sources),
+                vec![r(20).to_pdms_str()],
+                "{label}: 根 20 既被直接命中、又是级联目标"
+            );
+        }
+
+        // 级联把没被直接命中的 30 拉进 regen：它也是目标，照样点名（子计划为空时执行体本来就回退整根，
+        // 点不点名结果一样；点名让「级联目标根一律整根重算」这句话不带例外）。
+        let mut sources = make_sources();
+        sources.structural_connection.enabled = true;
+        sources.structural_connection.far_end_roots.insert(r(30));
+        sources.design_reference.enabled = true;
+        sources.design_reference.referrer_roots.insert(r(10));
+        assert_eq!(
+            targets_of(&sources),
+            vec![r(10).to_pdms_str(), r(30).to_pdms_str()],
+            "按 regen（= roots_T）的顺序"
+        );
+
+        // 关着的级联不算：目标集里即使有东西也不点名（生产上关着的级联目标集本来就是空的）。
+        let mut sources = make_sources();
+        sources.structural_connection.enabled = false;
+        sources.structural_connection.far_end_roots.insert(r(20));
+        assert!(
+            targets_of(&sources).is_empty(),
+            "C2 关着：只有它认得的依赖不在名单里，这条规则罩不住"
+        );
+    }
+
     /// ADR-080 实施约束 9 的守卫：`model_unit_level_publish` 关着时行为必须**逐位**等于今天——计划上没有基线、
     /// 没有一个单元带 `unit_publish` 提示、单元级执行体一次都不被叫到。整条链只有规划器一处读开关，往下全靠
     /// 「基线 `None` ⇒ 提示 `None` ⇒ 分桶为空 ⇒ 执行体不叫」传下去，所以钉四处，缺一处就红：
@@ -4128,6 +4295,7 @@ mod tests {
             42,
             None,
             &named,
+            &[],
         );
         assert_eq!(off.len(), 1);
         assert!(
@@ -4141,6 +4309,7 @@ mod tests {
             42,
             Some(41),
             &named,
+            &[],
         );
         assert!(
             matches!(
@@ -4151,6 +4320,53 @@ mod tests {
                 })
             ),
             "基线 Some 才带提示——这条守卫不是空转"
+        );
+        // GitHub #144：级联目标根的名单同样只在基线在时算、只赋值一次、原样搬进计划；提示那一处在基线的
+        // map 之下、先按名单把这根的基线摘掉。行为也核一遍：名单上的根基线在也不带提示。
+        assert!(
+            build.contains(
+                "let unit_publish_cascade_target_roots = if unit_publish_base_sesno.is_some() {"
+            ) && build.contains("sources.unit_publish_cascade_targets(&plan)"),
+            "级联目标根的名单只在基线在时、从三条级联的目标集算"
+        );
+        assert!(
+            build.contains(
+                "out.unit_publish_cascade_target_roots = unit_publish_cascade_target_roots;"
+            ),
+            "名单原样搬进计划"
+        );
+        assert_eq!(
+            planner
+                .matches(".unit_publish_cascade_target_roots =")
+                .count(),
+            1,
+            "级联目标根的名单只在搬进计划时赋一次"
+        );
+        // 按去掉空白的文本钉（这一句怎么折行由 rustfmt 定）：先把名单上的根的基线摘掉，再到那一处构造提示。
+        let squeezed: String = hints.split_whitespace().collect();
+        let withhold = squeezed
+            .find("unit_publish_base_sesno.filter(|_|")
+            .expect("级联目标根按「没有基线」算");
+        assert!(
+            squeezed.contains("!cascade_target_roots.iter().any(|root|root==&unit.root_refno)"),
+            "摘基线看的是计划带来的级联目标根名单"
+        );
+        let construct = squeezed
+            .find("unit_publish:unit_publish_base_sesno.map(|source_start_sesno|UnitPublishHint{")
+            .expect("构造提示的那一处");
+        assert!(withhold < construct, "摘基线在构造提示之前");
+        let withheld = crate::data_interface::manual_update::collect_unit_tasks(
+            std::slice::from_ref(&unit),
+            &[],
+            7997,
+            42,
+            Some(41),
+            &[],
+            &named,
+        );
+        assert!(
+            withheld[0].unit_publish.is_none(),
+            "级联目标名单上的根，基线在也不带提示"
         );
 
         // ③ 分流：按提示分桶，桶空不叫执行体；执行体的生产调用点只有一处。

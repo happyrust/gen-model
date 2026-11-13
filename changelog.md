@@ -28,6 +28,28 @@
 - **验证**：`cargo test --lib -- unit_geometry_snapshot` 4 条通过，新增 2 条，数据取自这根支管的真实行：`the_diff_does_not_depend_on_the_order_a_branch_s_tubes_are_read_in`（库序与投影序、带容差内的抖动，双向都是空差异；改之前这一条数成 `moved=1`）、`a_tube_that_really_moved_is_counted_whichever_row_it_is`（第三段缩短而并集盒不变、换序、少一段、多一段，都数在支管头上）。回放：同一个二进制上冷重启后重放 385→387，回执 `{moved 0, added 0, removed 0}`。
 - **没动**：`sort_overlay_records` 的顺序（它的注释说与库上一致，对管身其实不一致；`/model/records` 分页中途这根被逐出投影时游标可能错位，没有复现，另记）；容差；样本上限。
 
+### 只改 `COMPRE` 的支撑件不再被元数据门放行（GitHub #132）
+
+- **为什么**：支撑件（`ANCI` 一族）的管外径是 e3d-io 的目录求值替生成器读出来的——`ATTRIB POD` 在设计件自己没有 `LSTU` 时经它的 `COMPRE` 找到被支撑的构件，再走那只构件的 `LSTU` / `HSTU` 到管子的目录件取外径（e3d-io `03414fd`）。读 `COMPRE` 的是设计件自己，而字典判它 DCHC = 0、读取集合那一票又只收 e3d-model 与本仓模型面两半的扫描：只改 `COMPRE` 的候选两票都拿得到，被元数据门放行，支撑件停在旧外径上。护栏 `the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote` 从那个提交起一直是红的。
+- **改**：e3d-io 目录求值那一侧仍然整侧不投票（它 DCHC = 0 的名字里九个只读在目录行或目录件上，`PURP` 还是老五个元数据名之一），它在**设计元素**上读的名字逐个点名进票：`output/gen_read_set.py` 新增 `E3D_IO_DESIGN_SIDE_READS = ["COMPRE"]`，产物 `generation_read_set.json` 多一格 `e3d_io_catalogue_eval.design_side_names` 并进判决用的 `names`（202 → 203）；`model_impact.rs` 读这一格，镜像护栏的并集改成三半，e3d-io 那条护栏从「DCHC = 0 的名字恰好九个」改成「恰好是目录侧九个加设计侧点名的那几个，设计侧的必须在票里」，并把 `COMPRE` 归设计侧的依据钉在 e3d-io 的源码形状上。读取集合里 DCHC = 0 的成员 18 → 19，元数据门放行数 3941 − 18 → 3941 − 19。
+- **验证**：`data_interface::model_impact` 改之前 50 过 2 败（原护栏加新测试 `a_support_whose_component_reference_alone_changed_is_not_let_through_the_metadata_gate`），改之后 52 过 0 败。APS 样例工程 98 个设计库整条会话链 533 窗里没有一窗在已有元素上改过 `COMPRE`，现有窗口的结果不变。没有上真机。
+- **没动**：被指的构件 `LSTU` / `HSTU` 变了、或管子目录件的外径变了，支撑件仍不跟着重算——设计侧一跳反查查得到 `COMPRE` 的引用者但只为 `POSREF` 上卷，而且真库里 234 条 `COMPRE` 边有 224 条两端不在同一个设计库（探针 `live_probe_component_reference_edges_and_what_the_design_cascade_does_with_them`），另开票。
+
+### 结构连接级联（C2）复核：关节 ↔ 梁两个方向的真库测试与重算范围的量法（GitHub #34）
+
+- **为什么**：e3d-model 把 SCTN / GENSEC 的关节负体接齐之后（11-10 主关节朝向照 Core3D 现算，48 根杆的切口跟着变），「关节变了，被它切的梁要不要重算」成了正确性问题；ADR-090 D2 给 C2 翻缺省定了一道语料门。原有真库测试只有两窗、都是关节那一端单独改。
+- **改**（只加测试，不动生产代码）：`structural_connection::tests::live` 加假定源一条（五本库钉死会话，5,110 条会级联的边逐条假定持属性端单独改，关节 → 梁、梁 → 关节两个方向）、梁端单独改的自然窗口一条（`aps250209_0001` 15→16 / 16→17）、手动量法一条（逐窗两态对拍，量开着多出多少根）。
+- **验证**：`data_interface::structural_connection` 15 过 0 败 1 忽略。量法 2026-11-11 本机：20 个库 130 个真库窗口开着没有一窗多出根；单条边假定单独改时最多多出 3 根。语料门还差的两条与读代码发现的一处（级联目标根走单元级发布只重建点名单元）记在 `docs/plans/2026-10-14-structural-connection-cascade-default-on-checklist.md` §9。
+- **没动**：`model_structural_connection_cascade` 的缺省值。
+
+### 级联目标根不走单元级发布，整根重算（GitHub #144）
+
+- **为什么**：窗口规划器的三条级联（结构连接 C2 / 电缆端点 C8 / 设计引用 P4）把「对端 / 引用者」所在的生成根并进 `regen`，只到根。根怎么重算由单元级发布定：规划器给本窗每个 regen 根都带单元级提示，执行体从 `plan_update(S→T)` 给它切子计划，空才回退整根，不空就只重建点名的那几件。级联目标根自己这一窗若也有改动，子计划不空，而级联要它重算的那一件不在里面——`plan_update` 不认识这条跨元素的依赖。刚体前移（ADR-066 D1 规则 5）与只推回执（ADR-080 D10 条件 3）都有「级联目标根不走便宜路」，局部重建这一档没有。
+- **改**：计划多一格 `ModelUpdatePlan::unit_publish_cascade_target_roots`（`#[serde(default)]`，旧恢复记录读成空名单）；规划器由 `WindowRootSources::unit_publish_cascade_targets` 点名（`plan.regen` ∩ `cascaded_roots()`，只在单元级发布的基线在时算），`warnings` 多一行 `cascade-target roots=N of regen=M […]`；`collect_unit_tasks` 多一个参数，名单上的根不带单元级提示、整根重算。选根一个字没动。ADR-080 实施约束 13、`CONTEXT.md`「单元级发布」词条同步。
+- **验证**：新测试文件 `src/fast_model/unit_publish_cascade_target_tests.rs`。纯内存两条走生产同一段（规划器选根 → 工作单带提示 → 执行体切子计划）：改之前 1 过 1 败（红在「子计划不空、被牵连的那件不在其中，任务却带着单元级提示」），改之后 2 过。真库假定源（`#[ignore]`；ams7999 / ams251183 里带目录正体的 `PJOI` 与它 `CREF` 的梁，把一端当成一窗仅有的候选喂给 e3d-model 真的 `plan_update_with`）：同根的 1,071 对两个方向、跨根的 3 对，`plan_update` 都不点名对端，对端所在的根子计划不空；C2 开着时这些根是级联目标，改之前任务仍带提示（每类抽 60 对时 240 / 240），改之后 0。真库真实窗口（`#[ignore]`；电缆 / 桥架库 5 本，每一步加整条链一窗，33 窗）：级联目标根 9 个改之前都带提示、改之后都不带，其余 40 个根两态逐字相同。全量库单测 3116 过 / 2 败 / 148 忽略（两条败的在 `fast_model::concurrency` 与 `model_record_reader`，改之前就红）。没有上真机。
+- **代价**（量法 `live_measure_what_regenerating_cascade_targets_whole_costs`，只读真库文件）：量 C2 用的那 20 个库各取会话链最后 12 步共 130 窗，缺省配置（C2 关，C8 / P4 开）下「子计划不空的级联目标根」只有 6 个，全是当窗新建的电缆根——没有旧回执，本来就整根重算，**真正从局部重建改成整根重算的根是 0**。C2 也开着的话另有 47 个根，其中 11 个本来就过不了小根门，真正改道 36 个：名下 39,672 个元素，原本只重建 2,292 个单元。
+- **罩不住的**：这条规则只认**开着**的级联。C2 默认关时，「带目录正体的 `PJOI` 与同根的梁」这一形状（ams7999 894 对、ams251183 177 对）不是任何级联的目标，规则不拦——测试如实钉着这一半。真库上还看到两件事：这两本库里带目录正体的 `PJOI` 不给梁出刀（1,071 根梁的账上没有一把它的刀），要跟着变的是反方向（关节原点沿梁轴投到梁端，这一句是读代码）；量过的真实窗口（上面 130 窗、ams7999 整条会话链 235 窗、电缆 / `POSREF` 库 122 窗）里，按两种找法——结构连接一端被点名、对端单元没被点名的两端各建一次（64 处）；改道的根两端整根各生成一次（20 根）——没有找到一件因为这个洞算错的几何。
+
 ## 2026-11-08
 
 ### 投影删除只有一个入口：锁序、受影响根闭包、退役与作废（ADR-097）

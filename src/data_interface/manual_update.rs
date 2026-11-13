@@ -2563,9 +2563,10 @@ pub struct UnitTask {
     pub transform: Option<TransformUnit>,
     /// 单元级发布（ADR-080 D9）的提示：这个根是本窗规划出来的 regen 根，`source_start_sesno` 是本窗
     /// `plan_update(S→T)` 的基线 S——执行体的幂等闸拿它对回执，生产方拿它切子计划，两处必须是同一个 S。
-    /// `None` = 照旧整根重算：开关关着、规划退化、或这根不是本窗产物（级联 / 恢复 / 目录名单来的根，
-    /// 它们的回执不在本窗的 S 上，局部清单对不上）。与 `transform` 同时在时 **transform 优先、unit 兜底**
-    /// （实施约束 7）。
+    /// `None` = 照旧整根重算：开关关着、规划退化、这根不是本窗产物（目录级联 / 恢复 / 目录名单来的根，
+    /// 它们的回执不在本窗的 S 上，局部清单对不上），或这根是本窗某条级联（C2 / C8 / P4）的目标
+    /// （`ModelUpdatePlan::unit_publish_cascade_target_roots`，GitHub #144：级联要它重算的那一件不在
+    /// `plan_update` 切给它的子计划里）。与 `transform` 同时在时 **transform 优先、unit 兜底**（实施约束 7）。
     pub unit_publish: Option<UnitPublishHint>,
 }
 
@@ -2588,6 +2589,9 @@ pub struct UnitPublishHint {
 /// 每个新单元都带单元级发布提示（ADR-080 D9），`None` 时一个都不带、与今天逐位相同。
 /// `no_model_only_roots` 是计划上的 `unit_publish_no_model_only_roots`（`a/b`）：名单上的根提示里
 /// `no_model_only = true`（D10）；基线为 `None` 时名单不看。
+/// `cascade_target_roots` 是计划上的 `unit_publish_cascade_target_roots`（`a/b`，GitHub #144）：名单上的根
+/// **不带**单元级提示、整根重算——级联（C2 / C8 / P4）把它拉进来的理由在它自己的子计划里看不见，带着提示
+/// 执行体只会重建子计划点名的那几件。
 pub fn collect_unit_tasks(
     units: &[DeliveryUnitSummary],
     transform_units: &[TransformUnit],
@@ -2595,6 +2599,7 @@ pub fn collect_unit_tasks(
     end_sesno: i32,
     unit_publish_base_sesno: Option<u32>,
     no_model_only_roots: &[String],
+    cascade_target_roots: &[String],
 ) -> Vec<UnitTask> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut tasks = Vec::new();
@@ -2603,6 +2608,12 @@ pub fn collect_unit_tasks(
         if !unit.will_generate || root_deleted || !seen.insert(unit.root_refno.as_str()) {
             continue;
         }
+        // GitHub #144：级联目标根这一格按「没有基线」算——不带单元级提示，整根重算。
+        let unit_publish_base_sesno = unit_publish_base_sesno.filter(|_| {
+            !cascade_target_roots
+                .iter()
+                .any(|root| root == &unit.root_refno)
+        });
         tasks.push(UnitTask {
             dbnum,
             root_refno: unit.root_refno.clone(),
@@ -5915,6 +5926,7 @@ impl AiosDBManager {
                     success.end_sesno,
                     success.model_plan.unit_publish_base_sesno,
                     &success.model_plan.unit_publish_no_model_only_roots,
+                    &success.model_plan.unit_publish_cascade_target_roots,
                 );
                 // 计划里 `RegenRoot` 之外的工作项（删除清理 / 位姿 / 级联 / 根生成后补刷 AABB）
                 // 随返回值交给任务就地执行（ADR-072 D5）——尾事务不再把它们写成 pending 行。
@@ -8583,7 +8595,7 @@ mod tests {
         assert!(unit.will_generate);
 
         // 一次分支重生成即可同时重算弯头与相邻管段——生成任务只有一个。
-        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[]);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[], &[]);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].root_refno, r(5).to_pdms_str());
     }
@@ -9811,7 +9823,7 @@ mod tests {
         assert_eq!(unit.deleted, 1);
         assert_eq!(unit.added, 1);
 
-        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[]);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[], &[]);
         assert_eq!(tasks.len(), 1, "same root dedupes to one generation task");
         assert_eq!(tasks[0].root_refno, root_key);
         assert_eq!(tasks[0].source_end_sesno, 42);
@@ -9822,7 +9834,7 @@ mod tests {
             &[change(20, NetOp::Added, false)],
             &default_unit_types(),
         );
-        assert!(collect_unit_tasks(&units, &[], 1, 42, None, &[]).is_empty());
+        assert!(collect_unit_tasks(&units, &[], 1, 42, None, &[], &[]).is_empty());
 
         // Issue #18: deleting the delivery root itself is handled by DeleteCleanup. The preview
         // rollup may still mark the old BRAN model-affecting, but it no longer exists post-save.
@@ -9837,7 +9849,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            collect_unit_tasks(&[deleted_root], &[], 1, 42, None, &[]).is_empty(),
+            collect_unit_tasks(&[deleted_root], &[], 1, 42, None, &[], &[]).is_empty(),
             "a deleted delivery root must not be regenerated"
         );
     }
@@ -9867,7 +9879,15 @@ mod tests {
                 delta: crate::data_interface::rigid_motion::MatrixWire([0.0; 16]),
             }],
         }];
-        let tasks = collect_unit_tasks(&[equi.clone(), bran.clone()], &hint, 7997, 42, None, &[]);
+        let tasks = collect_unit_tasks(
+            &[equi.clone(), bran.clone()],
+            &hint,
+            7997,
+            42,
+            None,
+            &[],
+            &[],
+        );
         let equi_task = tasks
             .iter()
             .find(|t| t.root_refno == r(5).to_pdms_str())
@@ -9901,6 +9921,7 @@ mod tests {
             42,
             Some(41),
             &[r(6).to_pdms_str()],
+            &[],
         );
         assert_eq!(tasks.len(), 2);
         for task in &tasks {
@@ -9925,10 +9946,67 @@ mod tests {
         );
         // 基线为 None 时名单不看：一个都不带提示。
         assert!(
-            collect_unit_tasks(&[equi, bran], &hint, 7997, 42, None, &[r(6).to_pdms_str()])
-                .iter()
-                .all(|task| task.unit_publish.is_none()),
+            collect_unit_tasks(
+                &[equi.clone(), bran.clone()],
+                &hint,
+                7997,
+                42,
+                None,
+                &[r(6).to_pdms_str()],
+                &[]
+            )
+            .iter()
+            .all(|task| task.unit_publish.is_none()),
             "没有基线就没有单元级提示，名单上的根也不例外"
+        );
+
+        // GitHub #144：计划点名的级联目标根不带单元级提示（整根重算），别的根照旧；transform 提示不受影响，
+        // D10 名单上的根若同时被点名成级联目标，也不带（规划器不会同时点两张名单，这里钉的是谁说了算）。
+        let tasks = collect_unit_tasks(
+            &[equi.clone(), bran.clone()],
+            &hint,
+            7997,
+            42,
+            Some(41),
+            &[],
+            &[r(6).to_pdms_str()],
+        );
+        let of = |n: u64| {
+            tasks
+                .iter()
+                .find(|task| task.root_refno == r(n).to_pdms_str())
+                .expect("task present")
+        };
+        assert_eq!(
+            of(6).unit_publish,
+            None,
+            "级联目标根不带单元级提示：切给它的子计划里没有级联要它重算的那一件"
+        );
+        assert_eq!(
+            of(5).unit_publish,
+            Some(UnitPublishHint {
+                source_start_sesno: 41,
+                no_model_only: false,
+            }),
+            "名单之外的根照旧带基线 S"
+        );
+        assert!(of(5).transform.is_some(), "transform 提示不看这张名单");
+        let both = collect_unit_tasks(
+            &[equi, bran],
+            &hint,
+            7997,
+            42,
+            Some(41),
+            &[r(6).to_pdms_str()],
+            &[r(6).to_pdms_str()],
+        );
+        assert!(
+            both.iter()
+                .find(|task| task.root_refno == r(6).to_pdms_str())
+                .expect("task present")
+                .unit_publish
+                .is_none(),
+            "两张名单都点了它：级联目标说了算，整根重算"
         );
     }
 

@@ -2205,5 +2205,160 @@ mod tests {
             );
             assert!(windows_checked > 0);
         }
+
+        /// 探针（GitHub #132 的跨元素一层，手动）：支撑件（`ANCI` 一族）经 `COMPRE` 指着被支撑的构件，管外径取自
+        /// 那只构件的 `LSTU` / `HSTU`（e3d-io 目录求值的 `ATTRIB POD`）。被指的构件变了，支撑件要不要重算，今天谁来答？
+        ///
+        /// 量三件事（只读，数是语料的性质，不下数值断言）：
+        /// 1. 哪些设计库带 `COMPRE` 反向表、表里多少条边、多少条的两端不在同一个库；
+        /// 2. 被指的构件是哪种形态：自己有 `LSTU`（形态 A）、没有 `LSTU` 但有 `HSTU`（形态 B，BRAN）、两样都没有；
+        /// 3. 假定每个被指的构件都变了，本模块的设计侧一跳（P4）逐库点查答出什么、做了什么。
+        ///
+        /// 钉的只有今天的形状：`COMPRE` 不在 [`DESIGN_CASCADE_ATTRIBUTES`] 里，P4 查得回这些边（`edges_by_attribute`）
+        /// 却一个引用者的根都不上卷。哪天把它接上，这几条断言一起改。
+        ///
+        /// 只读文件：`AIOS_APS_PROJECT_DIR`（缺省本机 APS 样例工程）+ `AIOS_E3D_TEMPLATE_DIR`。
+        #[test]
+        #[ignore = "manual live probe: walks every DESI database of the APS sample project; needs the E3D template directory"]
+        fn live_probe_component_reference_edges_and_what_the_design_cascade_does_with_them() {
+            let dir =
+                PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
+                }));
+            if !dir.is_dir() {
+                println!("skip: {} 不在本机", dir.display());
+                return;
+            }
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let sources = sources_in_dir(&dir, &["DESI"]).expect("DESI sources");
+            let hash = e3d_attlib::db1_hash("COMPRE");
+
+            // 1. 反向表在**引用者**那个库的文件里，键是被引用的元素。
+            let mut edges: Vec<(RefNo, RefNo)> = Vec::new();
+            let mut carriers = 0usize;
+            for source in &sources {
+                let Ok(mut engine) = ReadOnlyEngine::open(&source.file) else {
+                    continue;
+                };
+                if !engine.tables().iter().any(|table| table.name_hash == hash) {
+                    continue;
+                }
+                let entries: Vec<(RefNo, RefNo)> = match engine.reference_table(hash) {
+                    Some(mut table) => table
+                        .iter()
+                        .filter_map(Result::ok)
+                        .map(|entry| (entry.target, entry.referrer))
+                        .collect(),
+                    None => continue,
+                };
+                carriers += 1;
+                let cross = entries
+                    .iter()
+                    .filter(|(target, referrer)| target.dbno() != referrer.dbno())
+                    .count();
+                println!(
+                    "[#132] dbnum {} 的 COMPRE 表：{} 条边，其中 {cross} 条指到别的库",
+                    source.dbnum,
+                    entries.len()
+                );
+                edges.extend(entries);
+            }
+            let cross_db = edges
+                .iter()
+                .filter(|(target, referrer)| target.dbno() != referrer.dbno())
+                .count();
+            println!(
+                "[#132] {} 个 DESI 库里 {carriers} 个带 COMPRE 反向表；共 {} 条边，跨库 {cross_db} 条、同库 {} 条",
+                sources.len(),
+                edges.len(),
+                edges.len() - cross_db
+            );
+            if edges.is_empty() {
+                println!("[#132] 语料里没有 COMPRE 边（或没有这张反向表）");
+                return;
+            }
+
+            // 2. 被指的构件的形态。全部 DESI 库注册进同一份 DbSet（与生产 `build_set` 同形）才读得到跨库的那一端。
+            let all = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            for source in &sources {
+                let _ = all.add_db(DbFilePin {
+                    file: source.file.clone(),
+                    template: template_file_for(schema.template_dir(), "DESI")
+                        .expect("DESI template"),
+                    db_type: Some("DESI".into()),
+                    sesno: None,
+                });
+            }
+            let mut shapes: BTreeMap<String, usize> = BTreeMap::new();
+            let mut forward_ok = 0usize;
+            for (target, referrer) in &edges {
+                let referrer_element = all.element(*referrer);
+                let referrer_noun = referrer_element
+                    .element_type()
+                    .unwrap_or_else(|_| "?".into());
+                if referrer_element.get_ref("COMPRE").ok().flatten() == Some(*target) {
+                    forward_ok += 1;
+                }
+                let target_element = all.element(*target);
+                let target_noun = target_element.element_type().unwrap_or_else(|_| "?".into());
+                let points_somewhere = |name: &str| {
+                    target_element.has_attribute(name).unwrap_or(false)
+                        && target_element
+                            .get_ref(name)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|refno| refno.is_valid())
+                };
+                let form = if points_somewhere("LSTU") {
+                    "形态 A（自己有 LSTU）"
+                } else if points_somewhere("HSTU") {
+                    "形态 B（HSTU）"
+                } else {
+                    "LSTU / HSTU 都没有"
+                };
+                *shapes
+                    .entry(format!("{referrer_noun}.COMPRE -> {target_noun}：{form}"))
+                    .or_default() += 1;
+            }
+            println!(
+                "[#132] 正向核对（引用者的 COMPRE 读出来就是表里那个键）：{forward_ok}/{}",
+                edges.len()
+            );
+            for (shape, count) in &shapes {
+                println!("[#132]   {shape} × {count}");
+            }
+
+            // 3. 假定每个被指的构件都变了：P4 逐库点查。预算放开——这里量的是答不答得出，不是成本。
+            let mut targets: Vec<RefNo> = edges.iter().map(|(target, _)| *target).collect();
+            targets.sort();
+            targets.dedup();
+            let queried = read_design_referrer_edges(&targets, &sources, usize::MAX);
+            let own_db = targets[0].dbno();
+            let cascade = DesignReferenceCascade::from_edges(&queried, own_db, |_| Vec::new());
+            println!("[#132] {}", cascade.summary_line(own_db));
+            let seen = cascade
+                .edges_by_attribute
+                .get("COMPRE")
+                .copied()
+                .unwrap_or(0);
+            println!(
+                "[#132] 假定 {} 个被指的构件都变了：P4 点查 {} 次，查回 COMPRE 引用者边 {seen} 条（表里 {} 条）；上卷的引用者根 {} 个",
+                targets.len(),
+                cascade.queries,
+                edges.len(),
+                cascade.referrer_roots.len()
+            );
+            assert!(
+                !DESIGN_CASCADE_ATTRIBUTES.contains(&"COMPRE"),
+                "COMPRE 进了行为名单：这条探针的结论要重写"
+            );
+            assert_eq!(seen, edges.len(), "点查该找回表里的每一条边");
+            assert!(
+                cascade.referrer_roots.is_empty(),
+                "COMPRE 今天只记账：P4 不该为它上卷任何根"
+            );
+        }
     }
 }

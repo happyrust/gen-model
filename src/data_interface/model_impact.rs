@@ -415,13 +415,27 @@ pub const GEN_MODEL_READ_MODULES: [&str; 11] = [
     "src/data_interface/rigid_motion.rs",
 ];
 
-/// e3d-io 目录表达式求值环境（`DbElementParamEnv`）——替生成器读属性的第三处，**只作文档、不进判决**
-/// （见 [`generation_read_set`]）。与 `gen_read_set.py::E3D_IO_CATALOGUE_EVAL_FILES` 一字不差。
+/// e3d-io 目录表达式求值环境（`DbElementParamEnv`）——替生成器读属性的第三处。这一侧整体**只作文档、不进判决**，
+/// 进判决的只有 [`E3D_IO_DESIGN_SIDE_READS`] 点名的那几个（见 [`generation_read_set`]）。
+/// 与 `gen_read_set.py::E3D_IO_CATALOGUE_EVAL_FILES` 一字不差。
 pub const E3D_IO_CATALOGUE_EVAL_FILES: [&str; 3] = [
     "src/db_param_env.rs",
     "src/record/catalogue_eval.rs",
     "src/record/catalogue_expr.rs",
 ];
+
+/// e3d-io 目录求值环境在**设计元素**上读、而 e3d-model 与本仓模型面两半都没有收的名字——那一侧里唯一进
+/// [`generation_read_set`] 的部分。与 `gen_read_set.py::E3D_IO_DESIGN_SIDE_READS` 一字不差。
+///
+/// 那一侧不能整侧投票：它字典 DCHC = 0 的名字大多只读在目录 `DATA` / `SELE` 行上（`PURP` 还是老五个元数据名
+/// 之一），整侧投票等于把元数据门对这些名字关掉。所以设计侧的读点逐个点名，判据只有一条——读它的那个元素是不是
+/// DESI 元素。
+///
+/// `COMPRE`（GitHub #132，e3d-io `03414fd`）：目录表达式里的 `ATTRIB POD`（管外径）在设计件自己没有 `LSTU` 时，
+/// 经它的 `COMPRE` 找到被支撑的构件，再走那只构件的 `LSTU` / `HSTU` 到管子的目录件取 `PARA[2]`
+/// （`db_param_env.rs` 的 `catalogue_component_trace`）。支撑件（`ANCI` 一族）的整件位置吃这个外径；字典判它
+/// DCHC = 0，不点名的话只改 `COMPRE` 的支撑件被元数据门放行、停在旧外径上。
+pub const E3D_IO_DESIGN_SIDE_READS: [&str; 1] = ["COMPRE"];
 
 /// `generation_read_set.json` 的形状（`output/gen_read_set.py` 生成）。
 #[derive(Debug, Deserialize)]
@@ -437,9 +451,10 @@ pub struct GenerationReadSetFile {
     pub e3d_model: Vec<String>,
     /// gen-model 模型面模块的读点。
     pub gen_model: ReadSetSide,
-    /// e3d-io 目录求值环境的读点，`vote == false`。
+    /// e3d-io 目录求值环境的读点，`vote == false`；其中在设计元素上读的那几个另列在
+    /// [`ReadSetSide::design_side_names`]，进判决。
     pub e3d_io_catalogue_eval: ReadSetSide,
-    /// **判决用的那一份**：`e3d_model ∪ gen_model.names`。
+    /// **判决用的那一份**：`e3d_model ∪ gen_model.names ∪ e3d_io_catalogue_eval.design_side_names`。
     pub names: Vec<String>,
 }
 
@@ -453,6 +468,11 @@ pub struct ReadSetSide {
     pub files: Vec<String>,
     /// 属性名（在字典 ∪ 运行库 schema 里、或直接传进 e3d-io 读取口的大写字面量），升序。
     pub names: Vec<String>,
+    /// `names` 里**在设计元素上读**、因此进 [`generation_read_set`] 那一票的名字，升序。只有不投票的那一侧
+    /// （e3d-io 目录求值）用它——整侧不投票，设计侧的读点逐个点名（[`E3D_IO_DESIGN_SIDE_READS`]，GitHub #132）；
+    /// 投票的侧全部名字本来就在票里，这一格为空。
+    #[serde(default)]
+    pub design_side_names: Vec<String>,
     /// 既不是属性名也不是字典 noun 的大写字面量，升序（让守卫分清「新冒出的」与「早知道不是属性的」）。
     pub non_attribute_literals: Vec<String>,
 }
@@ -482,8 +502,11 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 /// 老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在。
 ///
 /// e3d-io 目录求值环境读到的名字（`e3d_io_catalogue_eval`，`ANGL RADI HEIG DESP UNIPAR` 与目录侧
-/// `DATA.PURP/DKEY/NUMB`、`SELE.QUES/ANSW/MAXA/TANS`）**不进这一票**：设计侧那几个 DCHC ≠ 0 或已在
-/// e3d-model 一侧，DCHC = 0 的那七个全在目录元素上读，而元数据门只跑 DESI 窗口。
+/// `DATA.PURP/DKEY/NUMB`、`SELE.QUES/ANSW/MAXA/TANS`）整侧**不进这一票**：设计侧那几个大多 DCHC ≠ 0 或已在
+/// e3d-model 一侧，DCHC = 0 的那些大多只在目录元素上读，而元数据门只跑 DESI 窗口。**例外逐个点名**
+/// （[`E3D_IO_DESIGN_SIDE_READS`]，产物的 `e3d_io_catalogue_eval.design_side_names`，GitHub #132）：它在**设计元素**
+/// 上读、别的两半又没收的名字进这一票——今天只有 `COMPRE`（支撑件的管外径经它找到被支撑的构件），2026-11-11 进票，
+/// 条数 202 → 203。
 ///
 /// 戳（[`GenerationReadSetFile::stamp_literals`]，2026-09-16 Q5）也不在这里：`CACHID` 在运行库 schema 里，
 /// 差分层为了排除它而写下的那个字面量会被这条最宽的扫描当成读点，那是错的——它不是几何输入。
@@ -537,8 +560,9 @@ fn wnoevt_no_event_names() -> &'static HashSet<String> {
 ///
 /// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
 /// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
-/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `BRAD CMPR DIR ELDATA FILL GTYP HREF HSPE JFRE MINBEN NARE NGMR
-/// OUTD PKEY PSPE TREF UKEY VXREF` 十八个（core 不重画、我们却真拿来生成的输入），其余 3923 个都放行。其中 11 个被
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合挡 `BRAD CMPR COMPRE DIR ELDATA FILL GTYP HREF HSPE JFRE MINBEN NARE
+/// NGMR OUTD PKEY PSPE TREF UKEY VXREF` 十九个（core 不重画、我们却真拿来生成的输入；`COMPRE` 是 e3d-io 目录求值
+/// 替生成器在设计件上读的，GitHub #132），其余 3922 个都放行。其中 11 个被
 /// 手写表登记成几何 / 级联输入（`DKEY DDPR FSPREF SCREF STYP CURD PTYP` 与 `SIZE MAXA ORRF PTOF`）：
 /// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
 /// [`tests::the_two_votes_override_the_hand_tables_for_exactly_eleven_names`] 逐个点名钉住，名单变了就得重新问
@@ -2543,11 +2567,20 @@ mod tests {
             ]
         );
 
-        let union: BTreeSet<String> = e3d_model_side.union(&names).cloned().collect();
+        // 投票的侧全部名字本来就在票里，不另点名。
+        assert!(file.gen_model.design_side_names.is_empty());
+        // e3d-io 目录求值那一侧整体不投票，只有它在设计元素上读的那几个名字进并集（GitHub #132；
+        // 名单本身由 `the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote` 钉）。
+        let design_side = sorted_set(&file.e3d_io_catalogue_eval.design_side_names);
+        let union: BTreeSet<String> = e3d_model_side
+            .union(&names)
+            .chain(design_side.iter())
+            .cloned()
+            .collect();
         assert_eq!(
             sorted_set(&file.names),
             union,
-            "names 必须恰好是 e3d_model ∪ gen_model.names"
+            "names 必须恰好是 e3d_model ∪ gen_model.names ∪ e3d_io_catalogue_eval.design_side_names"
         );
         assert_eq!(generation_read_set().len(), file.names.len());
         assert!(generation_reads_attribute("pos") && generation_reads_attribute(" JOIS "));
@@ -2561,10 +2594,13 @@ mod tests {
         }
     }
 
-    /// S5 护栏（e3d-io 半边）：目录求值环境读到的名字如实记录、按同一条规则可重扫，但 `vote == false`——
-    /// 它 DCHC = 0 的七个名字全在目录 `DATA` / `SELE` 行上读（`PSPE` 只是 `ATTRIB … OF PSPE OF PIPE`
-    /// 的属主链 token），设计侧的 `ANGL RADI HEIG DESP` 已在 e3d-model 一侧、`UNIPAR` 不在字典。
-    /// 名单变了就得重新回答「新名字是在设计元素上读的吗」，答是就该改 `vote`。
+    /// S5 护栏（e3d-io 半边）：目录求值环境读到的名字如实记录、按同一条规则可重扫，但整侧 `vote == false`——
+    /// 它 DCHC = 0 的名字里九个只读在目录一侧（`DATA` / `SELE` 行、目录件的 `CMPR`；`PSPE` 只是
+    /// `ATTRIB … OF PSPE OF PIPE` 的属主链 token），设计侧的 `ANGL RADI HEIG DESP` 已在 e3d-model 一侧、`UNIPAR`
+    /// 不在字典。名单变了就得重新回答「新名字是在设计元素上读的吗」：答是，就把它加进
+    /// [`E3D_IO_DESIGN_SIDE_READS`]——那张名单上的名字进第二票（GitHub #132 的 `COMPRE` 就是这样进去的）；
+    /// 答不是，才加进下面那张目录侧名单。两张名单合起来必须恰好是这一侧 DCHC = 0 的全部名字，新冒出来的名字两边
+    /// 都不在就红。
     #[test]
     fn the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote() {
         if runtime_attribute_names().is_empty() {
@@ -2601,6 +2637,26 @@ mod tests {
             other,
             "重跑 output/gen_read_set.py"
         );
+        // 设计侧名单：与常量逐名相等，点了名的都是这一侧扫得到的名字，而且都在第二票里。
+        assert_eq!(
+            side.design_side_names,
+            E3D_IO_DESIGN_SIDE_READS
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>(),
+            "design_side_names 与 E3D_IO_DESIGN_SIDE_READS 不一致，重跑 output/gen_read_set.py"
+        );
+        let design_side = sorted_set(&side.design_side_names);
+        for name in &design_side {
+            assert!(
+                names.contains(name),
+                "{name} 不在 e3d-io 目录求值的扫描里：E3D_IO_DESIGN_SIDE_READS 里这一条陈旧了"
+            );
+            assert!(
+                generation_reads_attribute(name),
+                "{name} 在设计元素上读，却没进第二票"
+            );
+        }
         let mut zero: Vec<&str> = side
             .names
             .iter()
@@ -2608,31 +2664,79 @@ mod tests {
             .map(String::as_str)
             .collect();
         zero.sort_unstable();
+        // 目录侧：只读在目录元素上（或只是属主链 token）的 DCHC=0 名字，不进票。
+        const CATALOGUE_SIDE_ZERO: [&str; 9] = [
+            "ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS",
+        ];
+        // 设计侧：读它的那个元素是 DESI 元素，进票。今天只有 `COMPRE`（GitHub #132）。
+        let design_side_zero: Vec<&str> = design_side
+            .iter()
+            .map(String::as_str)
+            .filter(|n| raw_dchc_code(n) == Some(0))
+            .collect();
+        assert_eq!(design_side_zero, ["COMPRE"]);
+        for name in CATALOGUE_SIDE_ZERO {
+            assert!(
+                !design_side.contains(name),
+                "{name} 不能既算目录侧又算设计侧"
+            );
+        }
+        let mut classified: Vec<&str> = CATALOGUE_SIDE_ZERO
+            .iter()
+            .copied()
+            .chain(design_side_zero.iter().copied())
+            .collect();
+        classified.sort_unstable();
         assert_eq!(
-            zero,
-            [
-                "ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"
-            ],
-            "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的"
+            zero, classified,
+            "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的——是就加进 \
+             E3D_IO_DESIGN_SIDE_READS（进第二票），不是才加进这里的目录侧名单"
         );
-        // 它单独读到、而两票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0 要么已在 e3d_model。
+        // `COMPRE` 归设计侧的依据钉在 e3d-io 的源码形状上：它只经 `COMPONENT_REFERENCE` 这一个常量读，读它的是求值
+        // 环境里的**设计件**（`catalogue_component_trace` 的 `design.get_element(COMPONENT_REFERENCE)`）。形状变了
+        // 就回来重判它还是不是设计侧的读点。
+        let env_source = std::fs::read_to_string(root.join("src/db_param_env.rs"))
+            .expect("e3d-io src/db_param_env.rs 可读");
+        let env_source = strip_test_module(&env_source);
+        assert!(
+            env_source.contains("const COMPONENT_REFERENCE: &str = \"COMPRE\";"),
+            "e3d-io 不再把 COMPRE 记在 COMPONENT_REFERENCE 里"
+        );
+        assert!(
+            !direct.contains("COMPRE"),
+            "COMPRE 多了一处直接按名读取：核一遍那一处读的是不是设计件"
+        );
+        assert_eq!(
+            env_source
+                .matches("get_element(COMPONENT_REFERENCE)")
+                .count(),
+            1,
+            "COMPONENT_REFERENCE 的读点不再只有一处"
+        );
+        assert!(
+            env_source.contains("design.get_element(COMPONENT_REFERENCE)"),
+            "COMPRE 不再是在求值环境的设计件上读的"
+        );
+        // 它单独读到、而第二票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0、要么已在
+        // e3d_model 一侧、要么点了名进票。
         let vote = generation_read_set();
         for name in &side.names {
             if !vote.contains(name) {
                 assert!(
-                    raw_dchc_code(name) != Some(0) || zero.contains(&name.as_str()),
+                    raw_dchc_code(name) != Some(0) || CATALOGUE_SIDE_ZERO.contains(&name.as_str()),
                     "{name}"
                 );
             }
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十八个，全来自 e3d-model：`DIR` catalogue_point、
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十九个。十八个来自 e3d-model：`DIR` catalogue_point、
     /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
     /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN` 与连接弯半径 `BRAD`、GENPRI 归档里的 B-rep `ELDATA`、跨管分支点接管的
     /// `HREF`/`TREF`（route）、吊架与竖井 spec 门 `HSPE`/`PSPE`（route / pipeline）、PJOI 现算标架找目录件
-    /// 中性轴线的 `NARE`（datum）——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；
-    /// 老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
+    /// 中性轴线的 `NARE`、SJOI 现算标架里关节留不留在站位的 `JFRE`（datum）；一个来自 e3d-io 目录求值的设计侧读点：支撑件的管外径经 `COMPRE` 找被支撑的构件
+    /// （[`E3D_IO_DESIGN_SIDE_READS`]，GitHub #132）——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是
+    /// 为它们立的）；老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
         let mut zero: Vec<&str> = generation_read_set()
@@ -2644,8 +2748,8 @@ mod tests {
         assert_eq!(
             zero,
             [
-                "BRAD", "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "HREF", "HSPE", "JFRE", "MINBEN",
-                "NARE", "NGMR", "OUTD", "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
+                "BRAD", "CMPR", "COMPRE", "DIR", "ELDATA", "FILL", "GTYP", "HREF", "HSPE", "JFRE",
+                "MINBEN", "NARE", "NGMR", "OUTD", "PKEY", "PSPE", "TREF", "UKEY", "VXREF"
             ]
         );
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2708,7 +2812,11 @@ mod tests {
         // 2026-11-10：e3d-model `fix/pjoi-orientation`（PJOI 的朝向照 Core3D 的 `GJTORI` + `GNAORI` 现算，
         // e3d-model #34）起 datum 读目录侧 p-line 集的 `NARE`（指自家中性轴线的引用，关节的滚转取那条线的 `PLAX`）
         // （202）。`NARE` 是字典 DCHC=0，上面那一列从 17 个变成 18 个。
-        assert_eq!(generation_read_set().len(), 202, "读取集合条数漂移");
+        // 2026-11-11：GitHub #132。e3d-io `03414fd`（POD 接上 `COMPRE` 两条链）起，目录求值环境在设计件上读
+        // `COMPRE`（支撑件没有 `LSTU` 时经它找被支撑的构件，再取那只构件的管外径）。这是 e3d-io 一侧的读点，
+        // e3d-model 与本仓模型面两半都扫不到它；它是设计侧的读点，经 `E3D_IO_DESIGN_SIDE_READS` 点名进票（203）。
+        // `COMPRE` 是字典 DCHC=0，上面那一列从 18 个变成 19 个。
+        assert_eq!(generation_read_set().len(), 203, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2985,10 +3093,11 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十八个（第十一个是 GENPRI 归档的 `ELDATA`，
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十九个（第十一个是 GENPRI 归档的 `ELDATA`，
         // 第十二到十五个是 AMS 九库收口带进的 `HREF` / `HSPE` / `PSPE` / `TREF`，第十六个是
         // 2026-11-06 `JFRE`，第十七个是 2026-11-10 电缆连接弯半径的 `BRAD`，第十八个是同日 PJOI 现算标架
-        // 找中性轴线的 `NARE`），其余全部放行。
+        // 找中性轴线的 `NARE`，第十九个是 2026-11-11 支撑件找被支撑构件的 `COMPRE`——e3d-io 目录求值在设计件上
+        // 读的，GitHub #132），其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -3001,7 +3110,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 18,
+            3941 - 19,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
@@ -3015,6 +3124,59 @@ mod tests {
             assert_eq!(metadata_only_tier([name]), None);
             assert_eq!(metadata_only_tier(["NAME", name]), None);
         }
+    }
+
+    /// GitHub #132：支撑件（`ANCI` 一族）的管外径是 e3d-io 的目录求值环境替生成器读出来的——设计件自己没有
+    /// `LSTU` 时经它的 `COMPRE` 找到被支撑的构件，再走那只构件的 `LSTU` / `HSTU` 到管子的目录件取 `PARA[2]`
+    /// （`ATTRIB POD`，e3d-io `db_param_env.rs`，`03414fd`）。`COMPRE` 字典 DCHC = 0，又不在 e3d-model 与本仓
+    /// 模型面那两半的扫描里：只靠那两半它两票都拿得到，被元数据门放行，只改 `COMPRE` 的支撑件停在旧外径上。
+    /// 它是在**设计元素**上读的，所以进第二票（`generation_read_set.json` 的
+    /// `e3d_io_catalogue_eval.design_side_names`，守卫
+    /// [`the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote`] 钉名单）。
+    #[test]
+    fn a_support_whose_component_reference_alone_changed_is_not_let_through_the_metadata_gate() {
+        use crate::data_interface::window_root_plan::{
+            change_is_metadata_only, change_metadata_tier, metadata_only_change_seeds_no_root,
+        };
+        // 字典那一票照旧说 0——挡它的只能是读取集合那一票。
+        assert_eq!(raw_dchc_code("COMPRE"), Some(0));
+        assert!(generation_reads_attribute("COMPRE"));
+        for name in ["COMPRE", "compre", "att.COMPRE"] {
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        assert!(!attribute_is_curated_metadata("COMPRE"));
+        // 分档：单独改、跟着老名单 / 新档 / 戳一起改，都没有档——整次改动照常上卷。
+        assert_eq!(metadata_only_tier(["COMPRE"]), None);
+        assert_eq!(metadata_only_tier(["NAME", "COMPRE"]), None);
+        assert_eq!(metadata_only_tier(["DUTY", "COMPRE"]), None);
+        assert_eq!(metadata_only_tier(["CACHID", "COMPRE"]), None);
+        // 窗口规划器的元数据门（`plan_update_with` 收的那条谓词）：一只 ANCI 只改了 COMPRE，不放行，
+        // 也照旧做祖先闭包的种子——它所在的根进 `regen`。
+        let support = |attributes: &[&str]| e3d_model::element_diff::ElementDiff {
+            refno: "2013286648/1256".into(),
+            noun: "ANCI".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        assert_eq!(change_metadata_tier(&support(&["COMPRE"])), None);
+        assert!(!change_is_metadata_only(&support(&["COMPRE"])));
+        assert!(!metadata_only_change_seeds_no_root(&support(&["COMPRE"])));
+        assert_eq!(change_metadata_tier(&support(&["NAME", "COMPRE"])), None);
+        // 预览那一侧同口径：不是 Skip；它是引用属性，按级联一侧归类。
+        let mut op = modified_operation("COMPRE");
+        set_operation_noun(&mut op, "ANCI");
+        let summary = classify_operation_effects(&op);
+        assert_eq!(summary.impact(), OperationImpact::Regen);
+        assert_eq!(summary.effects, vec![AttributeEffect::DependencyCascade]);
+        // 对照：同一只支撑件只改名，门照旧放行——收紧的是 `COMPRE` 这一格，不是把门关上。
+        assert_eq!(
+            change_metadata_tier(&support(&["NAME"])),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert!(metadata_only_change_seeds_no_root(&support(&["NAME"])));
     }
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字

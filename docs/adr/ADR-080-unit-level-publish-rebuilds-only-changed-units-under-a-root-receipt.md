@@ -451,6 +451,20 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 12. **生产方与选根用同一份计划口径**（★0916）：`UnitDeltaProducer::open` 与 `WindowRootSources::collect` 都按
     `model_skip_metadata_only_changes()` 决定走 `plan_update_with(change_metadata_tier)` 还是裸 `plan_update`。
     两边口径一旦分叉，选出来要局部发布的根与切给它的子计划就对不上——多半表现为空 delta 盖一个 T 章。
+13. **级联目标根不走单元级发布**（★1111，GitHub #144）：`plan.regen` 里凡是三条级联（结构连接 C2 / 电缆端点 C8 /
+    设计引用 P4）**目标**的根（`WindowRootSources::cascaded_roots()`）由计划点名
+    （`ModelUpdatePlan::unit_publish_cascade_target_roots`），`collect_unit_tasks` 不给它们带单元级提示，整根重算。
+    级联把一根并进 `regen` 是因为别处变了、它名下另一件的几何要跟，这条依赖 `plan_update` 不认识：这根自己这一窗若也有
+    改动，切给它的子计划不空，执行体只重建子计划里那几件，被牵连的那一件留在旧几何上（子计划为空的那一种，生产方本来
+    就回退整根）。与 ADR-066 D1 规则 5（刚体前移的 `expanded`）、本文 D10 的条件 3 是同一条规则的第三处；选根一个字
+    不改（约束 6），名单只在基线在时算（约束 9）。**只认开着的级联**：C2 默认关（ADR-090 D2），只有 C2 认得的依赖
+    ——带目录正体的 `PJOI` 与它同根的 `CREF` 梁，两个方向 `plan_update` 都不点名对端（ams7999 894 对、ams251183 177 对）
+    ——在缺省配置下不在名单里，这条约束罩不住，留在 #144。量过的代价：缺省配置下 130 个真实窗口里真正从局部重建
+    改成整根重算的根是 0，C2 也开着另有 36 个（`changelog.md` 2026-11-11）。守卫：
+    `fast_model::e3d_model_service::unit_publish_cascade_target_tests`（纯内存两条；真库假定源、真实窗口、量法各一条
+    `#[ignore]`）、`window_root_plan::tests::unit_publish_cascade_targets_are_the_regen_roots_some_open_cascade_points_at`，
+    约束 9 那条源码钉补了三句（名单只在基线在时算、只赋值一次、摘基线在构造提示之前）。先红后绿：`collect_unit_tasks`
+    里没有摘基线那一句时（修之前），纯内存那条红在「级联目标根的任务不许带单元级提示」。
 
 ## 验收
 

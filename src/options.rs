@@ -4529,6 +4529,14 @@ mod tests {
 
         // getter 本身在没有进程内覆盖时也必须是关（DbOption.toml 写 false）。
         // 同一进程里别的测试可能已设环境变量，所以只在没有任何 AIOS_GROUP_SCOSEL 时断言。
+        //
+        // 「没有进程内覆盖」得自己保证：`handlers` / `group_membership` / `direct_tree` 里十几条用例会拿
+        // `GroupScoselOverride` 把取值函数摁成开，并行跑时这里恰好读到那个值就红（2026-11-11 全量库单测里
+        // 二十几次出一次）。拿同一把锁、不设覆盖：别人的守卫落下时先把覆盖清零再放锁，锁到手时取值函数
+        // 一定是「按配置来」。
+        let _nobody_overrides = GROUP_SCOSEL_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if std::env::var(GROUP_SCOSEL_ENV).is_err() {
             assert!(!group_scosel(), "没设环境变量、配置写 false 时必须默认关");
         }
@@ -4545,12 +4553,20 @@ mod tests {
     /// 并发读环境变量的用例互相踩（`parse_bool_flag` 那组测试同样刻意不改进程环境）。
     #[test]
     fn the_group_scosel_override_pins_both_branches_and_releases() {
+        // 「归零」要在没人拿着守卫的时候看：自己的守卫一落，别的用例随时会再设覆盖，不拿锁直接读就可能读到
+        // 别人的 1 / 2。拿同一把锁读——守卫忘了清零的话，无论最后落下的是谁的，这里读到的都不是 0。
+        let at_rest = || {
+            let _nobody_overrides = GROUP_SCOSEL_OVERRIDE_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst)
+        };
         {
             let _on = GroupScoselOverride::set(true);
             assert!(group_scosel(), "守卫设开时取值函数必须回 true");
         }
         assert_eq!(
-            GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst),
+            at_rest(),
             0,
             "守卫落下后必须回到「按配置来」，否则后续用例会读到一个假的开关值"
         );
@@ -4558,11 +4574,7 @@ mod tests {
             let _off = GroupScoselOverride::set(false);
             assert!(!group_scosel(), "守卫设关时取值函数必须回 false");
         }
-        assert_eq!(
-            GROUP_SCOSEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "第二个守卫落下后同样必须归零"
-        );
+        assert_eq!(at_rest(), 0, "第二个守卫落下后同样必须归零");
     }
 
     /// VAL-WIRE-003 的配置文件那一半：仓库根 `DbOption.toml` 必须**生效地**写着 `group_scosel = false`。
