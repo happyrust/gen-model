@@ -1147,10 +1147,10 @@ pub(crate) fn compare_rvms_with_elements(
         eprintln!("警告：={}：{message}（生成侧的构件记成没解出 refno）", spec.refno);
         Vec::new()
     });
-    // 配对成功、包围盒也通过的构件再比一次体积（GitHub #127）：构件摆错但包围盒不变时，
+    // 配对成功、包围盒也通过的构件再比一次体积（GitHub #127 / #171）：构件摆错但包围盒不变时，
     // 只比 AABB 会判成一致（48 根竖杆端部切口摆反 180° 就是这样漏掉的）。
     // 只在这一条路上做：`compare_rvms_scoped` 的调用方要的是纯 AABB 口径。
-    apply_volume_check(task_dir, &mut report);
+    volume::apply_to_report(task_dir, &mut report, &sources);
     // 基准与项目数据的 E3D 版本不一致时说出来（GitHub #126）：版本错配的差异会冒充模型差异。
     // 这里只出声、不改判档——版本对不对是人的判断，工具不该替人判模型。
     note_baseline_version(task_dir, spec);
@@ -1179,34 +1179,10 @@ fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
     }
 }
 
-/// 对配对成功且判档不是 `off` 的构件再比体积（GitHub #127）。超门限的改成 `off`，
-/// 并在 `only_*` 之外单列一条——判色读的是 `verdict`，改它才进得了判据。
-///
-/// 任一侧算不出体积时**不动判档**：那是「比不了」，不是「不一致」。
+/// 对配对成功且判档不是 `off` 的构件再比体积（GitHub #127 / #171），实现见 [`volume::apply_to_report`]。
+#[allow(dead_code)]
 fn apply_volume_check(task_dir: &Path, report: &mut e3d_model::rvm_compare::CompareReport) {
-    let baseline_path = task_dir.join("e3d.rvm");
-    let generated_path = task_dir.join("ours").join("generated.rvm");
-    let (Ok(baseline), Ok(generated)) = (
-        volume::read_volumes(&baseline_path),
-        volume::read_volumes(&generated_path),
-    ) else {
-        // 读不动就整条跳过：体积是加严判据，读不到不该让整次核对失败。
-        return;
-    };
-    let mut flipped = 0usize;
-    for pair in report.pairs.iter_mut() {
-        if pair.verdict == "off" || pair.aabb_source == "lines" {
-            continue;
-        }
-        let verdict = volume::compare_pair(&baseline, &generated, &pair.refno, &pair.noun);
-        if verdict.differs {
-            pair.verdict = "off";
-            flipped += 1;
-        }
-    }
-    if flipped > 0 {
-        eprintln!("体积复核：{flipped} 件包围盒通过但体积超门限，判档改成 off");
-    }
+    volume::apply_to_report(task_dir, report, &[]);
 }
 
 /// 按文件比对两份 RVM，落 `compare.json`，交回整份报告。
