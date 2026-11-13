@@ -3841,5 +3841,871 @@ mod tests {
                 );
             }
         }
+
+        /// GitHub #161 普查（只读）：统计 AMS、APS、SLYK 三个项目里，目录 P 点表达式用
+        /// `ATTRIB <TPOS|HPOS|TDIR|HDIR> OF CREF`（[`e3d_model::catalogue_point`] 的
+        /// `connected_branch_point` 口径）的设计件有多少、在哪些库、各自接的支管是不是零长。
+        ///
+        /// 三个项目的配置口径对齐各自 `DbOption*.toml`：
+        /// - AMS：`project_path = D:/AVEVA/Projects/E3D3.1`，`project_name = AvevaMarineSample`，`mdb = ALL`
+        /// - APS：`project_path = D:/AVEVA/Projects/E3D3.1`，`project_name = AvevaPlantSample`，`mdb = ALL`
+        /// - SLYK：`project_path = D:/AVEVA/Projects/E3D3.1/YCYK-E3D`，
+        ///   `project_search_paths = [D:/AVEVA/Projects/E3D3.1]`，`project_name = YCYK-E3D`，`mdb = SLYK`
+        ///
+        /// 每个项目同时报两个范围：
+        /// 1. 项目 MDB 声明绑定的全部成员库（区分主项目自有库与 MDB 引入的外部项目库，且目录解析遵循
+        ///    设计库同项目优先）；
+        /// 2. 主项目 `*000` 目录里未进入该默认 MDB 的其余 `CATA` / `DESI` 库文件。
+        ///
+        /// 2026-11-13 实测：三套项目仅命中同一份 AVEVA 自带规则样例（`dbnum=7015`，`acp7015` /
+        /// `aps7015` / `acw7015` 的 `OLET 23399/832` → 零长支管 `BRAN 23399/1381`），非零长样本为 0，
+        /// 故未在窗口规划器引入正向级联。若后续新语料出现非零长样本，末尾断言会变红提醒补齐 #161。
+        #[test]
+        #[ignore = "manual live census (#161): scans AMS, APS, and SLYK for catalogue P-points reading ATTRIB <HPOS|TPOS|HDIR|TDIR> OF CREF and checks connected branch lengths"]
+        fn live_census_design_members_using_catalogue_points_of_cref() {
+            use std::time::Duration;
+
+            use e3d_io::ScanTier;
+            use e3d_io::db_element::DbFileResolver;
+            use e3d_io::record::descriptor::DescriptorValue;
+
+            use crate::data_interface::mdb_closure;
+            use crate::data_interface::mdb_membership::{
+                CATA_STYP, DESI_STYP, bind_declared,
+            };
+
+            let projects_root = PathBuf::from(
+                std::env::var("AIOS_E3D_PROJECTS_ROOT")
+                    .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1".into()),
+            );
+            let slyk_root = PathBuf::from(
+                std::env::var("AIOS_SLYK_PROJECT_PATH")
+                    .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D".into()),
+            );
+            if !projects_root.is_dir() && !slyk_root.is_dir() {
+                println!(
+                    "[#161] skip: 项目根目录不在本机（{} / {}）",
+                    projects_root.display(),
+                    slyk_root.display()
+                );
+                return;
+            }
+
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let template_dir = if template_file_for(schema.template_dir(), "CATA")
+                .is_ok_and(|path| path.is_file())
+            {
+                schema.template_dir().to_path_buf()
+            } else {
+                e3d_io::bundled_schema_root().join("e3d31").join("binaries")
+            };
+            let attlib_file = template_dir.join("attlib.dat");
+            let attlib = Arc::new(
+                e3d_attlib::AttlibData::parse_file(&attlib_file).expect("parse attlib.dat"),
+            );
+            let cata_template = template_file_for(&template_dir, "CATA").expect("CATA template");
+            let desi_template = template_file_for(&template_dir, "DESI").expect("DESI template");
+            let unit_types = resolve_delivery_unit_types(&[]);
+
+            let cref_hash = e3d_attlib::db1_hash("CREF");
+            let ptpos_hash = e3d_attlib::db1_hash("PTPOS");
+            let ptca_hash = e3d_attlib::db1_hash("PTCA");
+            let ptax_hash = e3d_attlib::db1_hash("PTAX");
+            let ptmi_hash = e3d_attlib::db1_hash("PTMI");
+            let cata_chain_tables: [(&str, u32); 3] = [
+                ("PTRE", e3d_attlib::db1_hash("PTRE")),
+                ("CATR", e3d_attlib::db1_hash("CATR")),
+                ("PRTREF", e3d_attlib::db1_hash("PRTREF")),
+            ];
+            let desi_chain_tables: [(&str, u32); 3] = [
+                ("SPRE", e3d_attlib::db1_hash("SPRE")),
+                ("CATR", e3d_attlib::db1_hash("CATR")),
+                ("PRTREF", e3d_attlib::db1_hash("PRTREF")),
+            ];
+            let cata_carrier_nouns: [u32; 5] = [
+                e3d_attlib::db1_hash("SCOM"),
+                e3d_attlib::db1_hash("SFIT"),
+                e3d_attlib::db1_hash("SPCO"),
+                e3d_attlib::db1_hash("GPART"),
+                e3d_attlib::db1_hash("TABITE"),
+            ];
+
+            fn attr_words(element: &e3d_io::db_element::DbElement, name: &str) -> Vec<u32> {
+                match element.attribute(name).ok().flatten() {
+                    Some(DescriptorValue::RawWords(words) | DescriptorValue::WordArray(words)) => {
+                        words
+                    }
+                    Some(DescriptorValue::IntArray(words)) => {
+                        words.into_iter().map(|word| word as u32).collect()
+                    }
+                    Some(_) | None => Vec::new(),
+                }
+            }
+
+            // 与 e3d-model `catalogue_point::connected_branch_end` 逐词同口径。
+            let decode_of_cref = |words: &[u32], expected_kind: u32| -> Option<&'static str> {
+                let &[15, 5, stored_kind, 34, 83, attr_hash, 0, 92, 7, 2, 0, 34, ref_hash, 1, 5] =
+                    words
+                else {
+                    return None;
+                };
+                if stored_kind != expected_kind || ref_hash != cref_hash {
+                    return None;
+                }
+                let attr = db1_dehash(attr_hash)?;
+                match (expected_kind, attr.as_str()) {
+                    (1, "HPOS") => Some("HPOS"),
+                    (1, "TPOS") => Some("TPOS"),
+                    (2, "HDIR") => Some("HDIR"),
+                    (2, "TDIR") => Some("TDIR"),
+                    _ => None,
+                }
+            };
+
+            struct ProjectSpec {
+                label: &'static str,
+                project_name: &'static str,
+                mdb_name: &'static str,
+                roots: Vec<PathBuf>,
+                own_db_dir: PathBuf,
+            }
+
+            #[derive(Clone)]
+            struct DbEntry {
+                dbnum: u32,
+                db_type: &'static str,
+                project: String,
+                file: PathBuf,
+                in_mdb: bool,
+            }
+
+            #[derive(Clone)]
+            struct CrefPointHit {
+                cata_file: PathBuf,
+                cata_project: String,
+                in_mdb: bool,
+                point_refno: RefNo,
+                ptse_refno: Option<RefNo>,
+                number: Option<u32>,
+                pos_attr: &'static str,
+                dir_attr: &'static str,
+            }
+
+            struct ProjectAwareCataResolver {
+                preferred_project: String,
+                by_project: BTreeMap<(String, u32), PathBuf>,
+                mdb_default: BTreeMap<u32, PathBuf>,
+                cata_template: PathBuf,
+            }
+
+            impl DbFileResolver for ProjectAwareCataResolver {
+                fn resolve(&self, dbno: u32) -> Option<DbFilePin> {
+                    let file = self
+                        .by_project
+                        .get(&(self.preferred_project.to_ascii_lowercase(), dbno))
+                        .or_else(|| self.mdb_default.get(&dbno))?;
+                    Some(DbFilePin {
+                        file: file.clone(),
+                        template: self.cata_template.clone(),
+                        db_type: Some("CATA".into()),
+                        sesno: None,
+                    })
+                }
+            }
+
+            let specs = [
+                ProjectSpec {
+                    label: "AMS",
+                    project_name: "AvevaMarineSample",
+                    mdb_name: "ALL",
+                    roots: vec![projects_root.clone()],
+                    own_db_dir: projects_root.join("AvevaMarineSample").join("ams000"),
+                },
+                ProjectSpec {
+                    label: "APS",
+                    project_name: "AvevaPlantSample",
+                    mdb_name: "ALL",
+                    roots: vec![projects_root.clone()],
+                    own_db_dir: projects_root.join("AvevaPlantSample").join("aps000"),
+                },
+                ProjectSpec {
+                    label: "SLYK",
+                    project_name: "YCYK-E3D",
+                    mdb_name: "SLYK",
+                    roots: vec![slyk_root.clone(), projects_root.clone()],
+                    own_db_dir: slyk_root.join("acw000"),
+                },
+            ];
+
+            let mut slyk_ran = false;
+            let mut slyk_found_known_olet = false;
+
+            for spec in &specs {
+                if !spec.own_db_dir.is_dir() {
+                    println!(
+                        "[#161] skip {}: 目录不在本机（{}）",
+                        spec.label,
+                        spec.own_db_dir.display()
+                    );
+                    continue;
+                }
+                if spec.label == "SLYK" {
+                    slyk_ran = true;
+                }
+
+                let closure = mdb_closure::resolve(
+                    &spec.roots,
+                    spec.project_name,
+                    spec.mdb_name,
+                    Duration::from_secs(15),
+                );
+                let watch_plan = closure.watch_dir_plan();
+                let project_dirs: Vec<(String, Vec<PathBuf>)> = watch_plan
+                    .projects
+                    .iter()
+                    .filter(|entry| !entry.db_dirs.is_empty())
+                    .map(|entry| (entry.project.clone(), entry.db_dirs.clone()))
+                    .collect();
+                let decl = closure
+                    .declaration
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{}: 读不到 MDB 声明：{:?}", spec.label, closure.declaration_error));
+                let bound = bind_declared(&decl.databases, &project_dirs, spec.project_name)
+                    .expect("bind MDB declarations");
+
+                // 路径 → 所属项目名（从 watch_plan 的 db_dirs 反查，兜底取上上级目录名）。
+                let project_of_file = |path: &Path| -> String {
+                    if let Some(parent) = path.parent() {
+                        for (proj, dirs) in &project_dirs {
+                            if dirs.iter().any(|dir| dir == parent) {
+                                return proj.clone();
+                            }
+                        }
+                        if let Some(grand) = parent.parent().and_then(|p| p.file_name()) {
+                            return grand.to_string_lossy().into_owned();
+                        }
+                    }
+                    spec.project_name.to_string()
+                };
+
+                let mut cata_entries: Vec<DbEntry> = Vec::new();
+                let mut desi_entries: Vec<DbEntry> = Vec::new();
+                let mut seen_cata_files: BTreeSet<PathBuf> = BTreeSet::new();
+                let mut seen_desi_files: BTreeSet<PathBuf> = BTreeSet::new();
+                let mut cata_by_project: BTreeMap<(String, u32), PathBuf> = BTreeMap::new();
+                let mut cata_mdb_default: BTreeMap<u32, PathBuf> = BTreeMap::new();
+
+                for db in &bound.databases {
+                    let Some(path) = db.path.as_ref() else {
+                        continue;
+                    };
+                    let proj = db
+                        .project
+                        .clone()
+                        .unwrap_or_else(|| spec.project_name.to_string());
+                    if db.styp == CATA_STYP {
+                        cata_mdb_default.entry(db.dbnum).or_insert_with(|| path.clone());
+                        cata_by_project
+                            .entry((proj.to_ascii_lowercase(), db.dbnum))
+                            .or_insert_with(|| path.clone());
+                        if seen_cata_files.insert(path.clone()) {
+                            cata_entries.push(DbEntry {
+                                dbnum: db.dbnum,
+                                db_type: "CATA",
+                                project: proj.clone(),
+                                file: path.clone(),
+                                in_mdb: true,
+                            });
+                        }
+                        // 同号不同项目的目录库副本（如 AMS /ALL 下 acp7000 被 ams7000 遮蔽，但 acp7015 生成时读 acp7000）。
+                        for shadowed in &db.shadowed {
+                            let Ok(header) =
+                                crate::data_interface::db_file_header::DbFileHeader::read(shadowed)
+                            else {
+                                continue;
+                            };
+                            if header.dbnum != db.dbnum as i32
+                                || !header.db_type.eq_ignore_ascii_case("CATA")
+                            {
+                                continue;
+                            }
+                            let s_proj = project_of_file(shadowed);
+                            cata_by_project
+                                .entry((s_proj.to_ascii_lowercase(), db.dbnum))
+                                .or_insert_with(|| shadowed.clone());
+                            if seen_cata_files.insert(shadowed.clone()) {
+                                cata_entries.push(DbEntry {
+                                    dbnum: db.dbnum,
+                                    db_type: "CATA",
+                                    project: s_proj,
+                                    file: shadowed.clone(),
+                                    in_mdb: true,
+                                });
+                            }
+                        }
+                    } else if db.styp == DESI_STYP && seen_desi_files.insert(path.clone()) {
+                        desi_entries.push(DbEntry {
+                            dbnum: db.dbnum,
+                            db_type: "DESI",
+                            project: proj,
+                            file: path.clone(),
+                            in_mdb: true,
+                        });
+                    }
+                }
+
+                // 主项目自有 *000 目录里未进入该默认 MDB 的 CATA / DESI 主文件也一并纳入核查。
+                let own_scan = e3d_model::DirectoryDbResolver::scan(
+                    std::slice::from_ref(&spec.own_db_dir),
+                    &template_dir,
+                )
+                .expect("scan own_db_dir");
+                for disc in own_scan.discovered().iter().filter(|d| d.ext_no <= 1) {
+                    if disc.db_type.eq_ignore_ascii_case("CATA") {
+                        cata_mdb_default
+                            .entry(disc.dbno)
+                            .or_insert_with(|| disc.file.clone());
+                        cata_by_project
+                            .entry((spec.project_name.to_ascii_lowercase(), disc.dbno))
+                            .or_insert_with(|| disc.file.clone());
+                        if seen_cata_files.insert(disc.file.clone()) {
+                            cata_entries.push(DbEntry {
+                                dbnum: disc.dbno,
+                                db_type: "CATA",
+                                project: spec.project_name.to_string(),
+                                file: disc.file.clone(),
+                                in_mdb: false,
+                            });
+                        }
+                    } else if disc.db_type.eq_ignore_ascii_case("DESI")
+                        && seen_desi_files.insert(disc.file.clone())
+                    {
+                        desi_entries.push(DbEntry {
+                            dbnum: disc.dbno,
+                            db_type: "DESI",
+                            project: spec.project_name.to_string(),
+                            file: disc.file.clone(),
+                            in_mdb: false,
+                        });
+                    }
+                }
+
+                let mdb_desi_own = desi_entries
+                    .iter()
+                    .filter(|d| d.in_mdb && d.project.eq_ignore_ascii_case(spec.project_name))
+                    .count();
+                let mdb_desi_ext = desi_entries
+                    .iter()
+                    .filter(|d| d.in_mdb && !d.project.eq_ignore_ascii_case(spec.project_name))
+                    .count();
+                let extra_desi_own = desi_entries.iter().filter(|d| !d.in_mdb).count();
+                let mdb_cata_cnt = cata_entries.iter().filter(|c| c.in_mdb).count();
+                let extra_cata_cnt = cata_entries.iter().filter(|c| !c.in_mdb).count();
+
+                println!(
+                    "\n[#161] ==================== {} ({} MDB /{}) ====================",
+                    spec.label, spec.project_name, spec.mdb_name
+                );
+                println!(
+                    "[#161] {}: DESI 库 MDB 内 {} 本（自有 {} + 外部项目 {}），主目录未入 MDB {} 本；CATA 库文件 MDB 相关 {} 本，主目录未入 MDB {} 本",
+                    spec.label,
+                    mdb_desi_own + mdb_desi_ext,
+                    mdb_desi_own,
+                    mdb_desi_ext,
+                    extra_desi_own,
+                    mdb_cata_cnt,
+                    extra_cata_cnt
+                );
+
+                // 1. 扫描所有可达 CATA 文件里的 PTPOS（及任何词流出现 CREF hash 的 P 点）。
+                let mut point_hits: Vec<CrefPointHit> = Vec::new();
+                let mut other_cref_mentions: Vec<String> = Vec::new();
+                let mut ptpos_total = 0usize;
+
+                for cata in &cata_entries {
+                    let Ok(mut engine) = ReadOnlyEngine::open(&cata.file) else {
+                        continue;
+                    };
+                    let set = Arc::new(DbSet::new(attlib.clone()));
+                    if set
+                        .add_db(DbFilePin {
+                            file: cata.file.clone(),
+                            template: cata_template.clone(),
+                            db_type: Some("CATA".into()),
+                            sesno: None,
+                        })
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let Ok(iter) = engine.scan_elements(ScanTier::Header) else {
+                        continue;
+                    };
+                    for scanned in iter.flatten() {
+                        let nh = scanned.noun_hash;
+                        if nh != ptpos_hash && nh != ptca_hash && nh != ptax_hash && nh != ptmi_hash
+                        {
+                            continue;
+                        }
+                        let el = set.element(scanned.refno);
+                        if nh == ptpos_hash {
+                            ptpos_total += 1;
+                            let pos_w = attr_words(&el, "PTCPOS");
+                            let dir_w = attr_words(&el, "PTCD");
+                            if let (Some(pos_attr), Some(dir_attr)) =
+                                (decode_of_cref(&pos_w, 1), decode_of_cref(&dir_w, 2))
+                            {
+                                let ptse_refno = el.owner().ok().flatten().map(|o| o.refno());
+                                let number = match el.attribute("NUMB").ok().flatten() {
+                                    Some(DescriptorValue::Word { raw, .. }) => Some(raw),
+                                    Some(DescriptorValue::Int(v)) => u32::try_from(v).ok(),
+                                    _ => None,
+                                };
+                                point_hits.push(CrefPointHit {
+                                    cata_file: cata.file.clone(),
+                                    cata_project: cata.project.clone(),
+                                    in_mdb: cata.in_mdb,
+                                    point_refno: scanned.refno,
+                                    ptse_refno,
+                                    number,
+                                    pos_attr,
+                                    dir_attr,
+                                });
+                                continue;
+                            }
+                        }
+                        // 兜底检查：任何 P 点属性词流里含 CREF 哈希但未命中双侧标准形式。
+                        for attr_name in ["PTCPOS", "PTCD", "PAXI", "PDIS", "PX", "PY", "PZ"] {
+                            let w = attr_words(&el, attr_name);
+                            if w.contains(&cref_hash) {
+                                other_cref_mentions.push(format!(
+                                    "{} {} {}.{attr_name}={w:?}",
+                                    cata.file.file_name().unwrap_or_default().to_string_lossy(),
+                                    el.element_type().unwrap_or_default(),
+                                    scanned.refno
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let mut hits_by_cata: BTreeMap<String, usize> = BTreeMap::new();
+                for hit in &point_hits {
+                    let fname = hit
+                        .cata_file
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    *hits_by_cata
+                        .entry(format!(
+                            "{fname}({},{})",
+                            hit.cata_project,
+                            if hit.in_mdb { "MDB" } else { "非MDB" }
+                        ))
+                        .or_default() += 1;
+                }
+                println!(
+                    "[#161] {}: 扫描 PTPOS 共 {} 只；命中 ATTRIB <HPOS|TPOS|HDIR|TDIR> OF CREF 共 {} 只（按库：{:?}）；其它含 CREF 的 P 点属性 {} 处 {:?}",
+                    spec.label,
+                    ptpos_total,
+                    point_hits.len(),
+                    hits_by_cata,
+                    other_cref_mentions.len(),
+                    other_cref_mentions
+                );
+
+                if point_hits.is_empty() {
+                    println!(
+                        "[#161] {}: 目录里没有任何 ATTRIB … OF CREF 的 P 点 → 设计件 0 只",
+                        spec.label
+                    );
+                    continue;
+                }
+
+                // 2. 从命中的 PTPOS ∪ PTSE 出发，在全部可达 CATA 文件里求反向引用闭包。
+                let mut cata_closure: BTreeSet<RefKey> = BTreeSet::new();
+                let mut frontier: VecDeque<RefNo> = VecDeque::new();
+                let mut target_ptses: BTreeSet<RefKey> = BTreeSet::new();
+                for hit in &point_hits {
+                    if cata_closure.insert(key(hit.point_refno)) {
+                        frontier.push_back(hit.point_refno);
+                    }
+                    if let Some(ptse) = hit.ptse_refno {
+                        target_ptses.insert(key(ptse));
+                        if cata_closure.insert(key(ptse)) {
+                            frontier.push_back(ptse);
+                        }
+                    }
+                }
+
+                // 预开所有 CATA 文件的引擎，取 PTRE / CATR / PRTREF 反向表（对完全无表的 CATA 文件用目录载体 noun 兜底）。
+                let mut open_catas: Vec<(PathBuf, ReadOnlyEngine, Vec<u32>, bool)> = Vec::new();
+                for cata in &cata_entries {
+                    if let Ok(engine) = ReadOnlyEngine::open(&cata.file) {
+                        let any_tables = !engine.tables().is_empty();
+                        let wanted: Vec<u32> = cata_chain_tables
+                            .iter()
+                            .filter(|(_, h)| engine.tables().iter().any(|t| t.name_hash == *h))
+                            .map(|(_, h)| *h)
+                            .collect();
+                        open_catas.push((cata.file.clone(), engine, wanted, any_tables));
+                    }
+                }
+                // 无反向表 CATA 库（如 ams7351）一次扫出目录载体元素（SCOM/SFIT/SPCO/GPART/TABITE）的反向边表。
+                let mut zero_table_rev: BTreeMap<RefKey, Vec<RefNo>> = BTreeMap::new();
+                for (cfile, engine, _, any_tables) in &mut open_catas {
+                    if *any_tables {
+                        continue;
+                    }
+                    let set = Arc::new(DbSet::new(attlib.clone()));
+                    if set
+                        .add_db(DbFilePin {
+                            file: cfile.clone(),
+                            template: cata_template.clone(),
+                            db_type: Some("CATA".into()),
+                            sesno: None,
+                        })
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if let Ok(iter) = engine.scan_elements(ScanTier::Header) {
+                        for scanned in iter.flatten() {
+                            if !cata_carrier_nouns.contains(&scanned.noun_hash) {
+                                continue;
+                            }
+                            let el = set.element(scanned.refno);
+                            for attr in ["PTRE", "CATR", "PRTREF"] {
+                                if let Some(dst) =
+                                    el.get_ref(attr).ok().flatten().filter(RefNo::is_valid)
+                                {
+                                    zero_table_rev
+                                        .entry(key(dst))
+                                        .or_default()
+                                        .push(scanned.refno);
+                                }
+                            }
+                        }
+                    }
+                }
+                while let Some(target) = frontier.pop_front() {
+                    for (_, engine, wanted, _) in &mut open_catas {
+                        for &hash in wanted.iter() {
+                            if let Ok(referrers) = engine.referrers_of(hash, target) {
+                                for r in referrers {
+                                    if r.is_valid() && cata_closure.insert(key(r)) {
+                                        frontier.push_back(r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(extra) = zero_table_rev.get(&key(target)) {
+                        for &r in extra {
+                            if cata_closure.insert(key(r)) {
+                                frontier.push_back(r);
+                            }
+                        }
+                    }
+                }
+                drop(open_catas);
+
+                // 3. 在全部 DESI 库文件里经 SPRE / CATR / PRTREF 反向表点查引用了 cata_closure 的设计元素。
+                // （这三个属性在 E3D 3.1 里均为 kind-16 带文件反向表的属性：只要库里有元素写过非空引用，表必在文件头。）
+                let closure_targets: Vec<RefNo> = cata_closure.iter().copied().map(unkey).collect();
+                // (desi_entry_idx, design_refno, tables_hit)
+                let mut raw_design_hits: Vec<(usize, RefNo, Vec<String>)> = Vec::new();
+
+                for (idx, desi) in desi_entries.iter().enumerate() {
+                    let Ok(mut engine) = ReadOnlyEngine::open(&desi.file) else {
+                        continue;
+                    };
+                    let present: Vec<(&str, u32)> = desi_chain_tables
+                        .iter()
+                        .copied()
+                        .filter(|(_, h)| engine.tables().iter().any(|t| t.name_hash == *h))
+                        .collect();
+                    if present.is_empty() {
+                        continue;
+                    }
+                    let mut by_member: BTreeMap<RefKey, BTreeSet<String>> = BTreeMap::new();
+                    for &target in &closure_targets {
+                        for &(tname, hash) in &present {
+                            if let Ok(found) = engine.referrers_of(hash, target) {
+                                for referrer in found {
+                                    if referrer.is_valid() {
+                                        by_member
+                                            .entry(key(referrer))
+                                            .or_default()
+                                            .insert(tname.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (rk, via) in by_member {
+                        raw_design_hits.push((idx, unkey(rk), via.into_iter().collect()));
+                    }
+                }
+
+                println!(
+                    "[#161] {}: 目录闭包 {} 个节点 → DESI 反向表粗命中 {} 个候选设计件",
+                    spec.label,
+                    cata_closure.len(),
+                    raw_design_hits.len()
+                );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+
+                // 4. 按设计库所属项目构造项目感知 DbSet（全部 DESI 挂载 + 同项目优先 CATA 解析），逐件核验：
+                //    (a) 它的目录 P 点集是否真落到 target_ptses（排除同库号异项目撞号）；
+                //    (b) 读它的 CREF 找到所接支管，核对回指（HREF / TREF）与支管长度（零长 vs 非零长）。
+                let build_project_set = |primary_desi: &DbEntry| -> Arc<DbSet> {
+                    let set = Arc::new(
+                        DbSet::with_resolver(
+                            attlib.clone(),
+                            Box::new(ProjectAwareCataResolver {
+                                preferred_project: primary_desi.project.clone(),
+                                by_project: cata_by_project.clone(),
+                                mdb_default: cata_mdb_default.clone(),
+                                cata_template: cata_template.clone(),
+                            }),
+                        )
+                        .with_element_cache_limit(200_000),
+                    );
+                    let _ = set.add_db(DbFilePin {
+                        file: primary_desi.file.clone(),
+                        template: desi_template.clone(),
+                        db_type: Some("DESI".into()),
+                        sesno: None,
+                    });
+                    for d in &desi_entries {
+                        if d.dbnum == primary_desi.dbnum || !d.in_mdb {
+                            continue;
+                        }
+                        let _ = set.add_db(DbFilePin {
+                            file: d.file.clone(),
+                            template: desi_template.clone(),
+                            db_type: Some("DESI".into()),
+                            sesno: None,
+                        });
+                    }
+                    set
+                };
+
+                let mut cached_sets: BTreeMap<usize, Arc<DbSet>> = BTreeMap::new();
+                let mut verified_mdb_own_zero = 0usize;
+                let mut verified_mdb_own_nonzero = 0usize;
+                let mut verified_mdb_ext_zero = 0usize;
+                let mut verified_mdb_ext_nonzero = 0usize;
+                let mut verified_non_mdb_zero = 0usize;
+                let mut verified_non_mdb_nonzero = 0usize;
+                let mut verified_no_cref = 0usize;
+                let mut shadowed_false_positives = 0usize;
+
+                for (idx, member_refno, via_tables) in &raw_design_hits {
+                    let desi = &desi_entries[*idx];
+                    let set = cached_sets
+                        .entry(*idx)
+                        .or_insert_with(|| build_project_set(desi))
+                        .clone();
+                    let member = set.element(*member_refno);
+                    let noun = member.element_type().unwrap_or_else(|_| "?".into());
+                    let name = member.stored_name().ok().flatten().unwrap_or_default();
+                    let ptset = match e3d_model::catalogue_point_set(&member) {
+                        Ok(ptset) => ptset,
+                        Err(err) => {
+                            println!(
+                                "[#161]   [读目录失败] {} dbnum={} ({}) {} {member_refno} {name:?}: {err}",
+                                spec.label,
+                                desi.dbnum,
+                                desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                                noun
+                            );
+                            continue;
+                        }
+                    };
+                    let Some(resolved_ptse) = ptset.point_set else {
+                        shadowed_false_positives += 1;
+                        println!(
+                            "[#161]   [同库号异项目撞号，非真命中] {} dbnum={} ({}, proj={}) {} {member_refno} {name:?} via={via_tables:?} → point_set=None",
+                            spec.label,
+                            desi.dbnum,
+                            desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                            desi.project,
+                            noun
+                        );
+                        continue;
+                    };
+                    if !target_ptses.contains(&key(resolved_ptse)) {
+                        shadowed_false_positives += 1;
+                        println!(
+                            "[#161]   [非 OF CREF 点集] {} dbnum={} ({}) {} {member_refno} → PTSE {resolved_ptse}",
+                            spec.label,
+                            desi.dbnum,
+                            desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                            noun
+                        );
+                        continue;
+                    }
+
+                    let matched_points: Vec<String> = point_hits
+                        .iter()
+                        .filter(|h| h.ptse_refno == Some(resolved_ptse))
+                        .map(|h| {
+                            let label = match h.number {
+                                Some(n) => format!("P{n}"),
+                                None => "P?".to_string(),
+                            };
+                            format!(
+                                "{label}(PTCPOS=ATTRIB {} OF CREF, PTCD=ATTRIB {} OF CREF)",
+                                h.pos_attr, h.dir_attr
+                            )
+                        })
+                        .collect();
+
+                    let root_desc = resolve_root_from_set(&set, &unit_types, *member_refno)
+                        .map(|r| format!("{} {}", r.noun, r.root.to_pdms_str()))
+                        .unwrap_or_else(|| "<无根>".into());
+                    let member_world = e3d_model::transform::world_matrix(&member)
+                        .ok()
+                        .map(|m| m.w_axis.truncate());
+
+                    let cref_target = member.get_ref("CREF").ok().flatten().filter(RefNo::is_valid);
+                    let scope_tag = if !desi.in_mdb {
+                        "主目录未入MDB"
+                    } else if desi.project.eq_ignore_ascii_case(spec.project_name) {
+                        "MDB自有库"
+                    } else {
+                        "MDB外部库"
+                    };
+
+                    if spec.label == "SLYK" && *member_refno == RefNo::new(23399, 832) {
+                        slyk_found_known_olet = true;
+                    }
+
+                    let Some(branch_refno) = cref_target else {
+                        verified_no_cref += 1;
+                        println!(
+                            "[#161]   [命中-无CREF] {} [{scope_tag}] dbnum={} ({}, proj={}) | {noun} {member_refno} {name:?} (root={root_desc}) | 点={matched_points:?} | CREF=未设",
+                            spec.label,
+                            desi.dbnum,
+                            desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                            desi.project,
+                        );
+                        continue;
+                    };
+
+                    let branch = set.element(branch_refno);
+                    if !branch.exists().unwrap_or(false) {
+                        verified_no_cref += 1;
+                        println!(
+                            "[#161]   [命中-CREF悬空] {} [{scope_tag}] dbnum={} ({}, proj={}) | {noun} {member_refno} {name:?} (root={root_desc}) | 点={matched_points:?} | CREF={branch_refno} (不存在)",
+                            spec.label,
+                            desi.dbnum,
+                            desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                            desi.project,
+                        );
+                        continue;
+                    }
+
+                    let branch_noun = branch.element_type().unwrap_or_else(|_| "?".into());
+                    let branch_name = branch.stored_name().ok().flatten().unwrap_or_default();
+                    let href = branch.get_ref("HREF").ok().flatten();
+                    let tref = branch.get_ref("TREF").ok().flatten();
+                    let backref_side = match (href == Some(*member_refno), tref == Some(*member_refno)) {
+                        (true, true) => "HREF+TREF均回指",
+                        (true, false) => "HREF回指",
+                        (false, true) => "TREF回指",
+                        (false, false) => "未回指",
+                    };
+
+                    let branch_mat = e3d_model::transform::world_matrix(&branch)
+                        .expect("branch world_matrix");
+                    let hpos_local = branch
+                        .get_position("HPOS")
+                        .ok()
+                        .flatten()
+                        .map(glam::DVec3::from_array);
+                    let tpos_local = branch
+                        .get_position("TPOS")
+                        .ok()
+                        .flatten()
+                        .map(glam::DVec3::from_array);
+                    let hpos_world = hpos_local.map(|p| branch_mat.transform_point3(p));
+                    let tpos_world = tpos_local.map(|p| branch_mat.transform_point3(p));
+                    let head_tail_dist = match (hpos_world, tpos_world) {
+                        (Some(h), Some(t)) => (t - h).length(),
+                        _ => f64::NAN,
+                    };
+                    let branch_members: Vec<e3d_io::db_element::DbElement> = branch
+                        .members()
+                        .map(|cursor| cursor.collect())
+                        .unwrap_or_default();
+                    let mut max_member_offset = 0.0_f64;
+                    for bm in &branch_members {
+                        if let (Some(hw), Ok(mw)) =
+                            (hpos_world, e3d_model::transform::world_matrix(bm))
+                        {
+                            let d = (mw.w_axis.truncate() - hw).length();
+                            if d > max_member_offset {
+                                max_member_offset = d;
+                            }
+                        }
+                    }
+                    let is_zero_len = head_tail_dist.is_finite()
+                        && head_tail_dist <= 1.0e-3
+                        && max_member_offset <= 1.0e-3;
+
+                    match (desi.in_mdb, desi.project.eq_ignore_ascii_case(spec.project_name), is_zero_len) {
+                        (true, true, true) => verified_mdb_own_zero += 1,
+                        (true, true, false) => verified_mdb_own_nonzero += 1,
+                        (true, false, true) => verified_mdb_ext_zero += 1,
+                        (true, false, false) => verified_mdb_ext_nonzero += 1,
+                        (false, _, true) => verified_non_mdb_zero += 1,
+                        (false, _, false) => verified_non_mdb_nonzero += 1,
+                    }
+
+                    println!(
+                        "[#161]   [命中] {} [{scope_tag}] dbnum={} ({}, proj={}) | {noun} {member_refno} {name:?} (root={root_desc}, world={member_world:?}) | 点={matched_points:?} | CREF -> {branch_noun} {branch_refno} (dbnum={}, cross_db={}) {branch_name:?} | {backref_side} (HREF={href:?}, TREF={tref:?}) | HPOS_W={hpos_world:?} TPOS_W={tpos_world:?} 头尾距离={head_tail_dist:.4}mm 支管成员数={} 最大成员偏移={max_member_offset:.4}mm => {}",
+                        spec.label,
+                        desi.dbnum,
+                        desi.file.file_name().unwrap_or_default().to_string_lossy(),
+                        desi.project,
+                        branch_refno.dbno(),
+                        branch_refno.dbno() != member_refno.dbno(),
+                        branch_members.len(),
+                        if is_zero_len { "零长" } else { "非零长" }
+                    );
+                }
+
+                println!(
+                    "[#161] ==== {} 汇总：MDB自有库(零长={}, 非零长={}) | MDB外部库(零长={}, 非零长={}) | 主目录未入MDB(零长={}, 非零长={}) | CREF空或悬空={} | 同库号异项目撞号排除={}",
+                    spec.label,
+                    verified_mdb_own_zero,
+                    verified_mdb_own_nonzero,
+                    verified_mdb_ext_zero,
+                    verified_mdb_ext_nonzero,
+                    verified_non_mdb_zero,
+                    verified_non_mdb_nonzero,
+                    verified_no_cref,
+                    shadowed_false_positives
+                );
+                let nonzero_total =
+                    verified_mdb_own_nonzero + verified_mdb_ext_nonzero + verified_non_mdb_nonzero;
+                assert_eq!(
+                    nonzero_total, 0,
+                    "{}: 发现 {nonzero_total} 只接非零长支管的 ATTRIB … OF CREF 设计件，需按 #161 补齐支管头尾正向级联",
+                    spec.label
+                );
+            }
+
+            if slyk_ran {
+                assert!(
+                    slyk_found_known_olet,
+                    "SLYK 已知样例 OLET 23399/832 必须被普查链路命中（未命中说明反查或目录解析断了）"
+                );
+            }
+        }
     }
 }
