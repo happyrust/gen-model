@@ -343,34 +343,54 @@ pub fn read_foreign_referrers(
     if sources.is_empty() {
         return out;
     }
-    for member in members
+    // 远端共享上一轮实测：逐成员开引擎 + 点查全串行是跨库级联的大头。按成员并行
+    // （rayon 保序 collect），各计数与表都可交换合并，结果与串行版一致。
+    use rayon::prelude::*;
+    let candidates: Vec<&SourceDb> = members
         .iter()
         .filter(|member| member.db_type.eq_ignore_ascii_case("DESI") && member.dbnum != own_dbnum)
-    {
-        let opened = match member.sesno {
-            Some(sesno) => ReadOnlyEngine::open_at(&member.file, sesno),
-            None => ReadOnlyEngine::open(&member.file),
-        };
-        let mut engine = match opened {
-            Ok(engine) => engine,
-            Err(error) => {
-                out.unreadable_members
-                    .insert(member.dbnum, format!("{error:#}"));
-                continue;
+        .collect();
+    let results: Vec<ForeignReferrers> = candidates
+        .into_par_iter()
+        .map(|member| {
+            let mut local = ForeignReferrers::default();
+            let opened = match member.sesno {
+                Some(sesno) => ReadOnlyEngine::open_at(&member.file, sesno),
+                None => ReadOnlyEngine::open(&member.file),
+            };
+            let mut engine = match opened {
+                Ok(engine) => engine,
+                Err(error) => {
+                    local
+                        .unreadable_members
+                        .insert(member.dbnum, format!("{error:#}"));
+                    return local;
+                }
+            };
+            let edges = read_referrer_edges(sources, &mut engine, owners);
+            if edges.tables_present.is_empty() {
+                return local;
             }
-        };
-        let edges = read_referrer_edges(sources, &mut engine, owners);
-        if edges.tables_present.is_empty() {
-            continue;
-        }
-        out.members_queried += 1;
-        out.queries += edges.queries;
-        out.query_failures += edges.query_failures;
-        for edge in edges.edges {
-            out.referrers
-                .entry(edge.referrer.dbno())
-                .or_default()
-                .insert((edge.referrer.word0, edge.referrer.word1));
+            local.members_queried += 1;
+            local.queries += edges.queries;
+            local.query_failures += edges.query_failures;
+            for edge in edges.edges {
+                local
+                    .referrers
+                    .entry(edge.referrer.dbno())
+                    .or_default()
+                    .insert((edge.referrer.word0, edge.referrer.word1));
+            }
+            local
+        })
+        .collect();
+    for local in results {
+        out.members_queried += local.members_queried;
+        out.queries += local.queries;
+        out.query_failures += local.query_failures;
+        out.unreadable_members.extend(local.unreadable_members);
+        for (dbnum, referrers) in local.referrers {
+            out.referrers.entry(dbnum).or_default().extend(referrers);
         }
     }
     out

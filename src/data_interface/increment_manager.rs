@@ -651,6 +651,45 @@ mod tests {
         assert!(dirs_under(&[], Path::new("/proj/AvevaMarineSample")).is_empty());
     }
 
+    /// `AIOS_WATCH_HOT_DIRS` 的命中口径：前缀自身与其下目录都算；分量边界不许
+    /// 把 `Aveva` 误配给 `AvevaMarineSample`；空前缀表 = 不收窄。
+    #[test]
+    fn hot_dirs_among_keeps_only_dirs_under_the_given_prefixes() {
+        let dirs = vec![
+            PathBuf::from("/share/AvevaMarineSample/ams000"),
+            PathBuf::from("/share/AvevaCatalogue/acp000"),
+            PathBuf::from("/share/AvevaPlantSample/aps000"),
+        ];
+        // 项目前缀：盖住它下面的库目录，别的项目落选。
+        assert_eq!(
+            hot_dirs_among(
+                &dirs,
+                &[PathBuf::from("/share/AvevaMarineSample")]
+            ),
+            vec![PathBuf::from("/share/AvevaMarineSample/ams000")]
+        );
+        // 目录本体当前缀：相等也算命中。
+        assert_eq!(
+            hot_dirs_among(&dirs, &[PathBuf::from("/share/AvevaCatalogue/acp000")]),
+            vec![PathBuf::from("/share/AvevaCatalogue/acp000")]
+        );
+        // 多前缀取并集；一个都不中 = 空（调用方据此退回全量并告警）。
+        assert_eq!(
+            hot_dirs_among(
+                &dirs,
+                &[
+                    PathBuf::from("/share/AvevaMarineSample/ams000"),
+                    PathBuf::from("/share/Nope")
+                ]
+            ),
+            vec![PathBuf::from("/share/AvevaMarineSample/ams000")]
+        );
+        assert!(hot_dirs_among(&dirs, &[PathBuf::from("/share/Nope")]).is_empty());
+        // 空前缀表不收窄；空目录表收窄也是空——两种「空」含义不同，调用方分开判。
+        assert_eq!(hot_dirs_among(&dirs, &[]), dirs);
+        assert!(hot_dirs_among(&[], &[PathBuf::from("/share")]).is_empty());
+    }
+
     #[test]
     fn unreadable_files_are_not_treated_as_e3d_databases() {
         assert!(try_parse_db_basic_info(Path::new("missing-e3d-db")).is_none());
@@ -3468,6 +3507,24 @@ fn dirs_under(watch_dirs: &[PathBuf], project_dir: &std::path::Path) -> Vec<Path
         .collect()
 }
 
+/// `poll_watch_dirs` 的纯函数版：`dirs` 里落在任一 `prefixes` 前缀下的那些。
+/// 前缀为空表 = 不收窄，原样返回。口径与 [`path_starts_with`] 一致（字面归一、
+/// Windows 大小写不敏感），不碰文件系统。
+fn hot_dirs_among(watch_dirs: &[PathBuf], prefixes: &[PathBuf]) -> Vec<PathBuf> {
+    if prefixes.is_empty() {
+        return watch_dirs.to_vec();
+    }
+    watch_dirs
+        .iter()
+        .filter(|dir| {
+            prefixes
+                .iter()
+                .any(|prefix| path_starts_with(dir, prefix))
+        })
+        .cloned()
+        .collect()
+}
+
 /// 头 60 字节读不到、或不是 dabacon 描述符页，都是 `None`（`DbBasicInfo::read` 的口径）。
 fn try_parse_db_basic_info(path: &std::path::Path) -> Option<DbBasicInfo> {
     DbBasicInfo::read(path)
@@ -3961,6 +4018,43 @@ impl AiosDBManager {
             }
         }
         dirs
+    }
+
+    /// PollWatcher 定时轮询实际挂载的监控面。
+    ///
+    /// `AIOS_WATCH_HOT_DIRS`（分号/逗号分隔的目录前缀，`path_starts_with` 口径）
+    /// 命中的监控目录；未配置 = 全部监控目录，行为与收窄特性引入前逐位相同。
+    ///
+    /// 收窄只影响「文件事件发现」这一路：PollWatcher 每轮要 stat 命中目录下的
+    /// 每一个文件，远端共享上一轮实测全量 ~8k 文件一轮 ~100s；命中面缩到单个
+    /// `*000` 库目录（~450 文件）后同一动作 ~7s。冷目录里的变化不丢——
+    /// `sweep_watch_dirs` 的 init / reconcile / scope-refresh 三条路扫的仍是
+    /// [`Self::watch_dirs`] 全量，最迟在 `AIOS_WATCH_RECONCILE_SECS` 一个对账
+    /// 周期被追回（入队按水位幂等，追的是真变化不是误报）。
+    ///
+    /// 前缀一个都没命中时退回全量并告警：收窄到零个目录等于事件路径全灭，
+    /// 比不收窄更糟，静默挂着的看门狗是最难发现的失效形态。
+    fn poll_watch_dirs(&self) -> Vec<PathBuf> {
+        let dirs = self.watch_dirs();
+        let prefixes: Vec<PathBuf> = std::env::var("AIOS_WATCH_HOT_DIRS")
+            .unwrap_or_default()
+            .split([';', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if prefixes.is_empty() {
+            return dirs;
+        }
+        let hot = hot_dirs_among(&dirs, &prefixes);
+        if hot.is_empty() && !dirs.is_empty() {
+            log::warn!(
+                "[watch] AIOS_WATCH_HOT_DIRS={:?} 没有命中任何监控目录，退回全量轮询: {dirs:?}",
+                std::env::var("AIOS_WATCH_HOT_DIRS").unwrap_or_default()
+            );
+            return dirs;
+        }
+        hot
     }
 
     /// 文件的归属项目：看它落在哪个监控目录下。
@@ -5992,7 +6086,9 @@ impl AiosDBManager {
         // 先复查已挂目录还在不在——这一段不碰搜索根：「挂上过」不等于「还在被监听」，
         // 中途掉线的目录不降级的话永远不会被这一轮回头看。失联目录恢复前必须先 unwatch
         // 再重挂——直接重挂会让 PollWatcher 把同一个目录列两遍，F6 立刻整库阻断。
-        let dirs = self.watch_dirs();
+        // 复查与补挂都只面对 PollWatcher 的监控面（AIOS_WATCH_HOT_DIRS 收窄后的那批），
+        // 冷目录本来就不该被挂上，算进 missing 只会让重挂轮每拍都白跑。
+        let dirs = self.poll_watch_dirs();
         let newly_lost = mounted.refresh_health(&dirs);
         if !newly_lost.is_empty() {
             log::warn!("监控目录失联，降级等待恢复: {newly_lost:?}");
@@ -6037,8 +6133,9 @@ impl AiosDBManager {
             println!("重挂轮发现新的监控目录: {discovered:?}");
         }
 
-        // 新发现的目录已并入 `self.watch_dirs()`，缺席判定要对合并后的清单重算。
-        let missing = mounted.missing(self.watch_dirs());
+        // 新发现的目录已并入 `self.watch_dirs()`，缺席判定要对合并后的清单重算；
+        // 但只对 PollWatcher 监控面判缺席——冷目录不该被补挂。
+        let missing = mounted.missing(self.poll_watch_dirs());
         if missing.is_empty() {
             return;
         }
@@ -6221,7 +6318,16 @@ impl AiosDBManager {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
         let mut mounted = MountState::new();
-        let watch_dirs = self.watch_dirs();
+        let watch_dirs = self.poll_watch_dirs();
+        let sweep_dirs = self.watch_dirs();
+        if watch_dirs.len() != sweep_dirs.len() {
+            println!(
+                "[watch] PollWatcher 监控面收窄到 {}/{} 个目录（AIOS_WATCH_HOT_DIRS）；\
+                 其余目录由 init/reconcile/scope-refresh 整面重扫兜底: {watch_dirs:?}",
+                watch_dirs.len(),
+                sweep_dirs.len()
+            );
+        }
         log::debug!("async_watch 监控目录: {watch_dirs:?}");
 
         // 单个目录不可达（共享盘掉线、路径写错）不再 panic 掉整个看门狗（T903）：

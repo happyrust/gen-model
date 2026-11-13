@@ -974,20 +974,30 @@ pub fn read_design_referrer_edges(
     if sources.is_empty() {
         return out;
     }
+    // 远端共享上一轮实测：逐库 open（读文件头 + 逐表抽样判反向表）与逐表点查全串行是
+    // 这一窗的大头。开库、点查都按库并行（rayon 保序 collect），合并顺序与串行版逐字一致。
+    use rayon::prelude::*;
+    let candidates: Vec<&SourceDb> = design_dbs
+        .iter()
+        .filter(|source| source.is_design())
+        .collect();
+    let opened: Vec<(u32, anyhow::Result<OpenDb>)> = candidates
+        .into_par_iter()
+        .map(|source| (source.dbnum, OpenDb::open(source)))
+        .collect();
     let mut open: Vec<OpenDb> = Vec::new();
-    for source in design_dbs.iter().filter(|source| source.is_design()) {
-        match OpenDb::open(source) {
+    for (dbnum, result) in opened {
+        match result {
             Ok(db) if db.tables.is_empty() => {}
             Ok(db) => {
                 out.tables_used.insert(
-                    source.dbnum,
+                    dbnum,
                     db.tables.iter().map(|(name, _)| name.clone()).collect(),
                 );
                 open.push(db);
             }
             Err(error) => {
-                out.unreadable_dbs
-                    .insert(source.dbnum, format!("{error:#}"));
+                out.unreadable_dbs.insert(dbnum, format!("{error:#}"));
             }
         }
     }
@@ -997,15 +1007,19 @@ pub fn read_design_referrer_edges(
         walk_target_read_tables(&mut open, sources, &mut out);
         return out;
     }
-    for db in &mut open {
-        let tables = db.tables.clone();
-        for target in sources {
-            for (name, hash) in &tables {
-                out.queries += 1;
-                match db.engine.referrers_of(*hash, *target) {
-                    Ok(referrers) => {
-                        out.edges
-                            .extend(
+    let outcomes: Vec<(Vec<DesignReferrerEdge>, usize, usize)> = open
+        .into_par_iter()
+        .map(|mut db| {
+            let tables = db.tables.clone();
+            let mut edges = Vec::new();
+            let mut queries = 0usize;
+            let mut query_failures = 0usize;
+            for target in sources {
+                for (name, hash) in &tables {
+                    queries += 1;
+                    match db.engine.referrers_of(*hash, *target) {
+                        Ok(referrers) => {
+                            edges.extend(
                                 referrers
                                     .into_iter()
                                     .filter(RefNo::is_valid)
@@ -1015,11 +1029,18 @@ pub fn read_design_referrer_edges(
                                         referrer,
                                     }),
                             )
+                        }
+                        Err(_) => query_failures += 1,
                     }
-                    Err(_) => out.query_failures += 1,
                 }
             }
-        }
+            (edges, queries, query_failures)
+        })
+        .collect();
+    for (edges, queries, query_failures) in outcomes {
+        out.queries += queries;
+        out.query_failures += query_failures;
+        out.edges.extend(edges);
     }
     out
 }

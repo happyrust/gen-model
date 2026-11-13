@@ -3739,25 +3739,35 @@ impl E3dModelService {
             None => set,
         };
         let set = Arc::new(set);
-        for pin in &self.pins {
-            // CATA identity belongs to the project-aware locator.  Preloading a
-            // watermark path here can shadow the resolver with a same-dbnum file
-            // from another project (for example APS7600 vs ZDJ7600).
-            if pin.db_type.eq_ignore_ascii_case("CATA") {
-                continue;
-            }
-            let sesno = if pin.dbnum == target_dbnum as i32 {
-                target_sesno
-            } else {
-                pin.sesno
-            };
-            set.add_db(DbFilePin {
-                file: pin.file.clone(),
-                template: template_file_for(self.schema.template_dir(), &pin.db_type)?,
-                db_type: Some(pin.db_type.clone()),
-                sesno,
-            })?;
-        }
+        // 先把 ~28 个成员 pin 解析成 `DbFilePin`（纯内存），再并发 `add_db`：
+        // `OpenDb::open` 的远端开库是大头且不碰共享态，`dbs` 写锁只罩住登记那一下。
+        // MDB 成员 dbnum 唯一，并发登记不存在「同号后写覆盖」的顺序问题。
+        // CATA identity belongs to the project-aware locator.  Preloading a
+        // watermark path here can shadow the resolver with a same-dbnum file
+        // from another project (for example APS7600 vs ZDJ7600).
+        let pins_to_open = self
+            .pins
+            .iter()
+            .filter(|pin| !pin.db_type.eq_ignore_ascii_case("CATA"))
+            .map(|pin| {
+                let sesno = if pin.dbnum == target_dbnum as i32 {
+                    target_sesno
+                } else {
+                    pin.sesno
+                };
+                anyhow::Ok(DbFilePin {
+                    file: pin.file.clone(),
+                    template: template_file_for(self.schema.template_dir(), &pin.db_type)?,
+                    db_type: Some(pin.db_type.clone()),
+                    sesno,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        use rayon::prelude::*;
+        pins_to_open
+            .into_par_iter()
+            .map(|pin| set.add_db(pin))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(set)
     }
 }
@@ -3913,9 +3923,12 @@ pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataL
 /// （`session` 即 `source_session`：钉住的照钉、没钉的问文件最新）；问不出的交 `None`，不中断。
 fn design_members(
     pins: &[DbPin],
-    mut session: impl FnMut(&DbPin) -> anyhow::Result<u32>,
+    session: impl Fn(&DbPin) -> anyhow::Result<u32> + Sync,
 ) -> Vec<(u32, PathBuf, Option<u32>)> {
-    pins.iter()
+    // 会话解析要逐成员开库文件问最新会话：远端共享上一轮实测 ~2s/成员串行。
+    // `par_iter` 的 collect 保持 pins 顺序，产物与串行版逐字一致。
+    use rayon::prelude::*;
+    pins.par_iter()
         .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
         .map(|pin| (pin.dbnum as u32, pin.file.clone(), session(pin).ok()))
         .collect()
@@ -11138,15 +11151,22 @@ mod tests {
             pin(7351, "CATA", None),
             pin(8002, "DESI", None),
         ];
-        let mut asked = Vec::new();
+        let mut asked = std::sync::Mutex::new(Vec::new());
         let members = design_members(&pins, |pin| {
-            asked.push(pin.dbnum);
+            asked
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(pin.dbnum);
             match (pin.sesno, pin.dbnum) {
                 (Some(sesno), _) => Ok(sesno),
                 (None, 8000) => Ok(42),
                 (None, dbnum) => anyhow::bail!("dbnum {dbnum} 的库文件被占用"),
             }
         });
+        let mut asked = asked
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        asked.sort_unstable();
         assert_eq!(asked, vec![8000, 8001, 8002], "只问设计成员");
         assert_eq!(
             members,

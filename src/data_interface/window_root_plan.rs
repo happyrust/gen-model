@@ -665,6 +665,10 @@ pub(crate) struct WindowSourceTimings {
     pub changes: Duration,
     pub rigid: Duration,
     pub cascades: Duration,
+    /// 三条级联各自的墙钟（它们在 scoped 线程里并行，`cascades` 只是最慢那条的下界）。
+    pub cascade_structural: Duration,
+    pub cascade_cable: Duration,
+    pub cascade_design_ref: Duration,
     pub removed: Duration,
     pub cache: Duration,
     /// `roots_S` 怎么来的（`cached` / `full`）、`roots_T` 怎么来的（`incremental` / `incremental+parity` /
@@ -680,7 +684,7 @@ impl WindowSourceTimings {
     pub(crate) fn line(&self) -> String {
         format!(
             "ledger={}ms closure={}ms xgeom={}ms index_S={}ms roots_S={}ms[{}] index_T={}ms roots_T={}ms[{} parity={}ms] \
-             nested={}ms changes={}ms rigid={}ms cascades={}ms removed={}ms cache={}ms",
+             nested={}ms changes={}ms rigid={}ms cascades={}ms(s={} c={} d={}) removed={}ms cache={}ms",
             self.ledger.as_millis(),
             self.closure.as_millis(),
             self.xgeometry.as_millis(),
@@ -695,6 +699,9 @@ impl WindowSourceTimings {
             self.changes.as_millis(),
             self.rigid.as_millis(),
             self.cascades.as_millis(),
+            self.cascade_structural.as_millis(),
+            self.cascade_cable.as_millis(),
+            self.cascade_design_ref.as_millis(),
             self.removed.as_millis(),
             self.cache.as_millis(),
         )
@@ -1685,55 +1692,98 @@ impl WindowRootSources {
             RigidMotionSources::default()
         };
         timings.rigid = lap(&mut tick);
-        // C2：结构连接正向级联。开关关 = 一次文件读都不发生（`off()`），touched 一字不改。
-        let structural_connection = if crate::options::model_structural_connection_cascade() {
-            crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
-                &plan,
-                base,
-                target,
-                &index.owners,
-                &roots_t,
-            )
-        } else {
-            crate::data_interface::structural_connection::StructuralConnectionCascade::off()
-        };
-        // C8：电缆端点 / 路由反向级联。开关关 = 不开引擎、不查表（`off()`），touched 一字不改。
-        // 本库的引用者并进 touched；MDB 其余设计成员表里的引用者（跨库版，GitHub #35）只记下来，
-        // 随计划交给跨库交接（`cross_db_handoff`）。
-        let cable_endpoint = if crate::options::model_cable_endpoint_cascade() {
-            crate::data_interface::cable_endpoint::CableEndpointCascade::collect(
-                &plan,
-                file,
-                target_sesno,
-                &index.owners,
-                &roots_t,
-            )
-            .with_foreign_members(
-                &plan,
-                &index.owners,
-                &roots_t,
-                index.dbnum,
-                design_dbs,
-            )
-        } else {
-            crate::data_interface::cable_endpoint::CableEndpointCascade::off()
-        };
-        // P4：设计侧通用一跳。开关关 = 一个成员库都不开（`off()`），touched 一字不改。
-        let design_reference = if crate::options::model_design_reference_cascade() {
-            crate::data_interface::reverse_reference::DesignReferenceCascade::collect(
-                &plan,
-                index.dbnum,
-                file,
-                target_sesno,
-                design_dbs,
-                &index.owners,
-                &roots_t,
-                base,
-                target,
-            )
-        } else {
-            crate::data_interface::reverse_reference::DesignReferenceCascade::off()
-        };
+        // C2/C8/P4 三条级联互不依赖、只读同一份窗口现场：串行时每条都按 design_dbs
+        // 逐库开文件反查，远端共享上一轮实测合计 ~27s。scoped 线程并行跑；开关关的
+        // 照旧 `off()`，一次文件读都不发生，touched 一字不改。
+        let structural_on = crate::options::model_structural_connection_cascade();
+        let cable_on = crate::options::model_cable_endpoint_cascade();
+        let design_on = crate::options::model_design_reference_cascade();
+        let ((structural_connection, structural_ms), (cable_endpoint, cable_ms), (design_reference, design_ref_ms)) =
+            std::thread::scope(|scope| {
+                let structural = structural_on.then(|| {
+                    scope.spawn(|| {
+                        let started = Instant::now();
+                        let cascade =
+                            crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
+                                &plan,
+                                base,
+                                target,
+                                &index.owners,
+                                &roots_t,
+                            );
+                        (cascade, started.elapsed())
+                    })
+                });
+                let cable = cable_on.then(|| {
+                    scope.spawn(|| {
+                        let started = Instant::now();
+                        let cascade =
+                            crate::data_interface::cable_endpoint::CableEndpointCascade::collect(
+                                &plan,
+                                file,
+                                target_sesno,
+                                &index.owners,
+                                &roots_t,
+                            )
+                            .with_foreign_members(
+                                &plan,
+                                &index.owners,
+                                &roots_t,
+                                index.dbnum,
+                                design_dbs,
+                            );
+                        (cascade, started.elapsed())
+                    })
+                });
+                let design = design_on.then(|| {
+                    scope.spawn(|| {
+                        let started = Instant::now();
+                        let cascade =
+                            crate::data_interface::reverse_reference::DesignReferenceCascade::collect(
+                                &plan,
+                                index.dbnum,
+                                file,
+                                target_sesno,
+                                design_dbs,
+                                &index.owners,
+                                &roots_t,
+                                base,
+                                target,
+                            );
+                        (cascade, started.elapsed())
+                    })
+                });
+                // 开关关 = 对应 handle 为 None，直接 off()，不占线程。
+                let (structural_connection, structural_ms) = match structural {
+                    Some(handle) => handle.join().expect("结构连接级联线程 panic"),
+                    None => (
+                        crate::data_interface::structural_connection::StructuralConnectionCascade::off(),
+                        Duration::ZERO,
+                    ),
+                };
+                let (cable_endpoint, cable_ms) = match cable {
+                    Some(handle) => handle.join().expect("电缆端点级联线程 panic"),
+                    None => (
+                        crate::data_interface::cable_endpoint::CableEndpointCascade::off(),
+                        Duration::ZERO,
+                    ),
+                };
+                let (design_reference, design_ref_ms) = match design {
+                    Some(handle) => handle.join().expect("设计引用级联线程 panic"),
+                    None => (
+                        crate::data_interface::reverse_reference::DesignReferenceCascade::off(),
+                        Duration::ZERO,
+                    ),
+                };
+                (
+                    (structural_connection, structural_ms),
+                    (cable_endpoint, cable_ms),
+                    (design_reference, design_ref_ms),
+                )
+            });
+        timings.cascade_structural = structural_ms;
+        timings.cascade_cable = cable_ms;
+        timings.cascade_design_ref = design_ref_ms;
         timings.cascades = lap(&mut tick);
         // 覆盖账（计划 D3）：被删单元的 S 端属主链在这里取——两端 `DbSet` 都在手，之后只剩纯比对。
         let removed_units = collect_removed_units(&plan, base);
@@ -2259,8 +2309,18 @@ pub(crate) async fn build_model_update_plan_from_window(
     let planned = tokio::task::spawn_blocking(move || {
         let mut tick = Instant::now();
         let file = service.source_file(dbnum)?.to_path_buf();
-        let base = service.build_set(dbnum, Some(base_sesno))?;
-        let target = service.build_set(dbnum, Some(target_sesno))?;
+        // 两端 `DbSet` 互不依赖：各自要把 MDB 全部 pin 逐个远端开库，串行 ~23s。
+        // scoped 双线程并行，产物与串行一致。
+        let (base, target) = std::thread::scope(|scope| {
+            let base_handle = scope.spawn(|| service.build_set(dbnum, Some(base_sesno)));
+            let target_handle = scope.spawn(|| service.build_set(dbnum, Some(target_sesno)));
+            (
+                base_handle.join().expect("base DbSet 构建线程 panic"),
+                target_handle.join().expect("target DbSet 构建线程 panic"),
+            )
+        });
+        let base = base?;
+        let target = target?;
         let sets_ms = lap(&mut tick);
         // P4 逐库并集的输入：一张反向表只答它自己那个库的引用者，跨库引用者只有逐个开
         // MDB 的设计成员才找得到。C8 的跨库版（电缆端点，GitHub #35）用同一份名单。两个开关都关着时
