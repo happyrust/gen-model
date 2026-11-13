@@ -9,6 +9,10 @@
 pub mod events;
 pub(crate) mod handlers;
 mod rvm_check;
+/// 一次取一批网格（`POST /api/v1/meshes/batch`，spec §4.11.4）：一个键一帧的二进制流。
+pub(crate) mod mesh_batch;
+/// 节点模型状态与生成预检（`GET /api/v1/node/model-status`，spec §4.5.3，ADR-099）：只读、不落库。
+pub(crate) mod node_model_status;
 /// 显示用粗网格回填（ADR-096）：`/api/v1/mesh-lod1/backfill`。
 mod mesh_lod1;
 /// 分组写侧（GPWL / GPSET / GPITEM）：`/api/v1/group/write`。
@@ -668,6 +672,12 @@ async fn serve_with_ready(
             "/api/v1/node/versions/resolve",
             get(handlers::node_versions_resolve),
         )
+        // 节点模型状态与生成预检（spec §4.5.3，ADR-099）：生成过没有、是不是最新、要生成多少。按需算的派生量——
+        // 只读 GET，不建表、不写任何东西，后端没有任何判据读它的输出。
+        .route(
+            "/api/v1/node/model-status",
+            get(node_model_status::node_model_status),
+        )
         // 构件属性时点查询（Requirement 6.13）：与 `model/history/query tool=attributes` 同一个
         // 渲染器，但不经快照回执。
         .route(
@@ -736,6 +746,9 @@ async fn serve_with_ready(
         // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
         // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
         .route("/api/v1/meshes/{file}", get(handlers::mesh_glb))
+        // 一次取一批网格（spec §4.11.4）：请求带一组键，响应是一个键一帧的二进制流。静态段 `batch`
+        // 压过上面的 `{file}`；单个路由照旧（`batch` 不带后缀，本来就不是合法的单个网格路径）。
+        .route("/api/v1/meshes/batch", post(mesh_batch::meshes_batch))
         // 交付删除记录（`datacenter_delete`，plant-ui #1）的对外口：只读分页、每行附 `published`，
         // 不带 `instance_code`、不删行（spec §4.14；鉴权同本组其余 `/api/v1` 路由）。
         .route(
@@ -1293,6 +1306,30 @@ mod tests {
         }
     }
 
+    /// 节点模型状态是按需算的派生量（ADR-099）：只此一条、只读 GET——没有写它的路由，库里也没有给它的表。
+    #[test]
+    fn node_model_status_is_a_single_read_only_get() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains(
+                "\"/api/v1/node/model-status\",\n            get(node_model_status::node_model_status),"
+            ),
+            "node model status must be a plain GET: {serve}"
+        );
+        assert_eq!(
+            serve.matches("/api/v1/node/model-status").count(),
+            1,
+            "exactly one node model status route"
+        );
+    }
+
     /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。
     #[test]
     fn residue_preview_route_has_no_delete_method() {
@@ -1337,6 +1374,27 @@ mod tests {
             serve.contains(".route(\"/api/v1/meshes/{file}\", get(handlers::mesh_glb))"),
             "missing mesh GLB GET route: {serve}"
         );
+    }
+
+    /// 打包取网格是单个路由旁边的一条 POST（spec §4.11.4）：单个路由一个字不动，
+    /// 旧后端没有这一条时同一路径落到上面的 GET 上回 405，前端据此退回逐个取。
+    #[test]
+    fn mesh_batch_is_a_post_route_beside_the_single_mesh_get() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let single = serve
+            .find(".route(\"/api/v1/meshes/{file}\", get(handlers::mesh_glb))")
+            .expect("单个网格的 GET 路由必须还在");
+        let batch = serve
+            .find(".route(\"/api/v1/meshes/batch\", post(mesh_batch::meshes_batch))")
+            .expect("missing mesh batch POST route");
+        assert!(single < batch, "打包路由挂在单个路由之后: {serve}");
     }
 
     #[test]
