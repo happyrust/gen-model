@@ -17,6 +17,15 @@
 - **顺带量的**（给 #34 的决策材料，手动）：`live_measure_what_the_receipt_only_bucket_does_with_all_three_cascades_on`——三条级联都开时 D10 点名多少根只推回执、点名的根两端整根各生成一次有没有判错的。
 - **新发现、没修**（手动普查 `live_census_units_whose_cutters_land_on_another_unit` / `live_measure_host_walls_left_on_old_holes_on_natural_windows`）：墙向自己名下的套管 / 开孔件收刀（`WALL` ← 带 `DESP` 的 `FIXING`、`GWALL` ← `SBFI`），这些件自己成单元，只改它时墙不被点名——ams1112 取样 120 对里 120 对如此，墙建模时都确实扣过负体；这本库的真实历史（68 窗）里没有一窗单独改过套管。另开票。
 - **没动**：`SCOJ` / `PCOJ` / `SUBJ`；跨库（只在回执里点名，仍只有 C2 管）；梁不认领的关节（语料 0 只）；路由节点、详图式扶手立柱「从画变成不画」同样没人擦。没有上真机。
+
+### 人工执行是通用的「再试一次」：数据已是最新的库，`update/execute` 也清模型侧的失败账并重排模型补算
+
+- **为什么**：`POST /api/v1/update/execute` 只在「有窗口可跑」那条路上清失败账（`manual_update` 里 `reset_batch_failure` 那一句），「已是最新」在它之前就早退了。可模型侧停下来的库——失败的根全部判死（`model_only`）、整库重排到次数上限（`whole_library_retry_limit`）——数据恰恰多半已经追平：人点了执行，回执说「已是最新」，库还停着，解除只能靠 `POST /api/v1/dbnums/{dbnum}/model/rebuild`、保存新会话或重启。已发的 #72 评论里那句「保存新会话或人工执行即恢复」对这种库不成立。用户定：改，人工执行就是通用的「再试一次」。
+- **改**：`enqueue_manual_update_with` 在「已是最新」的早退里先过 `manual_update::release_model_retry`——清失败账上这个库的那一页连同整库重排的次数（`batch_worker::release_batch_failure`，带回执的 `reset_batch_failure`），清生成根账本上还没过完的退避（`model_root_ledger::clear_backoff`：只清「等到什么时候」，连败的两个数不动，再败接着上一档翻倍、同错连败照样数到判死线）。清的只是重试资格：不碰数据、不碰模型，已放弃的根不动，没被勾选的库不清，没有这种账的库什么都不发生。`update_execute` 处理器在扫描入队之后调 `manual_update::requeue_released_model_catch_up`：只对放行的这几个库当场跑一次稳态补偿（`startup_reconcile::reconcile_model_catch_up_for(Some(名单))`，与周期对账那一拍同一枚水位判据、同一个入队形状，不另写入队路），把「排上了没有、没排是为什么」写回回执。稳态补偿的判据拆出带原因的 `steady_catch_up_verdict`（`steady_catch_up_plan` 是它的 `.ok()`，判据仍只有一份）。
+- **回执与文案**：回执多一格 `model_retry_released[]`（`{dbnum, cause, streak, parked, whole_library_failed_runs, backoff_cleared_roots}`），`warnings` 里每个放行的库一句（清了什么；模型补算已重新排队 task … / 这次没有另排：原因）。`/health.batch_failures.<dbnum>.unblock`、失败日志 `batch_park.unblock`、到上限停的那句 `reason` 里，模型侧两种原因的人工那一条从「整库重排」改成「`POST /api/v1/update/execute`（显式重试：清账、清失败根的退避，模型补算立即重排，从头再数）」，整库重排作为「从头重算全库」的那条路仍点名。规格 `docs/specs/web-service-api.md` §4.3 / §4.8.1 / §4.8.2、ADR-090 D1 的解除一段、`CONTEXT.md`「退避期」「稳态补偿」同步。
+- **取舍**：① 清账后整库重排的次数从头数（至多再自动重排 `model_whole_library_retry_limit` 次），与「保存新会话」「重启」两条路同一口径，没有另造「只放一次」的计数；② 已放弃的根不复活——账上停着的库它们还落在补算窗口里，下一条任务照样重算；没停的库不因为人点一次执行就翻回「还在赶」；③ 只重排放行的库，别的库照旧等周期对账，没有把「人工执行」扩成「全范围模型补算」；④ 不在监听范围 / 不在当前 MDB 的库稳态补偿本来就不管，账照清，回执如实说「这次没有排模型补算」并点名整库重排。
+- **验证**：新增单测 `batch_worker::…::releasing_a_library_clears_both_columns_and_says_what_was_there`、`model_root_ledger::…::clearing_the_backoff_lets_failed_roots_run_now_without_forgetting_their_streaks`、`manual_update::…::a_manual_execute_on_an_up_to_date_library_releases_its_model_side_retry`、`…::the_release_notice_says_what_was_cleared_and_whether_the_catch_up_was_requeued`，`startup_reconcile` 的入队真值表补「不排时是哪一格挡的」；源码钉 `handlers::…::explicit_execute_requeues_the_model_catch_up_it_released`（先扫描入队再重排；放行在「已是最新」的早退里）。原先钉着「模型侧的解除办法里不许出现 `update/execute`」的两条断言改成「必须同时点名人工执行与整库重排」。没有上真机。
+
 ## 2026-11-11
 
 ### 清几何不再删别的范围还挂着的共用几何行（GitHub #142，查 #76 时查出）

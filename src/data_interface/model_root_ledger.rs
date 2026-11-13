@@ -405,6 +405,26 @@ pub fn deferral(
     })
 }
 
+/// 人工执行是显式的重试指令（`manual_update::release_model_retry`，2026-11-12）：这个库还在赶的根里退避期没过的
+/// 那些这就可以重算。只清「等到什么时候」——连败的两个数原样留着：再败，退避接着上一档翻倍，同错连败照样数到判死线
+/// （[`DEAD_ROOT_STREAK`]）。已放弃的根不动：它们本来就不退避，落在窗口里的下一条任务照样重算
+/// （`batch_worker::data_failure_booking`）。返回清了几根。
+pub(crate) fn clear_backoff(dbnum: u32) -> usize {
+    let now = Instant::now();
+    let mut ledger = write();
+    let Some(roots) = ledger.roots.get_mut(&dbnum) else {
+        return 0;
+    };
+    let mut cleared = 0;
+    for entry in roots.values_mut() {
+        if entry.backing_off(now) {
+            entry.retry_at = None;
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
 /// `/health.model_root_backoff`：`null` = 没有根在退避；否则 `backing_off` 是总数，`samples` 点名
 /// 最快到期的几根（库号、根、还剩几秒、连败几次、上次的错）。
 pub fn backoff_snapshot() -> serde_json::Value {
@@ -734,6 +754,68 @@ mod tests {
         assert_eq!(dead.retry_at, None, "判死的根不在赶，也就不退避");
         assert!(deferral(dbnum, r(3), 26, Instant::now()).is_none());
         forget_dbnum(dbnum);
+    }
+
+    /// 人工执行清退避（2026-11-12）：还在退避的根这就可以重算，连败的两个数不动——再败接着上一档翻倍、
+    /// 同错连败照样数到判死线；已放弃的根、已追平的根、别的库都不碰。
+    #[test]
+    fn clearing_the_backoff_lets_failed_roots_run_now_without_forgetting_their_streaks() {
+        let dbnum = 990_008;
+        let other = 990_009;
+        forget_dbnum(dbnum);
+        forget_dbnum(other);
+        assert_eq!(clear_backoff(dbnum), 0, "账本上没有这个库：没有可清的");
+
+        record_failed(dbnum, r(1), "BRAN", 26, "boom");
+        record_failed(dbnum, r(1), "BRAN", 26, "boom");
+        record_transient_failure(dbnum, r(2), "EQUI", 26, "write-behind exhausted");
+        record_generated(dbnum, r(3), "EQUI", 26);
+        for _ in 0..DEAD_ROOT_STREAK {
+            record_failed(dbnum, r(4), "BRAN", 26, "dead");
+        }
+        record_failed(other, r(1), "BRAN", 26, "boom");
+        let before = entry(dbnum, r(1)).expect("entry");
+        assert_eq!((before.failure_streak, before.consecutive_failures), (2, 2));
+        assert!(deferral(dbnum, r(1), 26, Instant::now()).is_some());
+        assert!(deferral(dbnum, r(2), 26, Instant::now()).is_some());
+        let dead_before = entry(dbnum, r(4)).expect("dead");
+
+        assert_eq!(clear_backoff(dbnum), 2, "还在赶、退避期没过的两根");
+        assert!(deferral(dbnum, r(1), 26, Instant::now()).is_none());
+        assert!(deferral(dbnum, r(2), 26, Instant::now()).is_none());
+        let after = entry(dbnum, r(1)).expect("entry");
+        assert!(after.is_chasing(), "还在赶：清的只是等多久，不是失败本身");
+        assert_eq!(
+            (after.failure_streak, after.consecutive_failures),
+            (2, 2),
+            "连败的两个数原样留着"
+        );
+        assert_eq!(after.retry_at, None);
+        assert_eq!(
+            entry(dbnum, r(4)).as_ref(),
+            Some(&dead_before),
+            "已放弃的根不动"
+        );
+        assert!(dead_before.is_refused());
+        assert!(entry(dbnum, r(3)).unwrap().is_settled());
+        assert!(
+            deferral(other, r(1), 26, Instant::now()).is_some(),
+            "别的库不碰"
+        );
+        assert_eq!(clear_backoff(dbnum), 0, "清过了，再清没有");
+
+        // 再败一次：第 3 次连败，退避接着翻到 120 s；同错连败数到 3，判死线照样在前面等着。
+        record_failed(dbnum, r(1), "BRAN", 26, "boom");
+        let third = deferral(dbnum, r(1), 26, Instant::now()).expect("再败照样退避");
+        assert_eq!(third.consecutive_failures, 3);
+        assert!(
+            third.remaining > Duration::from_secs(115),
+            "{:?}",
+            third.remaining
+        );
+        assert_eq!(entry(dbnum, r(1)).unwrap().failure_streak, 3);
+        forget_dbnum(dbnum);
+        forget_dbnum(other);
     }
 
     #[test]

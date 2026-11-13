@@ -308,6 +308,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   "blocked": [{ "dbnum": 8004, "reason": "库类型变更（登记 DESI → 现场 SYST），已阻断" }],
   "shadowed": [],
   "up_to_date": 2,
+  "model_retry_released": [],
   "unselected": [],
   "warnings": ["dbnum=8003: 检测到文件回退（file_latest_sesno=812 < applied_sesno=1005），已按整库重建入队：worker 执行时将清空该库数据并按首次导入重新解析当前文件"]
 }
@@ -316,6 +317,27 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - 语义：手动触发**不插队**（ADR-011 §6）——对已在队里的库只是并入会话（`merged`），
   它剩下的唯一新意义是「别等下一个 30s 轮询」。阻断与排除的库压根不入队（`blocked`）。
   `sync_live=true` 时同样可用（422 已退役）。
+- **人工执行是通用的「再试一次」（2026-11-12，用户定）**：数据已是最新的库（算在 `up_to_date` 里）若模型侧欠着重试——
+  停在失败账上（§4.8.1，多半是 `model_only` / `whole_library_retry_limit`）、整库重排的次数在数、或有失败的根还在退避期——
+  本次执行把这三样清掉，并当场按稳态补偿的同一判据把它的模型补算重新排队，不等下一拍周期对账（默认 300 s）。
+  清的只是**重试资格**：不碰数据、不碰模型，已放弃（判死）的根不动，没被勾选的库（`unselected`）不清。
+  此前「已是最新」在清账之前就早退，模型侧停下来的库人工执行解不开，只能整库重排、保存新会话或重启。
+  - 回执 `model_retry_released[]` 逐库列出清了什么：`{ dbnum, cause, streak, parked, whole_library_failed_runs, backoff_cleared_roots }`
+    ——`cause` 是清掉的失败账的原因（`data_batch` / `model_only` / `whole_library_retry_limit`；`null` = 这个库没停，清的只是次数或退避），
+    `streak` / `parked` 是清账前 `/health.batch_failures.<dbnum>` 的那两格，`whole_library_failed_runs` 是清账前
+    `/health.whole_library_retries.<dbnum>.failed_runs`，`backoff_cleared_roots` 是清掉退避、这就可以重算的失败根数（连败数不动：
+    再败，退避接着上一档翻倍，同错连败照样数到判死线）。没有这种库时为 `[]`，行为与此前完全一致。
+  - `warnings` 里每个放行的库一句，说清模型补算排上了没有：「模型补算已重新排队（task …：会话 M → N）」（模型水位从没盖过的库是
+    「整库重排到会话 N」），或「这次没有另排模型补算：<原因>」——模型水位已追平、队列里已经有这个库的任务（最常见：它的任务
+    正在排 / 在跑）、不在监听范围内、不在当前 MDB 的 DESI 成员里、取不到文件最新会话等；没另排时同一句里指到
+    `/api/v1/tasks` 与 `/api/v1/health`，并点名「要从头重算全库」的那条路 `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+  - 清的不是病因：原因没修好，它会照原样再停一次。整库重排到上限的库清账后次数从头数，即至多再自动重排
+    `model_whole_library_retry_limit` 次（缺省 3）。
+  ```json
+  "model_retry_released": [{ "dbnum": 7997, "cause": "whole_library_retry_limit", "streak": 1, "parked": true,
+                             "whole_library_failed_runs": 3, "backoff_cleared_roots": 4 }],
+  "warnings": ["dbnum=7997: 数据已是最新；人工执行是显式重试，已清：失败账（原因 whole_library_retry_limit，同右端连败 1 次，自动重跑已停）、整库重排连败 3 次的计数、4 根失败根的退避。模型补算已重新排队（task db-20261112-101500-000041：模型水位从没盖过，整库重排到会话 1139）。清的是重试资格不是病因——原因没修好，它会照原样再停一次"]
+  ```
 - 回退默认整库重建（ADR-021，2026-08-13，取代 2026-08-12 的 watermark_realign 档位）：
   判定为**回退**的库不进 `blocked`——按首次导入形状（窗口 `1..file_latest`）入队并经
   `warnings` 报告（样例见上）。入队本身**不删任何数据**；worker 出队后在冻结点复核，
@@ -1446,9 +1468,12 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
     就停下等人。没到上限时的次数在 `/health.whole_library_retries`（下）。
   - 三种谁先到谁算。缺省上限 3 小于判死线 5，所以从没盖过水位的库上先到的是第三种；盖过水位的库重试只重算欠账的根，
     不数第三种。
-- 解除按原因给（`unblock`）：`data_batch` 是上面那三条；后两种的库数据多半已经追平，`update/execute` 对它回「已是最新」、
-  不入队也不清账，人工那一条是 `POST /api/v1/dbnums/{dbnum}/model/rebuild`（它排的任务不过 park 那道闸；成了账就清，不成仍停着），
-  另两条仍是新会话与重启。
+- 解除按原因给（`unblock`）。三种原因现在是同样三条路——新会话、人工执行、重启——差别只在人工那一条的措辞：
+  `data_batch` 的库还有窗口可跑，`update/execute` 清账并重跑窗口；后两种的库数据多半已经追平，`update/execute` 在「已是最新」
+  那里同样清账、清失败根的退避，并当场重排模型补算（**2026-11-12 起**，回执 `model_retry_released`，§4.3；此前它在清账之前
+  早退，这两种原因的人工那一条只有整库重排），措辞是「修好原因后 POST /api/v1/update/execute（显式重试：清账、清失败根的退避，
+  模型补算立即重排，从头再数；不成仍会停下。要把全库从头重算一遍用 POST /api/v1/dbnums/{dbnum}/model/rebuild）」。
+  `model/rebuild` 仍可用：它从头重算全库，排的任务不过 park 那道闸；成了账就清，不成仍停着。
 - 账为空时整格为 `null`；否则按 dbnum（字符串键）一项（这里的每一项都是「已经停了」的库）：
 
 | 字段 | 类型 | 说明 |
@@ -1549,7 +1574,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `last_reason` | string | `warnings.last()` 口径；权威那句在同 dbnum 的 `batch_failure` 记录里 |
 | `first_at` / `last_at` | string | |
 | `auto_retry` | bool | 恒 `false` |
-| `unblock` | array | 三条解法，按 `cause` 给。`data_batch`：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」；`model_only` 与 `whole_library_retry_limit`：人工那一条换成「修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（…成了账就清，不成仍停着）」 |
+| `unblock` | array | 三条解法，按 `cause` 给。`data_batch`：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」；`model_only` 与 `whole_library_retry_limit`：人工那一条是「修好原因后 POST /api/v1/update/execute（显式重试：清账、清失败根的退避，模型补算立即重排，从头再数；不成仍会停下。要把全库从头重算一遍用 POST /api/v1/dbnums/{dbnum}/model/rebuild）」（2026-11-12 起；此前的记录里这一条是整库重排） |
 | `unblock_note` | string | 「三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。」 |
 
 ```json

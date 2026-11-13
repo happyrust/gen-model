@@ -662,15 +662,9 @@ pub(crate) fn model_catch_up_enqueued_total() -> u64 {
     MODEL_CATCH_UP_ENQUEUED_TOTAL.load(Ordering::Relaxed)
 }
 
-/// 稳态补偿的入队判定（WP-E / ADR-090 D1）：一库的水位三格 + 三条节流事实 → 这一拍排不排。
-/// 纯函数，独立于 MDB / 队列 / 账本：真值表单测与生产用同一条判据。
-///
-/// - 「稳态」=`applied_sesno == file_latest_sesno`：没有新会话可追，落后不是「数据还没落」
-///   造成的；文件回退（`applied` 反超 `file_latest`）同样不算稳态；
-/// - 水位判据复用 [`startup_model_recovery_plan`]：`applied <= 0` 或 `model >= applied` 不排；
-/// - 三条节流闸任一命中不排：队列已有该库行（任何状态）、欠账根全在退避期、数据批次 park。
-///   `all_chasing_backing_off` 由调用方按「该库欠账根非空且逐根 `deferral` 命中」算——
-///   空集不算「全在退避」：没有欠账根时排了真能把水位盖上。
+/// [`steady_catch_up_verdict`] 只问「排不排」的形态：真值表与跨模块的几条单测按它写。判据只有那一份——
+/// 这里是它的 `.ok()`；生产路径（[`reconcile_model_catch_up_for`]）直接读带原因的那一句。
+#[cfg(test)]
 pub(crate) fn steady_catch_up_plan(
     applied_sesno: i32,
     model_sesno: i32,
@@ -679,17 +673,72 @@ pub(crate) fn steady_catch_up_plan(
     all_chasing_backing_off: bool,
     parked: bool,
 ) -> Option<StartupModelRecoveryPlan> {
-    if applied_sesno != file_latest_sesno {
-        return None;
-    }
-    let plan = startup_model_recovery_plan(applied_sesno, model_sesno)?;
-    if queue_has_row || all_chasing_backing_off || parked {
-        return None;
-    }
-    Some(plan)
+    steady_catch_up_verdict(
+        applied_sesno,
+        model_sesno,
+        file_latest_sesno,
+        queue_has_row,
+        all_chasing_backing_off,
+        parked,
+    )
+    .ok()
 }
 
-/// [`steady_catch_up_plan`] 的第二道闸：这个库的欠账根（生成根账本里还在赶的）是不是**全**在退避期。
+/// 稳态补偿的入队判定（WP-E / ADR-090 D1）：一库的水位三格 + 三条节流事实 → 这一拍排不排；
+/// 不排时带上是哪一格挡的（先到的先说）。纯函数，独立于 MDB / 队列 / 账本：真值表单测与生产用同一条判据。
+///
+/// - 「稳态」=`applied_sesno == file_latest_sesno`：没有新会话可追，落后不是「数据还没落」
+///   造成的；文件回退（`applied` 反超 `file_latest`）同样不算稳态；
+/// - 水位判据复用 [`startup_model_recovery_plan`]：`applied <= 0` 或 `model >= applied` 不排；
+/// - 三条节流闸任一命中不排：队列已有该库行（任何状态）、欠账根全在退避期、数据批次 park。
+///   `all_chasing_backing_off` 由调用方按「该库欠账根非空且逐根 `deferral` 命中」算——
+///   空集不算「全在退避」：没有欠账根时排了真能把水位盖上。
+///
+/// 原因那一句是给人工执行用的（`update/execute`，2026-11-12）：它放行一个库之后要把「排上了没有、
+/// 没排是为什么」写回回执；周期对账那一拍只看排不排。
+pub(crate) fn steady_catch_up_verdict(
+    applied_sesno: i32,
+    model_sesno: i32,
+    file_latest_sesno: i32,
+    queue_has_row: bool,
+    all_chasing_backing_off: bool,
+    parked: bool,
+) -> Result<StartupModelRecoveryPlan, &'static str> {
+    if applied_sesno != file_latest_sesno {
+        return Err(
+            "数据水位与文件最新会话不一致（有窗口待应用，或文件回退过）：模型跟着数据批次走",
+        );
+    }
+    let Some(plan) = startup_model_recovery_plan(applied_sesno, model_sesno) else {
+        return Err("模型水位已追平数据水位（或数据水位还没建立），没有欠着的");
+    };
+    if queue_has_row {
+        return Err("队列里已经有这个库的任务");
+    }
+    if all_chasing_backing_off {
+        return Err("欠账的根全在退避期");
+    }
+    if parked {
+        return Err("失败账上还停着");
+    }
+    Ok(plan)
+}
+
+/// 稳态补偿这一拍对一个库的去向（[`reconcile_model_catch_up_for`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatchUpOutcome {
+    /// 排了一条 `ModelOnly`（新排、并入既有行或接在运行批次之后）：从 `model_sesno` 补到 `applied_sesno`
+    /// （`model_sesno = 0` 是整库重排）。
+    Enqueued {
+        task_id: String,
+        model_sesno: i32,
+        applied_sesno: i32,
+    },
+    /// 没排，一句话说为什么。
+    Skipped(String),
+}
+
+/// [`steady_catch_up_verdict`] 的第二道闸：这个库的欠账根（生成根账本里还在赶的）是不是**全**在退避期。
 ///
 /// 全在退避期才挡：任务真排了也只会把这些根再 defer 一遍（`batch_worker::split_backing_off_units`
 /// 按 `source_end_sesno = applied` 问同一句 `deferral`），排了等于空转。有一根到期就放行——失败的根
@@ -706,22 +755,50 @@ pub(crate) fn all_chasing_backing_off(dbnum: u32, applied_sesno: i32, now: Insta
 /// 周期对账拍上的稳态模型补偿（WP-E）：数据追平、模型却落后的库各补一条 `ModelOnly`——
 /// 与启动核对同一枚水位判据、同一个入队形状（`intent=ModelOnly`，`model_start_sesno = model_sesno`，
 /// 右端 `applied`），范围收窄到「监听域（`watch_scope::admits`）∩ 当前 MDB 的 DESI 成员」，
-/// 并多三条节流闸（见 [`steady_catch_up_plan`]）。一拍一库最多一条。
+/// 并多三条节流闸（见 [`steady_catch_up_verdict`]）。一拍一库最多一条。
 ///
 /// 任何一步出错都只告警、不挡下一拍——本函数自己返回 `()`，调用点在
 /// `increment_manager` 的 `reconcile` 分支、`sweep_watch_dirs` 之后。
 pub(crate) async fn reconcile_model_catch_up() {
+    reconcile_model_catch_up_for(None).await;
+}
+
+/// [`reconcile_model_catch_up`] 的本体。`only = None` 是周期对账那一拍：看范围里的每个库，不看返回值。
+///
+/// `only = Some(名单)` 是人工执行（`update/execute`，2026-11-12）：它刚给名单里的库清了失败账与失败根的退避
+/// （`manual_update::release_model_retry`），模型补算这就该重排——排法还是这里的同一枚水位判据、同一个入队形状，
+/// 不另写一条入队路。只看名单里的库（别的库照旧归周期对账那一拍），并回每个库的去向：名单里的每个库都有一格，
+/// 人工执行据此把「排上了没有、没排是为什么」写回回执。
+pub(crate) async fn reconcile_model_catch_up_for(
+    only: Option<&BTreeSet<u32>>,
+) -> BTreeMap<u32, CatchUpOutcome> {
+    let mut outcomes: BTreeMap<u32, CatchUpOutcome> = BTreeMap::new();
+    // 这一拍整个没跑成：名单里的库各记一句（周期对账没有名单，只留日志）。
+    let aborted = |reason: &str| -> BTreeMap<u32, CatchUpOutcome> {
+        only.into_iter()
+            .flatten()
+            .map(|dbnum| (*dbnum, CatchUpOutcome::Skipped(reason.to_owned())))
+            .collect()
+    };
     let declared = match current_mdb_design_dbnums().await {
         Ok(dbnums) => dbnums,
         Err(error) => {
             log::warn!(
                 "[reconcile] model catch-up：取不到当前 MDB 的 DESI 成员，这一拍不排: {error:#}"
             );
-            return;
+            return aborted("取不到当前 MDB 的 DESI 成员，这一拍没跑成（见服务日志）");
         }
     };
+    if let Some(only) = only {
+        for dbnum in only.difference(&declared) {
+            outcomes.insert(
+                *dbnum,
+                CatchUpOutcome::Skipped("不在当前 MDB 的 DESI 成员里，稳态补偿不管它".to_owned()),
+            );
+        }
+    }
     if declared.is_empty() {
-        return;
+        return outcomes;
     }
     let registered = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(rows) => rows
@@ -730,7 +807,7 @@ pub(crate) async fn reconcile_model_catch_up() {
             .collect::<BTreeMap<_, _>>(),
         Err(error) => {
             log::warn!("[reconcile] model catch-up：读不到 DBNUM 注册表，这一拍不排: {error:#}");
-            return;
+            return aborted("读不到 DBNUM 注册表，这一拍没跑成（见服务日志）");
         }
     };
     // 队列行取一次快照：这一拍的入队决定都按它看；上一拍排的行在里面，
@@ -743,17 +820,29 @@ pub(crate) async fn reconcile_model_catch_up() {
     let now = Instant::now();
     let mut enqueued = 0usize;
     for dbnum in declared {
+        if only.is_some_and(|only| !only.contains(&dbnum)) {
+            continue;
+        }
+        // 去向只在有名单时记（人工执行要回话）；周期对账那一拍不看，不为它攒几百句话。
+        let mut skip = |reason: &str| {
+            if only.is_some() {
+                outcomes.insert(dbnum, CatchUpOutcome::Skipped(reason.to_owned()));
+            }
+        };
         if !crate::data_interface::watch_scope::admits(dbnum) {
+            skip("不在监听范围内，稳态补偿不管它");
             continue;
         }
         let Some(state) = registered.get(&dbnum) else {
+            skip("DBNUM 注册表里没有它");
             continue;
         };
         if !state.db_type.eq_ignore_ascii_case("DESI") {
+            skip("登记的不是 DESI 库");
             continue;
         }
         let all_backing_off = all_chasing_backing_off(dbnum, state.applied_sesno, now);
-        let Some(plan) = steady_catch_up_plan(
+        let plan = match steady_catch_up_verdict(
             state.applied_sesno,
             state.model_sesno,
             state.file_latest_sesno,
@@ -764,8 +853,12 @@ pub(crate) async fn reconcile_model_catch_up() {
                 state.file_latest_sesno,
             )
             .is_some(),
-        ) else {
-            continue;
+        ) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                skip(reason);
+                continue;
+            }
         };
         // 文件身份与启动核对同一把尺：MDB 声明文件 + 它的最新会话。读不到这一库只跳过
         // （按「本轮未确认」），不中止整拍。
@@ -779,17 +872,20 @@ pub(crate) async fn reconcile_model_catch_up() {
                 log::warn!(
                     "[reconcile] model catch-up 跳过 dbnum={dbnum}（取不到文件最新会话）: {error:#}"
                 );
+                skip("取不到文件最新会话（见服务日志）");
                 continue;
             }
             Err(error) => {
                 log::warn!(
                     "[reconcile] model catch-up 跳过 dbnum={dbnum}（取文件最新会话的阻塞任务异常）: {error}"
                 );
+                skip("取不到文件最新会话（见服务日志）");
                 continue;
             }
         };
         // 文件比 applied 还旧 = 源回退过：这超出稳态补偿能修的范围，等数据面裁决（回退重建）。
         if source.sesno < state.applied_sesno as u32 {
+            skip("文件比数据水位还旧（回退过）：等数据面裁决");
             continue;
         }
         let model_start_sesno = plan.model_start_sesno;
@@ -821,18 +917,31 @@ pub(crate) async fn reconcile_model_catch_up() {
             &found,
             false,
         );
-        if outcome.outcome != crate::data_interface::batch_queue::Enqueued::AlreadyCovered {
-            enqueued += 1;
-            MODEL_CATCH_UP_ENQUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
-            println!(
-                "[reconcile] model catch-up dbnum={dbnum} model={} applied={} reason={} task={}",
-                state.model_sesno, state.applied_sesno, plan.reason, outcome.info.task_id
+        if outcome.outcome == crate::data_interface::batch_queue::Enqueued::AlreadyCovered {
+            skip("队列里已有覆盖它的任务");
+            continue;
+        }
+        enqueued += 1;
+        MODEL_CATCH_UP_ENQUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        println!(
+            "[reconcile] model catch-up dbnum={dbnum} model={} applied={} reason={} task={}",
+            state.model_sesno, state.applied_sesno, plan.reason, outcome.info.task_id
+        );
+        if only.is_some() {
+            outcomes.insert(
+                dbnum,
+                CatchUpOutcome::Enqueued {
+                    task_id: outcome.info.task_id.clone(),
+                    model_sesno: state.model_sesno,
+                    applied_sesno: state.applied_sesno,
+                },
             );
         }
     }
     if enqueued > 0 {
         crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
     }
+    outcomes
 }
 
 #[cfg(test)]
@@ -966,6 +1075,23 @@ mod tests {
             "欠账根全在退避期"
         );
         assert!(!enqueues(26, 20, 26, false, false, true), "数据批次 park");
+
+        // 不排时说得出是哪一格挡的（人工执行放行之后拿它回话）：与上面逐格对应，先到的先说。
+        let why = |applied, model, latest, queued, backoff, parked| {
+            steady_catch_up_verdict(applied, model, latest, queued, backoff, parked)
+                .expect_err("这一格不排")
+        };
+        assert!(why(26, 20, 30, true, true, true).contains("数据水位与文件最新会话不一致"));
+        assert!(why(26, 26, 26, true, true, true).contains("模型水位已追平"));
+        assert!(why(0, 0, 0, false, false, false).contains("模型水位已追平"));
+        assert!(why(26, 20, 26, true, true, true).contains("队列里已经有这个库的任务"));
+        assert!(why(26, 20, 26, false, true, true).contains("欠账的根全在退避期"));
+        assert!(why(26, 20, 26, false, false, true).contains("失败账上还停着"));
+        assert_eq!(
+            steady_catch_up_verdict(26, 20, 26, false, false, false).ok(),
+            steady_catch_up_plan(26, 20, 26, false, false, false),
+            "排的那一格两个函数是同一个答案"
+        );
     }
 
     /// GitHub #72 / ADR-090 D1 的重试那一半，从账本接到入队判定：`ModelOnly` 里一根失败之后

@@ -132,6 +132,129 @@ pub(crate) fn has_data_backing(
     has_any_data || confirmed_empty_baseline_sesno == Some(applied_sesno)
 }
 
+/// 「数据已是最新」的库上，人工执行仍是显式的重试指令（2026-11-12，用户定：`update/execute` 是通用的「再试一次」）。
+///
+/// 此前 `enqueue_manual_update_with` 只在「有窗口可跑」那条路上清失败账（`reset_batch_failure`），「已是最新」在它
+/// 之前就早退了。可模型侧停下来的库——失败的根全部判死（`ParkCause::ModelOnly`）、整库重排到次数上限
+/// （`ParkCause::WholeLibraryRetryLimit`）——数据恰恰多半已经追平：人点了执行，回执说「已是最新」，库还停着，
+/// 解除只能靠整库重排、保存新会话或重启。
+///
+/// 清两样，都只是**重试资格**，不碰数据也不碰模型：
+/// - 失败账上这个库的那一页连同整库重排的次数（`batch_worker::release_batch_failure`）：停跑立即解除，次数从头再数；
+/// - 生成根账本上还在退避的根的等待（`model_root_ledger::clear_backoff`）：这就可以重算，连败数不动。不清的话，
+///   放行后排的那条补算会把还在退避的根原样跳过、记一次失败，白白用掉一次机会。
+///
+/// 已放弃（判死）的根不动：账上停着的库，它们还落在补算窗口里，下一条任务照样重算；没停的库（水位已经盖过它们）
+/// 不因为人点一次执行就翻回「还在赶」。
+///
+/// 两样都没有（绝大多数库）回 `None`，回执照旧只数 `up_to_date`。重排模型补算不在这里做：这时扫描还没完、本次的
+/// 数据窗口也还没入队——调用方（`update/execute`）在入队之后调 [`requeue_released_model_catch_up`]。
+pub(crate) fn release_model_retry(
+    dbnum: u32,
+) -> Option<crate::data_interface::batch_scheduler::ModelRetryReleased> {
+    let failure = crate::data_interface::batch_worker::release_batch_failure(dbnum);
+    let backoff_cleared_roots = crate::data_interface::model_root_ledger::clear_backoff(dbnum);
+    if failure.is_none() && backoff_cleared_roots == 0 {
+        return None;
+    }
+    Some(crate::data_interface::batch_scheduler::ModelRetryReleased {
+        dbnum,
+        cause: failure
+            .and_then(|failure| failure.cause)
+            .map(|cause| cause.as_str()),
+        streak: failure.map_or(0, |failure| failure.streak),
+        parked: failure.is_some_and(|failure| failure.parked),
+        whole_library_failed_runs: failure.map_or(0, |failure| failure.whole_library_failed_runs),
+        backoff_cleared_roots,
+    })
+}
+
+/// 放行之后给人看的那一句（回执 `warnings`）：清了什么、模型补算排上了没有、没排是为什么。
+/// `outcome` 是稳态补偿对这个库的去向（[`requeue_released_model_catch_up`]）。
+pub(crate) fn model_retry_notice(
+    released: &crate::data_interface::batch_scheduler::ModelRetryReleased,
+    outcome: Option<&crate::data_interface::startup_reconcile::CatchUpOutcome>,
+) -> String {
+    use crate::data_interface::startup_reconcile::CatchUpOutcome;
+    let dbnum = released.dbnum;
+    let mut cleared = Vec::new();
+    if let Some(cause) = released.cause {
+        cleared.push(format!(
+            "失败账（原因 {cause}，同右端连败 {} 次{}）",
+            released.streak,
+            if released.parked {
+                "，自动重跑已停"
+            } else {
+                ""
+            }
+        ));
+    }
+    if released.whole_library_failed_runs > 0 {
+        cleared.push(format!(
+            "整库重排连败 {} 次的计数",
+            released.whole_library_failed_runs
+        ));
+    }
+    if released.backoff_cleared_roots > 0 {
+        cleared.push(format!("{} 根失败根的退避", released.backoff_cleared_roots));
+    }
+    let next = match outcome {
+        Some(CatchUpOutcome::Enqueued {
+            task_id,
+            model_sesno,
+            applied_sesno,
+        }) if *model_sesno <= 0 => format!(
+            "模型补算已重新排队（task {task_id}：模型水位从没盖过，整库重排到会话 {applied_sesno}）"
+        ),
+        Some(CatchUpOutcome::Enqueued {
+            task_id,
+            model_sesno,
+            applied_sesno,
+        }) => format!("模型补算已重新排队（task {task_id}：会话 {model_sesno} → {applied_sesno}）"),
+        // 没另排不等于没人管：最常见的是这个库已经有任务在排 / 在跑。所以只说事实和去哪儿看，整库重排只作为
+        // 「要从头重算」时的那条路点名，不当成这一格的处方。
+        Some(CatchUpOutcome::Skipped(reason)) => format!(
+            "这次没有另排模型补算：{reason}（这个库的任务与水位看 /api/v1/tasks 与 /api/v1/health；\
+             要把全库从头重算一遍用 POST /api/v1/dbnums/{dbnum}/model/rebuild）"
+        ),
+        None => "模型补算留给下一拍周期对账".to_owned(),
+    };
+    format!(
+        "dbnum={dbnum}: 数据已是最新；人工执行是显式重试，已清：{}。{next}。\
+         清的是重试资格不是病因——原因没修好，它会照原样再停一次",
+        cleared.join("、")
+    )
+}
+
+/// 人工执行放行了模型侧的重试之后（[`release_model_retry`]），把这些库的模型补算这就重排，并把去向写回回执。
+///
+/// 重排用的是稳态补偿自己那一拍（`startup_reconcile::reconcile_model_catch_up_for`）：同一枚水位判据、同一个入队
+/// 形状、同样的节流闸，只看放行的这几个库——别的库照旧等周期对账。不重排的话，放行的库要等下一拍（默认 300 s）
+/// 才动，人看到的还是「我点了执行它不动」。没有放行的库时什么都不做。
+///
+/// 必须在本次扫描入队之后调：稳态补偿看的是队列快照，这个库已经有任务在排 / 在跑时不该再叠一条。
+pub(crate) async fn requeue_released_model_catch_up(
+    receipt: &mut crate::data_interface::batch_scheduler::ManualEnqueueReceipt,
+) {
+    if receipt.model_retry_released.is_empty() {
+        return;
+    }
+    let released: std::collections::BTreeSet<u32> = receipt
+        .model_retry_released
+        .iter()
+        .map(|released| released.dbnum)
+        .collect();
+    let outcomes =
+        crate::data_interface::startup_reconcile::reconcile_model_catch_up_for(Some(&released))
+            .await;
+    let notices: Vec<String> = receipt
+        .model_retry_released
+        .iter()
+        .map(|released| model_retry_notice(released, outcomes.get(&released.dbnum)))
+        .collect();
+    receipt.warnings.extend(notices);
+}
+
 /// 冻结点「要不要清库」的三格裁决（ADR-021 §3 + 2026-09-10 重新计算契约 C2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReinitWipeDecision {
@@ -5174,6 +5297,13 @@ impl AiosDBManager {
                         ) =>
                     {
                         receipt.up_to_date += 1;
+                        // 人工执行是显式的重试指令，「已是最新」也不例外（2026-11-12）：模型侧停下来的库
+                        // 数据多半正是追平的，此前在这里早退、清不到账，人点了执行它照样不动。清的只是重试资格
+                        // （失败账、整库重排的次数、失败根的退避），见 `release_model_retry`；模型补算的重排在
+                        // 入队之后由调用方做。没有这种账的库回 `None`，回执照旧。
+                        receipt
+                            .model_retry_released
+                            .extend(release_model_retry(dbnum));
                         continue;
                     }
                     Ok(_) => {
@@ -7333,6 +7463,182 @@ mod tests {
             "{body}"
         );
         assert!(body[empty..baseline].contains("status: BatchStatus::Applied"));
+    }
+
+    /// 2026-11-12（用户定：人工执行是通用的「再试一次」）：数据已是最新的库上，人工执行清的是模型侧的重试资格
+    /// ——失败账那一页、整库重排的次数、失败根的退避——清完稳态补偿那三道闸里它管的两道就开了；已放弃的根不动，
+    /// 没有这种账的库什么都不发生（回 `None`，回执照旧只数 `up_to_date`）。
+    #[test]
+    fn a_manual_execute_on_an_up_to_date_library_releases_its_model_side_retry() {
+        use crate::data_interface::batch_scheduler::ModelRetryReleased;
+        use crate::data_interface::batch_worker::{
+            ParkCause, batch_failure_parked, reset_batch_failure,
+        };
+        use crate::data_interface::model_root_ledger as ledger;
+        use crate::data_interface::startup_reconcile::{
+            all_chasing_backing_off, steady_catch_up_plan,
+        };
+        use std::time::Instant;
+        // 两本账都是进程全局的：用自己的 dbnum。
+        let dbnum = 996_401;
+        let untouched = 996_402;
+        for dbnum in [dbnum, untouched] {
+            reset_batch_failure(dbnum);
+            ledger::forget_dbnum(dbnum);
+        }
+        // 数据追平在 1139、模型水位停在 1130：稳态补偿该排一条补算，除非被闸挡住。
+        let catch_up_enqueues = |dbnum: u32| {
+            steady_catch_up_plan(
+                1139,
+                1130,
+                1139,
+                false,
+                all_chasing_backing_off(dbnum, 1139, Instant::now()),
+                batch_failure_parked(dbnum, 1139).is_some(),
+            )
+            .is_some()
+        };
+
+        assert_eq!(release_model_retry(dbnum), None, "没有账的库：什么都不发生");
+        assert!(catch_up_enqueues(dbnum));
+
+        // 停着（失败的根全部判死那一种），另有两根还在赶、退避期没过，一根已放弃。
+        let root = |id: u32| ledger::parse_root(&format!("24384/{id}")).expect("refno");
+        for dbnum in [dbnum, untouched] {
+            ParkCause::ModelOnly.record_for_tests(dbnum, 1139, "2 根生成失败（都已判死）");
+            ledger::record_failed(dbnum, root(1), "BRAN", 1139, "boom");
+            ledger::record_transient_failure(
+                dbnum,
+                root(2),
+                "EQUI",
+                1139,
+                "write-behind exhausted",
+            );
+            for _ in 0..ledger::DEAD_ROOT_STREAK {
+                ledger::record_failed(dbnum, root(3), "BRAN", 1139, "dead");
+            }
+            assert!(
+                !catch_up_enqueues(dbnum),
+                "停着、欠账根全在退避：稳态补偿不排"
+            );
+        }
+
+        assert_eq!(
+            release_model_retry(dbnum),
+            Some(ModelRetryReleased {
+                dbnum,
+                cause: Some("model_only"),
+                streak: 1,
+                parked: true,
+                whole_library_failed_runs: 0,
+                backoff_cleared_roots: 2,
+            })
+        );
+        assert!(catch_up_enqueues(dbnum), "放行之后稳态补偿这就能排");
+        assert!(
+            ledger::entry(dbnum, root(3)).is_some_and(|entry| entry.is_refused()),
+            "已放弃的根不动"
+        );
+        assert_eq!(
+            ledger::chasing_roots(dbnum).len(),
+            2,
+            "还在赶的根仍在赶：清的是等多久，不是失败本身"
+        );
+        assert_eq!(
+            release_model_retry(dbnum),
+            None,
+            "清过了，再点一次没有可清的"
+        );
+
+        // 没被这次执行点到的库原样停着。
+        assert!(!catch_up_enqueues(untouched));
+        assert!(batch_failure_parked(untouched, 1139).is_some());
+
+        // 没停、只是失败根在退避的库：也放行（cause 为空）。
+        reset_batch_failure(untouched);
+        assert_eq!(
+            release_model_retry(untouched),
+            Some(ModelRetryReleased {
+                dbnum: untouched,
+                cause: None,
+                streak: 0,
+                parked: false,
+                whole_library_failed_runs: 0,
+                backoff_cleared_roots: 2,
+            })
+        );
+        for dbnum in [dbnum, untouched] {
+            reset_batch_failure(dbnum);
+            ledger::forget_dbnum(dbnum);
+        }
+    }
+
+    /// 放行之后回执里那一句要说全三件事：清了什么、模型补算排上了没有（哪条任务、补哪一段）、没排是为什么
+    /// 以及这时该用哪条路；并提醒清的不是病因。
+    #[test]
+    fn the_release_notice_says_what_was_cleared_and_whether_the_catch_up_was_requeued() {
+        use crate::data_interface::batch_scheduler::ModelRetryReleased;
+        use crate::data_interface::startup_reconcile::CatchUpOutcome;
+        let capped = ModelRetryReleased {
+            dbnum: 7997,
+            cause: Some("whole_library_retry_limit"),
+            streak: 1,
+            parked: true,
+            whole_library_failed_runs: 3,
+            backoff_cleared_roots: 4,
+        };
+        let whole = model_retry_notice(
+            &capped,
+            Some(&CatchUpOutcome::Enqueued {
+                task_id: "task-1".to_owned(),
+                model_sesno: 0,
+                applied_sesno: 1139,
+            }),
+        );
+        assert!(
+            whole.starts_with("dbnum=7997: 数据已是最新；人工执行是显式重试，已清：失败账（原因 whole_library_retry_limit，同右端连败 1 次，自动重跑已停）、整库重排连败 3 次的计数、4 根失败根的退避。")
+                && whole.contains("模型补算已重新排队（task task-1：模型水位从没盖过，整库重排到会话 1139）")
+                && whole.contains("清的是重试资格不是病因"),
+            "{whole}"
+        );
+
+        let backoff_only = ModelRetryReleased {
+            dbnum: 7998,
+            backoff_cleared_roots: 1,
+            ..Default::default()
+        };
+        let window = model_retry_notice(
+            &backoff_only,
+            Some(&CatchUpOutcome::Enqueued {
+                task_id: "task-2".to_owned(),
+                model_sesno: 1130,
+                applied_sesno: 1139,
+            }),
+        );
+        assert!(
+            window.contains(
+                "已清：1 根失败根的退避。模型补算已重新排队（task task-2：会话 1130 → 1139）"
+            ) && !window.contains("失败账")
+                && !window.contains("整库重排连败"),
+            "{window}"
+        );
+
+        let skipped = model_retry_notice(
+            &capped,
+            Some(&CatchUpOutcome::Skipped(
+                "不在监听范围内，稳态补偿不管它".to_owned(),
+            )),
+        );
+        assert!(
+            skipped.contains("这次没有另排模型补算：不在监听范围内，稳态补偿不管它（")
+                && skipped.contains("/api/v1/tasks")
+                && skipped.contains("POST /api/v1/dbnums/7997/model/rebuild）。清的是重试资格"),
+            "{skipped}"
+        );
+        assert!(
+            model_retry_notice(&capped, None).contains("模型补算留给下一拍周期对账"),
+            "没有去向（不该发生）也要有话说"
+        );
     }
 
     /// ADR-021 顺序钉的另一半：扫描路径只分类 + 入队，破坏性清库不得回流——

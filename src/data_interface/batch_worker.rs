@@ -464,10 +464,12 @@ impl ParkCause {
         }
     }
 
-    /// 怎么解除。三种原因清的都是同一本账，差别在「人工」那一条：数据窗口失败的库还有窗口可跑，
-    /// `POST /api/v1/update/execute` 会清账并重跑；模型侧停下来的库数据多半已经追平——那时 `update/execute`
-    /// 看到的是「已是最新」，不入队也不清账（`manual_update` 里清账那一句在这条早退之后）——所以人工那一条给的是
-    /// 整库重排（`model_full_rebuild_enabled` 缺省开着）：它排的任务不过 park 那道闸，成了就清账。
+    /// 怎么解除。三种原因清的都是同一本账，「人工」那一条现在也是同一条：`POST /api/v1/update/execute` 是通用的
+    /// 「再试一次」（2026-11-12）。数据窗口失败的库还有窗口可跑，它清账并重跑窗口；模型侧停下来的库数据多半已经
+    /// 追平——它在「已是最新」早退之前同样清账、清失败根的退避（`manual_update::release_model_retry`），模型补算随
+    /// 这次执行重新排队（`startup_reconcile::reconcile_model_catch_up`）。此前那条早退在清账之前，模型侧停下来的库
+    /// 人工执行解不开，只能整库重排；整库重排（`model_full_rebuild_enabled` 缺省开着）仍然可用——它从头重算全库，
+    /// 排的任务不过 park 那道闸，成了就清账。
     pub fn unblock(self) -> [&'static str; 3] {
         match self {
             Self::DataBatch => [
@@ -476,11 +478,25 @@ impl ParkCause {
                 "重启进程（账本在进程内）",
             ],
             Self::ModelOnly | Self::WholeLibraryRetryLimit => [
-                "修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（人工整库重排一次；成了账就清，不成仍停着）",
+                "修好原因后 POST /api/v1/update/execute（显式重试：清账、清失败根的退避，模型补算立即重排，从头再数；不成仍会停下。要把全库从头重算一遍用 POST /api/v1/dbnums/{dbnum}/model/rebuild）",
                 "文件长出新会话（右端 sesno 前进；旧账作废，从头再数）",
                 "重启进程（账本在进程内；启动核对会再排，从头再数）",
             ],
         }
+    }
+
+    /// 测试用：往进程全局的失败账里直接记一笔这种原因的失败（生产路径是 `note_batch_failure`，它还要写日志）。
+    /// 写成带缩进的关联函数而不是顶格的 `#[cfg(test)]` 自由函数：本文件有源码钉按第一个顶格的
+    /// `#[cfg(test)]` 切「生产代码」。
+    #[cfg(test)]
+    pub(crate) fn record_for_tests(self, dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
+        batch_failure_ledger().record_caused(
+            dbnum,
+            end_sesno,
+            reason,
+            "2026-11-12T05:30:00+08:00",
+            self,
+        )
     }
 }
 
@@ -561,7 +577,8 @@ pub(crate) struct ParkedVerdict {
 /// （[`DATA_BATCH_PARK_AFTER`]）就停，失败原因写入 `logs/batch-failures-*.jsonl`。
 /// 重扫侧不再自动入队（park），改记 manifest blocker，让阶段可见地不就绪。
 /// 复活：文件长出新会话（右端前进，[`Self::parked_streak`] 顺带清账）或人工执行
-/// （POST /update/execute → [`reset_batch_failure`]）。成功一次即清零。重启即清零。
+/// （POST /update/execute：有窗口可跑的库 → [`reset_batch_failure`]；数据已是最新的库 →
+/// [`release_batch_failure`]，2026-11-12 起）。成功一次即清零。重启即清零。
 ///
 /// 账里另有一栏 [`Self::whole_library`]：整库重排（起点 0 的 `ModelOnly`）败在还会重试的根上时**不** park，
 /// 只在这一栏记次数；连着记到上限才转成上面那种 park（原因记 [`ParkCause::WholeLibraryRetryLimit`]）。两栏同生共死：
@@ -712,6 +729,47 @@ pub(crate) fn batch_failure_parked(dbnum: u32, file_latest_sesno: i32) -> Option
 /// 人工执行是显式的重试指令：清掉该库的连败账，park 立即解除。
 pub(crate) fn reset_batch_failure(dbnum: u32) {
     batch_failure_ledger().clear(dbnum);
+}
+
+/// [`release_batch_failure`] 清掉的那一页：清之前账上记着什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReleasedBatchFailure {
+    /// 失败账上有这个库时，它是哪种原因记进来的；只有整库重排的次数在数时为 `None`。
+    pub cause: Option<ParkCause>,
+    /// 同右端连续失败几次（失败账上没有它为 0）。
+    pub streak: u32,
+    /// 清之前是不是已经停了自动重跑。
+    pub parked: bool,
+    /// 整库重排连败几次（没有在数为 0）。
+    pub whole_library_failed_runs: u32,
+}
+
+/// [`reset_batch_failure`] 的带回执形态：清掉该库的连败账与整库重排的次数，并说清之前账上有什么；
+/// 两栏都没有它时什么都不做、回 `None`。
+///
+/// 给「数据已是最新」的库用（`manual_update::release_model_retry`，2026-11-12）：模型侧停下来的库数据多半已经
+/// 追平，人工执行此前在「已是最新」那里早退、清不到账——现在人工执行是通用的「再试一次」，早退之前先过这里。
+/// 有数据窗口可跑的库照旧走 [`reset_batch_failure`]（不需要回执：它的批次自己会出现在入队回执里）。
+pub(crate) fn release_batch_failure(dbnum: u32) -> Option<ReleasedBatchFailure> {
+    let mut ledger = batch_failure_ledger();
+    let entry = ledger
+        .entries
+        .get(&dbnum)
+        .map(|entry| (entry.cause, entry.streak, entry.parked()));
+    let whole_library_failed_runs = ledger
+        .whole_library
+        .get(&dbnum)
+        .map(|entry| entry.failed_runs);
+    if entry.is_none() && whole_library_failed_runs.is_none() {
+        return None;
+    }
+    ledger.clear(dbnum);
+    Some(ReleasedBatchFailure {
+        cause: entry.map(|(cause, _, _)| cause),
+        streak: entry.map_or(0, |(_, streak, _)| streak),
+        parked: entry.is_some_and(|(_, _, parked)| parked),
+        whole_library_failed_runs: whole_library_failed_runs.unwrap_or(0),
+    })
 }
 
 /// `/health` 用：从没失败过是 `null`，否则逐 dbnum 一本账。
@@ -912,7 +970,8 @@ fn whole_library_cap_message(dbnum: u32, run: WholeLibraryRun, last_failure: &st
     format!(
         "dbnum={dbnum} 整库模型重排已连续失败 {} 次，到上限（{}，配置 model_whole_library_retry_limit），不再自动重排：\
          这个库的模型水位从没盖过，每次重试都要把全库重算一遍。最近一次：{last_failure}。\
-         解除：修好原因后 POST /api/v1/dbnums/{dbnum}/model/rebuild（成了账就清）；保存新会话或重启服务也会从头再数",
+         解除：修好原因后 POST /api/v1/update/execute（再试一次，从头再数）或 POST /api/v1/dbnums/{dbnum}/model/rebuild\
+         （人工整库重排，成了账就清）；保存新会话或重启服务也会从头再数",
         run.failed_runs, run.limit
     )
 }
@@ -7973,7 +8032,7 @@ mod tests {
         );
         assert_eq!(booking(Clear, ModelOnly, None).0, Clear);
 
-        // 三种原因各有自己的词与解除路：数据批次失败的库人工执行即可；模型侧停下来的库要整库重排。
+        // 三种原因各有自己的词；人工那一条都是 `update/execute`（通用的「再试一次」），模型侧停下来的库另点名整库重排。
         assert_eq!(ParkCause::DataBatch.as_str(), "data_batch");
         assert_eq!(ParkCause::ModelOnly.as_str(), "model_only");
         assert_eq!(
@@ -7989,7 +8048,8 @@ mod tests {
         for cause in [ParkCause::ModelOnly, ParkCause::WholeLibraryRetryLimit] {
             let unblock = cause.unblock().join("");
             assert!(
-                unblock.contains("/model/rebuild") && !unblock.contains("update/execute"),
+                unblock.contains("POST /api/v1/update/execute")
+                    && unblock.contains("/model/rebuild"),
                 "{unblock}"
             );
         }
@@ -8168,7 +8228,8 @@ mod tests {
         assert_eq!(retries[key.as_str()]["failed_runs"], 3);
         assert_eq!(retries[key.as_str()]["capped"], true);
 
-        // 解除后能再跑（一）：清账——人工整库重排成了走的是 `Clear` 那一臂，人工执行走 reset_batch_failure，都是这一句。
+        // 解除后能再跑（一）：清账——人工整库重排成了走的是 `Clear` 那一臂；人工执行对数据已追平的库走
+        // release_batch_failure（下一条测试），清的是同一页，这里用 reset_batch_failure 代它。
         reset_batch_failure(dbnum);
         assert_eq!(enqueues(1139), Some(0), "清账后稳态补偿又排");
         assert_eq!(
@@ -8201,6 +8262,82 @@ mod tests {
         }
         assert_eq!(enqueues(1140), Some(0));
         reset_batch_failure(dbnum);
+    }
+
+    /// 人工执行对「数据已是最新」的库清账（2026-11-12）：清的是失败账那一页连同整库重排的次数，并说得出清之前
+    /// 账上有什么（回执要用）；两栏都没有它时什么都不做。三种模型侧的情形各走一遍：次数在数还没停、到上限停了、
+    /// 失败的根全部判死停了。
+    #[tokio::test]
+    async fn releasing_a_library_clears_both_columns_and_says_what_was_there() {
+        use DataFailureBooking::{Record, Untouched};
+        // 失败账是进程全局的：用自己的 dbnum。
+        let dbnum = 996_302;
+        let key = dbnum.to_string();
+        reset_batch_failure(dbnum);
+        assert_eq!(release_batch_failure(dbnum), None, "账上没有它：什么都不做");
+
+        // 整库重排败了一次，还没到上限：没停，只有次数那一栏。
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched
+        );
+        assert_eq!(
+            release_batch_failure(dbnum),
+            Some(ReleasedBatchFailure {
+                cause: None,
+                streak: 0,
+                parked: false,
+                whole_library_failed_runs: 1,
+            })
+        );
+        assert!(
+            whole_library_retry_snapshot().is_none_or(|runs| runs.get(key.as_str()).is_none()),
+            "次数清了"
+        );
+
+        // 到上限停了：两栏都在，一起清；清完那道闸就开了，次数从头数。
+        for _ in 0..2 {
+            assert_eq!(
+                settle_whole_library_failure(dbnum, 1139, 3).await,
+                Untouched
+            );
+        }
+        assert_eq!(settle_whole_library_failure(dbnum, 1139, 3).await, Record);
+        assert_eq!(
+            release_batch_failure(dbnum),
+            Some(ReleasedBatchFailure {
+                cause: Some(ParkCause::WholeLibraryRetryLimit),
+                streak: 1,
+                parked: true,
+                whole_library_failed_runs: 3,
+            })
+        );
+        assert!(batch_failure_parked(dbnum, 1139).is_none(), "停跑解除");
+        assert!(
+            batch_failure_snapshot().is_none_or(|health| health.get(key.as_str()).is_none()),
+            "/health.batch_failures 里没有它了"
+        );
+        assert_eq!(release_batch_failure(dbnum), None, "清过了，再清没有");
+        assert_eq!(
+            settle_whole_library_failure(dbnum, 1139, 3).await,
+            Untouched,
+            "次数从头数：这是第 1 次"
+        );
+        reset_batch_failure(dbnum);
+
+        // 失败的根全部判死停的那一种：没有次数那一栏。
+        ParkCause::ModelOnly.record_for_tests(dbnum, 1139, "2 根生成失败（都已判死）");
+        assert!(batch_failure_parked(dbnum, 1139).is_some());
+        assert_eq!(
+            release_batch_failure(dbnum),
+            Some(ReleasedBatchFailure {
+                cause: Some(ParkCause::ModelOnly),
+                streak: 1,
+                parked: true,
+                whole_library_failed_runs: 0,
+            })
+        );
+        assert!(batch_failure_parked(dbnum, 1139).is_none());
     }
 
     /// ADR-094 D1：数据批次失败的阻断只挡肇事库。失败收口与 panic 隔离壳两处都得经

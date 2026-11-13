@@ -2544,6 +2544,11 @@ pub async fn update_execute(
     // this arm an `AIOS_STARTUP_AUTORUN=0` canary returns `up_to_date` forever
     // while its pre-existing room work remains stranded.
     crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+    // 人工执行是通用的「再试一次」（2026-11-12）：数据已是最新、模型侧却停着 / 退避着的库，上面那次扫描已经
+    // 清了它们的失败账与失败根的退避（回执 `model_retry_released`）；这里把它们的模型补算这就重排，并把
+    // 「排上了没有、没排是为什么」写回回执。没有这种库时什么都不做。在这里等它：只读一次 MDB 成员与注册表，
+    // 比上面那次扫描轻，而「我点了执行它动没动」必须回执自己说得出。
+    crate::data_interface::manual_update::requeue_released_model_catch_up(&mut receipt).await;
     // 摄入形态下目录库不进数据批次（ADR-058 D1），上面那次扫描对「目录换了版」一声不响；
     // 显式执行是人在说「现在就核」，目录版本核对随之另起任务跑一次（H1 (b)），与读透分支的
     // `reconcile_model_coverage_at_startup` 对称。不在这里等它：反查要开 MDB 的每个设计库。
@@ -9232,6 +9237,46 @@ mod tests {
         assert!(
             scan < arm,
             "only a completed explicit scan may arm backlog: {body}"
+        );
+    }
+
+    /// 2026-11-12：人工执行是通用的「再试一次」。模型侧停下来的库数据多半已经追平，扫描在「已是最新」那里
+    /// 放行它们（清失败账与退避）之后，处理器必须接着把模型补算重排并回话——只清账不重排，库要等下一拍
+    /// 周期对账（默认 300 s）才动；重排又必须在扫描入队之后（稳态补偿看队列快照）。
+    #[test]
+    fn explicit_execute_requeues_the_model_catch_up_it_released() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn update_execute(")
+            .expect("update_execute handler must exist")
+            .1
+            .split_once("pub struct TaskListQuery")
+            .expect("task list must follow update_execute")
+            .0;
+        let scan = body
+            .find(".enqueue_manual_update(")
+            .expect("manual execute must scan/enqueue first");
+        let requeue = body
+            .find("requeue_released_model_catch_up(&mut receipt)")
+            .expect("放行之后要把模型补算重排并回话");
+        assert!(scan < requeue, "先扫描入队，再重排放行的库: {body}");
+        let manual = include_str!("../data_interface/manual_update.rs");
+        let up_to_date = manual
+            .split_once("pub async fn enqueue_manual_update_with(")
+            .expect("enqueue_manual_update_with must exist")
+            .1
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum follows")
+            .0;
+        let release = up_to_date
+            .find("release_model_retry(dbnum)")
+            .expect("「已是最新」那条早退之前先放行模型侧的重试");
+        let window_reset = up_to_date
+            .find("reset_batch_failure(dbnum)")
+            .expect("有窗口可跑的库照旧清账");
+        assert!(
+            release < window_reset,
+            "放行在「已是最新」的早退里，早于有窗口那条路的清账"
         );
     }
 

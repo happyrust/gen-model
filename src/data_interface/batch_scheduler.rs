@@ -276,10 +276,32 @@ pub struct ManualEnqueueReceipt {
     pub shadowed: Vec<ShadowedCandidate>,
     /// 水位已覆盖文件、无事可做的 dbnum 数。
     pub up_to_date: usize,
+    /// 数据已是最新（算在 `up_to_date` 里）、模型侧却欠着的库里，这次被放行重试的那些
+    /// （2026-11-12：人工执行是通用的「再试一次」）。清的是失败账与失败根的退避；模型补算随本次执行重新排队，
+    /// 排没排上看 `/tasks` 与 `/health.model_catch_up_enqueued_total`。没有这种库时为空。
+    #[serde(default)]
+    pub model_retry_released: Vec<ModelRetryReleased>,
     /// 本次请求带了 `dbnums` 子集（ADR-020）而**没被勾选**的库：不扫描、不入队、
     /// 水位不动，等下一次执行。全范围请求时恒为空。
     pub unselected: Vec<u32>,
     pub warnings: Vec<String>,
+}
+
+/// 人工执行对一个「数据已是最新」的库放行的那一笔（[`ManualEnqueueReceipt::model_retry_released`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ModelRetryReleased {
+    pub dbnum: u32,
+    /// 清掉的失败账是哪种原因让它停的：`data_batch` / `model_only` / `whole_library_retry_limit`
+    /// （`/health.batch_failures.<dbnum>.cause` 同一个词）。`null` = 这个库没停，清的只是整库重排的次数或失败根的退避。
+    pub cause: Option<&'static str>,
+    /// 清账前同右端连续失败几次（失败账上没有它为 0）。
+    pub streak: u32,
+    /// 清账前是不是已经停了自动重跑（`/health.batch_failures.<dbnum>.parked`）。
+    pub parked: bool,
+    /// 清账前整库重排连败几次（没有在数为 0）。
+    pub whole_library_failed_runs: u32,
+    /// 清掉退避、这就可以重算的失败根数（还在赶、退避期没过的那些）。
+    pub backoff_cleared_roots: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

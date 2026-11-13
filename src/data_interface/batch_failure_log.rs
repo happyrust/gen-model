@@ -163,8 +163,8 @@ fn to_park_record(park: &BatchPark<'_>, now: DateTime<Local>) -> Value {
         "last_at": park.last_at,
         // 解除路径写进记录本身，而不是只留在文档里：读这个文件的人多半是被叫来
         // 救火的，他手上只有这一个文件。三条路清的都是**重试账**，不是病因——
-        // 确定性失败解开之后照样会再走一遍这五次。哪三条按 `cause` 给：模型侧停下来的库
-        // 数据多半已经追平，`update/execute` 对它不入队也不清账，人工那一条是整库重排。
+        // 确定性失败解开之后照样会再走一遍这五次。哪三条按 `cause` 给：人工那一条都是 `update/execute`
+        // （2026-11-12 起它对数据已追平的库也清账、重排模型补算），模型侧停下来的库另点名整库重排。
         "auto_retry": false,
         "unblock": park.cause.unblock(),
         "unblock_note": "三条路清的是重试账不是病因；先修 batch_failure 记录里那句 reason，否则解开后仍会再 park 一次。",
@@ -620,10 +620,11 @@ mod tests {
         );
     }
 
-    /// 模型侧停下来的库（失败根全部判死、整库重排到上限）解除路径不一样：数据多半已经追平，
-    /// `update/execute` 对它不入队也不清账，所以记录里给的人工那一条是整库重排；记录自己说得出是哪种原因停的。
+    /// 模型侧停下来的库（失败根全部判死、整库重排到上限）：记录自己说得出是哪种原因停的；人工那一条与数据批次
+    /// 失败同一条——`update/execute` 是通用的「再试一次」，对数据已追平的库也清账、重排模型补算（2026-11-12；
+    /// 此前它在「已是最新」早退、清不到账）——另点名整库重排。
     #[test]
-    fn a_model_side_park_names_its_cause_and_points_at_the_rebuild() {
+    fn a_model_side_park_names_its_cause_and_points_at_the_manual_retry_and_the_rebuild() {
         use crate::data_interface::batch_worker::ParkCause;
         for (cause, word) in [
             (ParkCause::ModelOnly, "model_only"),
@@ -652,7 +653,8 @@ mod tests {
             assert_eq!(record["cause"], word);
             let unblock = record["unblock"].to_string();
             assert!(
-                unblock.contains("/model/rebuild") && !unblock.contains("update/execute"),
+                unblock.contains("POST /api/v1/update/execute")
+                    && unblock.contains("/model/rebuild"),
                 "{record}"
             );
             assert_eq!(record["unblock"].as_array().map(Vec::len), Some(3));
