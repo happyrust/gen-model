@@ -254,6 +254,64 @@ pub(crate) async fn durable_alignment(
 ///
 /// `None` = 这一面不作数：开关关着（冻不出计算器）、非落盘形态（水位行活不过重启）、常驻参照没装上、
 /// 或水位列表读不出来——不作数与「零欠账」是两回事，JSON 里它是 `null`，不是空数组。
+///
+/// 欠账清扫器（[`sweep_room_alignment_debt`]）的名单源就是这里的 `owed_dbnums`：它要的是
+/// 「期望集内还欠着的库」那一段，不是给人看的那份 JSON。所以单独给一个函数，避免从 JSON 反解。
+pub(crate) async fn owed_dbnums_in_scope() -> Option<Vec<u32>> {
+    if !crate::options::store_mode().is_durable() {
+        return None;
+    }
+    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) | Err(_) => return None,
+    };
+    let resident = rooms.resident_generation();
+    let expected: Option<std::collections::BTreeSet<u32>> = rooms
+        .expected_dbnums()
+        .map(|dbnums| dbnums.iter().copied().collect());
+    let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .ok()?;
+    let mut registered_dbnums = std::collections::BTreeSet::new();
+    let mut owed = Vec::new();
+    for state in states {
+        registered_dbnums.insert(state.dbnum);
+        // 期望集外的库不扫：那是别的 MDB 的事，清扫器不该替它跑整库。
+        if let Some(scope) = &expected
+            && !scope.contains(&state.dbnum)
+        {
+            continue;
+        }
+        let alignment = DurableAlignment {
+            library: state.model_room_generation.clone(),
+            resident: resident.to_owned(),
+            stray: state.model_room_stray_generations.clone(),
+            stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
+        };
+        if alignment.owed().is_some() {
+            owed.push(state.dbnum);
+        }
+    }
+    if let Some(scope) = &expected {
+        for dbnum in scope.iter().copied() {
+            if registered_dbnums.contains(&dbnum) {
+                continue;
+            }
+            // 期望集内、水位行还没建：与 `durable_alignment` 读空行同一判法，欠一次。
+            let alignment = DurableAlignment {
+                library: None,
+                resident: resident.to_owned(),
+                stray: Vec::new(),
+                stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
+            };
+            if alignment.owed().is_some() {
+                owed.push(dbnum);
+            }
+        }
+    }
+    Some(owed)
+}
+
 pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
     if !crate::options::store_mode().is_durable() {
         return None;
@@ -1790,11 +1848,195 @@ async fn recompute_dbnum_room_edges_now_inner(dbnum: u32) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 房间欠账清扫器（issue #153）
+//
+// 票面症状：房间的墙板在一个库（A）里改了，别的库（B）里成员的房间归属要等 B 下一次有任务才更新；
+// B 没有新会话时，库上的旧房间边一直留着。
+//
+// 根因不是「发现不了」——两层证据今天都有：
+//   * 电平型：A 的常驻重建让 `input_version` 变，**全 MDB** 每个库的 `model_room_generation`
+//     都不再等于此刻常驻代号，每个库同时进入欠账态；
+//   * 边沿型：A 的定向重算把 B 命中的元素连同祖先链停进 B 的停放槽（`room_reverse::park`）。
+// 两层都只在「目标库有任务」时才被读（`parked_for_task` / `durable_alignment`）。B 没新会话 →
+// 没任务 → 没人读 → 旧边留着。
+//
+// 所以缺的是**一个不依赖会话的驱动**：周期性地看「谁还欠着」，逐个补。这就是这个清扫器。
+// ---------------------------------------------------------------------------
+
+/// 清扫器每 tick 之间的间隔（秒）。缺省 60 s；`AIOS_ROOM_DEBT_SWEEP_SECS` 可覆盖。
+fn debt_sweep_interval() -> std::time::Duration {
+    let secs = std::env::var("AIOS_ROOM_DEBT_SWEEP_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(60);
+    std::time::Duration::from_secs(secs)
+}
+
+/// 每个 tick 最多补几个库。缺省 2；`AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK` 可覆盖。
+///
+/// 一次面板变化最坏 N 个库同时欠账（N = 期望集大小）。每 tick 2 个 = 不把整机 CPU 占满，
+/// 同时 29 库约 15 分钟收敛——足够把「陈旧」压到分钟级，又不至于和正常任务抢资源。
+fn debt_sweep_dbnums_per_tick() -> usize {
+    std::env::var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(2)
+}
+
+/// 一个 tick 做的事：取欠账名单 → 逐个库补 → 记下这一 tick 的结果。
+///
+/// 门（与既有各条同源，不新造判据）：
+/// * `owed_dbnums_in_scope()` 回 `None` = 这一面不作数（开关关着 / 非落盘 / 常驻参照没装上），直接跳过；
+/// * 单库的 `try_lock_dbnum_task` 拿不到 = 那个库有任务在飞，跳过它（那个任务自己会处理）。
+///
+/// 单库失败不中断整轮：记进 `note_recompute_attempt`，名单上留着，下一 tick 再来。
+async fn sweep_once() -> SweepOutcome {
+    let Some(owed) = owed_dbnums_in_scope().await else {
+        return SweepOutcome::skipped("不作数（开关关着 / 非落盘 / 常驻参照没装上）");
+    };
+    if owed.is_empty() {
+        return SweepOutcome::skipped("零欠账");
+    }
+    let limit = debt_sweep_dbnums_per_tick();
+    let mut swept = Vec::new();
+    for dbnum in owed.into_iter().take(limit) {
+        // 有任务在飞的库跳过：那个任务自己会按任务路径处理，两边不抢。
+        let Ok(_guard) = crate::data_interface::batch_worker::try_lock_dbnum_task(dbnum) else {
+            swept.push(serde_json::json!({
+                "dbnum": dbnum,
+                "scope": "skipped",
+                "verdict": "这个库有任务在飞，交给它自己",
+            }));
+            continue;
+        };
+        let stamped = recompute_dbnum_room_edges_now(dbnum, "debt_sweep").await;
+        swept.push(serde_json::json!({
+            "dbnum": dbnum,
+            "scope": "whole_library",
+            "verdict": if stamped { "盖上了" } else { "没盖上（欠账仍在）" },
+        }));
+    }
+    SweepOutcome {
+        skipped_reason: None,
+        swept,
+    }
+}
+
+/// 一次 tick 的结果，给 `/health.room_build.debt_sweep.last_swept` 用。
+///
+/// 这是验收的唯一读数面：不能只看「边变了」，要看「是清扫器变的、走的是哪种范围」。
+struct SweepOutcome {
+    skipped_reason: Option<&'static str>,
+    swept: Vec<serde_json::Value>,
+}
+
+impl SweepOutcome {
+    fn skipped(reason: &'static str) -> Self {
+        Self {
+            skipped_reason: Some(reason),
+            swept: Vec::new(),
+        }
+    }
+}
+
+/// 最近一次 tick 的留底（进程内，重启清零）。
+static LAST_SWEEP: std::sync::LazyLock<std::sync::Mutex<serde_json::Value>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(serde_json::json!({
+            "in_flight": false,
+            "last_tick_at": serde_json::Value::Null,
+            "last_swept": [],
+            "skipped": "还没跑过",
+        }))
+    });
+
+/// `/health.room_build.debt_sweep` 那一格。
+pub(crate) fn debt_sweep_health() -> serde_json::Value {
+    LAST_SWEEP
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| serde_json::json!({ "in_flight": false, "last_swept": [], "skipped": "账本锁坏了" }))
+}
+
+/// 起清扫器（只起一次）。形状照 `native_runtime` 的 `OnceLock` 那套。
+pub(crate) fn ensure_debt_sweep_started() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        tokio::spawn(async {
+            let interval = debt_sweep_interval();
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Ok(mut book) = LAST_SWEEP.lock() {
+                    book["in_flight"] = serde_json::json!(true);
+                }
+                let outcome = sweep_once().await;
+                if let Ok(mut book) = LAST_SWEEP.lock() {
+                    book["in_flight"] = serde_json::json!(false);
+                    book["last_tick_at"] = serde_json::json!(chrono::Local::now().to_rfc3339());
+                    book["last_swept"] = serde_json::json!(outcome.swept);
+                    book["skipped"] = match outcome.skipped_reason {
+                        Some(reason) => serde_json::json!(reason),
+                        None => serde_json::Value::Null,
+                    };
+                }
+            }
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fast_model::room_resident::PanelDelta;
     use e3d_model::ledger::{ChangeKind, LedgerEntry};
+
+    /// 清扫器的两个旋钮：缺省 60 s / 2 库；环境变量覆盖；非法值（0、非数字）退回缺省。
+    ///
+    /// 这条测的是「旋钮读得出、读坏了不炸」——清扫器本身要真实库，门禁里跑不了。
+    /// 旋钮错了会让整机每分钟全库重排（secs=0）或一轮不干活（per_tick=0），所以边界要钉住。
+    #[test]
+    fn debt_sweep_knobs_default_and_override() {
+        // SAFETY: 测试里改环境变量，单线程读写，作用域内不留残余。
+        unsafe {
+            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_SECS");
+            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK");
+        }
+        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(60));
+        assert_eq!(debt_sweep_dbnums_per_tick(), 2);
+
+        unsafe {
+            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_SECS", "15");
+            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK", "5");
+        }
+        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(15));
+        assert_eq!(debt_sweep_dbnums_per_tick(), 5);
+
+        // 0 与非数字都退回缺省：0 会让清扫器空转或死循环，不能照抄。
+        unsafe {
+            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_SECS", "0");
+            std::env::set_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK", "abc");
+        }
+        assert_eq!(debt_sweep_interval(), std::time::Duration::from_secs(60));
+        assert_eq!(debt_sweep_dbnums_per_tick(), 2);
+
+        unsafe {
+            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_SECS");
+            std::env::remove_var("AIOS_ROOM_DEBT_SWEEP_DBNUMS_PER_TICK");
+        }
+    }
+
+    /// `debt_sweep_health()` 在没跑过时是「还没跑过」，不是「零欠账」——两者不能混。
+    #[test]
+    fn debt_sweep_health_reports_never_ran() {
+        let health = debt_sweep_health();
+        assert_eq!(health["in_flight"], serde_json::json!(false));
+        assert_eq!(health["last_tick_at"], serde_json::Value::Null);
+        assert_eq!(health["last_swept"], serde_json::json!([]));
+        assert_eq!(health["skipped"], serde_json::json!("还没跑过"));
+    }
 
     fn entry(noun: &str, kind: ChangeKind, id: u32) -> LedgerEntry {
         LedgerEntry {
