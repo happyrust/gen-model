@@ -1,0 +1,504 @@
+<body>
+
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-dashed" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-dasharray="3.2 3.2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5ZM2 17l10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 10l-2 2 2 2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7ZM14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><svg class="ico"><use href="#i-layers"/></svg></span>
+    <span class="brand-title">AIOS 部署面板</span>
+    <span class="brand-sub" id="top-host">连接中…</span>
+    <span class="tag-pill hidden" id="top-proj"></span>
+  </div>
+  <nav class="seg-tabs" id="view-tabs" aria-label="页面">
+    <button class="seg-btn active" data-view="overview" aria-current="page" onclick="switchView('overview', this)">概览与日志</button>
+    <button class="seg-btn" data-view="dbnums" onclick="switchView('dbnums', this)">设计库</button>
+    <button class="seg-btn" data-view="config" onclick="switchView('config', this)">工程配置</button>
+    <button class="seg-btn" data-view="jobs" onclick="switchView('jobs', this)">任务记录</button>
+  </nav>
+  <div class="top-right">
+    <div class="select-wrap"><select id="target-server-select" onchange="onServerSelectChange(this.value)" aria-label="当前管理的服务器"></select></div>
+    <button onclick="openSiteModal()" aria-label="创建站点" data-tip="创建站点，或连到另一台服务器"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span class="top-add-label">创建站点</span></button>
+    <button class="icon-btn" id="btn-theme" onclick="toggleTheme()" aria-label="切换深浅色" data-tip="切到深色"><svg class="ico" aria-hidden="true"><use id="theme-ico" href="#i-moon"/></svg></button>
+    <button class="icon-btn" onclick="openTokenModal()" aria-label="访问令牌" data-tip="访问令牌"><svg class="ico" aria-hidden="true"><use href="#i-key"/></svg></button>
+  </div>
+</header>
+
+<div class="app-shell">
+<aside id="fleet-sidebar" class="sidebar" aria-label="站点列表">
+  <div class="sidebar-head">
+    <span class="sidebar-title">站点</span>
+    <button class="icon-btn sm" id="btn-sidebar-toggle" onclick="toggleSidebar()" aria-label="收起或展开站点列表" data-tip="收起或展开（Ctrl+B）"><svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg></button>
+  </div>
+  <div class="sidebar-rows" id="fleet-rows"></div>
+  <div class="sidebar-foot">
+    <button class="sidebar-add-btn" onclick="openSiteModal()" aria-label="添加或创建站点"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span class="lbl">添加站点…</span></button>
+  </div>
+</aside>
+<main class="main-col" id="main-col">
+<div class="wrap" id="wrap">
+
+  <div class="hero-row">
+    <div class="hero-state">
+      <span class="hero-icon" id="hero-icon" aria-hidden="true"><svg class="ico"><use href="#i-dashed"/></svg></span>
+      <h1 class="hero-title"><span id="hero-title">正在读取状态</span><span class="hero-count" id="hero-count"></span></h1>
+      <span id="hero-problem" class="hero-problem hidden"></span>
+      <button id="hero-fix-btn" class="primary hidden"></button>
+      <button id="hero-more" class="link-btn hidden" aria-haspopup="true" aria-expanded="false" onclick="openProblemList(this)"></button>
+    </div>
+    <div class="hero-actions">
+      <span class="live-stamp" id="live-stamp" tabindex="0"><span class="dot" id="conn-dot"></span><span id="conn-text">连接中…</span></span>
+      <button id="btn-open-web" onclick="openFrontend()" aria-disabled="true">打开网页<svg class="ico sm" aria-hidden="true"><use href="#i-ext"/></svg></button>
+      <button id="btn-up" onclick="runJob('up', {}, false)" aria-disabled="true"><svg class="ico sm" aria-hidden="true"><use href="#i-play"/></svg>一键启动</button>
+      <button id="btn-down" onclick="confirmDown()" aria-disabled="true"><svg class="ico sm" aria-hidden="true"><use href="#i-square"/></svg>全部停止…</button>
+      <button id="btn-doctor" onclick="runJob('doctor', {}, false)" aria-disabled="true">自检</button>
+      <button class="icon-btn" id="btn-refresh" onclick="refreshNow()" aria-label="立即刷新" data-tip="立即重新检查一遍"><svg class="ico" aria-hidden="true"><use href="#i-restart"/></svg></button>
+    </div>
+  </div>
+
+  <div id="page-alert" class="page-alert hidden" role="alert">
+    <svg class="ico" aria-hidden="true"><use href="#i-alert"/></svg>
+    <span class="pa-text" id="page-alert-text"></span>
+    <button class="btn-sm" id="page-alert-btn" onclick="retryNow()">重试</button>
+  </div>
+
+  <div class="sub-row">
+    <div class="sub-left">
+      <button type="button" class="toggle-wrap" id="queue-toggle" role="switch" aria-checked="false" aria-disabled="true" onclick="toggleQueue()">
+        <span class="switch" id="queue-switch"></span>
+        <span>增量同步</span>
+        <span class="toggle-desc" id="queue-desc">—</span>
+      </button>
+      <button onclick="goDbnums()">生成模型…</button>
+      <span class="chips" id="hero-chips"></span>
+    </div>
+    <div class="sub-right">
+      <a class="ext-link off" id="link-web" href="#" target="_blank" rel="noopener">plant3d-web<svg class="ico sm" aria-hidden="true"><use href="#i-ext"/></svg></a>
+      <a class="ext-link off" id="link-api" href="#" target="_blank" rel="noopener">plant-ui<svg class="ico sm" aria-hidden="true"><use href="#i-ext"/></svg></a>
+    </div>
+  </div>
+
+  <div id="job-banner" class="banner hidden" role="status">
+    <span class="spin" aria-hidden="true"></span>
+    <strong id="job-title"></strong>
+    <span id="job-detail" class="banner-detail"></span>
+    <span class="banner-bar hidden" id="job-bar"><span id="job-bar-fill"></span></span>
+    <span id="job-elapsed" class="banner-time"></span>
+  </div>
+
+  <!-- 概览：四张卡 + 服务表 + 日志 -->
+  <div id="view-overview">
+    <div class="kpi-grid" id="kpi-grid">
+      <div class="kpi-card" id="kpi-svc">
+        <div class="kpi-top"><span class="kpi-label">服务</span><span class="kpi-hint">近 15 分钟</span></div>
+        <div class="kpi-val-row"><span class="kpi-val skel" id="kpi-svc-val">0 / 0</span><span class="kpi-unit" id="kpi-svc-unit"></span></div>
+        <div class="kpi-viz"><div class="ticks" id="kpi-svc-ticks"></div></div>
+        <div class="kpi-foot"><span id="kpi-svc-f1"></span><span id="kpi-svc-f2"></span></div>
+      </div>
+      <div class="kpi-card" id="kpi-job">
+        <div class="kpi-top"><span class="kpi-label">后端任务</span><span class="kpi-hint" id="kpi-job-hint"></span></div>
+        <div class="kpi-val-row"><span class="kpi-val skel" id="kpi-job-val">0</span><span class="kpi-unit" id="kpi-job-unit"></span></div>
+        <div class="kpi-viz" id="kpi-job-ticks"></div>
+        <div class="kpi-foot"><span id="kpi-job-f1"></span><span id="kpi-job-f2"></span></div>
+      </div>
+      <div class="kpi-card" id="kpi-disk">
+        <div class="kpi-top"><span class="kpi-label" id="kpi-disk-label">磁盘</span><span class="kpi-hint" id="kpi-disk-hint"></span></div>
+        <div class="kpi-val-row"><span class="kpi-val skel" id="kpi-disk-val">00.0</span><span class="kpi-unit" id="kpi-disk-unit"></span></div>
+        <div class="kpi-viz" id="kpi-disk-bar"></div>
+        <div class="kpi-foot"><span id="kpi-disk-f1"></span><span id="kpi-disk-f2"></span></div>
+      </div>
+      <div class="kpi-card" id="kpi-mem">
+        <div class="kpi-top"><span class="kpi-label">内存</span><span class="kpi-hint" id="kpi-mem-hint"></span></div>
+        <div class="kpi-val-row"><span class="kpi-val skel" id="kpi-mem-val">00.0</span><span class="kpi-unit" id="kpi-mem-unit"></span></div>
+        <div class="kpi-viz" id="kpi-mem-bar"></div>
+        <div class="kpi-foot"><span id="kpi-mem-f1"></span><span id="kpi-mem-f2"></span></div>
+      </div>
+    </div>
+
+    <section class="panel-card" id="services-card" aria-label="服务">
+      <div class="card-head">
+        <div class="card-head-left">
+          <h2 class="card-title">服务</h2>
+          <span id="pkg-cmp-summary" class="card-note"></span>
+        </div>
+        <div class="card-tools">
+          <input type="file" id="pkg-compare-dir" class="hidden" webkitdirectory multiple onchange="handleComparePackageDir(this.files)">
+          <button class="btn-sm ghost" onclick="document.getElementById('pkg-compare-dir').click()" data-tip="选一个本地发布包目录，和服务器上装的版本逐个对比"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg>对比本地包…</button>
+          <button class="btn-sm ghost" onclick="openUpgradeModal('backend')"><svg class="ico sm" aria-hidden="true"><use href="#i-upload"/></svg>版本推送…</button>
+          <button class="btn-sm ghost icon-only" onclick="loadServiceVersions(false)" aria-label="刷新版本信息" data-tip="刷新版本信息"><svg class="ico sm" aria-hidden="true"><use href="#i-restart"/></svg></button>
+        </div>
+      </div>
+      <div class="table-scroll">
+      <table class="svc-table">
+        <thead>
+          <tr>
+            <th class="col-svc">服务</th>
+            <th class="col-state">状态</th>
+            <th class="col-hist">近 15 分钟</th>
+            <th class="col-cpu num">CPU</th>
+            <th class="col-mem num">内存</th>
+            <th class="col-up">已运行</th>
+            <th class="col-ver">版本</th>
+            <th class="col-act"><span class="sr-only">操作</span></th>
+          </tr>
+        </thead>
+        <tbody id="services-tbody">
+          <tr><td colspan="8"><span class="skel skel-bar"></span></td></tr>
+          <tr><td colspan="8"><span class="skel skel-bar"></span></td></tr>
+          <tr><td colspan="8"><span class="skel skel-bar"></span></td></tr>
+          <tr><td colspan="8"><span class="skel skel-bar"></span></td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section class="panel-card log-card" id="log-card" aria-label="日志">
+      <div class="card-head">
+        <div class="log-left">
+          <h2 class="card-title">日志</h2>
+          <div class="pill-group" id="log-sources" role="group" aria-label="日志来源">
+            <button class="pill-btn" data-src="database" aria-pressed="false" onclick="setLogSource('database', this)">数据库</button>
+            <button class="pill-btn active" data-src="backend" aria-pressed="true" onclick="setLogSource('backend', this)">后端</button>
+            <button class="pill-btn" data-src="rs_server" aria-pressed="false" onclick="setLogSource('rs_server', this)">rs-server</button>
+            <button class="pill-btn" data-src="frontend" aria-pressed="false" onclick="setLogSource('frontend', this)">前端</button>
+            <button class="pill-btn" data-src="job" aria-pressed="false" onclick="setLogSource('job', this)">任务</button>
+            <button class="pill-btn" data-src="agent" aria-pressed="false" onclick="setLogSource('agent', this)">面板</button>
+          </div>
+          <div class="pill-group" id="log-levels" role="group" aria-label="日志级别">
+            <button class="pill-btn active" data-lv="all" aria-pressed="true" onclick="setLogLevel('all', this)">全部</button>
+            <button class="pill-btn" data-lv="warn" aria-pressed="false" onclick="setLogLevel('warn', this)">警告以上</button>
+            <button class="pill-btn" data-lv="err" aria-pressed="false" onclick="setLogLevel('err', this)">错误</button>
+          </div>
+        </div>
+        <div class="log-right">
+          <span id="log-count" class="log-count"></span>
+          <div class="search-wrap"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="log-search" placeholder="搜索" aria-label="搜索日志" oninput="renderLogs()"></div>
+          <button class="btn-sm" id="btn-log-pause" aria-pressed="false" onclick="togglePauseLog()">暂停</button>
+          <button class="btn-sm ghost" onclick="clearLogs()">清空</button>
+        </div>
+      </div>
+      <div class="log-body">
+        <div class="log-scroll" id="log-view" tabindex="0" role="log" aria-label="日志内容"></div>
+        <button class="btn-sm log-jump hidden" id="log-jump" onclick="jumpLogBottom()"></button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 设计库 -->
+  <section id="view-dbnums" class="panel-card hidden" aria-label="设计库">
+    <div class="card-head">
+      <div class="card-head-left">
+        <h2 class="card-title">设计库</h2>
+        <div class="search-wrap"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="dbnum-filter" placeholder="搜索库号或名称" aria-label="搜索库号或名称" oninput="renderDbnums()"></div>
+        <button class="btn-sm ghost icon-only" onclick="loadDbnums()" aria-label="刷新列表" data-tip="刷新列表"><svg class="ico sm" aria-hidden="true"><use href="#i-restart"/></svg></button>
+      </div>
+      <div class="card-tools">
+        <span class="card-note" id="dbnum-sel-count"></span>
+        <button class="primary" id="btn-dbnums-run" onclick="triggerDbnums()" aria-disabled="true" data-tip="先勾选至少一个库">生成所选库的模型…</button>
+      </div>
+    </div>
+    <div class="table-scroll tall">
+      <table class="data-table">
+        <thead><tr>
+          <th class="col-check"><input type="checkbox" id="dbnum-all" aria-label="全选当前列表" onchange="toggleAllDbnums(this.checked)"></th>
+          <th>库号</th><th>类型</th><th>名称</th><th class="num">文件大小</th><th>模型</th>
+        </tr></thead>
+        <tbody id="dbnums-body"><tr><td colspan="6" class="empty-cell">正在读取…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 工程配置 -->
+  <section id="view-config" class="panel-card hidden" aria-label="工程配置">
+    <div class="card-head">
+      <div class="card-head-left">
+        <h2 class="card-title">工程配置</h2>
+        <span class="card-note" id="cfg-target-banner">目标服务器 <b id="cfg-target-label">当前面板</b></span>
+      </div>
+      <div class="card-tools">
+        <button type="button" class="btn-sm ghost" onclick="promptAddServer()">换一台服务器…</button>
+      </div>
+    </div>
+    <div class="box-pad">
+      <div class="form-cols">
+        <fieldset class="form-section">
+          <legend>工程参数</legend>
+          <div class="form-grid">
+            <label for="cfg-e3d-root">E3D 根目录</label><input type="text" id="cfg-e3d-root" placeholder="如 C:/aios-cloud-test/e3d/E3D3.1">
+            <label for="cfg-name">工程名称</label><input type="text" id="cfg-name" placeholder="如 AvevaPlantSample">
+            <label for="cfg-dir">工程子目录（可选）</label><input type="text" id="cfg-dir" placeholder="留空表示直接使用 E3D 根目录">
+            <label for="cfg-code">工程代号</label><input type="text" id="cfg-code" placeholder="如 9002">
+            <label for="cfg-version">E3D 版本</label><input type="text" id="cfg-version" placeholder="如 e3d31 或 e3d21">
+            <label for="cfg-mdb">MDB 名称</label><input type="text" id="cfg-mdb" placeholder="如 ALL">
+          </div>
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>服务端口与网络</legend>
+          <div class="form-grid">
+            <label for="cfg-port-db">数据库端口</label><input type="number" id="cfg-port-db" min="1" max="65535" placeholder="如 28909">
+            <label for="cfg-port-be">后端端口</label><input type="number" id="cfg-port-be" min="1" max="65535" placeholder="如 28922">
+            <label for="cfg-port-rs">rs-server 端口</label><input type="number" id="cfg-port-rs" min="1" max="65535" placeholder="如 28998">
+            <label for="cfg-port-fe">前端端口</label><input type="number" id="cfg-port-fe" min="1" max="65535" placeholder="如 28900">
+            <label for="cfg-loopback">访问范围</label>
+            <div class="select-wrap"><select id="cfg-loopback">
+              <option value="false">局域网和公网都能访问</option>
+              <option value="true">只有本机（127.0.0.1）</option>
+            </select></div>
+          </div>
+        </fieldset>
+      </div>
+      <div class="form-actions">
+        <button class="primary" id="btn-save-redeploy" onclick="saveAndRedeploy()">保存并重新部署</button>
+        <button onclick="saveConfigOnly()">只保存</button>
+        <button class="ghost" onclick="loadConfig()">重新读取</button>
+        <span id="cfg-msg" class="form-msg" role="status"></span>
+      </div>
+      <p class="form-note">「只保存」要求所有服务已经停止。「保存并重新部署」会先停掉在跑的服务，写入工程和端口配置，再把全套重新启动；改了端口要确认防火墙和云安全组已经放行。</p>
+    </div>
+  </section>
+
+  <!-- 任务记录 -->
+  <section id="view-jobs" class="panel-card hidden" aria-label="任务记录">
+    <div class="card-head">
+      <div class="card-head-left"><h2 class="card-title">任务记录</h2></div>
+      <div class="card-tools">
+        <button class="btn-sm ghost icon-only" onclick="loadJobs()" aria-label="刷新任务列表" data-tip="刷新任务列表"><svg class="ico sm" aria-hidden="true"><use href="#i-restart"/></svg></button>
+      </div>
+    </div>
+    <div class="table-scroll short">
+      <table class="data-table">
+        <thead><tr><th>编号</th><th>任务</th><th>状态</th><th>开始</th><th class="num">用时</th><th>结果</th></tr></thead>
+        <tbody id="jobs-body"><tr><td colspan="6" class="empty-cell">正在读取…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="job-out">
+      <div class="job-out-head"><span id="job-out-title">输出</span></div>
+      <div class="log-scroll" id="job-out-view" tabindex="0">点一条任务，在这里看它的输出</div>
+    </div>
+  </section>
+
+</div>
+</main>
+</div>
+
+<footer class="footer-bar">
+  <span id="foot-left">运行目录 —</span>
+  <span id="foot-right"></span>
+</footer>
+
+<!-- 创建站点 -->
+<div id="site-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="site-modal-title" data-close="closeSiteModal">
+  <div class="modal modal-lg">
+    <div class="modal-head">
+      <h2 id="site-modal-title">创建站点</h2>
+      <button class="icon-btn" onclick="closeSiteModal()" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-desc">配好并启动一个站点：校验工程目录，写入配置，再把全套服务重新启动。</p>
+      <div class="preset-row">
+        <button type="button" class="btn-sm" id="preset-local" onclick="applySitePreset('local')">本地站点 · 127.0.0.1 · 8009 / 8022 / 9098 / 3100</button>
+        <button type="button" class="btn-sm" id="preset-net" onclick="applySitePreset('net')">网络站点 · 0.0.0.0 · 允许外部访问</button>
+      </div>
+      <div class="form-grid">
+        <label for="site-target-host">目标服务器</label>
+        <div class="field-row">
+          <input type="text" id="site-target-host" placeholder="留空就是当前面板；或填 IP，如 192.168.1.20:28600">
+          <button type="button" onclick="connectSiteTarget()">连接并读取</button>
+        </div>
+        <label for="site-target-token">目标令牌（可选）</label><input type="password" id="site-target-token" placeholder="目标服务器开了 --no-auth 就留空" autocomplete="off">
+        <div id="site-target-msg" class="field-msg" role="status"></div>
+        <label for="site-stack-name">站点名称</label><input type="text" id="site-stack-name" placeholder="如 local-site">
+        <label for="site-e3d-root">E3D 根目录</label>
+        <div class="field-row">
+          <input type="text" id="site-e3d-root" placeholder="如 D:\AVEVA\Projects\E3D3.1">
+          <button type="button" onclick="probeSitePath()">检测目录</button>
+        </div>
+        <div id="site-probe-msg" class="field-msg" role="status"></div>
+        <label for="site-name">工程名称</label><input type="text" id="site-name" placeholder="如 AvevaPlantSample">
+        <label for="site-dir">工程子目录（可选）</label><input type="text" id="site-dir" placeholder="留空表示直接使用 E3D 根目录">
+        <label for="site-code">工程代号</label><input type="text" id="site-code" placeholder="如 9002">
+        <label for="site-version">E3D 版本</label><input type="text" id="site-version" placeholder="如 e3d31">
+        <label for="site-mdb">MDB 名称</label><input type="text" id="site-mdb" placeholder="如 ALL">
+        <label for="site-loopback">访问范围</label>
+        <div class="select-wrap"><select id="site-loopback">
+          <option value="true">只有本机（127.0.0.1）</option>
+          <option value="false">全部网卡（0.0.0.0，局域网和公网）</option>
+        </select></div>
+        <label id="site-ports-label">服务端口</label>
+        <div class="port-grid" role="group" aria-labelledby="site-ports-label">
+          <input type="number" id="site-port-db" min="1" max="65535" aria-label="数据库端口" data-tip="数据库端口" placeholder="数据库 8009">
+          <input type="number" id="site-port-be" min="1" max="65535" aria-label="后端端口" data-tip="后端端口" placeholder="后端 8022">
+          <input type="number" id="site-port-rs" min="1" max="65535" aria-label="rs-server 端口" data-tip="rs-server 端口" placeholder="rs 9098">
+          <input type="number" id="site-port-fe" min="1" max="65535" aria-label="前端端口" data-tip="前端端口" placeholder="前端 3100">
+        </div>
+        <label class="check"><input type="checkbox" id="site-reset-work" checked><span>重建底层 DbOption.toml（按新站点配置重新生成）</span></label>
+      </div>
+      <div id="site-msg" class="form-msg" role="status"></div>
+    </div>
+    <div class="modal-foot">
+      <button onclick="closeSiteModal()">取消</button>
+      <button class="primary" id="btn-create-site" onclick="createAndStartSite()">创建站点并启动</button>
+    </div>
+  </div>
+</div>
+
+<!-- 版本对比与推送升级 -->
+<div id="svc-upgrade-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="up-modal-title" data-close="closeUpgradeModal">
+  <div class="modal modal-xl">
+    <div class="modal-head">
+      <h2 id="up-modal-title">版本对比与推送升级</h2>
+      <div class="modal-head-tools">
+        <div class="seg-tabs" id="up-svc-tabs" role="group" aria-label="服务">
+          <button type="button" class="seg-btn" data-svc="database" onclick="switchUpgradeSvc('database')">数据库</button>
+          <button type="button" class="seg-btn active" data-svc="backend" onclick="switchUpgradeSvc('backend')">后端</button>
+          <button type="button" class="seg-btn" data-svc="rs_server" onclick="switchUpgradeSvc('rs_server')">rs-server</button>
+          <button type="button" class="seg-btn" data-svc="frontend" onclick="switchUpgradeSvc('frontend')">前端</button>
+        </div>
+        <button class="icon-btn" onclick="closeUpgradeModal()" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div id="up-diff-banner" class="cmp-diff-banner info" role="status">正在读取服务器上的版本…</div>
+
+      <div class="cmp-grid">
+        <div class="cmp-card">
+          <h4><span>服务器上现在的版本</span><span id="up-cur-tag" class="tag-pill">—</span></h4>
+          <div class="cmp-kv">
+            <span class="k">版本号</span><span class="v" id="up-cur-ver">--</span>
+            <span class="k">构建 / Commit</span><span class="v" id="up-cur-build">--</span>
+            <span class="k">目标路径</span><span class="v" id="up-cur-path">--</span>
+            <span class="k">文件大小</span><span class="v" id="up-cur-bytes">--</span>
+            <span class="k">时间</span><span class="v" id="up-cur-time">--</span>
+            <span class="k">SHA-256</span><span class="v" id="up-cur-sha">--</span>
+          </div>
+        </div>
+        <div class="cmp-card">
+          <h4><span>要推送的新版本</span><span id="up-new-tag" class="tag-pill">未选择</span></h4>
+          <div class="cmp-kv">
+            <span class="k">版本号</span><span class="v" id="up-new-ver">--</span>
+            <span class="k">构建 / Commit</span><span class="v" id="up-new-build">--</span>
+            <span class="k">来源</span><span class="v" id="up-new-path">--</span>
+            <span class="k">文件大小</span><span class="v" id="up-new-bytes">--</span>
+            <span class="k">时间</span><span class="v" id="up-new-time">--</span>
+            <span class="k">SHA-256</span><span class="v" id="up-new-sha">--</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="up-source">
+        <div class="up-source-title">新版本从哪来：从本机选文件上传，或填服务器上的路径</div>
+        <div class="up-row">
+          <input type="file" id="up-file-single" class="hidden" accept=".exe,.zip" onchange="onPickSingleUpgradeFile(this.files)">
+          <input type="file" id="up-file-dir" class="hidden" webkitdirectory multiple onchange="onPickFrontendDir(this.files)">
+          <button type="button" id="btn-pick-file" onclick="document.getElementById('up-file-single').click()">选择本地程序或 .zip</button>
+          <button type="button" id="btn-pick-fedir" onclick="document.getElementById('up-file-dir').click()">选择前端 www / dist 目录</button>
+          <button type="button" class="ghost" onclick="clearServiceStage()">清除暂存</button>
+        </div>
+        <div id="up-local-pick-note" class="field-msg"></div>
+        <div class="up-row">
+          <input type="text" id="up-server-path" aria-label="服务器上的路径" placeholder="或填服务器上的文件或发布包目录，如 D:\releases\...\bin\aios-database.exe">
+          <button type="button" onclick="compareServerPath(false)">路径对比</button>
+          <button type="button" onclick="compareServerPath(true)">从服务器路径暂存</button>
+        </div>
+      </div>
+
+      <div id="up-progress-wrap" class="hidden">
+        <div class="up-progress-head"><span id="up-progress-text">准备中…</span><span id="up-progress-pct" class="num">0%</span></div>
+        <div class="up-progress-bar"><div id="up-progress-fill" class="up-progress-fill"></div></div>
+      </div>
+
+      <div id="up-logs" class="log-scroll hidden" tabindex="0" aria-label="升级过程"></div>
+    </div>
+    <div class="modal-foot">
+      <div class="grow">
+        <button type="button" id="btn-up-rollback" class="danger hidden" onclick="rollbackServiceVersion()"><svg class="ico sm" aria-hidden="true"><use href="#i-undo"/></svg>回滚上一版…</button>
+        <label class="check"><input type="checkbox" id="up-auto-start" checked><span>替换后启动并校验</span></label>
+        <label class="check"><input type="checkbox" id="up-force-stop"><span>若忙则强制停止</span></label>
+      </div>
+      <button type="button" onclick="closeUpgradeModal()">关闭</button>
+      <button type="button" id="btn-up-stage-only" onclick="pushSelectedToStage(false)">仅推送暂存</button>
+      <button type="button" id="btn-up-apply" class="primary" onclick="pushAndUpgradeSelected()">推送并立即升级…</button>
+    </div>
+  </div>
+</div>
+
+<!-- 连到另一台服务器 -->
+<div id="server-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="server-modal-title" data-close="closeServerModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="server-modal-title">连到另一台服务器</h2>
+      <button class="icon-btn" onclick="closeServerModal()" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <label for="server-host">地址</label><input type="text" id="server-host" placeholder="如 192.168.1.20 或 192.168.1.20:28600" onkeydown="if(event.key==='Enter')submitServerModal()">
+        <label for="server-token">访问令牌</label><input type="password" id="server-token" placeholder="对方开了 --no-auth 就留空" autocomplete="off" onkeydown="if(event.key==='Enter')submitServerModal()">
+        <div id="server-err" class="field-msg err" role="alert"></div>
+      </div>
+      <p class="form-note">不写端口时用 28600。</p>
+    </div>
+    <div class="modal-foot">
+      <button onclick="closeServerModal()">取消</button>
+      <button class="primary" onclick="submitServerModal()">连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- 访问令牌：服务器返回 401 或点钥匙按钮时出现 -->
+<div id="token-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="token-modal-title" data-close="closeTokenModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="token-modal-title">访问令牌</h2>
+      <button class="icon-btn" onclick="closeTokenModal()" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-desc">这台服务器开了令牌鉴权。在服务器上运行 <code>show-token.cmd</code> 可以看到令牌。</p>
+      <input type="password" id="token-input" placeholder="粘贴访问令牌" aria-label="访问令牌" autocomplete="off" onkeydown="if(event.key==='Enter')saveToken()">
+      <div id="token-err" class="field-msg err" role="alert"></div>
+    </div>
+    <div class="modal-foot">
+      <button onclick="closeTokenModal()">取消</button>
+      <button class="primary" onclick="saveToken()">连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- 确认 -->
+<div id="confirm-modal" class="modal-backdrop hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body" data-close="cancelConfirm">
+  <div class="modal">
+    <div class="modal-head"><h2 id="confirm-title">请确认</h2></div>
+    <div class="modal-body"><p id="confirm-body" class="modal-desc pre"></p></div>
+    <div class="modal-foot">
+      <button id="confirm-cancel" onclick="settleConfirm(false)">取消</button>
+      <button id="confirm-ok" class="primary" onclick="settleConfirm(true)">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="tip" class="tip hidden" role="tooltip"></div>
+<div id="pop" class="pop hidden"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+

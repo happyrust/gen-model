@@ -1,0 +1,2577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIOS 部署面板 · Web Dashboard</title>
+<style>
+  :root {
+    --page: #f8f9fb;
+    --panel: #ffffff;
+    --soft: #f3f4f6;
+    --soft-hover: #eaecef;
+    --line: #e5e7eb;
+    --line-strong: #d1d5db;
+    --ink: #18181b;
+    --ink2: #52525b;
+    --muted: #71717a;
+    --accent: #2563eb;
+    --accent-bg: rgba(37, 99, 235, 0.08);
+    --ok: #16a34a;
+    --ok-bg: rgba(22, 163, 74, 0.10);
+    --warn: #d97706;
+    --warn-text: #a16207;
+    --warn-bg: rgba(217, 119, 6, 0.12);
+    --bad: #dc2626;
+    --bad-bg: rgba(220, 38, 38, 0.08);
+    --bad-border: rgba(220, 38, 38, 0.35);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --radius: 8px;
+  }
+  html.dark {
+    --page: #0f1115;
+    --panel: #161920;
+    --soft: #1e222b;
+    --soft-hover: #262b36;
+    --line: #2a2f3a;
+    --line-strong: #3a4150;
+    --ink: #f4f4f5;
+    --ink2: #d4d4d8;
+    --muted: #a1a1aa;
+    --accent: #3b82f6;
+    --accent-bg: rgba(59, 130, 246, 0.14);
+    --ok: #22c55e;
+    --ok-bg: rgba(34, 197, 94, 0.14);
+    --warn: #eab308;
+    --warn-text: #facc15;
+    --warn-bg: rgba(234, 179, 8, 0.14);
+    --bad: #f87171;
+    --bad-bg: rgba(248, 113, 113, 0.14);
+    --bad-border: rgba(248, 113, 113, 0.40);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px; line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Top app bar matching GPUI header */
+  .topbar {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 8px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    position: sticky; top: 0; z-index: 30;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .brand-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .brand-sep { color: var(--muted); }
+  .brand-sub { font-size: 13px; color: var(--ink2); font-family: var(--mono); }
+  .tag-pill {
+    font-size: 11px; padding: 1px 8px; border-radius: 5px;
+    background: var(--soft); border: 1px solid var(--line); color: var(--muted);
+  }
+  .top-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  .seg-tabs {
+    display: inline-flex; background: var(--soft); border: 1px solid var(--line);
+    border-radius: 7px; padding: 2px; gap: 2px;
+  }
+  .seg-btn {
+    border: none; background: transparent; color: var(--muted); padding: 4px 10px;
+    border-radius: 5px; font-size: 12px; font-weight: 500; cursor: pointer;
+  }
+  .seg-btn:hover { color: var(--ink); background: transparent; }
+  .seg-btn.active {
+    background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
+
+  button {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 11px; font-size: 12px; cursor: pointer; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 5px; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { background: var(--soft); border-color: var(--line-strong); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--ink); border-color: var(--ink); color: var(--panel); }
+  button.primary:hover:not(:disabled) { opacity: .88; background: var(--ink); }
+  button.danger-soft {
+    background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad);
+  }
+  button.danger-soft:hover:not(:disabled) { background: rgba(220, 38, 38, 0.14); }
+  button.success-soft {
+    background: var(--ok-bg); border-color: rgba(22, 163, 74, 0.35); color: var(--ok);
+  }
+  button.success-soft:hover:not(:disabled) { background: rgba(22, 163, 74, 0.16); }
+  button.icon-btn { padding: 5px 8px; }
+
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 14px 20px 44px; }
+
+  /* Hero status & actions row */
+  .hero-row {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 10px;
+  }
+  .hero-state { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; }
+  .hero-icon {
+    width: 20px; height: 20px; border-radius: 50%; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  }
+  .hero-icon.ok { background: var(--ok-bg); color: var(--ok); border: 1.5px solid var(--ok); }
+  .hero-icon.warn { background: var(--warn-bg); color: var(--warn-text); border: 1.5px solid var(--warn); }
+  .hero-icon.bad { background: var(--bad-bg); color: var(--bad); border: 1.5px solid var(--bad); }
+  .hero-icon.stopped { background: var(--soft); color: var(--muted); border: 1.5px solid var(--line-strong); }
+  .hero-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .live-stamp { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; display: inline-block; }
+  .dot.ok { color: var(--ok); }
+  .dot.warn { color: var(--warn); }
+  .dot.bad { color: var(--bad); }
+
+  /* Sub-toolbar strip */
+  .sub-row {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 8px 0 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line);
+  }
+  .sub-left, .sub-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; }
+  .toggle-wrap { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .switch {
+    width: 34px; height: 19px; border-radius: 999px; background: var(--line-strong);
+    position: relative; transition: background .15s; flex-shrink: 0;
+  }
+  .switch.on { background: var(--ink); }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+    border-radius: 50%; background: var(--panel); transition: transform .15s;
+  }
+  .switch.on::after { transform: translateX(15px); }
+  .ext-link {
+    color: var(--ink2); text-decoration: none; font-family: var(--mono); font-size: 12px;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .ext-link:hover { color: var(--accent); text-decoration: underline; }
+
+  /* Job progress banner */
+  .banner {
+    padding: 9px 14px; border-radius: var(--radius); margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    border: 1px solid var(--accent); background: var(--accent-bg); font-size: 12px;
+  }
+  .hidden { display: none !important; }
+
+  /* 4 KPI cards matching GPUI */
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+  @media (max-width: 1100px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .kpi-grid { grid-template-columns: 1fr; } }
+
+  .kpi-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 13px 16px; min-height: 118px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px;
+  }
+  .kpi-top { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+  .kpi-label { color: var(--ink2); font-weight: 500; }
+  .kpi-hint { color: var(--muted); font-size: 11px; }
+  .kpi-val-row { display: flex; align-items: baseline; gap: 6px; }
+  .kpi-val { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .kpi-unit { font-size: 12px; color: var(--muted); }
+  .ticks { display: flex; gap: 3px; align-items: center; height: 10px; }
+  .tick { flex: 1; height: 6px; border-radius: 2px; background: var(--line); }
+  .tick.ok { background: rgba(22, 163, 74, 0.45); }
+  .tick.warn { background: var(--warn); }
+  .tick.bad { background: var(--bad); }
+  .meter { height: 4px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .meter-fill { height: 100%; background: var(--ok); border-radius: 999px; transition: width .3s; }
+  .meter-fill.warn { background: var(--warn); }
+  .meter-fill.bad { background: var(--bad); }
+  .kpi-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; color: var(--muted);
+  }
+
+  /* Service table matching GPUI */
+  .panel-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; margin-bottom: 12px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th {
+    color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap;
+    background: var(--soft); border-bottom: 1px solid var(--line);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.svc-row { cursor: pointer; transition: background .1s; }
+  tbody tr.svc-row:hover td { background: var(--soft); }
+  tbody tr.svc-row.selected td { background: var(--accent-bg); }
+  tbody tr:hover td { background: var(--soft); }
+
+  .svc-cell { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .svc-ico {
+    width: 28px; height: 28px; border-radius: 6px; background: var(--soft);
+    border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center;
+    color: var(--ink2); flex-shrink: 0;
+  }
+  .svc-name { font-weight: 600; color: var(--ink); font-size: 13px; white-space: nowrap; }
+  .svc-sub { font-family: var(--mono); color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px; font-weight: 500; font-size: 12px;
+    white-space: nowrap; padding: 2px 8px; border-radius: 999px;
+  }
+  .status-pill.ok { color: var(--ink); padding: 2px 0; }
+  .status-pill.ok .dot { color: var(--ok); }
+  .status-pill.warn { background: var(--warn-bg); color: var(--warn-text); border: 1px solid rgba(217, 119, 6, 0.35); }
+  .status-pill.bad { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-border); }
+  .status-pill.stopped { background: var(--soft); color: var(--muted); border: 1px solid var(--line); }
+
+  .mini-ticks { display: inline-flex; gap: 2px; align-items: center; }
+  .mini-tick { width: 4px; height: 14px; border-radius: 1px; background: var(--line); }
+  .mini-tick.ok { background: rgba(22, 163, 74, 0.45); }
+  .mini-tick.warn { background: var(--warn); }
+  .mini-tick.bad { background: var(--bad); }
+
+  .spark-cell { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); color: var(--ink2); white-space: nowrap; }
+  .spark-svg { width: 44px; height: 18px; display: block; flex-shrink: 0; }
+
+  .svc-actions { display: inline-flex; gap: 4px; align-items: center; justify-content: flex-end; white-space: nowrap; }
+  button.btn-sm { padding: 3px 7px; font-size: 11px; border-radius: 5px; }
+  button.accent-soft {
+    background: var(--accent-bg); border-color: rgba(37, 99, 235, 0.35); color: var(--accent);
+  }
+  button.accent-soft:hover:not(:disabled) { background: rgba(37, 99, 235, 0.16); }
+  .ver-main { font-family: var(--mono); color: var(--ink); font-weight: 500; font-size: 12px; }
+  .ver-sub { font-family: var(--mono); color: var(--muted); font-size: 11px; margin-top: 2px; word-break: break-all; }
+  .ver-badge {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; padding: 2px 7px;
+    border-radius: 5px; font-size: 11px; font-family: var(--mono); border: 1px solid var(--line);
+  }
+  .ver-badge.up { background: var(--warn-bg); color: var(--warn-text); border-color: rgba(217, 119, 6, 0.35); }
+  .ver-badge.same { background: var(--ok-bg); color: var(--ok); border-color: rgba(22, 163, 74, 0.35); }
+  .ver-badge.staged { background: var(--accent-bg); color: var(--accent); border-color: rgba(37, 99, 235, 0.35); }
+
+  .cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+  @media (max-width: 720px) { .cmp-grid { grid-template-columns: 1fr; } }
+  .cmp-card { border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; background: var(--page); }
+  .cmp-card h4 { margin: 0 0 8px; font-size: 12px; color: var(--ink2); display: flex; justify-content: space-between; align-items: center; }
+  .cmp-kv { display: grid; grid-template-columns: 78px 1fr; gap: 4px 8px; font-size: 11px; }
+  .cmp-kv .k { color: var(--muted); }
+  .cmp-kv .v { font-family: var(--mono); color: var(--ink); word-break: break-all; }
+  .cmp-diff-banner { padding: 8px 12px; border-radius: 6px; font-size: 12px; margin: 8px 0; border: 1px solid var(--line); }
+  .cmp-diff-banner.up { background: var(--warn-bg); color: var(--warn-text); border-color: rgba(217, 119, 6, 0.4); }
+  .cmp-diff-banner.same { background: var(--ok-bg); color: var(--ok); border-color: rgba(22, 163, 74, 0.4); }
+  .cmp-diff-banner.info { background: var(--soft); color: var(--ink2); }
+  .up-progress-bar { height: 7px; border-radius: 999px; background: var(--soft); overflow: hidden; margin-top: 6px; border: 1px solid var(--line); }
+  .up-progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width .15s; }
+
+  /* Logs section matching GPUI */
+  .log-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .log-left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .log-title { font-weight: 600; font-size: 13px; margin-right: 4px; }
+  .pill-group {
+    display: inline-flex; background: var(--soft); border: 1px solid var(--line);
+    border-radius: 6px; padding: 2px; gap: 2px;
+  }
+  .pill-btn {
+    border: none; background: transparent; color: var(--muted); padding: 3px 9px;
+    border-radius: 4px; font-size: 12px; cursor: pointer;
+  }
+  .pill-btn:hover { color: var(--ink); background: transparent; }
+  .pill-btn.active { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+
+  input[type="text"], input[type="password"], input[type="number"], select {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; font-family: var(--mono);
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+
+  .log-scroll {
+    height: 330px; min-height: 200px; max-height: 640px; resize: vertical;
+    overflow-y: auto; background: var(--panel);
+    font-family: var(--mono); font-size: 12px;
+  }
+  .log-row {
+    display: grid; grid-template-columns: 92px 84px 1fr; gap: 10px;
+    padding: 3px 14px; border-bottom: 1px solid transparent; align-items: baseline;
+  }
+  .log-row:hover { background: var(--soft); }
+  .log-ts { color: var(--muted); white-space: nowrap; }
+  .log-src { color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-msg { color: var(--ink); white-space: pre-wrap; word-break: break-all; }
+  .log-row.WARN .log-msg, .log-row.WARN .log-src { color: var(--warn-text); }
+  .log-row.ERR .log-msg, .log-row.ERROR .log-msg,
+  .log-row.ERR .log-src, .log-row.ERROR .log-src { color: var(--bad); }
+
+  /* Bottom status bar */
+  .footer-bar {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 5px 20px; display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; color: var(--muted); font-family: var(--mono);
+  }
+
+  /* Secondary tabs padding */
+  .box-pad { padding: 14px; }
+  .form-grid { display: grid; grid-template-columns: 140px 1fr; gap: 10px 12px; max-width: 680px; align-items: center; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(24, 24, 27, 0.45);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px; width: 420px; max-width: 92vw; box-shadow: 0 12px 32px rgba(0,0,0,0.16);
+  }
+  .modal h2 { margin: 0 0 8px; font-size: 16px; }
+  .modal p { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+
+  /* Left Sidebar (Fleet / Sites list, matching GUI) */
+  .app-shell { display: flex; align-items: stretch; min-height: calc(100vh - 50px); }
+  .sidebar {
+    width: 232px; flex-shrink: 0; background: var(--page);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column;
+    transition: width 0.15s ease;
+  }
+  .sidebar.collapsed { width: 52px; }
+  .sidebar-head {
+    height: 38px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); flex-shrink: 0;
+  }
+  .sidebar.collapsed .sidebar-head { justify-content: center; padding: 0; }
+  .sidebar-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .sidebar.collapsed .sidebar-title { display: none; }
+  .sidebar-rows { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 3px; }
+  .sidebar.collapsed .sidebar-rows { padding: 6px 4px; align-items: center; }
+  .site-row {
+    width: 100%; padding: 7px 9px; border-radius: var(--radius);
+    border: 1px solid transparent; cursor: pointer; text-align: left;
+    background: transparent; color: var(--ink); display: flex; flex-direction: column; gap: 2px;
+    position: relative;
+  }
+  .site-row:hover { background: var(--soft); }
+  .site-row.active { background: var(--accent-bg); border-color: rgba(37, 99, 235, 0.35); }
+  .site-row-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .site-row-name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .site-row.active .site-row-name { font-weight: 600; }
+  .site-row-word { font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .site-row-sub {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    padding-left: 16px; font-size: 11px; color: var(--muted); font-family: var(--mono);
+  }
+  .site-row-addr { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .site-del {
+    opacity: 0; border: none; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 12px; padding: 0 3px; line-height: 1; height: auto;
+  }
+  .site-row:hover .site-del { opacity: 1; }
+  .site-del:hover { color: var(--bad); }
+  .sidebar.collapsed .site-row { width: 38px; height: 36px; padding: 0; align-items: center; justify-content: center; }
+  .sidebar.collapsed .site-row-name,
+  .sidebar.collapsed .site-row-word,
+  .sidebar.collapsed .site-row-sub { display: none; }
+  .sidebar-foot { padding: 8px; border-top: 1px solid var(--line); flex-shrink: 0; }
+  .sidebar.collapsed .sidebar-foot { padding: 6px; display: flex; justify-content: center; }
+  .sidebar-add-btn { width: 100%; justify-content: center; font-size: 12px; }
+  .sidebar.collapsed .sidebar-add-btn span.lbl { display: none; }
+  .main-col { flex: 1; min-width: 0; }
+  @media (max-width: 820px) {
+    .sidebar { width: 52px; }
+    .sidebar .sidebar-title, .sidebar .site-row-name, .sidebar .site-row-word, .sidebar .site-row-sub, .sidebar .sidebar-add-btn span.lbl { display: none; }
+    .sidebar .sidebar-head { justify-content: center; padding: 0; }
+    .sidebar .site-row { width: 38px; height: 36px; padding: 0; align-items: center; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <span class="brand-title">AIOS 部署面板</span>
+    <span class="brand-sep">·</span>
+    <span class="brand-sub" id="top-host">连接中...</span>
+    <span class="tag-pill" id="top-proj">--</span>
+  </div>
+  <div class="top-right">
+    <div class="seg-tabs">
+      <button class="seg-btn active" onclick="switchView('overview', this)">概览与日志</button>
+      <button class="seg-btn" onclick="switchView('dbnums', this)">设计库</button>
+      <button class="seg-btn" onclick="switchView('config', this)">工程配置</button>
+      <button class="seg-btn" onclick="switchView('jobs', this)">任务记录</button>
+    </div>
+    <select id="target-server-select" onchange="onServerSelectChange(this.value)" title="切换当前管理的服务器 IP" style="height:28px;font-size:12px;max-width:190px;padding:0 8px;"></select>
+    <button class="primary" onclick="openSiteModal()" title="创建或切换本地/指定 IP 服务器站点">+ 创建站点</button>
+    <button class="icon-btn" id="btn-theme" onclick="toggleTheme()" title="切换亮/暗主题">🌙</button>
+    <button class="icon-btn" onclick="openTokenModal()" title="访问令牌设置">🔑</button>
+  </div>
+</div>
+
+<div class="app-shell">
+<aside id="fleet-sidebar" class="sidebar">
+  <div class="sidebar-head">
+    <span class="sidebar-title">站点 / 服务器</span>
+    <button class="icon-btn" id="btn-sidebar-toggle" onclick="toggleSidebar()" title="收起/展开站点列表 (Ctrl+B)" style="width:24px;height:24px;font-size:12px;">◀</button>
+  </div>
+  <div class="sidebar-rows" id="fleet-rows"></div>
+  <div class="sidebar-foot">
+    <button class="sidebar-add-btn" onclick="openSiteModal()" title="创建或添加指定 IP 站点">+ <span class="lbl">添加 / 创建站点…</span></button>
+  </div>
+</aside>
+<main class="main-col">
+<div class="wrap">
+  <!-- Hero Status + Primary Actions -->
+  <div class="hero-row">
+    <div class="hero-state">
+      <span class="hero-icon ok" id="hero-icon">✓</span>
+      <span id="hero-title">等待连接...</span>
+      <span id="hero-problem" class="tag-pill hidden" style="margin-left:4px;"></span>
+      <button id="hero-fix-btn" class="btn-sm primary hidden"></button>
+    </div>
+    <div class="hero-actions">
+      <span class="live-stamp"><span class="dot ok" id="conn-dot"></span><span id="conn-text">连接中...</span></span>
+      <button onclick="openFrontend()">打开网页 ↗</button>
+      <button class="primary" id="btn-up" onclick="runJob('up', {}, false)">▷ 一键启动</button>
+      <button class="danger-soft" id="btn-down" onclick="confirmDown()">□ 停止...</button>
+      <button id="btn-doctor" onclick="runJob('doctor', {}, false)">健康检查</button>
+      <button onclick="refreshNow()">↻ 刷新</button>
+    </div>
+  </div>
+
+  <!-- Sub-toolbar Strip -->
+  <div class="sub-row">
+    <div class="sub-left">
+      <label class="toggle-wrap" onclick="toggleQueue()">
+        <span class="switch" id="queue-switch"></span>
+        <span><b>增量同步</b> <span id="queue-desc" style="color:var(--muted)">--</span></span>
+      </label>
+      <button onclick="goDbnums()">生成模型 (dbnums)</button>
+    </div>
+    <div class="sub-right">
+      <a class="ext-link" id="link-web" href="#" target="_blank">↗ plant3d-web --</a>
+      <a class="ext-link" id="link-api" href="#" target="_blank">↗ plant-ui --</a>
+    </div>
+  </div>
+
+  <div id="job-banner" class="banner hidden">
+    <div>
+      <strong id="job-title">任务执行中</strong>
+      <span id="job-detail" style="margin-left:8px;color:var(--ink2);"></span>
+    </div>
+    <span id="job-elapsed" class="tag-pill">running</span>
+  </div>
+
+  <!-- VIEW 1: OVERVIEW (KPI + Service Table + Logs) -->
+  <div id="view-overview">
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-top"><span class="kpi-label">服务</span><span class="kpi-hint">实时状态</span></div>
+        <div class="kpi-val-row"><span class="kpi-val" id="kpi-svc-val">- / -</span><span class="kpi-unit" id="kpi-svc-unit">--</span></div>
+        <div class="ticks" id="kpi-svc-ticks"></div>
+        <div class="kpi-foot"><span id="kpi-svc-f1">--</span><span id="kpi-svc-f2">--</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-top"><span class="kpi-label">后端任务</span><span class="kpi-hint">任务队列</span></div>
+        <div class="kpi-val-row"><span class="kpi-val" id="kpi-job-val">0</span><span class="kpi-unit" id="kpi-job-unit">在跑 · 0 排队</span></div>
+        <div class="ticks" id="kpi-job-ticks"></div>
+        <div class="kpi-foot"><span id="kpi-job-f1">无运行中任务</span><span id="kpi-job-f2">后端 ok</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-top"><span class="kpi-label" id="kpi-disk-label">磁盘</span><span class="kpi-hint">红线 2.0 GB</span></div>
+        <div class="kpi-val-row"><span class="kpi-val" id="kpi-disk-val">--</span><span class="kpi-unit">可用</span></div>
+        <div class="meter"><div class="meter-fill" id="kpi-disk-bar" style="width:25%"></div></div>
+        <div class="kpi-foot"><span id="kpi-disk-f1">--</span><span id="kpi-disk-f2">--</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-top"><span class="kpi-label">内存（可提交）</span><span class="kpi-hint">开工线 16.0 GB</span></div>
+        <div class="kpi-val-row"><span class="kpi-val" id="kpi-mem-val">--</span><span class="kpi-unit">余量</span></div>
+        <div class="meter"><div class="meter-fill" id="kpi-mem-bar" style="width:30%"></div></div>
+        <div class="kpi-foot"><span id="kpi-mem-f1">--</span><span id="kpi-mem-f2">--</span></div>
+      </div>
+    </div>
+
+    <!-- Services Table -->
+    <div class="panel-card">
+      <div class="log-toolbar" style="justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="log-title">服务列表与版本管理</span>
+          <span id="pkg-cmp-summary" style="font-size:11px;color:var(--muted);"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <input type="file" id="pkg-compare-dir" webkitdirectory multiple style="display:none" onchange="handleComparePackageDir(this.files)">
+          <button class="btn-sm" onclick="document.getElementById('pkg-compare-dir').click()">📂 选择本地包版本对比</button>
+          <button class="btn-sm" onclick="openUpgradeModal('backend')">🚀 版本推送 / 升级</button>
+          <button class="btn-sm" onclick="loadServiceVersions(true)">↻ 刷新版本</button>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:155px;">服务</th>
+            <th style="width:82px;">状态</th>
+            <th style="width:100px;">近况</th>
+            <th style="width:94px;">CPU</th>
+            <th style="width:104px;">内存</th>
+            <th>版本 / 详情</th>
+            <th style="width:248px;text-align:right;">操作</th>
+          </tr>
+        </thead>
+        <tbody id="services-tbody">
+          <tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px;">正在读取服务状态...</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- Live Logs Card -->
+    <div class="panel-card">
+      <div class="log-toolbar">
+        <div class="log-left">
+          <span class="log-title">日志</span>
+          <div class="pill-group" id="log-sources">
+            <button class="pill-btn" onclick="setLogSource('database', this)">数据库</button>
+            <button class="pill-btn active" onclick="setLogSource('backend', this)">后端</button>
+            <button class="pill-btn" onclick="setLogSource('rs_server', this)">rs-server</button>
+            <button class="pill-btn" onclick="setLogSource('frontend', this)">前端</button>
+            <button class="pill-btn" onclick="setLogSource('job', this)">任务</button>
+            <button class="pill-btn" onclick="setLogSource('agent', this)">面板</button>
+          </div>
+          <div class="pill-group" id="log-levels">
+            <button class="pill-btn active" onclick="setLogLevel('all', this)">全部级别</button>
+            <button class="pill-btn" onclick="setLogLevel('warn', this)">警告+</button>
+            <button class="pill-btn" onclick="setLogLevel('err', this)">错误</button>
+          </div>
+          <input type="text" id="log-search" placeholder="搜索日志..." oninput="renderLogs()" style="width:180px;">
+          <button id="btn-log-pause" onclick="togglePauseLog()">暂停</button>
+          <button onclick="clearLogs()">清空</button>
+        </div>
+        <span id="log-count" style="font-size:11px;color:var(--muted);font-family:var(--mono);">显示 0 / 共 0 行</span>
+      </div>
+      <div class="log-scroll" id="log-view"></div>
+    </div>
+  </div>
+
+  <!-- VIEW 2: DBNUMS -->
+  <div id="view-dbnums" class="panel-card hidden">
+    <div class="box-pad">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <strong>设计库 (dbnums)</strong>
+          <input type="text" id="dbnum-filter" placeholder="搜索库号/名称..." oninput="renderDbnums()">
+          <button onclick="loadDbnums()">刷新列表</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="primary" onclick="triggerDbnums()">对选中库执行模型生成 (init)</button>
+        </div>
+      </div>
+      <div style="max-height:460px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;">
+        <table>
+          <thead><tr><th style="width:36px;">选</th><th>库号</th><th>类型</th><th>名称</th><th>文件大小</th><th>状态</th></tr></thead>
+          <tbody id="dbnums-body"><tr><td colspan="6" style="color:var(--muted);">点击加载设计库...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW 3: CONFIG -->
+  <div id="view-config" class="panel-card hidden">
+    <div class="box-pad">
+      <div id="cfg-target-banner" style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;margin-bottom:14px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:12px;">
+        <span>当前正在配置目标服务器：<b id="cfg-target-label">当前面板</b></span>
+        <button type="button" onclick="promptAddServer()">切换 / 指定服务器 IP...</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:24px;">
+        <div>
+          <div style="font-weight:600;margin-bottom:10px;font-size:13px;">工程参数</div>
+          <div class="form-grid">
+            <label>E3D 根目录</label><input type="text" id="cfg-e3d-root" placeholder="如 C:/aios-cloud-test/e3d/E3D3.1">
+            <label>工程名称</label><input type="text" id="cfg-name" placeholder="如 AvevaPlantSample">
+            <label>工程子目录 (可选)</label><input type="text" id="cfg-dir" placeholder="留空表示直接使用 E3D 根目录">
+            <label>工程代号</label><input type="text" id="cfg-code" placeholder="如 9002">
+            <label>E3D 版本</label><input type="text" id="cfg-version" placeholder="如 e3d31 或 e3d21">
+            <label>MDB 名称</label><input type="text" id="cfg-mdb" placeholder="如 ALL">
+          </div>
+        </div>
+        <div>
+          <div style="font-weight:600;margin-bottom:10px;font-size:13px;">服务端口与网络</div>
+          <div class="form-grid">
+            <label>数据库端口 (database)</label><input type="number" id="cfg-port-db" min="1" max="65535" placeholder="如 28909">
+            <label>后端端口 (backend)</label><input type="number" id="cfg-port-be" min="1" max="65535" placeholder="如 28922">
+            <label>rs-server 端口</label><input type="number" id="cfg-port-rs" min="1" max="65535" placeholder="如 28998">
+            <label>前端端口 (frontend)</label><input type="number" id="cfg-port-fe" min="1" max="65535" placeholder="如 28900">
+            <label>仅本机回环</label>
+            <select id="cfg-loopback">
+              <option value="false">false（允许局域网/公网 IP 访问）</option>
+              <option value="true">true（仅 127.0.0.1 本机访问）</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--line);">
+        <button class="primary" id="btn-save-redeploy" onclick="saveAndRedeploy()">保存配置并重新部署启动</button>
+        <button onclick="saveConfigOnly()">仅保存配置</button>
+        <button onclick="loadConfig()">重新读取</button>
+        <span id="cfg-msg" style="font-size:12px;"></span>
+      </div>
+      <p style="color:var(--muted);margin-top:10px;font-size:12px;">注：「仅保存配置」要求所有服务处于已停止状态；点击「保存配置并重新部署启动」会自动先停止运行中的服务、写入工程与端口配置并重新启动全栈（若修改了新端口，请确保防火墙与云安全组已放行）。</p>
+    </div>
+  </div>
+
+  <!-- VIEW 4: JOBS -->
+  <div id="view-jobs" class="panel-card hidden">
+    <div class="box-pad">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <span style="font-weight:600;">最近任务记录</span>
+        <button onclick="loadJobs()">刷新任务列表</button>
+      </div>
+      <div style="max-height:260px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--line);border-radius:6px;">
+        <table>
+          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>开始时间</th><th>消息</th><th>输出</th></tr></thead>
+          <tbody id="jobs-body"></tbody>
+        </table>
+      </div>
+      <div class="log-scroll" id="job-out-view" style="height:180px;border:1px solid var(--line);border-radius:6px;padding:10px;">点击上方任务的「查看输出」查看日志...</div>
+    </div>
+  </div>
+</div>
+</main>
+</div>
+
+<div class="footer-bar">
+  <span id="foot-left">运行目录 --</span>
+  <span id="foot-right">准备就绪</span>
+</div>
+
+<!-- Create Site Modal -->
+<div id="site-modal" class="modal-backdrop hidden">
+  <div class="modal" style="width:620px;max-height:92vh;overflow-y:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <h2 style="margin:0;">创建 / 初始化站点</h2>
+      <button onclick="closeSiteModal()">✕</button>
+    </div>
+    <p>快速配置并启动一个新的本地站点或局域网/公网站点，自动校验工程目录、写入配置并重启全栈。</p>
+
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+      <button type="button" id="preset-local" onclick="applySitePreset('local')">本地站点 (127.0.0.1 · 8009/8022/9098/3100)</button>
+      <button type="button" id="preset-net" onclick="applySitePreset('net')">网络站点 (0.0.0.0 · 允许外部访问)</button>
+    </div>
+
+    <div class="form-grid" style="max-width:100%;">
+      <label>目标服务器 IP</label>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="site-target-host" placeholder="留空为当前面板，或填 IP 如 82.156.155.65 或 82.156.155.65:28600" style="flex:1;">
+        <button type="button" onclick="connectSiteTarget()">连接并读取</button>
+      </div>
+      <label>目标令牌 (可选)</label><input type="password" id="site-target-token" placeholder="目标服务器开启 --no-auth 时留空">
+      <div></div><div id="site-target-msg" style="font-size:11px;color:var(--muted);margin-top:-6px;"></div>
+      <label>站点名称</label><input type="text" id="site-stack-name" placeholder="如 local-site">
+      <label>E3D 根目录</label>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="site-e3d-root" placeholder="如 D:\AVEVA\Projects\E3D3.1" style="flex:1;">
+        <button type="button" onclick="probeSitePath()">检测目录</button>
+      </div>
+      <div></div><div id="site-probe-msg" style="font-size:11px;color:var(--muted);margin-top:-6px;"></div>
+      <label>工程名称</label><input type="text" id="site-name" placeholder="如 AvevaPlantSample">
+      <label>工程子目录 (可选)</label><input type="text" id="site-dir" placeholder="留空表示直接使用 E3D 根目录">
+      <label>工程代号</label><input type="text" id="site-code" placeholder="如 9002">
+      <label>E3D 版本</label><input type="text" id="site-version" placeholder="如 e3d31">
+      <label>MDB 名称</label><input type="text" id="site-mdb" placeholder="如 ALL">
+      <label>访问模式</label>
+      <select id="site-loopback">
+        <option value="true">仅本机回环 (127.0.0.1 · 本地站点)</option>
+        <option value="false">全网卡监听 (0.0.0.0 · 局域网/公网)</option>
+      </select>
+      <label>服务端口</label>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
+        <input type="number" id="site-port-db" min="1" max="65535" title="database" placeholder="DB 8009">
+        <input type="number" id="site-port-be" min="1" max="65535" title="backend" placeholder="BE 8022">
+        <input type="number" id="site-port-rs" min="1" max="65535" title="rs-server" placeholder="RS 9098">
+        <input type="number" id="site-port-fe" min="1" max="65535" title="frontend" placeholder="FE 3100">
+      </div>
+      <div></div>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
+        <input type="checkbox" id="site-reset-work" checked>
+        <span>重建底层 DbOption.toml（按新站点配置重新生成）</span>
+      </label>
+    </div>
+
+    <div id="site-msg" style="font-size:12px;margin:12px 0 6px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+      <button onclick="closeSiteModal()">取消</button>
+      <button class="primary" id="btn-create-site" onclick="createAndStartSite()">创建站点并启动</button>
+    </div>
+  </div>
+</div>
+
+<!-- Service Version Comparison & Push Upgrade Modal -->
+<div id="svc-upgrade-modal" class="modal-backdrop hidden">
+  <div class="modal" style="width:760px;max-width:96vw;max-height:92vh;overflow-y:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+      <h2 style="margin:0;">服务版本对比与推送升级</h2>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div class="seg-tabs" id="up-svc-tabs">
+          <button type="button" class="seg-btn" data-svc="database" onclick="switchUpgradeSvc('database')">数据库</button>
+          <button type="button" class="seg-btn active" data-svc="backend" onclick="switchUpgradeSvc('backend')">后端</button>
+          <button type="button" class="seg-btn" data-svc="rs_server" onclick="switchUpgradeSvc('rs_server')">rs-server</button>
+          <button type="button" class="seg-btn" data-svc="frontend" onclick="switchUpgradeSvc('frontend')">前端</button>
+        </div>
+        <button onclick="closeUpgradeModal()">✕</button>
+      </div>
+    </div>
+
+    <div id="up-diff-banner" class="cmp-diff-banner info">正在读取当前服务器版本...</div>
+
+    <div class="cmp-grid">
+      <div class="cmp-card">
+        <h4><span>服务器端当前版本 (Installed)</span><span id="up-cur-tag" class="tag-pill">--</span></h4>
+        <div class="cmp-kv">
+          <span class="k">版本号</span><span class="v" id="up-cur-ver">--</span>
+          <span class="k">构建/Commit</span><span class="v" id="up-cur-build">--</span>
+          <span class="k">目标路径</span><span class="v" id="up-cur-path">--</span>
+          <span class="k">文件大小</span><span class="v" id="up-cur-bytes">--</span>
+          <span class="k">时间</span><span class="v" id="up-cur-time">--</span>
+          <span class="k">SHA-256</span><span class="v" id="up-cur-sha">--</span>
+        </div>
+      </div>
+      <div class="cmp-card">
+        <h4><span>待推送新版本 (Target)</span><span id="up-new-tag" class="tag-pill">未选择</span></h4>
+        <div class="cmp-kv">
+          <span class="k">版本号</span><span class="v" id="up-new-ver">--</span>
+          <span class="k">构建/Commit</span><span class="v" id="up-new-build">--</span>
+          <span class="k">来源</span><span class="v" id="up-new-path">--</span>
+          <span class="k">文件大小</span><span class="v" id="up-new-bytes">--</span>
+          <span class="k">时间</span><span class="v" id="up-new-time">--</span>
+          <span class="k">SHA-256</span><span class="v" id="up-new-sha">--</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--line);border-radius:7px;padding:10px 12px;margin-top:8px;">
+      <div style="font-weight:600;font-size:12px;margin-bottom:8px;">选择新版本来源（支持本机上传推送或服务器本地路径对比）</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+        <input type="file" id="up-file-single" accept=".exe,.zip" style="display:none" onchange="onPickSingleUpgradeFile(this.files)">
+        <input type="file" id="up-file-dir" webkitdirectory multiple style="display:none" onchange="onPickFrontendDir(this.files)">
+        <button type="button" id="btn-pick-file" onclick="document.getElementById('up-file-single').click()">📁 选择本地程序 / .zip</button>
+        <button type="button" id="btn-pick-fedir" onclick="document.getElementById('up-file-dir').click()">📂 选择前端 www / dist 目录</button>
+        <button type="button" onclick="clearServiceStage()">清除待升级暂存</button>
+        <span id="up-local-pick-note" style="font-size:11px;color:var(--muted);"></span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <input type="text" id="up-server-path" placeholder="或填服务器可访问的文件/发布包目录路径，例如 D:\releases\...\bin\aios-database.exe" style="flex:1;min-width:240px;">
+        <button type="button" onclick="compareServerPath(false)">路径对比</button>
+        <button type="button" onclick="compareServerPath(true)">从服务器路径暂存</button>
+      </div>
+    </div>
+
+    <div id="up-progress-wrap" class="hidden" style="margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink2);">
+        <span id="up-progress-text">准备中...</span>
+        <span id="up-progress-pct" style="font-family:var(--mono);">0%</span>
+      </div>
+      <div class="up-progress-bar"><div id="up-progress-fill" class="up-progress-fill"></div></div>
+    </div>
+
+    <div id="up-logs" class="log-scroll hidden" style="height:120px;margin-top:10px;border:1px solid var(--line);border-radius:6px;padding:8px;font-size:11px;"></div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1px solid var(--line);">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button type="button" id="btn-up-rollback" class="danger-soft hidden" onclick="rollbackServiceVersion()">↶ 回滚上一版</button>
+        <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;">
+          <input type="checkbox" id="up-auto-start" checked><span>替换后启动并校验</span>
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;">
+          <input type="checkbox" id="up-force-stop"><span>若忙则强制停止</span>
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="button" id="btn-up-stage-only" onclick="pushSelectedToStage(false)">仅推送暂存</button>
+        <button type="button" id="btn-up-apply" class="primary" onclick="pushAndUpgradeSelected()">推送并立即升级</button>
+        <button type="button" onclick="closeUpgradeModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Token Modal (only shown if server returns 401 or user clicks key button) -->
+<div id="token-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h2>连接 AIOS 部署控制面板</h2>
+    <p>当前服务器启用了令牌鉴权，请输入 Agent 访问令牌（可在服务器运行 <code>show-token.cmd</code> 查看）。</p>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <input type="password" id="token-input" placeholder="粘贴 Bearer Token..." style="flex:1;" onkeydown="if(event.key==='Enter')saveToken()">
+      <button class="primary" onclick="saveToken()">连接</button>
+    </div>
+    <div id="token-err" style="color:var(--bad);font-size:12px;margin-bottom:8px;"></div>
+    <div style="text-align:right;">
+      <button onclick="closeTokenModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = 'aios_agent_token';
+const THEME_KEY = 'aios_dash_theme';
+const SERVERS_KEY = 'aios_dash_servers';
+const ACTIVE_SERVER_KEY = 'aios_dash_active_server';
+
+function normalizeServerBase(raw) {
+  let s = (raw || '').trim().replace(/\/+$/, '');
+  if (!s || s === 'local' || s === 'current') return '';
+  if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
+  try {
+    const u = new URL(s);
+    if (!u.port) u.port = '28600';
+    return u.origin;
+  } catch (_) {
+    return s;
+  }
+}
+function loadSavedServers() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SERVERS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
+function saveServerEntry(base, tok) {
+  const b = normalizeServerBase(base);
+  if (!b) {
+    if (tok !== undefined) { token = tok; localStorage.setItem(TOKEN_KEY, tok); }
+    return;
+  }
+  const list = loadSavedServers();
+  const idx = list.findIndex(x => x.base === b);
+  const entry = { base: b, token: tok !== undefined ? tok : (idx >= 0 ? list[idx].token : '') };
+  if (idx >= 0) list[idx] = entry; else list.push(entry);
+  localStorage.setItem(SERVERS_KEY, JSON.stringify(list));
+}
+let activeBase = normalizeServerBase(localStorage.getItem(ACTIVE_SERVER_KEY) || '');
+function getActiveToken() {
+  if (!activeBase) return token;
+  const hit = loadSavedServers().find(x => x.base === activeBase);
+  return (hit && hit.token) || '';
+}
+function renderServerSelect() {
+  const sel = document.getElementById('target-server-select');
+  if (!sel) return;
+  const list = loadSavedServers();
+  sel.innerHTML = '';
+  const opt0 = document.createElement('option');
+  opt0.value = '';
+  opt0.textContent = '当前面板 (' + location.host + ')';
+  sel.appendChild(opt0);
+  for (const item of list) {
+    if (item.base === location.origin) continue;
+    const o = document.createElement('option');
+    o.value = item.base;
+    o.textContent = item.base.replace(/^https?:\/\//, '');
+    sel.appendChild(o);
+  }
+  const optAdd = document.createElement('option');
+  optAdd.value = '__add__';
+  optAdd.textContent = '+ 指定服务器 IP...';
+  sel.appendChild(optAdd);
+  sel.value = activeBase || '';
+  const lbl = document.getElementById('cfg-target-label');
+  if (lbl) lbl.textContent = activeBase || ('当前面板 (' + location.host + ')');
+  renderFleetSidebar();
+}
+const SIDEBAR_KEY = 'aios_dash_sidebar_collapsed';
+let fleetCache = {}; // base -> { name, addr, health: 'ok'|'warn'|'bad'|'stopped'|'connecting', word }
+if (localStorage.getItem(SIDEBAR_KEY) === '1') {
+  const sb = document.getElementById('fleet-sidebar');
+  if (sb) { sb.classList.add('collapsed'); document.getElementById('btn-sidebar-toggle').textContent = '▶'; }
+}
+function toggleSidebar() {
+  const sb = document.getElementById('fleet-sidebar');
+  if (!sb) return;
+  const collapsed = sb.classList.toggle('collapsed');
+  localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+  document.getElementById('btn-sidebar-toggle').textContent = collapsed ? '▶' : '◀';
+}
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b' && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName)) {
+    e.preventDefault();
+    toggleSidebar();
+  }
+});
+function summarizeSiteHealth(st) {
+  const svcs = st.services || [];
+  const total = svcs.length || 4;
+  const ok = svcs.filter(s => s.state === 'ok').length;
+  const stopped = svcs.filter(s => s.state === 'stopped').length;
+  const bad = svcs.filter(s => s.state === 'error' || s.state === 'unhealthy').length;
+  let health = 'warn', word = `${ok}/${total}`;
+  if (ok === total) { health = 'ok'; word = `${ok}/${total}`; }
+  else if (stopped === total) { health = 'stopped'; word = '已停止'; }
+  else if (bad > 0) { health = 'bad'; word = `${ok}/${total}`; }
+  const name = (st.stack && st.stack.name) || (st.project && st.project.name) || '';
+  return { health, word, name };
+}
+function removeSavedServer(base, ev) {
+  ev.stopPropagation();
+  const list = loadSavedServers().filter(x => x.base !== base);
+  localStorage.setItem(SERVERS_KEY, JSON.stringify(list));
+  if (activeBase === base) switchTargetServer('');
+  else renderServerSelect();
+}
+function renderFleetSidebar() {
+  const box = document.getElementById('fleet-rows');
+  if (!box) return;
+  const list = loadSavedServers();
+  const items = [{ base: '', isCurrent: true }].concat(
+    list.filter(x => x.base !== location.origin).map(x => ({ base: x.base, isCurrent: false }))
+  );
+  box.innerHTML = '';
+  for (const item of items) {
+    const isSel = (activeBase || '') === item.base;
+    const info = fleetCache[item.base] || {};
+    const h = info.health || (isSel && lastStatus ? summarizeSiteHealth(lastStatus).health : 'connecting');
+    const word = info.word || (isSel && lastStatus ? summarizeSiteHealth(lastStatus).word : '连接中');
+    const addr = item.isCurrent ? location.host : item.base.replace(/^https?:\/\//, '');
+    const title = info.name || (item.isCurrent ? '当前站点' : addr);
+    let dotHtml = '<span class="dot warn"></span>';
+    let wordColor = 'var(--muted)';
+    if (h === 'ok') { dotHtml = '<span class="dot ok"></span>'; wordColor = 'var(--ok)'; }
+    else if (h === 'bad') { dotHtml = '<span class="dot bad"></span>'; wordColor = 'var(--bad)'; }
+    else if (h === 'warn') { dotHtml = '<span class="dot warn"></span>'; wordColor = 'var(--warn-text)'; }
+    else if (h === 'stopped') { dotHtml = '<span class="dot" style="background:var(--muted);"></span>'; wordColor = 'var(--muted)'; }
+    else { dotHtml = '<span class="dot" style="background:var(--line-strong);"></span>'; }
+
+    const row = document.createElement('div');
+    row.className = 'site-row' + (isSel ? ' active' : '');
+    row.title = `${title}\n${addr}\n状态: ${word}`;
+    row.onclick = () => switchTargetServer(item.base);
+    row.innerHTML = `
+      <div class="site-row-top">
+        ${dotHtml}
+        <span class="site-row-name">${esc(title)}</span>
+        <span class="site-row-word" style="color:${wordColor};">${esc(word)}</span>
+      </div>
+      <div class="site-row-sub">
+        <span class="site-row-addr">${esc(addr)}</span>
+        ${item.isCurrent ? '' : '<button class="site-del" title="从列表移除">✕</button>'}
+      </div>`;
+    if (!item.isCurrent) {
+      row.querySelector('.site-del').onclick = e => removeSavedServer(item.base, e);
+    }
+    box.appendChild(row);
+  }
+}
+async function probeAllSites() {
+  const list = loadSavedServers();
+  const targets = [{ base: '', tok: localStorage.getItem(TOKEN_KEY) || '' }].concat(
+    list.filter(x => x.base !== location.origin).map(x => ({ base: x.base, tok: x.token || '' }))
+  );
+  await Promise.all(targets.map(async t => {
+    try {
+      const headers = {};
+      if (t.tok) headers['Authorization'] = 'Bearer ' + t.tok;
+      const resp = await fetch((t.base || '') + '/v1/status?since=0', { headers, signal: AbortSignal.timeout(4000) });
+      if (!resp.ok) {
+        fleetCache[t.base] = { name: (fleetCache[t.base] || {}).name || '', health: 'bad', word: resp.status === 401 ? '未授权' : 'HTTP ' + resp.status };
+        return;
+      }
+      const st = await resp.json();
+      fleetCache[t.base] = summarizeSiteHealth(st);
+    } catch (_) {
+      fleetCache[t.base] = { name: (fleetCache[t.base] || {}).name || '', health: 'bad', word: '离线' };
+    }
+  }));
+  renderFleetSidebar();
+}
+function switchTargetServer(base, tok) {
+  activeBase = normalizeServerBase(base);
+  if (activeBase && tok !== undefined) saveServerEntry(activeBase, tok);
+  localStorage.setItem(ACTIVE_SERVER_KEY, activeBase);
+  token = getActiveToken();
+  lastSeq = 0; logAfter = 0; logLines = []; svcHistory = {};
+  svcVersions = {}; localComparisons = {};
+  const pkgSum = document.getElementById('pkg-cmp-summary');
+  if (pkgSum) pkgSum.textContent = '';
+  renderServerSelect();
+  refreshNow();
+  loadConfig();
+  loadServiceVersions(true);
+}
+function onServerSelectChange(val) {
+  if (val === '__add__') {
+    renderServerSelect();
+    promptAddServer();
+    return;
+  }
+  switchTargetServer(val);
+}
+function promptAddServer() {
+  const raw = prompt('请输入目标服务器 IP 或地址（如 82.156.155.65 或 82.156.155.65:28600）：', activeBase ? activeBase.replace(/^https?:\/\//, '') : '82.156.155.65');
+  if (!raw || !raw.trim()) return;
+  const b = normalizeServerBase(raw);
+  const tok = prompt('请输入该服务器的访问令牌（若开启了 --no-auth 请直接留空确定）：', '');
+  saveServerEntry(b, (tok || '').trim());
+  switchTargetServer(b, (tok || '').trim());
+}
+
+let token = localStorage.getItem(TOKEN_KEY) || '';
+if (activeBase) token = getActiveToken();
+let lastSeq = 0;
+let lastStatus = null;
+let logSource = 'backend';
+let logLevel = 'all';
+let logAfter = 0;
+let logLines = [];
+let logPaused = false;
+let dbnumsList = [];
+let selectedDbnums = new Set();
+let pollActive = false;
+let svcHistory = {}; // name -> {ticks:[], cpu:[], mem:[]}
+let svcVersions = {}; // name -> ServiceVersionEntry
+let localComparisons = {}; // name -> { artifact, diff, kind, file, files }
+let upgradeModalSvc = 'backend';
+let upgradeBusy = false;
+
+// Apply saved theme (default light)
+if (localStorage.getItem(THEME_KEY) === 'dark') {
+  document.documentElement.classList.add('dark');
+  document.getElementById('btn-theme').textContent = '☀️';
+}
+function toggleTheme() {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem(THEME_KEY, isDark ? 'dark' : 'light');
+  document.getElementById('btn-theme').textContent = isDark ? '☀️' : '🌙';
+}
+
+function openTokenModal(msg) {
+  document.getElementById('token-err').textContent = msg || '';
+  document.getElementById('token-input').value = token;
+  document.getElementById('token-modal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('token-input').focus(), 50);
+}
+function closeTokenModal() { document.getElementById('token-modal').classList.add('hidden'); }
+function saveToken() {
+  token = document.getElementById('token-input').value.trim();
+  if (activeBase) saveServerEntry(activeBase, token);
+  else localStorage.setItem(TOKEN_KEY, token);
+  closeTokenModal();
+  lastSeq = 0; logAfter = 0; logLines = [];
+  renderServerSelect();
+probeAllSites();
+setInterval(probeAllSites, 10000);
+startLoops();
+}
+
+async function api(path, opts = {}, overrideBase = null, overrideToken = null) {
+  const base = overrideBase !== null ? normalizeServerBase(overrideBase) : activeBase;
+  const tok = overrideToken !== null ? overrideToken : (base ? ((loadSavedServers().find(x => x.base === base) || {}).token || '') : token);
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  const t0 = performance.now();
+  const url = (base || '') + path;
+  const resp = await fetch(url, Object.assign({}, opts, { headers }));
+  const ms = Math.round(performance.now() - t0);
+  if (resp.status === 401) {
+    if (overrideBase === null) {
+      setConn('bad', '需要令牌');
+      openTokenModal('令牌无效或已过期，请重新输入');
+    }
+    throw new Error('需要目标服务器访问令牌 (401)');
+  }
+  if (resp.status === 304) {
+    setConn('ok', `更新于 ${fmtNow()} · ${ms}ms`);
+    return { notModified: true };
+  }
+  const text = await resp.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
+  if (!resp.ok) throw new Error(data.message || data.error || ('HTTP ' + resp.status));
+  setConn('ok', `更新于 ${fmtNow()} · ${ms}ms`);
+  return data;
+}
+
+function fmtNow() {
+  const d = new Date();
+  return d.toTimeString().slice(0, 8);
+}
+
+function setConn(cls, text) {
+  document.getElementById('conn-dot').className = 'dot ' + cls;
+  document.getElementById('conn-text').textContent = text;
+}
+
+function svcIcon(name) {
+  const icons = {
+    database: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>',
+    backend: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>',
+    rs_server: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
+    frontend: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>'
+  };
+  return icons[name] || icons.backend;
+}
+
+function sparkSvg(arr, maxVal) {
+  const pts = (arr && arr.length) ? arr : [0, 0];
+  const mx = Math.max(maxVal || 1, ...pts, 0.001);
+  const w = 44, h = 18;
+  const coords = pts.map((v, i) => {
+    const x = pts.length === 1 ? w : (i / (pts.length - 1)) * w;
+    const y = h - 2 - (Math.min(v, mx) / mx) * (h - 4);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return `<svg class="spark-svg" viewBox="0 0 ${w} ${h}"><polyline fill="none" stroke="var(--muted)" stroke-width="1.3" points="${coords}"/></svg>`;
+}
+
+function renderStatus(st) {
+  lastStatus = st;
+  fleetCache[activeBase || ''] = summarizeSiteHealth(st);
+  renderFleetSidebar();
+  const host = st.agent?.host || location.hostname;
+  const root = st.agent?.root || '--';
+  const proj = st.project?.name || '未配置工程';
+  const code = st.project?.code ? `(${st.project.code})` : '';
+
+  document.getElementById('top-host').textContent = `${host} · ${proj}`;
+  document.getElementById('top-proj').textContent = st.project?.code || 'Web';
+  document.getElementById('foot-left').textContent = `运行目录 ${root} · 工程 ${proj} ${code} · 路径 ${st.project?.e3d_root || '--'}`;
+
+  const svcs = st.services || [];
+  const okCount = svcs.filter(s => s.state === 'ok').length;
+  const totalCount = svcs.length || 4;
+  const anyStarting = svcs.some(s => s.state === 'starting' || s.state === 'stopping');
+
+  const hi = document.getElementById('hero-icon');
+  const ht = document.getElementById('hero-title');
+  const hp = document.getElementById('hero-problem');
+  const hfb = document.getElementById('hero-fix-btn');
+  hp.classList.add('hidden');
+  hfb.classList.add('hidden');
+  hfb.onclick = null;
+  if (okCount === totalCount && totalCount > 0) {
+    hi.className = 'hero-icon ok'; hi.textContent = '✓';
+    ht.textContent = `全部正常 ${okCount}/${totalCount}`;
+  } else if (anyStarting) {
+    hi.className = 'hero-icon warn'; hi.textContent = '!';
+    ht.textContent = `状态切换中 ${okCount}/${totalCount}`;
+  } else if (okCount === 0) {
+    hi.className = 'hero-icon stopped'; hi.textContent = '■';
+    ht.textContent = `已停止 0/${totalCount}`;
+  } else {
+    hi.className = 'hero-icon bad'; hi.textContent = '✕';
+    ht.textContent = `部分异常 ${okCount}/${totalCount}`;
+    const badSvc = svcs.find(s => s.state !== 'ok');
+    if (badSvc) {
+      const label = badSvc.title || badSvc.name;
+      const reason = badSvc.reason || (badSvc.state === 'stopped' ? '已停止' : '未就绪');
+      hp.textContent = `${label} · ${reason}`;
+      hp.classList.remove('hidden');
+      if (badSvc.state === 'stopped') {
+        hfb.textContent = `▷ 启动 ${label}`;
+        hfb.onclick = () => startSingleService(badSvc.name);
+      } else {
+        hfb.textContent = `↻ 重启 ${label}`;
+        hfb.onclick = () => restartSingleService(badSvc.name);
+      }
+      hfb.classList.remove('hidden');
+    }
+  }
+
+  // Links
+  const feUrl = st.urls?.frontend || `${location.protocol}//${location.hostname}:${svcs.find(s=>s.name==='frontend')?.port || 3100}/`;
+  const beUrl = st.urls?.backend || `${location.protocol}//${location.hostname}:${svcs.find(s=>s.name==='backend')?.port || 8022}/`;
+  const lw = document.getElementById('link-web'); lw.href = feUrl; lw.textContent = `↗ plant3d-web ${feUrl}`;
+  const la = document.getElementById('link-api'); la.href = beUrl; la.textContent = `↗ plant-ui ${beUrl}`;
+
+  // Queue switch
+  const paused = st.backend?.queue_paused;
+  const sw = document.getElementById('queue-switch');
+  const qd = document.getElementById('queue-desc');
+  if (paused === false) { sw.classList.add('on'); qd.textContent = '开 · 文件变了就处理'; }
+  else if (paused === true) { sw.classList.remove('on'); qd.textContent = '已暂停 · 点击恢复'; }
+  else { sw.classList.remove('on'); qd.textContent = '等待后端'; }
+
+  // Job banner
+  const jb = document.getElementById('job-banner');
+  if (st.job) {
+    jb.classList.remove('hidden');
+    document.getElementById('job-title').textContent = st.job.label || st.job.kind;
+    const p = st.job.progress;
+    document.getElementById('job-detail').textContent = p ? `${p.step || ''} (${p.done}/${p.total})` : (st.job.message || '');
+    document.getElementById('job-elapsed').textContent = st.job.state;
+  } else {
+    jb.classList.add('hidden');
+  }
+
+  const busy = !!st.job;
+  document.getElementById('btn-up').disabled = busy || (okCount === totalCount && totalCount > 0);
+  document.getElementById('btn-down').disabled = busy || okCount === 0;
+  document.getElementById('btn-doctor').disabled = busy;
+
+  // Record history for ticks & sparklines
+  for (const s of svcs) {
+    if (!svcHistory[s.name]) {
+      const initTick = s.state === 'ok' ? 'ok' : (s.state === 'starting' || s.state === 'stopping' ? 'warn' : 'bad');
+      svcHistory[s.name] = {
+        ticks: Array(14).fill(initTick),
+        cpu: Array(12).fill(s.cpu_pct || 0),
+        mem: Array(12).fill(s.mem_gb || 0)
+      };
+    } else {
+      const h = svcHistory[s.name];
+      const tk = s.state === 'ok' ? 'ok' : (s.state === 'starting' || s.state === 'stopping' ? 'warn' : 'bad');
+      h.ticks.push(tk); if (h.ticks.length > 14) h.ticks.shift();
+      h.cpu.push(s.cpu_pct || 0); if (h.cpu.length > 14) h.cpu.shift();
+      h.mem.push(s.mem_gb || 0); if (h.mem.length > 14) h.mem.shift();
+    }
+  }
+
+  // KPI 1: Services
+  document.getElementById('kpi-svc-val').textContent = `${okCount} / ${totalCount}`;
+  document.getElementById('kpi-svc-unit').textContent = okCount === totalCount ? '正常' : '需关注';
+  const allOkTick = okCount === totalCount ? 'ok' : (anyStarting ? 'warn' : 'bad');
+  document.getElementById('kpi-svc-ticks').innerHTML = Array(20).fill(`<span class="tick ${allOkTick}"></span>`).join('');
+  document.getElementById('kpi-svc-f1').textContent = okCount === totalCount ? '全部正常' : `${totalCount - okCount} 个未就绪`;
+  document.getElementById('kpi-svc-f2').textContent = st.job ? '任务执行中' : '端口检测正常';
+
+  // KPI 2: Backend jobs
+  const activeJobs = st.backend?.jobs_active ?? (st.job ? 1 : 0);
+  const queuedJobs = st.backend?.jobs_queued ?? 0;
+  document.getElementById('kpi-job-val').textContent = String(activeJobs);
+  document.getElementById('kpi-job-unit').textContent = `在跑 · ${queuedJobs} 排队`;
+  document.getElementById('kpi-job-ticks').innerHTML = Array(20).fill(0).map((_, i) =>
+    `<span class="tick ${activeJobs > 0 && i > 14 ? 'ok' : ''}"></span>`
+  ).join('');
+  document.getElementById('kpi-job-f1').textContent = st.job ? (st.job.label || st.job.kind) : '当前空闲';
+  document.getElementById('kpi-job-f2').textContent = `后端 ${st.backend?.status || '--'}`;
+
+  // KPI 3: Disk
+  const d0 = st.host?.disks?.[0];
+  if (d0) {
+    document.getElementById('kpi-disk-label').textContent = `磁盘 ${d0.drive}`;
+    document.getElementById('kpi-disk-val').textContent = `${d0.free_gb.toFixed(1)} GB`;
+    const pct = d0.total_gb ? Math.min(100, Math.round(((d0.total_gb - d0.free_gb) / d0.total_gb) * 100)) : 25;
+    const bar = document.getElementById('kpi-disk-bar');
+    bar.style.width = pct + '%';
+    bar.className = 'meter-fill' + (d0.free_gb < 2 ? ' bad' : (d0.free_gb < 10 ? ' warn' : ''));
+    document.getElementById('kpi-disk-f1').textContent = d0.free_gb < 2 ? '空间不足' : '状态正常';
+    document.getElementById('kpi-disk-f2').textContent = d0.total_gb ? `已用 ${pct}%` : d0.drive;
+  }
+
+  // KPI 4: Memory
+  const cf = st.host?.commit_free_gb;
+  const beSvc = svcs.find(s => s.name === 'backend');
+  const beMemMb = beSvc?.mem_gb != null ? Math.round(beSvc.mem_gb * 1024) : '--';
+  if (cf != null) {
+    document.getElementById('kpi-mem-val').textContent = `${cf.toFixed(1)} GB`;
+    const bar = document.getElementById('kpi-mem-bar');
+    bar.style.width = Math.min(100, Math.max(12, Math.round((16 / Math.max(cf, 16)) * 50))) + '%';
+    bar.className = 'meter-fill' + (cf < 4 ? ' bad' : (cf < 16 ? ' warn' : ''));
+  }
+  document.getElementById('kpi-mem-f1').textContent = `后端 ${beMemMb} MB`;
+  document.getElementById('kpi-mem-f2').textContent = `CPU ${st.host?.cores || '--'} 核`;
+
+  // Service table
+  const tbody = document.getElementById('services-tbody');
+  tbody.innerHTML = svcs.map(s => {
+    const isRunning = s.state === 'ok' || s.state === 'starting' || s.state === 'stopping';
+    const cls = s.state === 'ok' ? 'ok' : (s.state === 'starting' || s.state === 'stopping' ? 'warn' : (s.state === 'stopped' ? 'stopped' : 'bad'));
+    const stText = s.state === 'ok' ? '正常' : (s.state === 'starting' ? '启动中' : (s.state === 'stopping' ? '停止中' : (s.state === 'stopped' ? '已停止' : s.state)));
+    const hasProc = isRunning || (s.pid && s.pid > 0);
+    const cpu = hasProc && s.cpu_pct != null ? (s.cpu_pct < 1 && s.cpu_pct > 0 ? '<1%' : s.cpu_pct.toFixed(0) + '%') : '—';
+    const mem = hasProc && s.mem_gb != null ? (s.mem_gb >= 1 ? s.mem_gb.toFixed(2) + ' GB' : Math.round(s.mem_gb * 1024) + ' MB') : '—';
+    const pidText = (s.pid && s.pid > 0) ? `PID ${s.pid}` : 'PID —';
+    const h = svcHistory[s.name] || { ticks: [], cpu: [], mem: [] };
+    const ticksHtml = `<div class="mini-ticks">${h.ticks.map(t => `<span class="mini-tick ${t}"></span>`).join('')}</div>`;
+    const disAttr = busy ? ' disabled' : '';
+    const title = s.title || s.name;
+    const actionsHtml = `<div class="svc-actions">
+      <button class="btn-sm success-soft" onclick="event.stopPropagation(); startSingleService('${s.name}')"${busy || s.state === 'ok' || s.state === 'starting' ? ' disabled' : ''} title="启动 ${esc(title)}">▷ 启动</button>
+      <button class="btn-sm danger-soft" onclick="event.stopPropagation(); stopSingleService('${s.name}')"${busy || !isRunning ? ' disabled' : ''} title="停止 ${esc(title)}">■ 停止</button>
+      <button class="btn-sm" onclick="event.stopPropagation(); restartSingleService('${s.name}')"${busy ? ' disabled' : ''} title="重启 ${esc(title)}">↻ 重启</button>
+      <button class="btn-sm accent-soft" onclick="event.stopPropagation(); openUpgradeModal('${s.name}')"${disAttr}>升级</button>
+      <button class="btn-sm" onclick="event.stopPropagation(); focusLog('${s.name}')">日志</button>
+    </div>`;
+
+    const vEntry = svcVersions[s.name];
+    const inst = vEntry && vEntry.installed ? vEntry.installed : null;
+    const localCmp = localComparisons[s.name];
+    const rawDiff = localCmp ? localCmp.diff : (vEntry ? vEntry.diff : null);
+    let badgeHtml = '';
+    if (rawDiff) {
+      const dm = diffUiMeta(rawDiff);
+      const prefix = localCmp ? '本地包: ' : '待推: ';
+      badgeHtml = `<span class="ver-badge ${dm.cssCls}" onclick="event.stopPropagation(); openUpgradeModal('${s.name}')" title="${esc(dm.summary)}">${esc(prefix + dm.label)}</span>`;
+    } else if (vEntry && vEntry.backup && vEntry.backup.exists) {
+      badgeHtml = `<span class="ver-badge changed" onclick="event.stopPropagation(); openUpgradeModal('${s.name}')" title="存在可回滚备份">可回滚</span>`;
+    }
+
+    const verMain = s.version || (inst && inst.version) || '--';
+    const subParts = [];
+    if (inst && inst.build_id) subParts.push(inst.build_id);
+    if (inst && inst.short_sha) subParts.push('#' + inst.short_sha);
+    if (inst && inst.bytes) subParts.push((inst.bytes / (1024 * 1024)).toFixed(1) + ' MB');
+    const verSub = subParts.join(' · ');
+    const reasonHtml = s.reason ? `<div style="color:var(--bad);font-size:11px;margin-top:2px;">${esc(s.reason)}</div>` : '';
+    const detailHtml = `<div class="ver-main">${esc(verMain)} ${badgeHtml}</div>${verSub ? `<div class="ver-sub">${esc(verSub)}</div>` : ''}${reasonHtml}`;
+    const selCls = logSource === s.name ? ' selected' : '';
+
+    return `<tr class="svc-row${selCls}" data-svc="${esc(s.name)}" onclick="focusLog('${s.name}')">
+      <td>
+        <div class="svc-cell">
+          <span class="svc-ico">${svcIcon(s.name)}</span>
+          <div>
+            <div class="svc-name">${esc(title)}</div>
+            <div class="svc-sub">${s.port || '--'} · ${pidText}</div>
+          </div>
+        </div>
+      </td>
+      <td><span class="status-pill ${cls}"><span class="dot"></span>${stText}</span></td>
+      <td>${ticksHtml}</td>
+      <td><div class="spark-cell">${sparkSvg(h.cpu, 100)}<span>${cpu}</span></div></td>
+      <td><div class="spark-cell">${sparkSvg(h.mem, 2)}<span>${mem}</span></div></td>
+      <td>${detailHtml}</td>
+      <td style="text-align:right;">${actionsHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function pollStatus() {
+  if (pollActive) return;
+  pollActive = true;
+  try {
+    while (true) {
+      try {
+        const res = await api(`/v1/status?since=${lastSeq}`);
+        if (!res.notModified && res.seq) {
+          lastSeq = res.seq;
+          renderStatus(res);
+        }
+      } catch (e) {
+        if (String(e).includes('401')) break;
+        setConn('bad', '连接断开');
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      await new Promise(r => setTimeout(r, 600));
+    }
+  } finally { pollActive = false; }
+}
+
+async function pollLogs() {
+  while (true) {
+    try {
+      const q = new URLSearchParams({ after: String(logAfter), max: '200', wait: '2' });
+      if (logSource) q.set('source', logSource);
+      const res = await api('/v1/logs?' + q.toString());
+      if (res && res.lines && res.lines.length) {
+        const srcTag = res.source || logSource;
+        for (const l of res.lines) {
+          logLines.push({ ts: l.t || '', source: srcTag, level: l.level || 'info', text: l.text || '' });
+        }
+        if (logLines.length > 800) logLines = logLines.slice(-800);
+        logAfter = res.next;
+        renderLogs();
+      } else if (res && res.next != null) {
+        logAfter = res.next;
+      }
+    } catch (e) {
+      if (String(e).includes('401')) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+function renderLogs() {
+  const q = (document.getElementById('log-search').value || '').trim().toLowerCase();
+  const filtered = logLines.filter(l => {
+    const lv = (l.level || 'INFO').toUpperCase();
+    if (logLevel === 'warn' && lv !== 'WARN' && lv !== 'ERR' && lv !== 'ERROR') return false;
+    if (logLevel === 'err' && lv !== 'ERR' && lv !== 'ERROR') return false;
+    if (q && !(l.text || '').toLowerCase().includes(q) && !(l.source || '').toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const v = document.getElementById('log-view');
+  v.innerHTML = filtered.map(l => {
+    const lv = (l.level || 'INFO').toUpperCase();
+    const tsShort = (l.ts || '').replace(/^.*T/, '').replace(/[+Z].*$/, '');
+    return `<div class="log-row ${lv}"><span class="log-ts">${esc(tsShort)}</span><span class="log-src">${esc(l.source || '')}</span><span class="log-msg">${esc(l.text || '')}</span></div>`;
+  }).join('');
+  document.getElementById('log-count').textContent = `显示 ${filtered.length} / 共 ${logLines.length} 行`;
+  document.getElementById('foot-right').textContent = `日志 ${logLines.length} 行`;
+  if (!logPaused) v.scrollTop = v.scrollHeight;
+}
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function setLogSource(src, btn) {
+  logSource = src; logAfter = 0; logLines = [];
+  document.querySelectorAll('#log-sources .pill-btn').forEach(p => p.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.querySelectorAll('#services-tbody tr.svc-row').forEach(tr => {
+    tr.classList.toggle('selected', tr.dataset.svc === src);
+  });
+  renderLogs();
+}
+function focusLog(src) {
+  const btns = [...document.querySelectorAll('#log-sources .pill-btn')];
+  const map = { database: 0, backend: 1, rs_server: 2, frontend: 3, job: 4, agent: 5 };
+  setLogSource(src, btns[map[src]] || btns[1]);
+}
+function setLogLevel(lv, btn) {
+  logLevel = lv;
+  document.querySelectorAll('#log-levels .pill-btn').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  renderLogs();
+}
+function togglePauseLog() {
+  logPaused = !logPaused;
+  document.getElementById('btn-log-pause').textContent = logPaused ? '继续' : '暂停';
+}
+function clearLogs() { logLines = []; renderLogs(); }
+
+async function runJob(kind, args, confirmReq) {
+  try {
+    await api('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ kind, args, confirm: !!confirmReq, note: 'web-dashboard' })
+    });
+  } catch (e) { alert('操作失败: ' + e.message); }
+}
+function confirmDown() {
+  if (confirm('确认要停止所有服务吗？')) runJob('down', { force: false }, true);
+}
+async function refreshNow() {
+  try { await api('/v1/refresh', { method: 'POST', body: '{}' }); } catch (_) {}
+}
+async function toggleQueue() {
+  const paused = lastStatus?.backend?.queue_paused;
+  try {
+    await api(paused ? '/v1/queue/resume' : '/v1/queue/pause', { method: 'POST', body: '{}' });
+  } catch (_) {}
+}
+function openFrontend() {
+  const url = lastStatus?.urls?.frontend;
+  if (url) {
+    window.open(url, '_blank');
+  } else {
+    const fePort = (lastStatus?.services || []).find(s => s.name === 'frontend')?.port || 3100;
+    window.open(`${location.protocol}//${location.hostname}:${fePort}/`, '_blank');
+  }
+}
+
+function switchView(name, btn) {
+  ['overview', 'dbnums', 'config', 'jobs'].forEach(t => document.getElementById('view-' + t).classList.add('hidden'));
+  document.getElementById('view-' + name).classList.remove('hidden');
+  document.querySelectorAll('.seg-tabs .seg-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  if (name === 'dbnums') loadDbnums();
+  if (name === 'config') loadConfig();
+  if (name === 'jobs') loadJobs();
+}
+function goDbnums() {
+  switchView('dbnums', document.querySelectorAll('.seg-tabs .seg-btn')[1]);
+}
+
+async function loadDbnums() {
+  try {
+    const res = await api('/v1/dbnums');
+    dbnumsList = res.dbnums || [];
+    renderDbnums();
+  } catch (e) {
+    document.getElementById('dbnums-body').innerHTML = `<tr><td colspan="6" style="color:var(--bad);">加载失败: ${esc(e.message)}</td></tr>`;
+  }
+}
+function renderDbnums() {
+  const q = (document.getElementById('dbnum-filter').value || '').trim().toLowerCase();
+  const rows = dbnumsList.filter(d => !q || String(d.dbnum).includes(q) || (d.name || '').toLowerCase().includes(q));
+  document.getElementById('dbnums-body').innerHTML = rows.map(d => {
+    const chk = selectedDbnums.has(d.dbnum) ? 'checked' : '';
+    const kb = d.file_size != null ? (d.file_size / 1024).toFixed(0) + ' KB' : '--';
+    const st = d.initialized ? `已初始化 (${d.pieces || 0} 构件)` : '未生成';
+    return `<tr>
+      <td><input type="checkbox" ${chk} onchange="toggleDb(${d.dbnum}, this.checked)"></td>
+      <td style="font-family:var(--mono);">${d.dbnum}</td>
+      <td>${esc(d.db_type || d.kind || '--')}</td>
+      <td>${esc(d.name || '--')}</td>
+      <td style="font-family:var(--mono);">${kb}</td>
+      <td>${st}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:var(--muted);">无匹配设计库</td></tr>';
+}
+function toggleDb(n, on) { if (on) selectedDbnums.add(n); else selectedDbnums.delete(n); }
+async function triggerDbnums() {
+  const arr = [...selectedDbnums];
+  if (!arr.length) return alert('请先勾选至少一个设计库');
+  await runJob('init', { dbnums: arr }, false);
+  switchView('overview', document.querySelectorAll('.seg-tabs .seg-btn')[0]);
+}
+
+async function loadConfig() {
+  const msg = document.getElementById('cfg-msg');
+  try {
+    const res = await api('/v1/config');
+    const p = res.project || {};
+    document.getElementById('cfg-e3d-root').value = p.e3d_root || '';
+    document.getElementById('cfg-name').value = p.name || '';
+    document.getElementById('cfg-dir').value = p.dir || '';
+    document.getElementById('cfg-code').value = p.code || '';
+    document.getElementById('cfg-version').value = p.e3d_version || 'e3d31';
+    document.getElementById('cfg-mdb').value = p.mdb || 'ALL';
+    const svcs = {};
+    for (const s of (res.services || [])) svcs[s.name] = s.port;
+    document.getElementById('cfg-port-db').value = svcs.database || 8009;
+    document.getElementById('cfg-port-be').value = svcs.backend || 8022;
+    document.getElementById('cfg-port-rs').value = svcs.rs_server || 9098;
+    document.getElementById('cfg-port-fe').value = svcs.frontend || 3100;
+    document.getElementById('cfg-loopback').value = String(!!res.listen?.loopback_only);
+    msg.textContent = '';
+  } catch (e) {
+    msg.style.color = 'var(--bad)';
+    msg.textContent = '读取失败: ' + e.message;
+  }
+}
+function readConfigForm() {
+  return {
+    e3d_root: document.getElementById('cfg-e3d-root').value.trim(),
+    name: document.getElementById('cfg-name').value.trim(),
+    dir: document.getElementById('cfg-dir').value.trim(),
+    code: document.getElementById('cfg-code').value.trim(),
+    e3d_version: document.getElementById('cfg-version').value.trim() || 'e3d31',
+    mdb: document.getElementById('cfg-mdb').value.trim() || 'ALL'
+  };
+}
+function readServicesForm() {
+  return {
+    database: Number(document.getElementById('cfg-port-db').value),
+    backend: Number(document.getElementById('cfg-port-be').value),
+    rs_server: Number(document.getElementById('cfg-port-rs').value),
+    frontend: Number(document.getElementById('cfg-port-fe').value),
+    loopback_only: document.getElementById('cfg-loopback').value === 'true'
+  };
+}
+async function waitJobDone(jobId, timeoutMs = 120000, overrideBase = null, overrideToken = null) {
+  if (!jobId) return waitUntilIdle(timeoutMs, overrideBase, overrideToken);
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const res = await api('/v1/jobs/' + jobId, {}, overrideBase, overrideToken);
+    const j = res.job || res;
+    if (j && j.state && j.state !== 'running' && j.state !== 'queued') {
+      if (j.state !== 'done') {
+        throw new Error(j.message || `任务 #${jobId} 状态异常: ${j.state}`);
+      }
+      return j;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('等待后台任务超时');
+}
+async function waitUntilIdle(timeoutMs = 120000, overrideBase = null, overrideToken = null) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const st = await api('/v1/status?since=0', {}, overrideBase, overrideToken);
+    if (!st.job) return st;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('等待后台任务超时');
+}
+async function saveConfigOnly() {
+  const msg = document.getElementById('cfg-msg');
+  try {
+    const res = await api('/v1/config/project', {
+      method: 'PUT',
+      body: JSON.stringify(Object.assign({}, readConfigForm(), { confirm: true, note: 'web-dashboard' }))
+    });
+    const jid = res.job_id ?? res.job?.id ?? res.id;
+    if (jid) await waitJobDone(jid, 60000);
+    await api('/v1/config/services', {
+      method: 'PUT',
+      body: JSON.stringify(readServicesForm())
+    });
+    msg.style.color = 'var(--ok)'; msg.textContent = '工程与端口配置已保存并同步到底层配置';
+  } catch (e) {
+    msg.style.color = 'var(--bad)'; msg.textContent = '保存失败: ' + e.message;
+  }
+}
+async function saveAndRedeploy() {
+  const msg = document.getElementById('cfg-msg');
+  const btn = document.getElementById('btn-save-redeploy');
+  btn.disabled = true;
+  try {
+    let st = await api('/v1/status?since=0');
+    const anyUp = (st.services || []).some(s => s.state !== 'stopped');
+    if (anyUp) {
+      msg.style.color = 'var(--ink2)'; msg.textContent = '1/4 正在停止运行中的服务...';
+      const dj = await api('/v1/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ kind: 'down', args: { force: false }, confirm: true, note: 'web-redeploy' })
+      });
+      await waitJobDone(dj.job_id ?? dj.job?.id ?? dj.id, 90000);
+    }
+    msg.style.color = 'var(--ink2)'; msg.textContent = '2/4 正在保存工程配置并检查...';
+    const cj = await api('/v1/config/project', {
+      method: 'PUT',
+      body: JSON.stringify(Object.assign({}, readConfigForm(), { confirm: true, note: 'web-redeploy' }))
+    });
+    await waitJobDone(cj.job_id ?? cj.job?.id ?? cj.id, 90000);
+
+    msg.style.color = 'var(--ink2)'; msg.textContent = '3/4 正在保存服务端口并同步底层配置...';
+    await api('/v1/config/services', {
+      method: 'PUT',
+      body: JSON.stringify(readServicesForm())
+    });
+
+    msg.style.color = 'var(--ink2)'; msg.textContent = '4/4 正在重新启动全栈服务...';
+    await api('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'up', args: {}, confirm: false, note: 'web-redeploy' })
+    });
+    msg.style.color = 'var(--ok)'; msg.textContent = '已触发重新部署启动，请查看概览状态';
+    switchView('overview', document.querySelectorAll('.seg-tabs .seg-btn')[0]);
+  } catch (e) {
+    msg.style.color = 'var(--bad)'; msg.textContent = '重新部署失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function getSiteTarget() {
+  const raw = document.getElementById('site-target-host').value.trim();
+  const base = raw ? normalizeServerBase(raw) : activeBase;
+  const tokVal = document.getElementById('site-target-token').value.trim();
+  const tok = tokVal || (base ? ((loadSavedServers().find(x => x.base === base) || {}).token || '') : token);
+  return { base, tok };
+}
+function fillSiteFormFromConfig(cfg, st) {
+  const p = cfg.project || {};
+  const svcs = {};
+  for (const s of (cfg.services || [])) svcs[s.name] = s.port;
+  document.getElementById('site-stack-name').value = (st && st.stack && st.stack.name) || 'local-site';
+  document.getElementById('site-e3d-root').value = p.e3d_root || '';
+  document.getElementById('site-name').value = p.name || '';
+  document.getElementById('site-dir').value = p.dir || '';
+  document.getElementById('site-code').value = p.code || '';
+  document.getElementById('site-version').value = p.e3d_version || 'e3d31';
+  document.getElementById('site-mdb').value = p.mdb || 'ALL';
+  document.getElementById('site-loopback').value = String(!!(cfg.listen && cfg.listen.loopback_only));
+  document.getElementById('site-port-db').value = svcs.database || 8009;
+  document.getElementById('site-port-be').value = svcs.backend || 8022;
+  document.getElementById('site-port-rs').value = svcs.rs_server || 9098;
+  document.getElementById('site-port-fe').value = svcs.frontend || 3100;
+}
+async function connectSiteTarget() {
+  const msg = document.getElementById('site-target-msg');
+  const { base, tok } = getSiteTarget();
+  msg.style.color = 'var(--ink2)'; msg.textContent = '正在连接 ' + (base || location.origin) + ' ...';
+  try {
+    const ping = await api('/v1/ping', {}, base, tok);
+    const cfg = await api('/v1/config', {}, base, tok);
+    const st = await api('/v1/status?since=0', {}, base, tok);
+    fillSiteFormFromConfig(cfg, st);
+    msg.style.color = 'var(--ok)';
+    msg.textContent = '✓ 已连接目标服务器 (' + (base || location.origin) + ' · agent ' + (ping.agent_version || '') + ')，已读取当前配置';
+  } catch (e) {
+    msg.style.color = 'var(--bad)';
+    msg.textContent = '✕ 连接失败: ' + e.message;
+  }
+}
+async function openSiteModal() {
+  document.getElementById('site-msg').textContent = '';
+  document.getElementById('site-probe-msg').textContent = '';
+  document.getElementById('site-target-msg').textContent = '';
+  document.getElementById('site-target-host').value = activeBase ? activeBase.replace(/^https?:\/\//, '') : '';
+  document.getElementById('site-target-token').value = activeBase ? getActiveToken() : '';
+  try {
+    const cfg = await api('/v1/config');
+    fillSiteFormFromConfig(cfg, lastStatus);
+  } catch (_) {}
+  document.getElementById('site-modal').classList.remove('hidden');
+}
+function closeSiteModal() { document.getElementById('site-modal').classList.add('hidden'); }
+function applySitePreset(mode) {
+  if (mode === 'local') {
+    document.getElementById('site-stack-name').value = 'local-site';
+    document.getElementById('site-loopback').value = 'true';
+    document.getElementById('site-port-db').value = 8009;
+    document.getElementById('site-port-be').value = 8022;
+    document.getElementById('site-port-rs').value = 9098;
+    document.getElementById('site-port-fe').value = 3100;
+  } else {
+    document.getElementById('site-loopback').value = 'false';
+  }
+}
+async function probeSitePath() {
+  const el = document.getElementById('site-probe-msg');
+  const p = document.getElementById('site-e3d-root').value.trim();
+  if (!p) { el.style.color = 'var(--bad)'; el.textContent = '请先输入 E3D 根目录'; return; }
+  const { base, tok } = getSiteTarget();
+  try {
+    const r = await api('/v1/fs/probe?path=' + encodeURIComponent(p), {}, base, tok);
+    if (r.exists && r.is_dir && r.readable) {
+      el.style.color = 'var(--ok)'; el.textContent = '✓ 目标服务器目录存在且可读';
+    } else if (r.exists && !r.is_dir) {
+      el.style.color = 'var(--bad)'; el.textContent = '✕ 该路径是文件而不是目录';
+    } else {
+      el.style.color = 'var(--bad)'; el.textContent = '✕ 目标服务器目录不存在或不可读';
+    }
+  } catch (e) {
+    el.style.color = 'var(--bad)'; el.textContent = '检测失败: ' + e.message;
+  }
+}
+async function createAndStartSite() {
+  const msg = document.getElementById('site-msg');
+  const btn = document.getElementById('btn-create-site');
+  const { base, tok } = getSiteTarget();
+  const proj = {
+    e3d_root: document.getElementById('site-e3d-root').value.trim(),
+    name: document.getElementById('site-name').value.trim(),
+    dir: document.getElementById('site-dir').value.trim(),
+    code: document.getElementById('site-code').value.trim(),
+    e3d_version: document.getElementById('site-version').value.trim() || 'e3d31',
+    mdb: document.getElementById('site-mdb').value.trim() || 'ALL'
+  };
+  if (!proj.e3d_root || !proj.name || !proj.code) {
+    msg.style.color = 'var(--bad)'; msg.textContent = '请填写 E3D 根目录、工程名称与工程代号';
+    return;
+  }
+  const svcs = {
+    database: Number(document.getElementById('site-port-db').value),
+    backend: Number(document.getElementById('site-port-be').value),
+    rs_server: Number(document.getElementById('site-port-rs').value),
+    frontend: Number(document.getElementById('site-port-fe').value),
+    loopback_only: document.getElementById('site-loopback').value === 'true',
+    stack_name: document.getElementById('site-stack-name').value.trim() || null,
+    reset_work: document.getElementById('site-reset-work').checked
+  };
+  btn.disabled = true;
+  try {
+    const st = await api('/v1/status?since=0', {}, base, tok);
+    if ((st.services || []).some(s => s.state !== 'stopped')) {
+      msg.style.color = 'var(--ink2)'; msg.textContent = '1/4 正在停止目标服务器当前服务...';
+      const dj = await api('/v1/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ kind: 'down', args: { force: false }, confirm: true, note: 'create-site' })
+      }, base, tok);
+      await waitJobDone(dj.job_id ?? dj.job?.id ?? dj.id, 90000, base, tok);
+    }
+    msg.style.color = 'var(--ink2)'; msg.textContent = '2/4 正在写入目标服务器工程参数...';
+    const cj = await api('/v1/config/project', {
+      method: 'PUT',
+      body: JSON.stringify(Object.assign({}, proj, { confirm: true, note: 'create-site' }))
+    }, base, tok);
+    await waitJobDone(cj.job_id ?? cj.job?.id ?? cj.id, 90000, base, tok);
+
+    msg.style.color = 'var(--ink2)'; msg.textContent = '3/4 正在配置目标服务器端口与工作区...';
+    await api('/v1/config/services', {
+      method: 'PUT',
+      body: JSON.stringify(svcs)
+    }, base, tok);
+
+    msg.style.color = 'var(--ink2)'; msg.textContent = '4/4 正在启动目标服务器全栈服务...';
+    await api('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'up', args: {}, confirm: false, note: 'create-site' })
+    }, base, tok);
+    if (base) saveServerEntry(base, tok);
+    switchTargetServer(base, tok);
+    closeSiteModal();
+    switchView('overview', document.querySelectorAll('.seg-tabs .seg-btn')[0]);
+  } catch (e) {
+    msg.style.color = 'var(--bad)'; msg.textContent = '创建站点失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadJobs() {
+  try {
+    const res = await api('/v1/jobs');
+    const jobs = res.jobs || [];
+    document.getElementById('jobs-body').innerHTML = jobs.map(j => `<tr>
+      <td style="font-family:var(--mono);">${j.id}</td>
+      <td>${esc(j.label || j.kind)}</td>
+      <td>${esc(j.state)}</td>
+      <td style="font-family:var(--mono);">${esc(j.started_at || '')}</td>
+      <td>${esc(j.message || '')}</td>
+      <td><button onclick="viewJobOut('${j.id}')">查看输出</button></td>
+    </tr>`).join('') || '<tr><td colspan="6" style="color:var(--muted);">暂无任务记录</td></tr>';
+  } catch (e) {}
+}
+async function viewJobOut(id) {
+  try {
+    const res = await api('/v1/jobs/' + id);
+    document.getElementById('job-out-view').textContent = (res.output || []).join('\n') || '(无输出)';
+  } catch (e) {
+    document.getElementById('job-out-view').textContent = '读取失败: ' + e.message;
+  }
+}
+
+// =========================================================================
+// Service Start/Stop, Version Comparison, Chunked Push & Rollback
+// =========================================================================
+const SVC_DEFAULT_FILE = {
+  database: 'surreal.exe',
+  backend: 'aios-database.exe',
+  rs_server: 'rs-server.exe',
+  frontend: 'www/'
+};
+
+function getAuthTokenForActive() {
+  return activeBase ? ((loadSavedServers().find(x => x.base === activeBase) || {}).token || '') : token;
+}
+
+async function uploadChunkRaw(urlPath, u8) {
+  const headers = { 'Content-Type': 'application/octet-stream' };
+  const tok = getAuthTokenForActive();
+  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  const resp = await fetch((activeBase || '') + urlPath, { method: 'PUT', headers, body: u8 });
+  if (resp.status === 401) {
+    setConn('bad', '需要令牌');
+    openTokenModal('令牌无效或已过期，请重新输入');
+    throw new Error('需要目标服务器访问令牌 (401)');
+  }
+  const text = await resp.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
+  if (!resp.ok) throw new Error(data.message || data.error || ('HTTP ' + resp.status));
+  return data;
+}
+
+async function loadServiceVersions(silent = true) {
+  try {
+    const res = await api('/v1/services/versions');
+    if (res && Array.isArray(res.services)) {
+      const next = {};
+      for (const s of res.services) next[s.service] = s;
+      svcVersions = next;
+      if (lastStatus) renderStatus(lastStatus);
+      if (!document.getElementById('svc-upgrade-modal').classList.contains('hidden')) {
+        renderUpgradeModal();
+      }
+    }
+  } catch (e) {
+    if (!silent) alert('读取服务端版本失败: ' + e.message);
+  }
+}
+
+async function startSingleService(svc) {
+  try {
+    await runJob('start', { service: svc }, false);
+    refreshNow();
+    setTimeout(() => loadServiceVersions(true), 2500);
+  } catch (e) {
+    alert('启动失败: ' + e.message);
+  }
+}
+
+async function stopSingleService(svc) {
+  const s = (lastStatus?.services || []).find(x => x.name === svc);
+  const label = s?.title || svc;
+  if (!confirm(`确定停止服务「${label}」吗？停止期间对应端口将不可用，依赖它的上层服务也会一起停止。`)) return;
+  try {
+    await runJob('stop', { service: svc, force: false }, true);
+    refreshNow();
+    setTimeout(() => loadServiceVersions(true), 1500);
+  } catch (e) {
+    alert('停止失败: ' + e.message);
+  }
+}
+
+async function restartSingleService(svc) {
+  const s = (lastStatus?.services || []).find(x => x.name === svc);
+  const label = s?.title || svc;
+  const running = s && s.state !== 'stopped';
+  if (running && !confirm(`确定重启服务「${label}」吗？重启期间该服务将短暂中断。`)) return;
+  try {
+    await runJob('restart', { service: svc }, true);
+    refreshNow();
+    setTimeout(() => loadServiceVersions(true), 2500);
+  } catch (e) {
+    alert('重启失败: ' + e.message);
+  }
+}
+
+// Pure JS streaming SHA-256 (works over plain HTTP without crypto.subtle)
+class Sha256 {
+  constructor() {
+    this.h = new Uint32Array([
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]);
+    this.buf = new Uint8Array(64);
+    this.bufLen = 0;
+    this.totalBytes = 0;
+    this.w = new Uint32Array(64);
+  }
+  static K = new Uint32Array([
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  ]);
+  compress(chunk, off) {
+    const w = this.w, h = this.h, K = Sha256.K;
+    for (let i = 0; i < 16; i++) {
+      const j = off + i * 4;
+      w[i] = ((chunk[j] << 24) | (chunk[j+1] << 16) | (chunk[j+2] << 8) | chunk[j+3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = ((w[i-15] >>> 7) | (w[i-15] << 25)) ^ ((w[i-15] >>> 18) | (w[i-15] << 14)) ^ (w[i-15] >>> 3);
+      const s1 = ((w[i-2] >>> 17) | (w[i-2] << 15)) ^ ((w[i-2] >>> 19) | (w[i-2] << 13)) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+    }
+    let a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (hh + S1 + ch + K[i] + w[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      hh = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+  }
+  update(data) {
+    let pos = 0;
+    this.totalBytes += data.length;
+    if (this.bufLen > 0) {
+      const take = Math.min(64 - this.bufLen, data.length);
+      this.buf.set(data.subarray(0, take), this.bufLen);
+      this.bufLen += take;
+      pos += take;
+      if (this.bufLen === 64) {
+        this.compress(this.buf, 0);
+        this.bufLen = 0;
+      }
+    }
+    while (pos + 64 <= data.length) {
+      this.compress(data, pos);
+      pos += 64;
+    }
+    if (pos < data.length) {
+      this.buf.set(data.subarray(pos), 0);
+      this.bufLen = data.length - pos;
+    }
+  }
+  digestHex() {
+    const bitLenHi = Math.floor((this.totalBytes * 8) / 0x100000000) >>> 0;
+    const bitLenLo = ((this.totalBytes * 8) >>> 0);
+    const pad = new Uint8Array(this.bufLen < 56 ? 64 - this.bufLen : 128 - this.bufLen);
+    pad[0] = 0x80;
+    const dv = new DataView(pad.buffer);
+    dv.setUint32(pad.length - 8, bitLenHi, false);
+    dv.setUint32(pad.length - 4, bitLenLo, false);
+    this.update(pad);
+    return Array.from(this.h).map(v => v.toString(16).padStart(8, '0')).join('');
+  }
+}
+
+function scanRsServerCommit(bytes) {
+  // Pattern: 48 B9 <8B> 48 89 48 05 48 B9 <8B> 48 89 08 (inline commit in rs-server.exe)
+  for (let i = 0; i + 27 <= bytes.length; i++) {
+    if (bytes[i] === 0x48 && bytes[i+1] === 0xB9 &&
+        bytes[i+10] === 0x48 && bytes[i+11] === 0x89 && bytes[i+12] === 0x48 && bytes[i+13] === 0x05 &&
+        bytes[i+14] === 0x48 && bytes[i+15] === 0xB9 &&
+        bytes[i+24] === 0x48 && bytes[i+25] === 0x89 && bytes[i+26] === 0x08) {
+      let p2 = '', p1 = '';
+      for (let k = 0; k < 8; k++) { const c = bytes[i + 2 + k]; if (c >= 0x21 && c < 0x7f) p2 += String.fromCharCode(c); }
+      for (let k = 0; k < 8; k++) { const c = bytes[i + 16 + k]; if (c >= 0x21 && c < 0x7f) p1 += String.fromCharCode(c); }
+      if (p1.length === 8 && p2.length === 8) {
+        const s = p1.slice(0, 5) + p2;
+        if (/^[0-9a-f]{7,12}(?:-dirty)?$/.test(s)) return 'rs-server ' + s;
+      }
+    }
+  }
+  return '';
+}
+
+function extractExeMetaFromChunk(svc, bytes, state) {
+  if (svc === 'rs_server' && !state.rsVer) {
+    const found = scanRsServerCommit(bytes);
+    if (found) state.rsVer = found;
+  }
+  const dec = new TextDecoder('latin1').decode(bytes);
+  if (svc === 'database' && !state.dbVer) {
+    const m = dec.match(/surrealdb-(\d+\.\d+\.\d+[^\x00-\x1f\s"'<>\\]{0,40})/i)
+           || dec.match(/(\d+\.\d+\.\d+\+20\d{6}\.[0-9a-f]{7,12})/i);
+    if (m) state.dbVer = m[1].startsWith('surrealdb-') ? m[1] : ('surrealdb-' + m[1]);
+  }
+  if (svc === 'backend' && (!state.beVer || !state.beBuildId)) {
+    const bm = dec.match(/(\d+\.\d+\.\d+)(\+g[0-9a-f]+(?:\.[0-9]+)?(?:\.dirty)?)e3d_model_build_id/);
+    if (bm) {
+      if (!state.beVer) state.beVer = bm[1];
+      if (!state.beBuildId) state.beBuildId = bm[1] + bm[2];
+    } else if (!state.beVer) {
+      const m = dec.match(/aios-database[\/\\ @:-](\d+\.\d+\.\d+(?:[-+][0-9A-Za-z._-]+)?)/i)
+             || dec.match(/aios-database\x00[^\x00]{0,64}?(\d+\.\d+\.\d+)/i);
+      if (m) state.beVer = m[1];
+    }
+  }
+}
+
+async function analyzeLocalSingleFile(svc, file, pkgReleaseMeta = null) {
+  const CHUNK = 2 * 1024 * 1024;
+  const hasher = new Sha256();
+  const scanState = { rsVer: '', dbVer: '', beVer: '', beBuildId: '' };
+  let tail = new Uint8Array(0);
+  for (let off = 0; off < file.size; off += CHUNK) {
+    const slice = file.slice(off, Math.min(off + CHUNK, file.size));
+    const buf = new Uint8Array(await slice.arrayBuffer());
+    hasher.update(buf);
+    if (svc !== 'frontend' && !file.name.toLowerCase().endsWith('.zip')) {
+      const merged = new Uint8Array(tail.length + buf.length);
+      merged.set(tail, 0);
+      merged.set(buf, tail.length);
+      extractExeMetaFromChunk(svc, merged, scanState);
+      tail = merged.slice(Math.max(0, merged.length - 256));
+    }
+    await new Promise(r => setTimeout(r, 0));
+  }
+  const sha = hasher.digestHex();
+  let version = '';
+  let buildId = '';
+  if (svc === 'database') {
+    version = scanState.dbVer;
+  } else if (svc === 'backend') {
+    version = scanState.beVer;
+    buildId = scanState.beBuildId || '';
+    if (!version && pkgReleaseMeta && pkgReleaseMeta.backend && pkgReleaseMeta.backend.version) {
+      version = String(pkgReleaseMeta.backend.version);
+    }
+    if (!version) {
+      const m = file.name.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z._-]+)?)/);
+      if (m) version = m[1];
+    }
+  } else if (svc === 'rs_server') {
+    version = scanState.rsVer;
+    if (!version && pkgReleaseMeta && pkgReleaseMeta.rs_server && pkgReleaseMeta.rs_server.version) {
+      version = String(pkgReleaseMeta.rs_server.version);
+    }
+    if (version) {
+      const cm = version.match(/([0-9a-f]{6,12}(?:-dirty)?)/i);
+      if (cm) buildId = cm[1];
+    }
+  } else if (svc === 'frontend') {
+    const m = file.name.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z._-]+)?)/);
+    version = m ? m[1] : 'zip 包';
+  }
+  return {
+    version: version || '未识别版本号',
+    build_id: buildId || null,
+    path: file.name,
+    bytes: file.size,
+    sha256: sha,
+    short_sha: sha.slice(0, 12),
+    modified_at: file.lastModified ? new Date(file.lastModified).toISOString().replace('T', ' ').slice(0, 19) : '',
+    file_count: 1
+  };
+}
+
+function normalizeSemverTuple(v) {
+  if (!v) return null;
+  const m = String(v).match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
+}
+
+function compareSemverStr(a, b) {
+  const ta = normalizeSemverTuple(a);
+  const tb = normalizeSemverTuple(b);
+  if (!ta || !tb) return null;
+  for (let i = 0; i < 3; i++) {
+    if (ta[i] !== tb[i]) return tb[i] - ta[i];
+  }
+  return 0;
+}
+
+function diffUiMeta(diff) {
+  if (!diff) return { cssCls: '', label: '', summary: '' };
+  const st = diff.status || '';
+  if (st === 'up_to_date' || st === 'same') {
+    return { cssCls: 'same', label: diff.label || '版本一致', summary: diff.summary || '' };
+  }
+  if (st === 'update_available' || st === 'upgrade') {
+    const lbl = diff.label || (diff.version_changed ? '有新版本' : '内容有更新');
+    return { cssCls: 'upgrade', label: lbl, summary: diff.summary || '' };
+  }
+  if (st === 'not_installed') {
+    return { cssCls: 'upgrade', label: diff.label || '待首次部署', summary: diff.summary || '' };
+  }
+  return { cssCls: 'changed', label: diff.label || '版本差异', summary: diff.summary || '' };
+}
+
+function computeClientVersionDiff(installed, candidate) {
+  if (!installed || !candidate) return null;
+  if (!installed.exists && installed.exists !== undefined) {
+    return { status: 'not_installed', label: '待首次部署 ' + (candidate.version || ''), summary: `当前未安装，可部署新版本 ${candidate.version || ''}` };
+  }
+  if (installed.sha256 && candidate.sha256 && installed.sha256 === candidate.sha256) {
+    return { status: 'up_to_date', label: '版本一致', summary: 'SHA-256 与当前线上完全一致，无需重复推送' };
+  }
+  const cmp = compareSemverStr(installed.version, candidate.version);
+  if (cmp !== null && cmp > 0) {
+    return { status: 'update_available', label: '可升级 → ' + candidate.version, summary: `检测到新版本 ${candidate.version}（当前 ${installed.version || '未知'}）` };
+  }
+  if (cmp !== null && cmp < 0) {
+    return { status: 'changed', label: '较旧版本 ' + candidate.version, summary: `候选版本 ${candidate.version} 低于当前线上 ${installed.version}` };
+  }
+  if (candidate.build_id && installed.build_id && candidate.build_id !== installed.build_id) {
+    return { status: 'update_available', label: '构建差异 ' + candidate.build_id, summary: `构建标识不同（当前 ${installed.build_id} → 候选 ${candidate.build_id}）` };
+  }
+  if (candidate.bytes && installed.bytes && candidate.bytes === installed.bytes && installed.version === candidate.version && candidate.file_count > 1) {
+    return { status: 'up_to_date', label: '版本一致', summary: '版本号、构建标识与总大小均一致' };
+  }
+  return { status: 'changed', label: '内容有差异', summary: `文件哈希或体积不同（当前 ${installed.short_sha || '--'} → 候选 ${candidate.short_sha || '--'}）` };
+}
+
+function fmtBytesMB(b) {
+  if (!b && b !== 0) return '--';
+  if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB (' + b.toLocaleString() + ' B)';
+  if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+  return b + ' B';
+}
+
+function openUpgradeModal(svc) {
+  upgradeModalSvc = svc || 'backend';
+  document.getElementById('svc-upgrade-modal').classList.remove('hidden');
+  renderUpgradeModal();
+  loadServiceVersions(true);
+}
+function closeUpgradeModal() {
+  if (upgradeBusy) {
+    if (!confirm('当前正在传输或升级中，确定关闭弹窗吗？（后台升级请求仍会继续完成）')) return;
+  }
+  document.getElementById('svc-upgrade-modal').classList.add('hidden');
+}
+function switchUpgradeSvc(svc) {
+  upgradeModalSvc = svc;
+  document.getElementById('up-progress-wrap').style.display = 'none';
+  renderUpgradeModal();
+}
+
+function renderUpgradeModal() {
+  const svc = upgradeModalSvc;
+  document.querySelectorAll('#up-svc-tabs .tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.svc === svc);
+  });
+  const feBtn = document.getElementById('btn-pick-fedir');
+  const pickBtn = document.getElementById('btn-pick-file');
+  if (svc === 'frontend') {
+    feBtn.style.display = '';
+    pickBtn.textContent = '选择 frontend zip 包';
+  } else {
+    feBtn.style.display = 'none';
+    pickBtn.textContent = '选择新 ' + (SVC_DEFAULT_FILE[svc] || '文件');
+  }
+
+  const vEntry = svcVersions[svc];
+  const inst = vEntry && vEntry.installed ? vEntry.installed : null;
+  document.getElementById('up-cur-ver').textContent = (inst && inst.version) || '--';
+  document.getElementById('up-cur-build').textContent = (inst && inst.build_id) || '--';
+  document.getElementById('up-cur-path').textContent = (inst && inst.path) || '--';
+  document.getElementById('up-cur-bytes').textContent = inst ? fmtBytesMB(inst.bytes) : '--';
+  document.getElementById('up-cur-time').textContent = (inst && inst.modified_at) || '--';
+  document.getElementById('up-cur-sha').textContent = (inst && inst.sha256) || '--';
+  const curRunSvc = lastStatus && Array.isArray(lastStatus.services) ? lastStatus.services.find(x => x.name === svc) : null;
+  document.getElementById('up-cur-tag').textContent = curRunSvc ? (curRunSvc.state === 'ok' ? '运行中 PID ' + (curRunSvc.pid || '--') : curRunSvc.state) : '已安装';
+
+  const localCmp = localComparisons[svc];
+  const staged = vEntry && vEntry.staged ? vEntry.staged : null;
+  const cand = localCmp ? localCmp.artifact : staged;
+  const diff = localCmp ? localCmp.diff : (vEntry ? vEntry.diff : null);
+  const noteEl = document.getElementById('up-local-pick-note');
+
+  if (localCmp) {
+    document.getElementById('up-new-tag').textContent = '待推送 (本地已选)';
+    noteEl.textContent = `已选择本地文件: ${cand.path} (${fmtBytesMB(cand.bytes)})`;
+  } else if (staged) {
+    document.getElementById('up-new-tag').textContent = '已暂存到服务器';
+    noteEl.textContent = '服务器已存在该服务的待升级暂存包，可直接点击升级或重新选择文件覆盖。';
+  } else {
+    document.getElementById('up-new-tag').textContent = '未选择';
+    noteEl.textContent = '尚未选择新版本，请先选择本地文件 / 前端 www 目录，或在下方输入服务端路径进行对比。';
+  }
+
+  document.getElementById('up-new-ver').textContent = (cand && cand.version) || '--';
+  document.getElementById('up-new-build').textContent = (cand && cand.build_id) || '--';
+  document.getElementById('up-new-path').textContent = (cand && cand.path) || '--';
+  document.getElementById('up-new-bytes').textContent = cand ? fmtBytesMB(cand.bytes) : '--';
+  document.getElementById('up-new-time').textContent = (cand && cand.modified_at) || '--';
+  document.getElementById('up-new-sha').textContent = (cand && cand.sha256) || '--';
+
+  const banner = document.getElementById('up-diff-banner');
+  const dm = diffUiMeta(diff);
+  banner.className = 'cmp-diff-banner ' + dm.cssCls;
+  banner.textContent = diff ? `${dm.label} — ${dm.summary}` : '请选择待升级文件或输入服务器本地路径进行版本对比';
+
+  const hasBackup = !!(vEntry && vEntry.backup && vEntry.backup.exists);
+  const rbBtn = document.getElementById('btn-up-rollback');
+  rbBtn.disabled = !hasBackup || upgradeBusy;
+  rbBtn.title = hasBackup ? `回滚到备份 (${vEntry.backup.saved_at || ''})` : '当前暂无可回滚备份';
+
+  const canPush = !!(localCmp || staged);
+  document.getElementById('btn-up-stage-only').disabled = !localCmp || upgradeBusy;
+  document.getElementById('btn-up-apply').disabled = !canPush || upgradeBusy;
+}
+
+async function onPickSingleUpgradeFile(files) {
+  if (!files || !files.length) return;
+  const f = files[0];
+  const svc = upgradeModalSvc;
+  document.getElementById('up-local-pick-note').textContent = `正在计算 ${f.name} 哈希与版本信息...`;
+  try {
+    const art = await analyzeLocalSingleFile(svc, f);
+    const inst = svcVersions[svc] ? svcVersions[svc].installed : null;
+    localComparisons[svc] = { kind: 'single', file: f, artifact: art, diff: computeClientVersionDiff(inst, art) };
+    renderUpgradeModal();
+    if (lastStatus) renderStatus(lastStatus);
+  } catch (e) {
+    alert('解析文件失败: ' + e.message);
+  } finally {
+    document.getElementById('up-file-single').value = '';
+  }
+}
+
+async function analyzeFrontendDirFiles(items) {
+  // items: [{ relPath, file }] inside www/
+  let totalBytes = 0;
+  let maxMtime = 0;
+  let verMeta = null;
+  const fileHashes = [];
+  for (const it of items) {
+    totalBytes += it.file.size;
+    if (it.file.lastModified > maxMtime) maxMtime = it.file.lastModified;
+    if (it.relPath.toLowerCase() === 'version.json') {
+      try { verMeta = JSON.parse(await it.file.text()); } catch (_) {}
+    }
+    const h = new Sha256();
+    const CHUNK = 2 * 1024 * 1024;
+    for (let off = 0; off < it.file.size; off += CHUNK) {
+      const buf = new Uint8Array(await it.file.slice(off, Math.min(off + CHUNK, it.file.size)).arrayBuffer());
+      h.update(buf);
+    }
+    fileHashes.push(it.relPath + ':' + h.digestHex());
+  }
+  fileHashes.sort();
+  const dirH = new Sha256();
+  dirH.update(new TextEncoder().encode(fileHashes.join('\n')));
+  const sha = dirH.digestHex();
+  const version = verMeta && verMeta.version
+    ? `${verMeta.app || 'plant3d-web'} ${verMeta.version}`
+    : `${items.length} 个文件`;
+  const buildId = verMeta ? ([verMeta.git, verMeta.build].filter(Boolean).join(' ') || null) : null;
+  return {
+    version,
+    build_id: buildId,
+    path: `www/ (${items.length} files)`,
+    bytes: totalBytes,
+    sha256: sha,
+    short_sha: sha.slice(0, 12),
+    modified_at: maxMtime ? new Date(maxMtime).toISOString().replace('T', ' ').slice(0, 19) : '',
+    file_count: items.length
+  };
+}
+
+function normalizeFrontendDirItems(fileList) {
+  const items = [];
+  for (const f of Array.from(fileList)) {
+    const rawRel = (f.webkitRelativePath || f.name).replace(/\\/g, '/');
+    const parts = rawRel.split('/').filter(Boolean);
+    let rel = rawRel;
+    const wwwIdx = parts.findIndex(p => p.toLowerCase() === 'www');
+    if (wwwIdx >= 0) rel = parts.slice(wwwIdx + 1).join('/');
+    else if (parts.length > 1) rel = parts.slice(1).join('/');
+    if (!rel || rel.startsWith('.') || rel.endsWith('.bak')) continue;
+    items.push({ relPath: rel, file: f });
+  }
+  return items;
+}
+
+async function onPickFrontendDir(fileList) {
+  if (!fileList || !fileList.length) return;
+  const items = normalizeFrontendDirItems(fileList);
+  if (!items.length) {
+    alert('所选目录中没有有效的前端文件');
+    return;
+  }
+  document.getElementById('up-local-pick-note').textContent = `正在扫描前端目录 (${items.length} 个文件)...`;
+  try {
+    const art = await analyzeFrontendDirFiles(items);
+    const inst = svcVersions.frontend ? svcVersions.frontend.installed : null;
+    localComparisons.frontend = { kind: 'dir', files: items, artifact: art, diff: computeClientVersionDiff(inst, art) };
+    upgradeModalSvc = 'frontend';
+    renderUpgradeModal();
+    if (lastStatus) renderStatus(lastStatus);
+  } catch (e) {
+    alert('扫描前端目录失败: ' + e.message);
+  } finally {
+    document.getElementById('up-file-dir').value = '';
+  }
+}
+
+async function handleComparePackageDir(fileList) {
+  if (!fileList || !fileList.length) return;
+  const sumEl = document.getElementById('pkg-cmp-summary');
+  sumEl.textContent = '正在扫描本地发布包与计算版本差异...';
+  const files = Array.from(fileList);
+  let pkgReleaseMeta = null;
+  for (const f of files) {
+    const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/').toLowerCase();
+    if (rel.endsWith('/release.json') || rel === 'release.json') {
+      try { pkgReleaseMeta = JSON.parse(await f.text()); } catch (_) {}
+      break;
+    }
+  }
+  const bySvc = { database: null, backend: null, rs_server: null, frontendItems: [] };
+  for (const f of files) {
+    const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/');
+    const lower = rel.toLowerCase();
+    const base = lower.split('/').pop();
+    if (base === 'surreal.exe') bySvc.database = f;
+    else if (base === 'aios-database.exe') bySvc.backend = f;
+    else if (base === 'rs-server.exe') bySvc.rs_server = f;
+    else if (lower.includes('/www/') && !base.endsWith('.bak')) {
+      const idx = lower.indexOf('/www/');
+      const sub = rel.slice(idx + 5);
+      if (sub) bySvc.frontendItems.push({ relPath: sub, file: f });
+    }
+  }
+  let foundCount = 0, diffCount = 0;
+  for (const svc of ['database', 'backend', 'rs_server']) {
+    if (!bySvc[svc]) continue;
+    foundCount++;
+    const art = await analyzeLocalSingleFile(svc, bySvc[svc], pkgReleaseMeta);
+    const inst = svcVersions[svc] ? svcVersions[svc].installed : null;
+    const diff = computeClientVersionDiff(inst, art);
+    if (diff && diff.status !== 'same') diffCount++;
+    localComparisons[svc] = { kind: 'single', file: bySvc[svc], artifact: art, diff };
+  }
+  if (bySvc.frontendItems.length) {
+    foundCount++;
+    const art = await analyzeFrontendDirFiles(bySvc.frontendItems);
+    const inst = svcVersions.frontend ? svcVersions.frontend.installed : null;
+    const diff = computeClientVersionDiff(inst, art);
+    if (diff && diff.status !== 'same') diffCount++;
+    localComparisons.frontend = { kind: 'dir', files: bySvc.frontendItems, artifact: art, diff };
+  }
+  sumEl.textContent = foundCount
+    ? `已识别 ${foundCount} 个服务：${diffCount} 个有版本变化（点击服务行标签或“升级”即可推送）`
+    : '未在所选目录中识别出 surreal.exe / aios-database.exe / rs-server.exe / www/';
+  document.getElementById('pkg-compare-dir').value = '';
+  if (lastStatus) renderStatus(lastStatus);
+  if (!document.getElementById('svc-upgrade-modal').classList.contains('hidden')) renderUpgradeModal();
+}
+
+async function compareServerPath(stageAlso) {
+  const pathVal = document.getElementById('up-server-path').value.trim();
+  if (!pathVal) { alert('请先输入服务器可访问的路径'); return; }
+  setUpgradeBusy(true, stageAlso ? '正在对比并暂存服务端路径...' : '正在对比服务端路径...');
+  try {
+    const res = await api('/v1/services/compare-path', {
+      method: 'POST',
+      body: JSON.stringify({ service: upgradeModalSvc, path: pathVal, stage: !!stageAlso })
+    });
+    if (res && Array.isArray(res.services)) {
+      for (const s of res.services) svcVersions[s.service] = s;
+      if (stageAlso) delete localComparisons[upgradeModalSvc];
+      appendUpLog((stageAlso ? '[暂存] ' : '[对比] ') + pathVal + ' 完成');
+      renderUpgradeModal();
+      if (lastStatus) renderStatus(lastStatus);
+    }
+  } catch (e) {
+    appendUpLog('[错误] ' + e.message);
+    alert('路径对比失败: ' + e.message);
+  } finally {
+    setUpgradeBusy(false);
+  }
+}
+
+async function clearServiceStage() {
+  const svc = upgradeModalSvc;
+  delete localComparisons[svc];
+  try {
+    await api('/v1/services/stage-clear', { method: 'POST', body: JSON.stringify({ service: svc }) });
+    await loadServiceVersions(true);
+    appendUpLog(`[清理] 已清空 ${svc} 暂存`);
+  } catch (e) {
+    alert('清空暂存失败: ' + e.message);
+  }
+  renderUpgradeModal();
+  if (lastStatus) renderStatus(lastStatus);
+}
+
+function appendUpLog(msg) {
+  const box = document.getElementById('up-logs');
+  box.textContent = (box.textContent ? box.textContent + '\n' : '') + `[${fmtNow()}] ${msg}`;
+  box.scrollTop = box.scrollHeight;
+}
+
+function setUpgradeBusy(busy, label = '') {
+  upgradeBusy = busy;
+  const wrap = document.getElementById('up-progress-wrap');
+  if (busy && label) {
+    wrap.style.display = '';
+    document.getElementById('up-progress-text').textContent = label;
+  }
+  renderUpgradeModal();
+}
+
+function setUploadProgress(pct, text) {
+  document.getElementById('up-progress-wrap').style.display = '';
+  document.getElementById('up-progress-pct').textContent = Math.round(pct) + '%';
+  document.getElementById('up-progress-fill').style.width = Math.min(100, Math.max(0, pct)) + '%';
+  if (text) document.getElementById('up-progress-text').textContent = text;
+}
+
+async function uploadLocalSelectionToStage(svc) {
+  const localCmp = localComparisons[svc];
+  if (!localCmp) return null;
+  const CHUNK = 2 * 1024 * 1024;
+  let lastRes = null;
+
+  if (localCmp.kind === 'single') {
+    const file = localCmp.file;
+    const total = file.size;
+    let off = 0;
+    let first = true;
+    while (off < total || first) {
+      const end = Math.min(off + CHUNK, total);
+      const u8 = total === 0 ? new Uint8Array(0) : new Uint8Array(await file.slice(off, end).arrayBuffer());
+      const fin = end >= total ? 1 : 0;
+      const rst = first ? 1 : 0;
+      const qs = `service=${encodeURIComponent(svc)}&rel_path=${encodeURIComponent(file.name)}&offset=${off}&total=${total}&reset=${rst}&finalize=${fin}`;
+      setUploadProgress(total ? (end * 100 / total) : 100, `正在推送 ${file.name} (${fmtBytesMB(end)} / ${fmtBytesMB(total)})`);
+      lastRes = await uploadChunkRaw('/v1/services/upload?' + qs, u8);
+      first = false;
+      off = end;
+      if (total === 0) break;
+    }
+  } else {
+    const items = localCmp.files;
+    const totalAll = items.reduce((acc, it) => acc + it.file.size, 0) || 1;
+    let sentAll = 0;
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx];
+      const f = it.file;
+      const total = f.size;
+      let off = 0;
+      let firstChunkOfFile = true;
+      while (off < total || firstChunkOfFile) {
+        const end = Math.min(off + CHUNK, total);
+        const u8 = total === 0 ? new Uint8Array(0) : new Uint8Array(await f.slice(off, end).arrayBuffer());
+        const isVeryFirst = (idx === 0 && firstChunkOfFile);
+        const isVeryLast = (idx === items.length - 1 && end >= total);
+        const qs = `service=${encodeURIComponent(svc)}&rel_path=${encodeURIComponent(it.relPath)}&offset=${off}&total=${total}&reset=${isVeryFirst ? 1 : 0}&finalize=${isVeryLast ? 1 : 0}`;
+        setUploadProgress(((sentAll + (end - off)) * 100) / totalAll, `正在推送 ${it.relPath} (${idx + 1}/${items.length})`);
+        lastRes = await uploadChunkRaw('/v1/services/upload?' + qs, u8);
+        sentAll += (end - off);
+        firstChunkOfFile = false;
+        off = end;
+        if (total === 0) break;
+      }
+    }
+  }
+
+  if (lastRes && lastRes.entry) {
+    svcVersions[svc] = lastRes.entry;
+    delete localComparisons[svc];
+  }
+  return lastRes;
+}
+
+async function pushSelectedToStage() {
+  const svc = upgradeModalSvc;
+  if (!localComparisons[svc]) return;
+  setUpgradeBusy(true, '正在推送到服务端暂存区...');
+  try {
+    appendUpLog(`开始推送 ${svc} 到服务器暂存区...`);
+    await uploadLocalSelectionToStage(svc);
+    appendUpLog(`${svc} 推送暂存完成，服务端已校验 SHA-256。`);
+    await loadServiceVersions(true);
+  } catch (e) {
+    appendUpLog('[失败] ' + e.message);
+    alert('推送暂存失败: ' + e.message);
+  } finally {
+    setUpgradeBusy(false);
+  }
+}
+
+async function pushAndUpgradeSelected() {
+  const svc = upgradeModalSvc;
+  const force = document.getElementById('up-force-stop').checked;
+  const autoStart = document.getElementById('up-auto-start').checked;
+  const hasLocal = !!localComparisons[svc];
+  const hasStaged = !!(svcVersions[svc] && svcVersions[svc].staged);
+  if (!hasLocal && !hasStaged) {
+    alert('请先选择待推送文件或暂存服务端路径');
+    return;
+  }
+  if (!confirm(`确定对服务 "${svc}" 执行推送升级吗？\n流程：推送新版本 -> 停止服务 -> 备份当前版本 -> 原子替换 -> 启动并健康检查（启动失败将自动回滚）。`)) return;
+
+  setUpgradeBusy(true, '准备升级 ' + svc + '...');
+  try {
+    if (hasLocal) {
+      appendUpLog(`步骤 1/2：推送本地新版本到服务器暂存区 (${svc})...`);
+      await uploadLocalSelectionToStage(svc);
+    }
+    setUploadProgress(100, `正在服务端应用升级 (${svc})：停服 -> 备份 -> 替换 -> 启动校验...`);
+    appendUpLog(`步骤 2/2：执行服务端升级 ${svc} (force=${force}, auto_start=${autoStart})...`);
+    const res = await api('/v1/services/upgrade', {
+      method: 'POST',
+      body: JSON.stringify({ service: svc, force, auto_start: autoStart })
+    });
+    if (res && Array.isArray(res.logs)) {
+      for (const line of res.logs) appendUpLog(line);
+    }
+    if (res && res.entry) svcVersions[svc] = res.entry;
+    appendUpLog(`升级完成: ${svc}`);
+    await refreshNow();
+    await loadServiceVersions(true);
+  } catch (e) {
+    appendUpLog('[升级异常] ' + e.message);
+    await loadServiceVersions(true);
+    alert('升级失败: ' + e.message);
+  } finally {
+    setUpgradeBusy(false);
+  }
+}
+
+async function rollbackServiceVersion() {
+  const svc = upgradeModalSvc;
+  const autoStart = document.getElementById('up-auto-start').checked;
+  if (!confirm(`确定将 "${svc}" 回滚到最近一次升级前的备份吗？`)) return;
+  setUpgradeBusy(true, `正在回滚 ${svc}...`);
+  setUploadProgress(50, `正在停止并恢复 ${svc} 备份...`);
+  try {
+    appendUpLog(`开始回滚 ${svc}...`);
+    const res = await api('/v1/services/rollback', {
+      method: 'POST',
+      body: JSON.stringify({ service: svc, auto_start: autoStart })
+    });
+    if (res && Array.isArray(res.logs)) {
+      for (const line of res.logs) appendUpLog(line);
+    }
+    if (res && res.entry) svcVersions[svc] = res.entry;
+    setUploadProgress(100, `${svc} 回滚完成`);
+    await refreshNow();
+    await loadServiceVersions(true);
+  } catch (e) {
+    appendUpLog('[回滚失败] ' + e.message);
+    alert('回滚失败: ' + e.message);
+  } finally {
+    setUpgradeBusy(false);
+  }
+}
+
+let loopsStarted = false;
+function startLoops() {
+  if (!loopsStarted) { loopsStarted = true; pollStatus(); pollLogs(); loadServiceVersions(true); }
+  else { pollStatus(); loadServiceVersions(true); }
+}
+
+renderServerSelect();
+probeAllSites();
+setInterval(probeAllSites, 10000);
+startLoops();
+</script>
+</body>
+</html>

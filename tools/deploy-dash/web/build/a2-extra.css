@@ -1,0 +1,27 @@
+/* 补充：站点行的状态字、日志暂停按钮、任务结果区 */
+.skel-bar{display:block;width:40%;height:16px}
+.field-msg.err{color:var(--bad-text)}
+.modal-body .form-note{margin-top:0}
+.site-line{display:flex;align-items:baseline;gap:8px;min-width:0}
+.site-line .site-name{flex:1;min-width:0}
+.site-word{flex:none;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.site-word.w-bad{color:var(--bad-text)}
+.site-word.w-warn{color:var(--warn-text)}
+#btn-log-pause[aria-pressed="true"]{border-color:var(--accent-line);background:var(--accent-bg);color:var(--accent-text)}
+.log-line{gap:5px}
+.job-sum{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:8px;font:12px/1.5 var(--sans);color:var(--muted);white-space:normal}
+.job-msg{margin-bottom:8px;font:14px/1.45 var(--sans);color:var(--ink);white-space:pre-wrap}
+.job-none{font:14px/1.45 var(--sans);color:var(--muted)}
+.job-lines{white-space:pre-wrap}
+.doc{margin:0 0 12px;font:14px/1.45 var(--sans);white-space:normal}
+.doc-head{display:flex;align-items:center;gap:6px;font-weight:600}
+.doc-head.ok{color:var(--ok-text)}
+.doc-head.warn{color:var(--warn-text)}
+.doc-head.bad{color:var(--bad-text)}
+.doc-item{margin-top:8px;padding:8px 12px;border:1px solid var(--line);border-radius:var(--radius)}
+.doc-what{font-weight:600;color:var(--ink)}
+.doc-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin-top:4px;font-size:12px;color:var(--ink2)}
+.doc-kv .k{color:var(--muted)}
+.doc-notes{margin:8px 0 0;padding:0;list-style:none;font-size:12px;color:var(--ink2)}
+.doc-notes li{padding:1px 0}
+@media (max-width:820px){.log-line{gap:2px}}
