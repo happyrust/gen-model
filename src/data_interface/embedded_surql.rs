@@ -501,7 +501,9 @@ mod tests {
         let sql = owners
             .iter()
             .map(|key| format!("RETURN fn::room_code(pe:⟨{key}⟩);"))
-            .chain(std::iter::once("RETURN fn::room_code(pe:⟨5_6000⟩);".to_string()))
+            .chain(std::iter::once(
+                "RETURN fn::room_code(pe:⟨5_6000⟩);".to_string(),
+            ))
             .collect::<Vec<_>>()
             .join("\n");
         let mut response = db
@@ -591,7 +593,9 @@ mod tests {
         let top: Vec<f32> = response.take(1).expect("decode room_top_height");
         let orphan: Vec<f32> = response.take(2).expect("decode room_height without edge");
         let pos: Vec<Vec<f32>> = response.take(3).expect("decode get_world_pos");
-        let no_pos: Vec<Vec<f32>> = response.take(4).expect("decode get_world_pos without geometry");
+        let no_pos: Vec<Vec<f32>> = response
+            .take(4)
+            .expect("decode get_world_pos without geometry");
         assert_eq!(bottom, vec![-20.0], "底标高 = 面板 aabb_d.mins[2]");
         assert_eq!(top, vec![2705.0], "顶标高 = 面板 aabb_d.maxs[2]");
         assert!(
@@ -761,7 +765,8 @@ mod tests {
             .check()
             .expect("deleted probes execute");
         let alive: Option<String> = response.take(0).expect("decode alive member");
-        let deleted_edge: Option<serde_json::Value> = response.take(1).expect("decode deleted edge");
+        let deleted_edge: Option<serde_json::Value> =
+            response.take(1).expect("decode deleted edge");
         let deleted_num: Option<String> = response.take(2).expect("decode deleted room_num");
         let legacy: Option<String> = response.take(3).expect("decode legacy member");
 
@@ -780,5 +785,4 @@ mod tests {
             "deleted 字段为 NONE 的老记录不能被一起滤掉（`!deleted` 会误杀）"
         );
     }
-
 }

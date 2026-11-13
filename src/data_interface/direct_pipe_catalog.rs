@@ -27,8 +27,8 @@ use dashmap::DashMap;
 use e3d_io::refno::RefNo;
 use pipe_model::PipeCatalog;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 库内 refno 水位拿不到时的降级起点（与 MockCatalog 的分配段同纪律）。
 const EDIT_FALLBACK_BASE: u64 = 1_000_000;

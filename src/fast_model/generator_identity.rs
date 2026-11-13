@@ -65,8 +65,14 @@ mod tests {
                 build_id, "unknown",
                 "build.rs 没找到 {name} vendor 目录（../vendor/{name} 或对应的 *_VENDOR_DIR）"
             );
-            assert!(build_id.starts_with(&format!("{version}@")), "{name}: {build_id}");
+            assert!(
+                build_id.starts_with(&format!("{version}@")),
+                "{name}: {build_id}"
+            );
         }
-        assert!(!RULE_TAGS.contains(' '), "标签串不许带空格，它要原样进 SurrealQL 字符串");
+        assert!(
+            !RULE_TAGS.contains(' '),
+            "标签串不许带空格，它要原样进 SurrealQL 字符串"
+        );
     }
 }

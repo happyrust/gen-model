@@ -23,7 +23,8 @@ use surrealdb::engine::any::{Any, connect};
 /// 第二条异步账的三张表（模型意图队列 / 固定区间恢复记录 / 副作用队列）随 ADR-072 D5 整体退役，
 /// Ref0 统计的两张表（`dbnum_info_table` / `dbnum_stats_state`）随 ADR-071 D6 退役，都不再列在
 /// 这里：库里没有它们，对拍也就没有可掩的。
-pub const CONTROL_PLANE_TABLES: [&str; 3] = ["dbnum_watermark", "dbnum_write_state", "queue_control"];
+pub const CONTROL_PLANE_TABLES: [&str; 3] =
+    ["dbnum_watermark", "dbnum_write_state", "queue_control"];
 
 /// 起一个全新的 `mem://` 实例并切到 `ns`/`db`。**不装 schema**——要生产 schema
 /// 再调 [`init_schema_on`]，两步分开是为了让「无 schema 的裸实例」也能当对照组。
@@ -62,7 +63,10 @@ pub async fn init_schema_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     aios_core::create_geom_index_on(db).await?;
     aios_core::define_room_index_on(db).await?;
     aios_core::define_owner_index_on(db).await?;
-    aios_core::define_fullname_index_on(db).await?;
+    // 不装 `aios_core::define_fullname_index_on`（pe.name 上的 BM25 HIGHLIGHTS 全文索引）：
+    // 全仓没有一条 `@@` / `search::*` 查询读它（Plant UI 的名字搜索是本地 tantivy），
+    // 而在已有数据的库上现场建它，2.1.4 服务端内存线性涨到 17 GB 以上直到 0xc0000409 退出
+    // （AMS 66 万行 pe 实测；同一份库上 define_pe_index_on 的七条普通索引各 <1 GB、~30 s）。
     aios_core::define_pe_index_on(db).await?;
     aios_core::define_ses_index_on(db).await?;
     // gen-model 侧唯一的启动期 DEFINE（init_inst_relate_indices）——与生产同一组

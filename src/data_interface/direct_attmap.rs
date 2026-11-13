@@ -364,7 +364,9 @@ fn coerce(value: &DescriptorValue, declared: &AttrVal) -> Option<NamedAttrValue>
         (AttrVal::StringArrayType(_), D::IntArray(v)) => {
             NamedAttrValue::StringArrayType(v.iter().map(|w| word_text(*w as u32, None)).collect())
         }
-        (AttrVal::StringArrayType(_), D::TextList(v)) => NamedAttrValue::StringArrayType(text_list(v)),
+        (AttrVal::StringArrayType(_), D::TextList(v)) => {
+            NamedAttrValue::StringArrayType(text_list(v))
+        }
 
         (AttrVal::RefU64Type(_) | AttrVal::ElementType(_), D::RefNo(r)) => {
             NamedAttrValue::RefU64Type(refu64(*r))

@@ -496,7 +496,7 @@ DEFINE FUNCTION fn::next_connect_pe_data($pe:record) {
                 id: $pe,
                 next_full_name: fn::default_full_name($pe),
                 next: $pe,
-                tubi_refno: tubi_refno,
+                tubi_refno: $tubi_refno,
                 tubi_name: $tubi_name,
                 tubi_spref: $pe.refno.LSTU.name
             };

@@ -469,8 +469,8 @@ fn resolve_target_face(
     // 连线在面法向上的投影就是到面所在平面的垂距；两者差在容差内 = 连线本身可以当垂距用。
     let hugs_normal = |face: &FaceInfo| distance - (p - q).dot(&face.normal) <= tolerance;
     let Some(first) = candidates.first() else {
-        let perpendicular = cast(&face, None)
-            .or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
+        let perpendicular =
+            cast(&face, None).or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
         return (face, perpendicular);
     };
     if let Some(perpendicular) = cast(&face, Some(first.center())) {
@@ -506,7 +506,10 @@ fn hit_normal(
 }
 
 /// 一组点沿方向 `dir` 的支撑区间 [min, max]。
-fn support_interval<'a>(points: impl Iterator<Item = &'a Point<Real>>, dir: &Vector<Real>) -> (f32, f32) {
+fn support_interval<'a>(
+    points: impl Iterator<Item = &'a Point<Real>>,
+    dir: &Vector<Real>,
+) -> (f32, f32) {
     points.fold((f32::MAX, f32::MIN), |(lo, hi), p| {
         let d = p.coords.dot(dir);
         (lo.min(d), hi.max(d))
@@ -1819,7 +1822,11 @@ mod tests {
         assert_eq!(perp.distance, hit.distance);
         assert_eq!(perp.method, "contact");
         assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
-        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(
+            (perp.from - hit.source_point).norm() < 1e-6,
+            "{:?}",
+            perp.from
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
@@ -1857,7 +1864,11 @@ mod tests {
         let out = surface_clearance(&[bar], &[pane], opts());
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "{hit:?}");
-        assert!(approx(hit.distance, 46.6, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 46.6, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
             "{:?}",
@@ -1865,12 +1876,20 @@ mod tests {
         );
         let face = hit.target_face.expect("face");
         assert_eq!(face.kind, FaceKind::Side, "{face:?}");
-        assert!(approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3), "{:?}", face.normal);
+        assert!(
+            approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3),
+            "{:?}",
+            face.normal
+        );
         let perp = hit.perpendicular.expect("连线几乎沿法向，该有垂距");
         assert_eq!(perp.method, "edge");
         assert_eq!(perp.distance, hit.distance);
         assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
-        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(
+            (perp.from - hit.source_point).norm() < 1e-6,
+            "{:?}",
+            perp.from
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
@@ -1883,7 +1902,11 @@ mod tests {
         let (pane, bar) = yawed_pane_and_bar(18.0, 100.0);
         let out = surface_clearance(&[bar], &[pane], opts());
         let hit = out.hit.expect("hit");
-        assert!(approx(hit.distance, 100.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 100.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
             "{:?}",
@@ -1891,7 +1914,11 @@ mod tests {
         );
         let face = hit.target_face.expect("face");
         assert_eq!(face.kind, FaceKind::End, "{face:?}");
-        assert!(approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3), "{:?}", face.normal);
+        assert!(
+            approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3),
+            "{:?}",
+            face.normal
+        );
         assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
@@ -1919,7 +1946,11 @@ mod tests {
         let out = surface_clearance(&[part], &[wall], opts());
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "{hit:?}");
-        assert!(approx(hit.distance, 128.0625, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 128.0625, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, 0.0, 1e-2) && approx(hit.target_point.y, 2400.0, 1e-2),
             "{:?}",
@@ -1944,7 +1975,13 @@ mod tests {
         let verts: Vec<Point<Real>> = local
             .vertices()
             .iter()
-            .map(|v| Point::new(t[0] + v.x * c - v.y * s, t[1] + v.x * s + v.y * c, t[2] + v.z))
+            .map(|v| {
+                Point::new(
+                    t[0] + v.x * c - v.y * s,
+                    t[1] + v.x * s + v.y * c,
+                    t[2] + v.z,
+                )
+            })
             .collect();
         let pane = TriMesh::with_flags(verts, local.indices().to_vec(), TriMeshFlags::empty());
         let q = Point::new(-10424.999f32, 11746.903f32, 999.99994f32);
@@ -1967,8 +2004,14 @@ mod tests {
             .map(|n| (n.x, n.y))
             .collect();
         assert_eq!(candidates.len(), 2, "{normals:?}");
-        assert!(approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3), "side 该排前：{normals:?}");
-        assert!(approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3), "end 该在后：{normals:?}");
+        assert!(
+            approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3),
+            "side 该排前：{normals:?}"
+        );
+        assert!(
+            approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3),
+            "end 该在后：{normals:?}"
+        );
     }
 
     #[test]
@@ -2143,7 +2186,11 @@ mod tests {
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "洞里的管不该报穿墙：{hit:?}");
         assert_eq!(hit.witness, "closest-points");
-        assert!(approx(hit.distance, 50.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 50.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         // 最近点对：墙侧在 y = 2000 那片洞壁上（x 在墙厚内、z 在孔高内），管侧在管的 y = 2050 面上。
         assert!(
             approx(hit.target_point.y, hole_y[0], 1e-2),
@@ -2170,7 +2217,11 @@ mod tests {
         assert!(face.normal.y > 0.99, "{:?}", face.normal);
         let perp = hit.perpendicular.expect("洞壁是主面，该有垂距");
         assert!(approx(perp.distance, 50.0, 1e-2), "perp {}", perp.distance);
-        assert!(approx(perp.to.y, hole_y[0], 1e-2), "perp lands on the hole wall: {:?}", perp.to);
+        assert!(
+            approx(perp.to.y, hole_y[0], 1e-2),
+            "perp lands on the hole wall: {:?}",
+            perp.to
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
         assert_eq!((out.stats.total, out.stats.evaluated), (1, 1));
 
@@ -2204,13 +2255,33 @@ mod tests {
         // （短盒 y 范围, z 范围, 期望法向——已翻成指向源侧, 垂足所在洞壁：(坐标轴, 值)）
         let cases: [([f32; 2], [f32; 2], Vector<Real>, (usize, f32)); 4] = [
             // 贴 y 小侧洞壁 50 mm：法向 +Y。
-            ([2050.0, 2250.0], [1100.0, 1300.0], Vector::y(), (1, hole_y[0])),
+            (
+                [2050.0, 2250.0],
+                [1100.0, 1300.0],
+                Vector::y(),
+                (1, hole_y[0]),
+            ),
             // 贴 y 大侧洞壁：法向 −Y。
-            ([2150.0, 2350.0], [1100.0, 1300.0], -Vector::y(), (1, hole_y[1])),
+            (
+                [2150.0, 2350.0],
+                [1100.0, 1300.0],
+                -Vector::y(),
+                (1, hole_y[1]),
+            ),
             // 贴洞底：法向 +Z。
-            ([2100.0, 2300.0], [1050.0, 1250.0], Vector::z(), (2, hole_z[0])),
+            (
+                [2100.0, 2300.0],
+                [1050.0, 1250.0],
+                Vector::z(),
+                (2, hole_z[0]),
+            ),
             // 贴洞顶：法向 −Z。
-            ([2100.0, 2300.0], [1150.0, 1350.0], -Vector::z(), (2, hole_z[1])),
+            (
+                [2100.0, 2300.0],
+                [1150.0, 1350.0],
+                -Vector::z(),
+                (2, hole_z[1]),
+            ),
         ];
         for (ys, zs, normal, (axis, foot)) in cases {
             let stub = leaf(
@@ -2235,7 +2306,11 @@ mod tests {
             let perp = hit
                 .perpendicular
                 .unwrap_or_else(|| panic!("{ys:?} {zs:?}: 洞壁是主面，该有垂距"));
-            assert!(approx(perp.distance, 50.0, 1e-2), "{ys:?} {zs:?}: perp {}", perp.distance);
+            assert!(
+                approx(perp.distance, 50.0, 1e-2),
+                "{ys:?} {zs:?}: perp {}",
+                perp.distance
+            );
             assert!(
                 approx(perp.to[axis], foot, 1e-2),
                 "{ys:?} {zs:?}: 垂足该落在那片洞壁上 {:?}",

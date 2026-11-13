@@ -355,8 +355,10 @@ pub(crate) fn read_attributes_at(
     sesno: u32,
     target: RefNo,
     unit: Option<RefNo>,
-) -> Result<Option<crate::data_interface::element_attributes::ElementAttributesResponse>, HistoricalModelError>
-{
+) -> Result<
+    Option<crate::data_interface::element_attributes::ElementAttributesResponse>,
+    HistoricalModelError,
+> {
     let header = DbFileHeader::read(file)
         .map_err(|error| HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
     let pin = PinnedRead {
@@ -365,9 +367,9 @@ pub(crate) fn read_attributes_at(
         file: file.to_path_buf(),
         sesno,
     };
-    let set = service.open_pinned(&pin).map_err(|error| {
-        HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}"))
-    })?;
+    let set = service
+        .open_pinned(&pin)
+        .map_err(|error| HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}")))?;
     let element = set.element(target);
     let exists = element
         .exists()
@@ -379,9 +381,9 @@ pub(crate) fn read_attributes_at(
         && target != unit
     {
         let root = set.element(unit);
-        let inside = element.is_descendant_of(&root).map_err(|error| {
-            HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
-        })?;
+        let inside = element
+            .is_descendant_of(&root)
+            .map_err(|error| HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}")))?;
         if !inside {
             return Err(HistoricalModelError::new(
                 "REFNO_OUTSIDE_SNAPSHOT",
@@ -1316,7 +1318,8 @@ mod tests {
     /// 几何一起（与 `DELETE` 同一条路，之后再问是 `SNAPSHOT_NOT_FOUND`）；刚发布的永远留；同 key 重生成只刷新序号、
     /// 不算新格、不顶别人；0 = 不限；显式 `DELETE` 不计入顶掉数。
     #[tokio::test]
-    async fn the_snapshot_cap_drops_the_oldest_generated_first_and_a_regenerated_key_takes_no_new_slot() {
+    async fn the_snapshot_cap_drops_the_oldest_generated_first_and_a_regenerated_key_takes_no_new_slot()
+     {
         use crate::fast_model::model_memory_store::ProjectionCommit;
 
         let store = HistoricalModelStore::open().await.expect("report store");
@@ -1341,7 +1344,12 @@ mod tests {
             }],
             ..ProjectionCommit::default()
         };
-        let keys = ["24384_23257@7001", "24384_23257@7002", "24384_23257@7003", "24384_23257@7004"];
+        let keys = [
+            "24384_23257@7001",
+            "24384_23257@7002",
+            "24384_23257@7003",
+            "24384_23257@7004",
+        ];
         let store = &store;
         let seed = &seed;
         let publish = move |key: &'static str, cap: usize| async move {
@@ -1382,15 +1390,25 @@ mod tests {
             "SNAPSHOT_NOT_FOUND"
         );
         for kept in [keys[0], keys[2], keys[3]] {
-            assert!(store.snapshot(kept).await.expect("read").is_some(), "{kept}");
-            assert_eq!(projection.records(ProjectionScope::Historical(kept)).len(), 1);
+            assert!(
+                store.snapshot(kept).await.expect("read").is_some(),
+                "{kept}"
+            );
+            assert_eq!(
+                projection.records(ProjectionScope::Historical(kept)).len(),
+                1
+            );
         }
 
         // 上限收到 1：刚发布的那格留，其余按最近一次 generate 的先后走——7003 最旧、7001（重生成过）次之、7004 最新。
         let dropped = publish(keys[1], 1).await;
         assert_eq!(
             dropped,
-            vec![keys[2].to_string(), keys[0].to_string(), keys[3].to_string()],
+            vec![
+                keys[2].to_string(),
+                keys[0].to_string(),
+                keys[3].to_string()
+            ],
             "最久没 generate 的先出"
         );
         assert_eq!(store.stats().snapshots, 1);

@@ -589,10 +589,7 @@ mod tests {
         /// 一条版本行：sesno 严格递增（链序），时刻可缺、可重复、可倒退。
         fn version_table() -> impl Strategy<Value = Vec<VersionInstant>> {
             (0usize..12).prop_flat_map(|len| {
-                let rows = prop::collection::vec(
-                    (any::<bool>(), 0i64..5_000i64),
-                    len,
-                );
+                let rows = prop::collection::vec((any::<bool>(), 0i64..5_000i64), len);
                 rows.prop_map(|entries| {
                     entries
                         .into_iter()
@@ -614,7 +611,10 @@ mod tests {
         /// 暴力参考实现：带时间且秒级时间 ≤ t 的行里 sesno 最大者。
         ///
         /// 不带偏移的时间点按 Chain_Order 中第一条带时间行的偏移解释（design §1.5 第 4 点）。
-        fn reference(rows: &[VersionInstant], parsed: ParsedInstant) -> Result<(u32, String), ResolveError> {
+        fn reference(
+            rows: &[VersionInstant],
+            parsed: ParsedInstant,
+        ) -> Result<(u32, String), ResolveError> {
             let first_offset = rows
                 .iter()
                 .find_map(|row| {
@@ -645,10 +645,7 @@ mod tests {
                 }
             }
             match best {
-                Some(row) => Ok((
-                    row.sesno,
-                    row.session_time.clone().expect("timed row"),
-                )),
+                Some(row) => Ok((row.sesno, row.session_time.clone().expect("timed row"))),
                 None if any_timed => Err(ResolveError::BeforeOldest),
                 None => Err(ResolveError::NoResolvable),
             }
@@ -787,10 +784,12 @@ mod tests {
                 year.clone().prop_map(|y| format!("{y:04}-01-02T24:00:00Z")),
                 year.clone().prop_map(|y| format!("{y:04}-01-02T10:60")),
                 year.clone().prop_map(|y| format!("{y:04}-01-02T10:00:60")),
-                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00:00.1234")),
+                year.clone()
+                    .prop_map(|y| format!("{y:04}-01-02T10:00:00.1234")),
                 year.clone().prop_map(|y| format!("{y:04}-01-02t10:00")),
                 year.clone().prop_map(|y| format!("{y:04}/01/02 10:00")),
-                year.clone().prop_map(|y| format!("{y:04}-01-02T10:00+24:00")),
+                year.clone()
+                    .prop_map(|y| format!("{y:04}-01-02T10:00+24:00")),
                 year.clone().prop_map(|y| format!("{y:04}-01-02T10:00z")),
                 year.clone().prop_map(|y| format!(" {y:04}-01-02T10:00Z")),
                 year.clone().prop_map(|y| format!("{y:04}-01-02T10:00Z ")),

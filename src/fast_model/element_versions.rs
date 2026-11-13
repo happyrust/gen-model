@@ -539,8 +539,7 @@ fn compute_table(
                                     own.insert(current, impact_of(operation));
                                 }
                                 Err(reason) => {
-                                    warnings
-                                        .push(format!("会话 {current}：{reason}，按重生成记"));
+                                    warnings.push(format!("会话 {current}：{reason}，按重生成记"));
                                     own.insert(current, UnitVersionImpact::Mesh);
                                 }
                             }
@@ -653,7 +652,10 @@ mod tests {
 
     #[test]
     fn merged_timeline_keeps_sessions_where_either_side_moved() {
-        let own = HashMap::from([(1, UnitVersionImpact::Delivery), (9, UnitVersionImpact::Mesh)]);
+        let own = HashMap::from([
+            (1, UnitVersionImpact::Delivery),
+            (9, UnitVersionImpact::Mesh),
+        ]);
         let unit = HashMap::from([(5, UnitVersionImpact::Mesh), (9, UnitVersionImpact::Mesh)]);
         let (versions, positions) = merge_timeline(&chain(), &own, &unit);
         assert_eq!(
@@ -703,7 +705,10 @@ mod tests {
 
     #[test]
     fn since_sesno_slices_by_chain_order_even_when_that_session_has_no_version() {
-        let own = HashMap::from([(1, UnitVersionImpact::Delivery), (9, UnitVersionImpact::Mesh)]);
+        let own = HashMap::from([
+            (1, UnitVersionImpact::Delivery),
+            (9, UnitVersionImpact::Mesh),
+        ]);
         let unit = HashMap::from([(5, UnitVersionImpact::Mesh)]);
         let chain = chain();
         let (versions, chain_positions) = merge_timeline(&chain, &own, &unit);

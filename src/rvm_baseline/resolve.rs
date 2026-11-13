@@ -200,7 +200,11 @@ pub async fn load_subtree(db: &Surreal<Any>, root_refno: &str) -> Result<Subtree
 /// **这是一次全表扫**（`pe` 上没有 name 索引），所以只用在「还不知道根 refno、
 /// 连子树都枚举不了」这一处，一次对拍最多一次。子树装进 [`SubtreeIndex`] 之后
 /// 所有解析都在内存里做。
-pub async fn find_refno_by_name(db: &Surreal<Any>, dbnum: u32, name: &str) -> Result<Option<String>> {
+pub async fn find_refno_by_name(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    name: &str,
+) -> Result<Option<String>> {
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     let sql = format!(
         "SELECT VALUE type::string(id) FROM pe \

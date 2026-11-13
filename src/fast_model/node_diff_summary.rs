@@ -225,7 +225,11 @@ pub fn group_rows(
     for group in &mut groups {
         group.geometry_changed = group.counts.geometry_changed();
         // 节点自身那一行排最前，其余按 refno
-        group.rows.sort_by(|x, y| y.is_node.cmp(&x.is_node).then_with(|| x.refno.cmp(&y.refno)));
+        group.rows.sort_by(|x, y| {
+            y.is_node
+                .cmp(&x.is_node)
+                .then_with(|| x.refno.cmp(&y.refno))
+        });
     }
     // 无单元的一组（key None）在 BTreeMap 里排最前，挪到最后
     if groups.first().is_some_and(|g| g.unit_root.is_none()) {
@@ -299,10 +303,16 @@ fn compute(
     let node_at_b = set_b.element(refno);
     let node_at_a = set_a.element(refno);
     let exists_b = node_at_b.exists().map_err(|e| {
-        UnitVersionsError::new("SESSION_NOT_FOUND", format!("查 {} 在会话 {b} 失败: {e}", refno_text(refno)))
+        UnitVersionsError::new(
+            "SESSION_NOT_FOUND",
+            format!("查 {} 在会话 {b} 失败: {e}", refno_text(refno)),
+        )
     })?;
     let exists_a = node_at_a.exists().map_err(|e| {
-        UnitVersionsError::new("SESSION_NOT_FOUND", format!("查 {} 在会话 {a} 失败: {e}", refno_text(refno)))
+        UnitVersionsError::new(
+            "SESSION_NOT_FOUND",
+            format!("查 {} 在会话 {a} 失败: {e}", refno_text(refno)),
+        )
     })?;
     if !exists_a && !exists_b {
         return Err(UnitVersionsError::new(
@@ -320,7 +330,10 @@ fn compute(
     let window = e3d_model::increment::collect_window(source_file, a, b).map_err(|e| {
         UnitVersionsError::new(
             "INDEX_DIFF_FAILED",
-            format!("e3d-io 索引差分 {a}→{b} 失败（{}）：{e}", source_file.display()),
+            format!(
+                "e3d-io 索引差分 {a}→{b} 失败（{}）：{e}",
+                source_file.display()
+            ),
         )
     })?;
     stats.index_diff_ms = diff_started.elapsed().as_millis();
@@ -476,10 +489,10 @@ fn compute(
                 .iter()
                 .filter(|group| {
                     group.unit_root.is_some()
-                        && group
-                            .rows
-                            .iter()
-                            .any(|row| row.status == DiffStatus::Deleted && Some(&row.refno) == group.unit_root.as_ref())
+                        && group.rows.iter().any(|row| {
+                            row.status == DiffStatus::Deleted
+                                && Some(&row.refno) == group.unit_root.as_ref()
+                        })
                 })
                 .count();
             units.total += deleted_units;
@@ -493,7 +506,10 @@ fn compute(
     let total_warnings = warnings.len();
     if total_warnings > MAX_WARNINGS {
         warnings.truncate(MAX_WARNINGS);
-        warnings.push(format!("…另有 {} 条告警未列出", total_warnings - MAX_WARNINGS));
+        warnings.push(format!(
+            "…另有 {} 条告警未列出",
+            total_warnings - MAX_WARNINGS
+        ));
     }
 
     Ok(DiffSummaryReport {
@@ -578,9 +594,18 @@ mod tests {
         let groups = group_rows(
             vec![
                 (None, row("9304/1842", DiffStatus::Noop, true)),
-                (Some(equi.clone()), row("24384/26495", DiffStatus::Added, false)),
-                (Some(bran.clone()), row("24384/23262", DiffStatus::Modified, false)),
-                (Some(bran.clone()), row("24384/23264", DiffStatus::Noop, false)),
+                (
+                    Some(equi.clone()),
+                    row("24384/26495", DiffStatus::Added, false),
+                ),
+                (
+                    Some(bran.clone()),
+                    row("24384/23262", DiffStatus::Modified, false),
+                ),
+                (
+                    Some(bran.clone()),
+                    row("24384/23264", DiffStatus::Noop, false),
+                ),
             ],
             &names,
         );
@@ -649,6 +674,9 @@ mod tests {
             serde_json::from_str::<DiffScope>("\"subtree\"").unwrap(),
             DiffScope::Subtree
         );
-        assert_eq!(serde_json::to_string(&DiffScope::SelfOnly).unwrap(), "\"self\"");
+        assert_eq!(
+            serde_json::to_string(&DiffScope::SelfOnly).unwrap(),
+            "\"self\""
+        );
     }
 }

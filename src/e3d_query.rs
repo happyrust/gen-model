@@ -944,7 +944,9 @@ mod tests {
         let after_finish = position("$P L3-AFTER-FINISH");
         assert_eq!(finishes.len(), 2, "{text}");
         assert!(
-            done < quit && quit < after_quit && after_quit < finishes[0]
+            done < quit
+                && quit < after_quit
+                && after_quit < finishes[0]
                 && finishes[0] < after_finish
                 && after_finish < finishes[1],
             "顺序必须是 L3-DONE → QUIT → 标记 → FINISH → 标记 → FINISH：{text}"

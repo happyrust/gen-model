@@ -341,7 +341,12 @@ impl fmt::Display for LocateFailure {
                 if searched.is_empty() {
                     write!(f, "没有一个搜索根可达")?;
                 } else {
-                    write!(f, "在 {} 个可达的搜索根里都没有（找过：{}）", searched.len(), join_paths(searched))?;
+                    write!(
+                        f,
+                        "在 {} 个可达的搜索根里都没有（找过：{}）",
+                        searched.len(),
+                        join_paths(searched)
+                    )?;
                 }
                 if !unreachable.is_empty() {
                     write!(
@@ -378,7 +383,9 @@ fn join_paths(paths: &[PathBuf]) -> String {
 /// 按项目码定位：先到的根赢，同根两处冲突不选，其余记影子。
 pub fn locate_code(scans: &[RootScan], code: &str) -> Result<ProjectLocation, LocateFailure> {
     let wanted = code.trim().to_ascii_lowercase();
-    locate_by(scans, &wanted.to_ascii_uppercase(), |hit| hit.code == wanted)
+    locate_by(scans, &wanted.to_ascii_uppercase(), |hit| {
+        hit.code == wanted
+    })
 }
 
 /// 按项目目录名定位（主项目：`project_name` 是文件夹名）：匹配 `project_dir` 的最后一段，
@@ -518,7 +525,10 @@ mod tests {
 
     fn scan(roots: &[&Path]) -> Vec<RootScan> {
         scan_roots(
-            &roots.iter().map(|root| root.to_path_buf()).collect::<Vec<_>>(),
+            &roots
+                .iter()
+                .map(|root| root.to_path_buf())
+                .collect::<Vec<_>>(),
             DEFAULT_ROOT_SCAN_TIMEOUT,
         )
     }
@@ -645,7 +655,10 @@ mod tests {
         fixture.dir("AvevaMarineSample/amsdflts");
         let scans = scan(&[&fixture.root]);
         let location = locate_project_folder(&scans, "avevamarinesample").unwrap();
-        assert!(same_dir(&location.project_dir, &fixture.root.join("AvevaMarineSample")));
+        assert!(same_dir(
+            &location.project_dir,
+            &fixture.root.join("AvevaMarineSample")
+        ));
         assert_eq!(location.db_dirs, vec![ams, extra]);
         assert_eq!(location.code, "AMS+AMX");
         assert!(matches!(

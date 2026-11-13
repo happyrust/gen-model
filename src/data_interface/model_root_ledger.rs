@@ -382,7 +382,12 @@ pub struct Deferral {
 ///
 /// 退避中的根照样留在计划里、照样拦水位：只有任务的单元执行体按这一句跳过生成、单元记失败，
 /// 这一窗就不会被判追平——退避只省重算，不替水位担保什么。
-pub fn deferral(dbnum: u32, root: RefnoEnum, source_end_sesno: i32, now: Instant) -> Option<Deferral> {
+pub fn deferral(
+    dbnum: u32,
+    root: RefnoEnum,
+    source_end_sesno: i32,
+    now: Instant,
+) -> Option<Deferral> {
     let ledger = read();
     let entry = ledger.roots.get(&dbnum)?.get(&root)?;
     if !entry.backing_off(now) {
@@ -392,9 +397,9 @@ pub fn deferral(dbnum: u32, root: RefnoEnum, source_end_sesno: i32, now: Instant
         return None;
     }
     Some(Deferral {
-        remaining: entry
-            .retry_at
-            .map_or(Duration::ZERO, |retry_at| retry_at.saturating_duration_since(now)),
+        remaining: entry.retry_at.map_or(Duration::ZERO, |retry_at| {
+            retry_at.saturating_duration_since(now)
+        }),
         consecutive_failures: entry.consecutive_failures,
         error: entry.error().unwrap_or_default().to_owned(),
     })
@@ -409,9 +414,9 @@ pub fn backoff_snapshot() -> serde_json::Value {
     for (dbnum, roots) in &ledger.roots {
         for (root, entry) in roots {
             if entry.backing_off(now) {
-                let remaining = entry
-                    .retry_at
-                    .map_or(Duration::ZERO, |retry_at| retry_at.saturating_duration_since(now));
+                let remaining = entry.retry_at.map_or(Duration::ZERO, |retry_at| {
+                    retry_at.saturating_duration_since(now)
+                });
                 backing_off.push((remaining, *dbnum, *root, entry));
             }
         }
@@ -676,14 +681,27 @@ mod tests {
             "{:?}",
             first.remaining
         );
-        assert!(entry(dbnum, r(1)).unwrap().is_chasing(), "退避中仍在赶、拦水位");
-        assert_eq!(chasing_roots(dbnum), BTreeSet::from([r(1)]), "规划器照样把它并进计划");
+        assert!(
+            entry(dbnum, r(1)).unwrap().is_chasing(),
+            "退避中仍在赶、拦水位"
+        );
+        assert_eq!(
+            chasing_roots(dbnum),
+            BTreeSet::from([r(1)]),
+            "规划器照样把它并进计划"
+        );
         assert!(
             deferral(dbnum, r(1), 27, now).is_none(),
             "右端前进 = 数据又变了，立刻重算"
         );
         assert!(
-            deferral(dbnum, r(1), 26, now + RETRY_BACKOFF_BASE + Duration::from_secs(1)).is_none(),
+            deferral(
+                dbnum,
+                r(1),
+                26,
+                now + RETRY_BACKOFF_BASE + Duration::from_secs(1)
+            )
+            .is_none(),
             "到期就放行"
         );
         assert!(!backoff_snapshot().is_null(), "/health 点得出退避中的根");
@@ -691,7 +709,11 @@ mod tests {
         record_transient_failure(dbnum, r(1), "BRAN", 26, "write-behind exhausted");
         let second = deferral(dbnum, r(1), 26, Instant::now()).expect("无关失败也退避");
         assert_eq!(second.consecutive_failures, 2);
-        assert!(second.remaining > Duration::from_secs(55), "{:?}", second.remaining);
+        assert!(
+            second.remaining > Duration::from_secs(55),
+            "{:?}",
+            second.remaining
+        );
         assert_eq!(entry(dbnum, r(1)).unwrap().failure_streak, 0, "但不攒连败");
 
         record_generated(dbnum, r(1), "BRAN", 27);

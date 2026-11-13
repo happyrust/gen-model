@@ -12,10 +12,10 @@ use crate::data_interface::generation_root::{
     configured_delivery_unit_types, is_coarse_hierarchy_noun, resolve_live_element_generation_root,
 };
 use crate::data_interface::manual_update::{generate_unit_model, generation_root_lock};
+use crate::data_interface::mesh_purge::{self, ClearGeometry, MeshPurgeReport};
 use crate::data_interface::model_coverage::{
     generation_root_cache_current, generation_roots_cache_current,
 };
-use crate::data_interface::mesh_purge::{self, ClearGeometry, MeshPurgeReport};
 use crate::data_interface::model_scope_regen;
 use crate::data_interface::room_read_through::SessionRule;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -118,9 +118,10 @@ impl AiosDBManager {
     ) -> anyhow::Result<Option<MeshPurgeReport>> {
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         let read_through = crate::options::data_face().is_read_through();
-        // 库是权威面才有权威行可收、可删；「只写内存」/ 读透只有投影那一份（也不该在
-        // `scope_memory_only` 作用域里回头去碰那个库）。
-        let durable = !(memory_only || read_through);
+        let unbaselined_durable =
+            memory_only && !read_through && crate::options::store_mode().is_durable();
+        // 库是权威面或未建立水位的持久库有已落盘行可收、可删；只有纯内存 / 读透只清投影。
+        let durable = !(memory_only || read_through) || unbaselined_durable;
         // 几何键在删行之前收：行一删掉，库与投影都再也说不出这片范围引用过哪些网格。
         // 收不动就整趟中止（一行不删）——半成品比不删更难收拾。
         let keys = if geometry.purges() {
@@ -131,6 +132,36 @@ impl AiosDBManager {
         if memory_only || read_through {
             self.clear_projected_scope(requested_refno, roots, read_through)
                 .await?;
+            if unbaselined_durable {
+                // 未建立库级水位的持久库：按需生成结果也会经写后台落进 RocksDB（GitHub #146）。
+                // 重启回读放行后，显式删子树或强制重生成若只清内存投影会把旧库行留下来，
+                // 因此同步清掉这片作用域的持久行并摘掉账本记录。
+                let target = crate::data_interface::generation_root::refno_to_e3d(requested_refno);
+                let mut targets = if roots.is_empty() {
+                    vec![target]
+                } else {
+                    roots
+                        .iter()
+                        .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
+                        .collect()
+                };
+                targets.push(target);
+                targets.sort_unstable_by_key(|r| (r.word0, r.word1));
+                targets.dedup();
+                for scope_root in &targets {
+                    let tombstone = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+                        *scope_root,
+                        &targets,
+                        &[],
+                    );
+                    SUL_DB.query(tombstone).await?.check()?;
+                }
+                for scope_root in &targets {
+                    let dbnum = scope_root.dbno();
+                    let refno = crate::data_interface::generation_root::refno_from_e3d(*scope_root);
+                    crate::data_interface::model_root_ledger::forget_root(dbnum, refno);
+                }
+            }
         } else {
             self.delete_model_subtree(requested_refno).await?;
         }
@@ -256,13 +287,24 @@ impl AiosDBManager {
         if super::batch_worker::active_data_window().is_some()
             || super::staging::write_context::active_staging_writes().is_some()
         {
-            return self.ensure_exact_generation_root_inner(requested_refno, root, root_noun, force).await;
+            return self
+                .ensure_exact_generation_root_inner(requested_refno, root, root_noun, force)
+                .await;
         }
-        static FLIGHTS: std::sync::OnceLock<super::generation_flight::Flights<OnDemandModelResult>> = std::sync::OnceLock::new();
+        static FLIGHTS: std::sync::OnceLock<
+            super::generation_flight::Flights<OnDemandModelResult>,
+        > = std::sync::OnceLock::new();
         let version = generation_source_identity(root).await?;
         let memory_scope = super::model_read_route::memory_only_scope();
-        let key = format!("{}|{}|{}|{}|{}|{:?}", self.db_option.project_name,
-            self.db_option.mdb_name, root.to_pdms_str(), force, version, memory_scope);
+        let key = format!(
+            "{}|{}|{}|{}|{}|{:?}",
+            self.db_option.project_name,
+            self.db_option.mdb_name,
+            root.to_pdms_str(),
+            force,
+            version,
+            memory_scope
+        );
         let manager = self.clone();
         let noun = root_noun.to_string();
         let future = FLIGHTS.get_or_init(Default::default).run(key, async move {
@@ -272,21 +314,35 @@ impl AiosDBManager {
                 None => work.await,
             }
         });
-        let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future).await
-            .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
+        let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future)
+            .await
+            .map_err(|_| ModelGenerationInProgress {
+                root_refno: root.to_pdms_str(),
+            })??;
         // 两道后验失败都不是「正在后台生成」：生成已经完成，只是世界变了（源文件在生成期间前移）
         // 或判据说这根不算新。报成 `ModelGenerationInProgress` 会把这两种都藏在同一句 409 里
         // （2026-09-19 字典库会话位 0 那一桩就是这么被盖了一天）。
-        anyhow::ensure!(generation_source_identity(root).await? == version,
+        anyhow::ensure!(
+            generation_source_identity(root).await? == version,
             ModelStaleAfterGeneration {
                 root_refno: root.to_pdms_str(),
                 reason: "源文件版本在生成期间前移",
-            });
-        anyhow::ensure!(memory_root_current(root, SessionRule::NotBehind).await?,
+            }
+        );
+        let read_through = crate::options::data_face().is_read_through();
+        let durable_cache_allowed = !read_through && crate::options::store_mode().is_durable();
+        let receipt_or_durable_ok = match result.status {
+            OnDemandModelStatus::Generated => memory_root_current(root, SessionRule::NotBehind).await?,
+            _ if durable_cache_allowed => true,
+            _ => memory_root_current(root, SessionRule::NotBehind).await?,
+        };
+        anyhow::ensure!(
+            receipt_or_durable_ok,
             ModelStaleAfterGeneration {
                 root_refno: root.to_pdms_str(),
                 reason: "投影回执的模型目标核对不过，原因见日志 [模型目标核对]",
-            });
+            }
+        );
         result.requested_refno = requested_refno.to_pdms_str();
         Ok(result)
     }
@@ -316,25 +372,35 @@ impl AiosDBManager {
         // `advance` 根回执留在 S（ADR-079 D3）——任何窗口落地后每个未触根都被判过期整根重算，E3D 每次登录写的 DBMDAT
         // 会话让这件事天天发生（GitHub #65）。读穿 / 只写内存形态问同一枚水位（D5）：听得到就按「没落后」判，
         // 水位行不在 / 没盖到 / 读不到就退回等值，不让任何库比从前更越权。
-        let cache_current = if memory_only || crate::options::data_face().is_read_through() {
-            let rule = match generation_root_cache_current(&root_refno).await {
-                Ok(true) => SessionRule::NotBehind,
-                Ok(false) => SessionRule::Exact,
+        let read_through = crate::options::data_face().is_read_through();
+        let durable_cache_allowed = !read_through && crate::options::store_mode().is_durable();
+        let cache_current = if memory_only || read_through {
+            let promised = match generation_root_cache_current(&root_refno).await {
+                Ok(hit) => Some(hit),
                 Err(error) => {
                     log::debug!(
                         "[按需生成] 生成根 {root_refno} 的库级承诺读不到，回执按等值判: {error:#}"
                     );
-                    SessionRule::Exact
+                    None
                 }
             };
-            memory_root_current(root, rule).await?
+            if durable_cache_allowed && promised == Some(true) {
+                true
+            } else {
+                let rule = if promised == Some(true) {
+                    SessionRule::NotBehind
+                } else {
+                    SessionRule::Exact
+                };
+                memory_root_current(root, rule).await?
+            }
         } else {
             generation_root_cache_current(&root_refno).await?
-                && memory_root_current(root, SessionRule::NotBehind).await?
+                && (durable_cache_allowed
+                    || memory_root_current(root, SessionRule::NotBehind).await?)
         };
         if !force && cache_current {
-            // 计数只问进程内投影（S4 之后 legacy「读 inst_relate 表数实例」那条路退役）。
-            let counts = memory_counts(&[root]);
+            let counts = counts_with_durable_fallback(&[root], durable_cache_allowed).await?;
             return Ok(describe(
                 requested_refno,
                 root,
@@ -449,7 +515,8 @@ impl AiosDBManager {
             // 根锁 / 库级锁，范围内有根正在生成就按「正在后台生成」回，不与它抢。
             // 连几何一起清（2026-10-22）：马上就重新生成，这片范围还在用的 `inst_geo` 行与 `.mesh`
             // 会被写回，旧键不留着占盘；单位几何与共享键的取舍见 `mesh_purge`。
-            self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge).await?;
+            self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge)
+                .await?;
         }
         if roots.is_empty() {
             return self.ensure_model_generated(requested_refno, force).await;
@@ -467,11 +534,13 @@ impl AiosDBManager {
             .map(|root| root.noun.clone())
             .unwrap_or_else(|| "SCOPE".to_owned());
         let mut tally = ScopeRootTally::default();
-        // 只写内存的库（plan 2026-09-06 §8 R2）：凭证与计数都只问进程内投影。
+        // 只写内存的库（plan 2026-09-06 §8 R2）：凭证与计数先看投影，RocksDB 介质下允许命中已落盘根。
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
+        let read_through = crate::options::data_face().is_read_through();
+        let durable_cache_allowed = !read_through && crate::options::store_mode().is_durable();
         let current_roots = if force {
             std::collections::HashSet::new()
-        } else if memory_only || crate::options::data_face().is_read_through() {
+        } else if memory_only || read_through {
             // 整批只借一次阻塞线程：一个作用域有几百个根，逐根 `spawn_blocking` 就是
             // 几百次调度往返，而每根要做的只是几次 stat。
             // 库级承诺盖到的根按「没落后」判，其余退回等值（ADR-089 D5）；水位读不到就是空集，全部等值。
@@ -483,11 +552,12 @@ impl AiosDBManager {
                 });
             let pinned = pinned_data_window();
             let candidates = root_refnos.clone();
-            tokio::task::spawn_blocking(move || {
+            let promised_for_blocking = promised.clone();
+            let mut hits = tokio::task::spawn_blocking(move || {
                 candidates
                     .into_iter()
                     .filter(|root| {
-                        let rule = if promised.contains(&root.to_pdms_str()) {
+                        let rule = if promised_for_blocking.contains(&root.to_pdms_str()) {
                             SessionRule::NotBehind
                         } else {
                             SessionRule::Exact
@@ -497,7 +567,11 @@ impl AiosDBManager {
                     .map(|root| root.to_pdms_str())
                     .collect::<std::collections::HashSet<_>>()
             })
-            .await?
+            .await?;
+            if durable_cache_allowed {
+                hits.extend(promised);
+            }
+            hits
         } else {
             generation_roots_cache_current(
                 &roots
@@ -515,21 +589,22 @@ impl AiosDBManager {
             // HTTP worker's 120 s budget even though all 212 credentials were
             // current. A current credential is the authoritative cache hit;
             // only misses need the generation path and its per-root counts.
-            // A durable credential survives restart, but /model/records serves the
-            // process projection. Rebuild a missing resident root before calling it cached.
+            // Under durable storage (RocksDB), a persisted root remains readable
+            // via durable fallback after restart even when evicted from kv-mem.
             let current = current_roots.contains(&root.root.to_pdms_str())
-                && match memory_root_current(root.root, SessionRule::NotBehind).await {
-                    Ok(current) => current,
-                    // 投影核对本身垮了（阻塞线程 join 失败等）不拦整片：照常进生成路径，
-                    // 生成里的同一道核对会再裁一次，真坏就记进 `failed_roots`。
-                    Err(error) => {
-                        log::warn!(
-                            "[按需生成] 生成根 {} 的投影核对失败，照常生成: {error:#}",
-                            root.root.to_pdms_str()
-                        );
-                        false
-                    }
-                };
+                && (durable_cache_allowed
+                    || match memory_root_current(root.root, SessionRule::NotBehind).await {
+                        Ok(current) => current,
+                        // 投影核对本身垮了（阻塞线程 join 失败等）不拦整片：照常进生成路径，
+                        // 生成里的同一道核对会再裁一次，真坏就记进 `failed_roots`。
+                        Err(error) => {
+                            log::warn!(
+                                "[按需生成] 生成根 {} 的投影核对失败，照常生成: {error:#}",
+                                root.root.to_pdms_str()
+                            );
+                            false
+                        }
+                    });
             if current {
                 tally.cached += 1;
                 continue;
@@ -545,7 +620,7 @@ impl AiosDBManager {
         let (cached_root_count, generated_root_count, failed_roots) =
             tally.into_counts(requested_refno, root_count)?;
 
-        let counts = memory_counts(&root_refnos);
+        let counts = counts_with_durable_fallback(&root_refnos, durable_cache_allowed).await?;
         let status = if counts.renderable == 0 {
             OnDemandModelStatus::NoRenderableGeometry
         } else if generated_root_count > 0 {
@@ -603,7 +678,11 @@ pub struct ModelStaleAfterGeneration {
 
 impl std::fmt::Display for ModelStaleAfterGeneration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "生成根 {} 刚生成完就被判成不是最新：{}", self.root_refno, self.reason)
+        write!(
+            f,
+            "生成根 {} 刚生成完就被判成不是最新：{}",
+            self.root_refno, self.reason
+        )
     }
 }
 
@@ -726,6 +805,10 @@ pub(crate) fn root_failure_is_retryable(error: &anyhow::Error) -> bool {
                     }
                     _ => false,
                 }
+                || matches!(
+                    cause.downcast_ref::<e3d_io::DbElementError>(),
+                    Some(e3d_io::DbElementError::Open { .. })
+                )
         })
 }
 
@@ -821,16 +904,19 @@ fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool, rule: Ses
             if pinned_window {
                 return true;
             }
-            receipt.model_target.as_ref().is_some_and(|target|
-                super::room_read_through::target_current_under(target, rule).unwrap_or_else(|error| {
-                    // 核对不了（文件 stat 不到、会话解不出）按过期处理，但要说出来：此前这一句被吞成
-                    // 「正在后台生成」，日志里一行不剩。
-                    println!(
-                        "[模型目标核对] 生成根 {} 的目标核对不了，按过期处理: {error:#}",
-                        root.to_pdms_str()
-                    );
-                    false
-                }))
+            receipt.model_target.as_ref().is_some_and(|target| {
+                super::room_read_through::target_current_under(target, rule).unwrap_or_else(
+                    |error| {
+                        // 核对不了（文件 stat 不到、会话解不出）按过期处理，但要说出来：此前这一句被吞成
+                        // 「正在后台生成」，日志里一行不剩。
+                        println!(
+                            "[模型目标核对] 生成根 {} 的目标核对不了，按过期处理: {error:#}",
+                            root.to_pdms_str()
+                        );
+                        false
+                    },
+                )
+            })
         })
 }
 
@@ -840,7 +926,8 @@ async fn generation_source_identity(root: RefnoEnum) -> anyhow::Result<String> {
         let version = super::model_source::root_source_version(native)?;
         let source = super::frozen_source::FrozenSource::capture(version.file)?;
         source.commit_token_json()
-    }).await?
+    })
+    .await?
 }
 
 fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {
@@ -865,6 +952,53 @@ fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {
         written: ids.len(),
         renderable: ids.len(),
     }
+}
+
+async fn counts_with_durable_fallback(
+    roots: &[RefnoEnum],
+    allow_durable: bool,
+) -> anyhow::Result<InstanceCounts> {
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let mut ids = std::collections::HashSet::new();
+    let mut cold_roots = Vec::new();
+    let mut seen_cold = std::collections::HashSet::new();
+    for root in roots {
+        let Ok(parsed) = crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
+        else {
+            continue;
+        };
+        if store
+            .receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                parsed,
+            )
+            .is_some()
+        {
+            ids.extend(
+                store
+                    .records_of_root(
+                        crate::fast_model::model_memory_store::ProjectionScope::Current,
+                        parsed,
+                    )
+                    .into_iter()
+                    .map(|record| record.record_id),
+            );
+        } else if allow_durable && seen_cold.insert(*root) {
+            cold_roots.push(*root);
+        }
+    }
+    let mut durable_total = 0usize;
+    for root in cold_roots {
+        durable_total +=
+            crate::fast_model::model_record_reader::durable_records_of_root(&SUL_DB, root)
+                .await?
+                .len();
+    }
+    let total = ids.len() + durable_total;
+    Ok(InstanceCounts {
+        written: total,
+        renderable: total,
+    })
 }
 
 /// 解析不出生成根的两种缘由。调用方（HTTP 层）据此分型：客户端对着容器该做的事
@@ -1009,7 +1143,7 @@ mod tests {
             .expect("direct scope entry end exists")
             .0;
         let clear_at = scope
-            .find("self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge).await?")
+            .find("self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge)")
             .expect("force must clear the requested scope first, geometry included");
         let fallback_at = scope
             .find("ensure_model_generated(requested_refno, force)")
@@ -1035,7 +1169,10 @@ mod tests {
             clear.contains(".clear_projected_scope(requested_refno, roots, read_through)"),
             "memory-only / read-through clear the projection: {clear}"
         );
-        assert!(clear.contains("self.delete_model_subtree(requested_refno)"), "{clear}");
+        assert!(
+            clear.contains("self.delete_model_subtree(requested_refno)"),
+            "{clear}"
+        );
         assert!(
             !clear.contains("require_model_generation()"),
             "只写内存作用域不过初始化门，与同作用域下的生成路径同一口径: {clear}"
@@ -1450,12 +1587,22 @@ mod tests {
                 detail: "locked".into(),
             })
             .context("读目录库"),
+            anyhow::Error::new(e3d_io::DbElementError::Open {
+                file: "\\\\remote\\share\\ams1112_0001".into(),
+                detail: "source changed while opening frozen session".into(),
+            })
+            .context("钉依赖库会话"),
         ];
         for error in &retryable {
             assert!(root_failure_is_retryable(error), "{error:#}");
         }
         let terminal = [
             anyhow::anyhow!("几何坏了"),
+            anyhow::Error::new(e3d_io::DbElementError::DbTypeMismatch {
+                file: "x.db".into(),
+                expected: "DESI".into(),
+                actual: "CATA".into(),
+            }),
             anyhow::Error::new(DirectStoreError::DbNumberMismatch {
                 dbnum: 7004,
                 actual: 7005,

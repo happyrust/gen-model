@@ -10,9 +10,7 @@
 //! （编辑事务的会话号归属规则与收集器窗口一致）。
 
 use crate::data_interface::ele_data::EleData;
-use crate::data_interface::ele_ops::{
-    EleOperationData, EleOperationDetail, ModifiedElement,
-};
+use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail, ModifiedElement};
 use aios_core::{RefU64Vec, WholeAttMap};
 use pipe_model::render::{EditElement, EditModify, EditOp, RenderedBatch};
 
@@ -136,12 +134,9 @@ mod tests {
             under: RefU64(50),
             name: Some("/P-1".into()),
             attrs: NamedAttrMap {
-                map: HashMap::from([(
-                    "BORE".to_string(),
-                    NamedAttrValue::F32Type(100.0),
-                )])
-                .into_iter()
-                .collect(),
+                map: HashMap::from([("BORE".to_string(), NamedAttrValue::F32Type(100.0))])
+                    .into_iter()
+                    .collect(),
             },
         });
         let rendered = render_batch(&batch, &FlatCatalog);

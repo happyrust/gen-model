@@ -16,9 +16,9 @@
 #![recursion_limit = "256"]
 
 use crate::data_interface::tidb_manager::AiosDBManager;
-pub mod process_diagnostics;
-pub mod native_runtime;
 mod increment_diagnostics;
+pub mod native_runtime;
+pub mod process_diagnostics;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use crate::fast_model::spatial_state::SpatialTreeState;
 use crate::versioned_db::database::*;
@@ -562,8 +562,8 @@ pub mod cata;
 pub mod consts;
 pub mod data_interface;
 pub mod e3d_query;
-pub mod rvm_check;
 pub mod query_service;
+pub mod rvm_check;
 pub mod tables;
 // pub mod ssc;
 pub mod defines;
@@ -1006,10 +1006,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let stage = startup_step_begin("surql-selfcheck", "surreal 函数自检");
     crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
     startup_step_done("surql-selfcheck", stage, "");
-    let stage = startup_step_begin(
-        "increment-state",
-        "检查增量状态表（dbnum 水位存储兼容）",
-    );
+    let stage = startup_step_begin("increment-state", "检查增量状态表（dbnum 水位存储兼容）");
     let migrated =
         crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage().await?;
     startup_step_done("increment-state", stage, &format!("migrated={migrated}"));
@@ -1085,10 +1082,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         stage,
         &format!("dbnums={}", hydrated_states.len()),
     );
-    let stage = startup_step_begin(
-        "retired-tables",
-        "确认退役表与函数不存在（一次性幂等迁移）",
-    );
+    let stage = startup_step_begin("retired-tables", "确认退役表与函数不存在（一次性幂等迁移）");
     retire_publish_run_tables().await;
     startup_step_done("retired-tables", stage, "");
     // 存量行平表副本清扫（P4 写时物化；幂等——pre-P4 库首轮付清，之后空转即返回。
@@ -1175,11 +1169,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             db_option.mdb_name
         );
     }
-    startup_step_done(
-        "db-manager",
-        stage,
-        &format!("mdb={}", db_option.mdb_name),
-    );
+    startup_step_done("db-manager", stage, &format!("mdb={}", db_option.mdb_name));
     // 成员名单解完，紧接着造这个 MDB 的 **dbnum 路由目录**并打横幅：SYS/CURD 成员 →
     // `dbnum → 文件`，再核一遍每个成员文件的 60 字节头。**不读任何元素**——此前这里预热的是
     // 整份元素骨架（`ref0 → dbnum` / `refno → 属主` / `refno → noun` 三张表，每个 DESI 一次头
@@ -1223,7 +1213,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if crate::options::data_face().is_read_through() {
         initialization.mark_data_ready_without_manifest();
     }
-    let stage = startup_step_begin("pause-restore", "恢复队列暂停标志（重启前暂停则只入队不消费）");
+    let stage = startup_step_begin(
+        "pause-restore",
+        "恢复队列暂停标志（重启前暂停则只入队不消费）",
+    );
     match scheduler.restore_persisted_pause().await {
         Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
         Ok(false) => {}
@@ -1561,10 +1554,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             // worker 空闲轮那几步（认领迟到批次、AABB 落盘、模型门）。主线可能要等在飞的
             // 任务跑完；干等会让启动看起来像挂死——在飞任务变化时报实际进展，完全不变时
             // 最多每 300s 提醒一次。
-            let stage = startup_step_begin(
-                "model-converge",
-                "等模型积压收敛（空闲轮宣告 model_ready）",
-            );
+            let stage =
+                startup_step_begin("model-converge", "等模型积压收敛（空闲轮宣告 model_ready）");
             let mut waited_secs = 0u64;
             let mut last_wait_fingerprint: Option<String> = None;
             let mut last_wait_emitted_secs = 0u64;
@@ -1707,7 +1698,9 @@ mod startup_data_wait_tests {
             ("read-through", "run_read_through_core(db_option)"),
             ("run_cli", "run_cli(db_option).await"),
         ] {
-            let split = body.find(needle).unwrap_or_else(|| panic!("{arm} 那条臂还在吗"));
+            let split = body
+                .find(needle)
+                .unwrap_or_else(|| panic!("{arm} 那条臂还在吗"));
             assert!(notices < split, "点名要在分出「{arm}」这条臂之前");
         }
     }
@@ -1749,7 +1742,9 @@ mod startup_data_wait_tests {
         }
         assert!(
             body.find("startup_step_done(\"http\"").unwrap()
-                < body.find("startup_step_begin(\"session-baseline\"").unwrap()
+                < body
+                    .find("startup_step_begin(\"session-baseline\"")
+                    .unwrap()
         );
     }
 
@@ -1763,7 +1758,13 @@ mod startup_data_wait_tests {
             "fn startup_step_done(",
             "fn startup_step_skip(",
         ] {
-            let body = source.split_once(helper).unwrap().1.split_once("\nfn ").unwrap().0;
+            let body = source
+                .split_once(helper)
+                .unwrap()
+                .1
+                .split_once("\nfn ")
+                .unwrap()
+                .0;
             assert!(body.contains("println!"), "{helper} 丢了控制台出口");
             assert!(body.contains("log::info!"), "{helper} 丢了日志文件出口");
         }
@@ -1821,10 +1822,19 @@ mod startup_data_wait_tests {
     #[test]
     fn read_through_startup_never_generates_the_whole_mdb() {
         let source = include_str!("lib.rs");
-        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
-            .split_once("pub async fn run_app(").unwrap().0;
-        for forbidden in ["model_dbnum_ensure::start_and_wait", "scan_index(",
-            "scan_elements(", "bootstrap_read_through_rooms("] {
+        let body = source
+            .rsplit_once("async fn run_read_through_core(")
+            .unwrap()
+            .1
+            .split_once("pub async fn run_app(")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "model_dbnum_ensure::start_and_wait",
+            "scan_index(",
+            "scan_elements(",
+            "bootstrap_read_through_rooms(",
+        ] {
             assert!(!body.contains(forbidden), "startup contains {forbidden}");
         }
         assert!(body.contains("initialization.configure_model_bootstrap(false)"));
@@ -2014,7 +2024,12 @@ fn print_startup_complete_banner(
                  这些不在 model_sesno 的房间承诺内（ADR-073 D11；明细 /health.features.room.problems）：{}",
                 short(&generation),
                 problems.len(),
-                problems.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+                problems
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
             ResidentLifecycle::Blocked { problems } => {
                 format!(
@@ -2203,14 +2218,33 @@ async fn targeted_model_refresh(
         change.to.generation,
         change.path.display()
     );
-    let mut diagnostic = crate::process_diagnostics::Operation::begin("increment.detected",
-        format!("dbnum={} kind={:?} from={:?} to={:?} path={}", change.dbnum, change.kind, change.from, change.to, change.path.display()));
+    let mut diagnostic = crate::process_diagnostics::Operation::begin(
+        "increment.detected",
+        format!(
+            "dbnum={} kind={:?} from={:?} to={:?} path={}",
+            change.dbnum,
+            change.kind,
+            change.from,
+            change.to,
+            change.path.display()
+        ),
+    );
     let delta_change = change.clone();
     let operation = diagnostic.id();
-    match tokio::task::spawn_blocking(move || crate::increment_diagnostics::report(&delta_change, operation)).await {
-        Ok(Ok(())) => {},
-        Ok(Err(error)) => diagnostic.stage("increment.delta.failed", format!("{error:#}；明细未知，不当成零变化；继续失效/模型处理")),
-        Err(error) => diagnostic.stage("increment.delta.failed", format!("任务异常: {error}；继续失效/模型处理")),
+    match tokio::task::spawn_blocking(move || {
+        crate::increment_diagnostics::report(&delta_change, operation)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => diagnostic.stage(
+            "increment.delta.failed",
+            format!("{error:#}；明细未知，不当成零变化；继续失效/模型处理"),
+        ),
+        Err(error) => diagnostic.stage(
+            "increment.delta.failed",
+            format!("任务异常: {error}；继续失效/模型处理"),
+        ),
     }
     let mut refresh = TargetedRefresh {
         dbnum: change.dbnum,
@@ -2228,10 +2262,15 @@ async fn targeted_model_refresh(
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or_default(),
     };
-    diagnostic.stage("increment.invalidate.begin", "refresh source view and cached handles");
+    diagnostic.stage(
+        "increment.invalidate.begin",
+        "refresh source view and cached handles",
+    );
     let option = aios_core::get_db_option();
     if let Err(error) = crate::data_interface::mdb_read_store::invalidate_cached(
-        &option.project_name, &option.mdb_name, change.dbnum,
+        &option.project_name,
+        &option.mdb_name,
+        change.dbnum,
     ) {
         refresh.outcome = format!("read_view_refresh_failed: {error:#}");
         diagnostic.finish(&refresh.outcome);
@@ -2274,7 +2313,13 @@ async fn targeted_model_refresh(
         .map(|root| refno_from_e3d(*root).refno())
         .collect();
     let path = change.path.clone();
-    diagnostic.stage("increment.presence.begin", format!("roots={} invalidated={}", refresh.roots_seen, refresh.receipts_invalidated));
+    diagnostic.stage(
+        "increment.presence.begin",
+        format!(
+            "roots={} invalidated={}",
+            refresh.roots_seen, refresh.receipts_invalidated
+        ),
+    );
     let presence = match tokio::task::spawn_blocking(move || {
         crate::data_interface::db_file_header::snapshot_presence(&path, &requested)
     })
@@ -2288,7 +2333,7 @@ async fn targeted_model_refresh(
             );
             refresh.outcome = format!("presence_check_failed: {error:#}");
             diagnostic.finish(&refresh.outcome);
-        record_targeted_refresh(refresh);
+            record_targeted_refresh(refresh);
             return;
         }
         Err(error) => {
@@ -2298,7 +2343,7 @@ async fn targeted_model_refresh(
             );
             refresh.outcome = format!("presence_check_task_failed: {error}");
             diagnostic.finish(&refresh.outcome);
-        record_targeted_refresh(refresh);
+            record_targeted_refresh(refresh);
             return;
         }
     };
@@ -2306,7 +2351,10 @@ async fn targeted_model_refresh(
         .into_iter()
         .partition(|root| presence.contains(&refno_from_e3d(*root).refno()));
 
-    diagnostic.stage("increment.presence.done", format!("live={} retired={}", live.len(), retired.len()));
+    diagnostic.stage(
+        "increment.presence.done",
+        format!("live={} retired={}", live.len(), retired.len()),
+    );
     for root in retired {
         let requested = refno_from_e3d(root);
         diagnostic.stage("increment.delete.begin", format!("refno={requested}"));
@@ -2326,7 +2374,10 @@ async fn targeted_model_refresh(
                     change.dbnum
                 );
                 refresh.outcome = format!("retire_failed: {error:#}");
-                diagnostic.stage("increment.delete.failed", format!("refno={requested} error={error:#}"));
+                diagnostic.stage(
+                    "increment.delete.failed",
+                    format!("refno={requested} error={error:#}"),
+                );
             }
         }
     }
@@ -2371,7 +2422,7 @@ async fn targeted_model_refresh(
         }
     }
     diagnostic.finish(&refresh.outcome);
-        record_targeted_refresh(refresh);
+    record_targeted_refresh(refresh);
 }
 
 /// File/memory-first service path.  No database operation is allowed before
@@ -2423,11 +2474,7 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             )
         })?;
     let manager = Arc::new(manager);
-    startup_step_done(
-        "mdb",
-        stage,
-        &format!("mdb={}", db_option.mdb_name),
-    );
+    startup_step_done("mdb", stage, &format!("mdb={}", db_option.mdb_name));
     let stage = startup_step_begin(
         "http",
         &format!(
@@ -2451,14 +2498,14 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
         let db_option = db_option.clone();
         move || startup_route_directory(&db_option)
     })
-        .await
-        .map_err(|error| anyhow!("路由目录构造任务异常结束: {error}"))?
-        .map_err(|error| {
-            anyhow!(
-                "build dbnum route directory for MDB {}: {error:#}",
-                db_option.mdb_name
-            )
-        })?;
+    .await
+    .map_err(|error| anyhow!("路由目录构造任务异常结束: {error}"))?
+    .map_err(|error| {
+        anyhow!(
+            "build dbnum route directory for MDB {}: {error:#}",
+            db_option.mdb_name
+        )
+    })?;
     print_route_directory_banner(&directory, stage);
     startup_step_done(
         "route-directory",
@@ -2482,8 +2529,8 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     );
     prepare_room_resident_at_startup(&db_option).await;
     startup_step_done("spatial-room", stage, "");
-    let room_bootstrap_ready = !rooms_required
-        || crate::fast_model::room_resident::current_for_calculation().is_ok();
+    let room_bootstrap_ready =
+        !rooms_required || crate::fast_model::room_resident::current_for_calculation().is_ok();
     if rooms_required {
         if room_bootstrap_ready {
             initialization.settle_startup_rooms();
@@ -2521,7 +2568,11 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     let refresh_directory = directory.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-        crate::process_diagnostics::event(0, "increment.watch", "每 2 秒检测库文件/session；无变化每 30 秒输出心跳；变化立即处理");
+        crate::process_diagnostics::event(
+            0,
+            "increment.watch",
+            "每 2 秒检测库文件/session；无变化每 30 秒输出心跳；变化立即处理",
+        );
         let mut round = 0u64;
         loop {
             interval.tick().await;
@@ -2534,15 +2585,28 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             let changes = match polled {
                 Ok(changes) => changes,
                 Err(error) => {
-                    crate::process_diagnostics::event(0, "increment.poll.failed", &format!("round={round} error={error}；下一轮重试"));
+                    crate::process_diagnostics::event(
+                        0,
+                        "increment.poll.failed",
+                        &format!("round={round} error={error}；下一轮重试"),
+                    );
                     log::error!("[route-poll] 轮询任务异常结束，下一拍重试：{error}");
                     continue;
                 }
             };
             if round % 15 == 1 || !changes.is_empty() {
-                crate::process_diagnostics::event(0, "increment.poll", &format!(
-                    "round={round} changed_dbnums={:?} elapsed_ms={}；仅检查文件/session，不遍历元素",
-                    changes.iter().map(|change| change.dbnum).collect::<Vec<_>>(), poll_started.elapsed().as_millis()));
+                crate::process_diagnostics::event(
+                    0,
+                    "increment.poll",
+                    &format!(
+                        "round={round} changed_dbnums={:?} elapsed_ms={}；仅检查文件/session，不遍历元素",
+                        changes
+                            .iter()
+                            .map(|change| change.dbnum)
+                            .collect::<Vec<_>>(),
+                        poll_started.elapsed().as_millis()
+                    ),
+                );
             }
             for change in changes {
                 targeted_model_refresh(&refresh_manager, &change).await;
@@ -2611,10 +2675,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     mark_process_start();
     // 如果传入的是DbOptionExt，则取其内部的DbOption
-    let stage = startup_step_begin(
-        "config",
-        "装载 DbOption.toml 与环境变量覆盖、裁决资产根",
-    );
+    let stage = startup_step_begin("config", "装载 DbOption.toml 与环境变量覆盖、裁决资产根");
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
@@ -2634,7 +2695,10 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // Public entrypoint guard: take the deny-share handle before connecting a
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
-    let stage = startup_step_begin("instance-lock", "单实例锁与机器级写者锁（deny-share/flock）");
+    let stage = startup_step_begin(
+        "instance-lock",
+        "单实例锁与机器级写者锁（deny-share/flock）",
+    );
     acquire_process_instance_lock(&db_option)?;
     startup_step_done("instance-lock", stage, "");
     // 设置模式（配置向导，计划 2026-09-09-setup-wizard-web-frontend.md / ADR-069，
@@ -2667,8 +2731,10 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     }
     startup_step_done("store-connect", stage, "");
 
-    let stage =
-        startup_step_begin("data-face-claim", "数据面签名校验/认领（同一持久库不许多面孔）");
+    let stage = startup_step_begin(
+        "data-face-claim",
+        "数据面签名校验/认领（同一持久库不许多面孔）",
+    );
     crate::data_interface::data_face_signature::validate_or_claim(
         &db_option.project_name,
         &db_option.surreal_ns,

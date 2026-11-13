@@ -713,9 +713,13 @@ impl QueryService {
     async fn room(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
         if crate::options::data_face().is_read_through() && crate::options::room_membership() {
-            let tree = self.direct_tree.get().await
+            let tree = self
+                .direct_tree
+                .get()
+                .await
                 .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
-            return crate::data_interface::room_read_through::lookup(refno, tree).await
+            return crate::data_interface::room_read_through::lookup(refno, tree)
+                .await
                 .map_err(|error| {
                     if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
                         QueryError::new("UPDATING", error)
@@ -936,9 +940,13 @@ impl QueryService {
                     maxs[axis] = maxs[axis].max(record.world_bounds[1][axis]);
                 }
             }
-            let record_source_sessions = records.iter().map(|record| (record.dbnum, record.source_sesno))
-                .collect::<std::collections::BTreeSet<_>>().into_iter()
-                .map(|(dbnum, sesno)| json!({ "dbnum": dbnum, "sesno": sesno })).collect::<Vec<_>>();
+            let record_source_sessions = records
+                .iter()
+                .map(|record| (record.dbnum, record.source_sesno))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|(dbnum, sesno)| json!({ "dbnum": dbnum, "sesno": sesno }))
+                .collect::<Vec<_>>();
             return Ok(json!({
                 "refno": refno.to_string(),
                 "scope": match args.scope { BoundsScope::Exact => "exact", BoundsScope::Subtree => "subtree" },
@@ -1102,14 +1110,25 @@ fn db_error(error: impl ToString) -> QueryError {
 /// 500「internal」——2026-09-19 f20 部署实测 `24381/42528` 就是这么回的。
 fn room_source_error(error: anyhow::Error, refno: &RefnoEnum) -> QueryError {
     use crate::data_interface::direct_store::DirectStoreError;
-    let missing = error.chain().any(|cause| match cause.downcast_ref::<DirectStoreError>() {
-        Some(DirectStoreError::NoSuchElement { refno: missing, .. }) => {
-            missing == &refno.to_string() || missing == &refno.to_pdms_str()
-        }
-        Some(DirectStoreError::DbNotInMdb { .. } | DirectStoreError::InvalidRefNo { .. }) => true,
-        _ => false,
-    });
-    QueryError::new(if missing { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" }, format!("{error:#}"))
+    let missing = error
+        .chain()
+        .any(|cause| match cause.downcast_ref::<DirectStoreError>() {
+            Some(DirectStoreError::NoSuchElement { refno: missing, .. }) => {
+                missing == &refno.to_string() || missing == &refno.to_pdms_str()
+            }
+            Some(DirectStoreError::DbNotInMdb { .. } | DirectStoreError::InvalidRefNo { .. }) => {
+                true
+            }
+            _ => false,
+        });
+    QueryError::new(
+        if missing {
+            "NOT_FOUND"
+        } else {
+            "SOURCE_UNAVAILABLE"
+        },
+        format!("{error:#}"),
+    )
 }
 
 fn e3d_error(error: anyhow::Error) -> QueryError {
@@ -1143,8 +1162,14 @@ mod tests {
             })
             .context("room root task failed")
         };
-        assert_eq!(super::room_source_error(missing("24381/42528"), &refno).code, "NOT_FOUND");
-        assert_eq!(super::room_source_error(missing("24381_42528"), &refno).code, "NOT_FOUND");
+        assert_eq!(
+            super::room_source_error(missing("24381/42528"), &refno).code,
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            super::room_source_error(missing("24381_42528"), &refno).code,
+            "NOT_FOUND"
+        );
         assert_eq!(
             super::room_source_error(missing("24381/1"), &refno).code,
             "SOURCE_UNAVAILABLE",
@@ -1152,14 +1177,21 @@ mod tests {
         );
         assert_eq!(
             super::room_source_error(
-                anyhow::Error::new(DirectStoreError::DbNotInMdb { dbnum: 7997, refno: "24381/42528".into() }),
+                anyhow::Error::new(DirectStoreError::DbNotInMdb {
+                    dbnum: 7997,
+                    refno: "24381/42528".into()
+                }),
                 &refno
             )
             .code,
             "NOT_FOUND"
         );
         assert_eq!(
-            super::room_source_error(anyhow::anyhow!("dabacon 冻结源捕获期间文件持续变化"), &refno).code,
+            super::room_source_error(
+                anyhow::anyhow!("dabacon 冻结源捕获期间文件持续变化"),
+                &refno
+            )
+            .code,
             "SOURCE_UNAVAILABLE"
         );
     }

@@ -18,9 +18,13 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use aios_core::RefU64;
-use aios_database::data_interface::direct_store::{DirectSchema, DirectStoreError, TEMPLATE_DIR_ENV};
+use aios_database::data_interface::direct_store::{
+    DirectSchema, DirectStoreError, TEMPLATE_DIR_ENV,
+};
 use aios_database::data_interface::mdb_membership::{MdbDatabase, MdbMembership};
-use aios_database::data_interface::mdb_read_store::{MdbReadProvider, MdbReadStore, invalidate_cached};
+use aios_database::data_interface::mdb_read_store::{
+    MdbReadProvider, MdbReadStore, invalidate_cached,
+};
 use aios_database::data_interface::mdb_route_directory::MdbRouteDirectory;
 use e3d_io::db_element::DbElementError;
 use e3d_io::read_stats::{self, ReadStats};
@@ -83,7 +87,13 @@ fn sorted(dbnums: Vec<i32>) -> Vec<i32> {
 /// 这个差集就是变化集本身。
 fn dropped(older: &MdbReadStore, newer: &MdbReadStore) -> Vec<i32> {
     let kept: BTreeSet<i32> = newer.opened_dbnums().into_iter().collect();
-    sorted(older.opened_dbnums().into_iter().filter(|dbnum| !kept.contains(dbnum)).collect())
+    sorted(
+        older
+            .opened_dbnums()
+            .into_iter()
+            .filter(|dbnum| !kept.contains(dbnum))
+            .collect(),
+    )
 }
 
 fn parsed(view: &MdbReadStore, refno: RefU64) -> anyhow::Result<Arc<ParsedElement>> {
@@ -107,7 +117,10 @@ struct Lap {
 impl Lap {
     fn start() -> Self {
         let now = read_stats::snapshot();
-        Self { start: now, last: now }
+        Self {
+            start: now,
+            last: now,
+        }
     }
 
     fn opens(&mut self) -> u64 {
@@ -188,13 +201,28 @@ fn session_db_pages(dbnum: u32, sesno: u32) -> Vec<u8> {
     for (index, value) in [13_387_743_u32, 0, 2, 2, 0, 53].into_iter().enumerate() {
         put_be(&mut pages[2], (index + 1) * 4, value);
     }
-    for (index, value) in [element.word0, element.word1, 3, (20_u32 << 12) | 1].into_iter().enumerate() {
+    for (index, value) in [element.word0, element.word1, 3, (20_u32 << 12) | 1]
+        .into_iter()
+        .enumerate()
+    {
         put_be(&mut pages[2], (7 + index) * 4, value);
     }
     put_be(&mut pages[3], 0x00, 7);
-    for (index, value) in [11, element.word0, element.word1, 0x000A_AA01, 0, 0, 0, 0, 0, 0, 0]
-        .into_iter()
-        .enumerate()
+    for (index, value) in [
+        11,
+        element.word0,
+        element.word1,
+        0x000A_AA01,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    .into_iter()
+    .enumerate()
     {
         put_be(&mut pages[3], 40 + index * 4, value);
     }
@@ -222,7 +250,10 @@ fn a_session_advance_forks_only_that_database() {
     let directory = MdbRouteDirectory::from_databases(
         "t574-synthetic",
         "ALL",
-        &[declared(1_000, "/A", &file_a), declared(1_001, "/B", &file_b)],
+        &[
+            declared(1_000, "/A", &file_a),
+            declared(1_001, "/B", &file_b),
+        ],
         &templates,
     );
     let provider = MdbReadProvider::install_for_tests(
@@ -258,23 +289,40 @@ fn a_session_advance_forks_only_that_database() {
     // A SAVEWORK：会话 37 → 38，文件长了一页。fork 只丢 A 的槽，本身不开库。
     write_session_db(tmp.path(), "syn1000_0001", 1_000, 38, 1);
     let v2 = provider.view().expect("view 2");
-    assert_eq!(v2.epoch, 2, "one changed database advances the epoch by one");
+    assert_eq!(
+        v2.epoch, 2,
+        "one changed database advances the epoch by one"
+    );
     assert!(!Arc::ptr_eq(&v2, &v1));
     assert_eq!(dropped(&v1, &v2), vec![1_000], "only A's slot is dropped");
     assert_eq!(sorted(v2.opened_dbnums()), vec![1_001]);
-    assert_eq!(v2.cached_elements(), 1, "B's cache entry is carried over, A's is gone");
-    assert_eq!(sorted(v1.opened_dbnums()), vec![1_000, 1_001], "the old view keeps its pins");
+    assert_eq!(
+        v2.cached_elements(),
+        1,
+        "B's cache entry is carried over, A's is gone"
+    );
+    assert_eq!(
+        sorted(v1.opened_dbnums()),
+        vec![1_000, 1_001],
+        "the old view keeps its pins"
+    );
     assert_eq!(lap.opens(), 0);
 
     // 重读 A：恰好开 1 次，落在新会话；重读 B：0 次，同一个 Arc。
     let a2 = parsed(&v2, element_a).expect("A rereads after the save");
     assert_eq!(lap.opens(), 1, "rereading A reopens exactly A");
     assert_eq!(v2.metadata(1_000).unwrap().source.sesno, 38);
-    assert!(!Arc::ptr_eq(&a1, &a2), "A was parsed again from the new session");
+    assert!(
+        !Arc::ptr_eq(&a1, &a2),
+        "A was parsed again from the new session"
+    );
     assert!(same_record(&a1, &a2));
     let b2 = parsed(&v2, element_b).expect("B rereads");
     assert_eq!(lap.opens(), 0, "rereading B opens nothing");
-    assert!(Arc::ptr_eq(&b1, &b2), "B's parsed record is the very same Arc");
+    assert!(
+        Arc::ptr_eq(&b1, &b2),
+        "B's parsed record is the very same Arc"
+    );
     assert_eq!(v2.metadata(1_001).unwrap().source.sesno, 5);
     assert_eq!(v2.cached_elements(), 2);
 
@@ -298,7 +346,10 @@ fn a_session_advance_forks_only_that_database() {
     assert_eq!(lap.opens(), 1, "rereading B reopens exactly B");
     assert!(!Arc::ptr_eq(&b2, &b3));
     assert!(same_record(&b2, &b3));
-    assert!(Arc::ptr_eq(&b2, &parsed(&v2, element_b).unwrap()), "the older view keeps its B");
+    assert!(
+        Arc::ptr_eq(&b2, &parsed(&v2, element_b).unwrap()),
+        "the older view keeps its B"
+    );
 
     // 没开过的库与没登记的 provider：不丢任何槽、不开任何库。
     invalidate_cached("t574-synthetic", "ALL", 4_242).expect("unknown dbnum is harmless");
@@ -323,7 +374,8 @@ const AMS_SOURCES: [(u32, &str); 2] = [(8_000, "ams8000_0001"), (7_998, "ams7998
 const AMS8000_ELEMENT: (u32, u32) = (24_384, 23_257);
 
 fn sha256_file(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     hex::encode(Sha256::digest(&bytes))
 }
 
@@ -355,19 +407,33 @@ fn damage_then_recover(
     std::fs::write(copy_8000, damaged).expect("write damaged copy");
     clock.bump(copy_8000);
     let broken = provider.view().expect("view while damaged");
-    assert_eq!(broken.epoch, before.epoch + 1, "{label}: the damaged database advances the epoch by one");
-    assert_eq!(dropped(before, &broken), vec![8_000], "{label}: only 8000 is forked away");
+    assert_eq!(
+        broken.epoch,
+        before.epoch + 1,
+        "{label}: the damaged database advances the epoch by one"
+    );
+    assert_eq!(
+        dropped(before, &broken),
+        vec![8_000],
+        "{label}: only 8000 is forked away"
+    );
     assert_eq!(sorted(broken.opened_dbnums()), vec![7_998]);
     assert_eq!(lap.opens(), 0, "{label}: forking opens nothing");
 
     let error = parsed(&broken, e8000).expect_err("the damaged 8000 must not read");
     assert!(
-        matches!(error.downcast_ref::<DbElementError>(), Some(DbElementError::Open { .. })),
+        matches!(
+            error.downcast_ref::<DbElementError>(),
+            Some(DbElementError::Open { .. })
+        ),
         "{label}: an element read of the damaged 8000 fails at open, got {error:#}"
     );
     println!("[ams:{label}] new view 8000 element error (DbElementError::Open): {error:#}");
     assert!(
-        matches!(broken.metadata(8_000), Err(DirectStoreError::Session { dbnum: 8_000, .. })),
+        matches!(
+            broken.metadata(8_000),
+            Err(DirectStoreError::Session { dbnum: 8_000, .. })
+        ),
         "{label}: metadata of the damaged 8000 surfaces as DirectStoreError::Session on 8000"
     );
     assert_eq!(lap.opens(), 0, "{label}: a failed open is not an open");
@@ -375,27 +441,50 @@ fn damage_then_recover(
         Arc::ptr_eq(p7998, &parsed(&broken, e7998).expect("7998 keeps reading")),
         "{label}: 7998 answers from the shared cache"
     );
-    assert_eq!(lap.opens(), 0, "{label}: 7998 and everything else open nothing");
+    assert_eq!(
+        lap.opens(),
+        0,
+        "{label}: 7998 and everything else open nothing"
+    );
     assert!(
-        Arc::ptr_eq(p8000_before, &parsed(before, e8000).expect("old view reads 8000")),
+        Arc::ptr_eq(
+            p8000_before,
+            &parsed(before, e8000).expect("old view reads 8000")
+        ),
         "{label}: the old view still hands out the pre-damage 8000 record"
     );
     assert_eq!(before.metadata(8_000).unwrap().dbnum, 8_000);
     assert_eq!(lap.opens(), 0);
     let still_broken = provider.view().expect("view again while damaged");
-    assert!(Arc::ptr_eq(&still_broken, &broken), "{label}: nothing left to fork while 8000 stays closed");
+    assert!(
+        Arc::ptr_eq(&still_broken, &broken),
+        "{label}: nothing left to fork while 8000 stays closed"
+    );
     assert_eq!(lap.opens(), 0);
 
     std::fs::write(copy_8000, original).expect("restore original bytes");
     clock.bump(copy_8000);
     let recovered = provider.view().expect("view after restore");
-    assert_eq!(recovered.epoch, broken.epoch, "{label}: 8000 was not open, so there is nothing to fork");
+    assert_eq!(
+        recovered.epoch, broken.epoch,
+        "{label}: 8000 was not open, so there is nothing to fork"
+    );
     assert_eq!(sorted(recovered.opened_dbnums()), vec![7_998]);
     assert_eq!(lap.opens(), 0);
     let p8000_after = parsed(&recovered, e8000).expect("8000 reads again after restore");
-    assert_eq!(lap.opens(), 1, "{label}: the restored 8000 is reopened exactly once");
-    assert!(same_record(p8000_before, &p8000_after), "{label}: restored bytes give the same record");
-    assert!(Arc::ptr_eq(&p8000_after, &parsed(&recovered, e8000).unwrap()));
+    assert_eq!(
+        lap.opens(),
+        1,
+        "{label}: the restored 8000 is reopened exactly once"
+    );
+    assert!(
+        same_record(p8000_before, &p8000_after),
+        "{label}: restored bytes give the same record"
+    );
+    assert!(Arc::ptr_eq(
+        &p8000_after,
+        &parsed(&recovered, e8000).unwrap()
+    ));
     assert!(Arc::ptr_eq(p7998, &parsed(&recovered, e7998).unwrap()));
     assert_eq!(lap.opens(), 0);
     assert_eq!(sorted(recovered.opened_dbnums()), vec![7_998, 8_000]);
@@ -425,7 +514,12 @@ fn ams_copies_invalidate_only_the_changed_database() {
             (*dbnum, copy)
         })
         .collect();
-    let copy_8000 = copies.iter().find(|(dbnum, _)| *dbnum == 8_000).unwrap().1.clone();
+    let copy_8000 = copies
+        .iter()
+        .find(|(dbnum, _)| *dbnum == 8_000)
+        .unwrap()
+        .1
+        .clone();
     let original_8000 = std::fs::read(&copy_8000).expect("read the 8000 copy");
 
     let templates = template_dir();
@@ -438,7 +532,10 @@ fn ams_copies_invalidate_only_the_changed_database() {
             .collect::<Vec<_>>(),
         &templates,
     );
-    assert!(directory.verify_all_headers().is_empty(), "copies self-report their dbnums");
+    assert!(
+        directory.verify_all_headers().is_empty(),
+        "copies self-report their dbnums"
+    );
     let provider = MdbReadProvider::install_for_tests(
         "t574-ams-copy",
         "ALL",
@@ -460,7 +557,10 @@ fn ams_copies_invalidate_only_the_changed_database() {
     let p8000_v1 = parsed(&v1, e8000).expect("8000 element reads");
     let p7998_v1 = parsed(&v1, e7998).expect("7998 element reads");
     let snapshot_8000 = v1.element_snapshot(e8000).expect("8000 attributes extract");
-    assert_eq!((snapshot_8000.dbnum, snapshot_8000.db_type.as_str()), (8_000, "DESI"));
+    assert_eq!(
+        (snapshot_8000.dbnum, snapshot_8000.db_type.as_str()),
+        (8_000, "DESI")
+    );
     let sesno_8000 = v1.metadata(8_000).unwrap().source.sesno;
     assert_eq!(lap.opens(), 2);
     assert_eq!(sorted(v1.opened_dbnums()), vec![7_998, 8_000]);
@@ -470,7 +570,11 @@ fn ams_copies_invalidate_only_the_changed_database() {
     clock.bump(&copy_8000);
     let v2 = provider.view().expect("view 2");
     assert_eq!(v2.epoch, 2);
-    assert_eq!(dropped(&v1, &v2), vec![8_000], "identity change: only 8000 in the changed set");
+    assert_eq!(
+        dropped(&v1, &v2),
+        vec![8_000],
+        "identity change: only 8000 in the changed set"
+    );
     assert_eq!(sorted(v1.opened_dbnums()), vec![7_998, 8_000]);
     assert_eq!(lap.opens(), 0);
     let p7998_v2 = parsed(&v2, e7998).expect("7998 rereads");
@@ -481,20 +585,43 @@ fn ams_copies_invalidate_only_the_changed_database() {
     assert!(!Arc::ptr_eq(&p8000_v1, &p8000_v2));
     assert!(same_record(&p8000_v1, &p8000_v2));
     assert_eq!(v2.metadata(8_000).unwrap().source.sesno, sesno_8000);
-    assert!(Arc::ptr_eq(&p8000_v1, &parsed(&v1, e8000).unwrap()), "the old view keeps its 8000");
+    assert!(
+        Arc::ptr_eq(&p8000_v1, &parsed(&v1, e8000).unwrap()),
+        "the old view keeps its 8000"
+    );
     assert_eq!(lap.opens(), 0);
 
     // (2) 改坏描述符页 → 恢复；(3) 截断到 1 KiB → 恢复。
     let mut garbage_head = original_8000.clone();
     garbage_head[..4096].fill(0xFF);
     let v3 = damage_then_recover(
-        "descriptor pages overwritten", &provider, &copy_8000, &garbage_head, &original_8000,
-        &mut clock, &mut lap, &v2, e8000, e7998, &p8000_v2, &p7998_v1,
+        "descriptor pages overwritten",
+        &provider,
+        &copy_8000,
+        &garbage_head,
+        &original_8000,
+        &mut clock,
+        &mut lap,
+        &v2,
+        e8000,
+        e7998,
+        &p8000_v2,
+        &p7998_v1,
     );
     let p8000_v3 = parsed(&v3, e8000).unwrap();
     let v4 = damage_then_recover(
-        "file truncated to 1 KiB", &provider, &copy_8000, &original_8000[..1024], &original_8000,
-        &mut clock, &mut lap, &v3, e8000, e7998, &p8000_v3, &p7998_v1,
+        "file truncated to 1 KiB",
+        &provider,
+        &copy_8000,
+        &original_8000[..1024],
+        &original_8000,
+        &mut clock,
+        &mut lap,
+        &v3,
+        e8000,
+        e7998,
+        &p8000_v3,
+        &p7998_v1,
     );
     let p8000_v4 = parsed(&v4, e8000).unwrap();
     assert_eq!(v4.metadata(8_000).unwrap().source.sesno, sesno_8000);
@@ -506,16 +633,31 @@ fn ams_copies_invalidate_only_the_changed_database() {
     assert_eq!(dropped(&v4, &v5), vec![8_000]);
     assert_eq!(sorted(v5.opened_dbnums()), vec![7_998]);
     assert_eq!(lap.opens(), 0);
-    assert!(Arc::ptr_eq(&p7998_v1, &parsed(&v5, e7998).unwrap()), "7998 survives 8000's invalidation");
+    assert!(
+        Arc::ptr_eq(&p7998_v1, &parsed(&v5, e7998).unwrap()),
+        "7998 survives 8000's invalidation"
+    );
     assert_eq!(lap.opens(), 0);
     let p8000_v5 = parsed(&v5, e8000).expect("8000 after invalidate_cached");
-    assert_eq!(lap.opens(), 1, "invalidate_cached(8000) costs exactly one reopen of 8000");
+    assert_eq!(
+        lap.opens(),
+        1,
+        "invalidate_cached(8000) costs exactly one reopen of 8000"
+    );
     assert!(!Arc::ptr_eq(&p8000_v4, &p8000_v5));
     assert!(same_record(&p8000_v4, &p8000_v5));
-    assert!(Arc::ptr_eq(&p8000_v4, &parsed(&v4, e8000).unwrap()), "the older view keeps its 8000");
+    assert!(
+        Arc::ptr_eq(&p8000_v4, &parsed(&v4, e8000).unwrap()),
+        "the older view keeps its 8000"
+    );
     assert_eq!(lap.opens(), 0);
-    let snapshot_again = v5.element_snapshot(e8000).expect("8000 attributes extract again");
-    assert_eq!(snapshot_again.explicit_attributes, snapshot_8000.explicit_attributes);
+    let snapshot_again = v5
+        .element_snapshot(e8000)
+        .expect("8000 attributes extract again");
+    assert_eq!(
+        snapshot_again.explicit_attributes,
+        snapshot_8000.explicit_attributes
+    );
     assert_eq!(lap.opens(), 0);
 
     // 全程零扫描；源文件一个字节没动。
@@ -523,7 +665,10 @@ fn ams_copies_invalidate_only_the_changed_database() {
     assert_eq!(total.database_opens, 6, "{}", total.summary());
     assert_zero_scans(&total);
     let digests_after = source_digests(&source_dir);
-    assert_eq!(digests_after, digests_before, "source database files must be untouched");
+    assert_eq!(
+        digests_after, digests_before,
+        "source database files must be untouched"
+    );
     for (name, digest) in &digests_after {
         println!("[ams] source {name} sha256={digest} (unchanged)");
     }

@@ -33,7 +33,7 @@ pub const WRITE_STATE_TABLE: &str = "dbnum_write_state";
 
 /// 写库中（任务开工时置，崩溃后由回退清掉）。
 pub const STATUS_WRITING: &str = "writing";
-/// 本任务的写库结束了（欠什么由三水位回答，不由这一格回答）。
+/// 本任务的写库结束了（欠什么由双水位回答，不由这一格回答）。
 pub const STATUS_FINISHED: &str = "finished";
 
 /// 这一次写库是哪一种任务（d-283 的五种意图）。回退时决定走哪条清理路：
@@ -88,9 +88,7 @@ impl WriteIntent {
 /// ADR-073 D3: a durable `writing` row means the dbnum may contain a partially
 /// applied task. Recovery never tries to infer which face is safe to keep; all
 /// five historical intents restart through the whole-dbnum reinitialize path.
-pub const fn recovery_batch_intent(
-    _interrupted: WriteIntent,
-) -> super::batch_queue::BatchIntent {
+pub const fn recovery_batch_intent(_interrupted: WriteIntent) -> super::batch_queue::BatchIntent {
     super::batch_queue::BatchIntent::Reinitialize
 }
 
@@ -99,7 +97,7 @@ pub const fn recovery_batch_intent(
 pub struct WriteState {
     pub dbnum: u32,
     pub status: String,
-    /// 本次任务的起点 S：回退删的是 `sesno > S` 的痕迹，三水位退回它。
+    /// 本次任务的起点 S：回退删的是 `sesno > S` 的痕迹，双水位退回它。
     pub start_sesno: i32,
     /// 目标 T：回退之后按 S→T 重排。
     pub end_sesno: i32,
@@ -165,7 +163,8 @@ pub fn render_mark_writing(
     )
 }
 
-/// 收尾那一句。**只许** `task_end::render_task_end_tail` 拼它（W2），与三水位同一笔事务。
+/// 收尾那一句。**只许** `task_end::render_task_end_tail` 拼它（W2），与 `model_sesno`
+/// 那一枚水位同一笔事务（`applied_sesno` 早在数据尾事务就写过了，不在这里）。
 ///
 /// `UPDATE` 而不是 `UPSERT`：没有开工那一行就谈不上「这一次写库结束了」，凭空造一行出来
 /// 只会让下一次启动读到一个没有对手的 `finished`。
@@ -214,8 +213,12 @@ const TIME_COLUMNS: &str = "IF started_at = NONE THEN NONE ELSE type::string(sta
 
 /// 删掉标记行。整库 wipe 那条回退路用它收口——wipe 自己不认识这张表。
 pub(crate) async fn clear_marker(dbnum: u32) -> anyhow::Result<()> {
-    SUL_DB
-        .query(render_clear(dbnum))
+    clear_marker_on(&SUL_DB, dbnum).await
+}
+
+/// 同 [`clear_marker`]，删的是 `db` 那个库的标记行。
+pub(crate) async fn clear_marker_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<()> {
+    db.query(render_clear(dbnum))
         .await
         .with_context(|| format!("clear write state of dbnum {dbnum}"))?
         .check()
@@ -311,7 +314,10 @@ mod tests {
     fn only_one_statement_writes_finished_and_it_never_creates_the_row() {
         let sql = render_mark_finished(7997);
         assert_eq!(sql.matches("status = 'finished'").count(), 1, "{sql}");
-        assert!(sql.starts_with("UPDATE dbnum_write_state:7997 SET"), "{sql}");
+        assert!(
+            sql.starts_with("UPDATE dbnum_write_state:7997 SET"),
+            "{sql}"
+        );
         assert!(!sql.contains("UPSERT"), "{sql}");
 
         let production = include_str!("write_state.rs")
@@ -480,5 +486,26 @@ mod tests {
             .check()
             .unwrap();
         assert_eq!(load_on(&db, 7997).await.unwrap(), None);
+    }
+
+    /// 标记行只从传进来的那个库删：同一份 NS 下两个库各落一行，删一个不动另一个
+    /// （整库 wipe 的回退收口收的是「这个库」的标记，不是本进程那一个）。
+    #[tokio::test]
+    async fn clearing_the_marker_only_touches_the_database_it_was_given() {
+        let wiped = database("clear_wiped").await;
+        let kept = database("clear_kept").await;
+        mark_writing_on(&wiped, 7997, 41, 43, WriteIntent::ApplyWindow)
+            .await
+            .unwrap();
+        mark_writing_on(&kept, 7997, 41, 43, WriteIntent::ApplyWindow)
+            .await
+            .unwrap();
+
+        clear_marker_on(&wiped, 7997).await.unwrap();
+
+        assert_eq!(load_on(&wiped, 7997).await.unwrap(), None);
+        let survivor = load_on(&kept, 7997).await.unwrap().expect("另一个库的行");
+        assert!(survivor.is_writing());
+        assert_eq!((survivor.start_sesno, survivor.end_sesno), (41, 43));
     }
 }

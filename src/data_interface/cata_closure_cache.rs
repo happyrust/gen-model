@@ -154,7 +154,12 @@ impl ClosureCache {
 
     /// 一次 resolve 碰到一个库时先调：身份与缓存里记的不一致（或第一次见）就整库作废、记下新身份。
     /// 之后对该库的 `get` / `insert` 都以这份身份为准。关着时什么都不做。
-    pub(crate) fn begin_catalogue(&mut self, project: &str, dbnum: u32, identity: &CatalogueIdentity) {
+    pub(crate) fn begin_catalogue(
+        &mut self,
+        project: &str,
+        dbnum: u32,
+        identity: &CatalogueIdentity,
+    ) {
         if !self.enabled() {
             return;
         }
@@ -172,7 +177,12 @@ impl ClosureCache {
     }
 
     /// 命中刷最近使用序。没经 [`Self::begin_catalogue`] 登记身份的库一律 miss（不知道它是哪一版文件）。
-    pub(crate) fn get(&mut self, project: &str, dbnum: u32, refno: RefU64) -> Option<Arc<CachedCataElement>> {
+    pub(crate) fn get(
+        &mut self,
+        project: &str,
+        dbnum: u32,
+        refno: RefU64,
+    ) -> Option<Arc<CachedCataElement>> {
         if !self.enabled() {
             return None;
         }
@@ -289,9 +299,10 @@ pub(crate) fn approx_bytes(parsed: &ParsedCataEle, att: &NamedAttrMap) -> usize 
             NamedAttrValue::StringType(s)
             | NamedAttrValue::ElementType(s)
             | NamedAttrValue::WordType(s) => s.len(),
-            NamedAttrValue::StringArrayType(items) => {
-                items.iter().map(|s| s.len() + std::mem::size_of::<String>()).sum()
-            }
+            NamedAttrValue::StringArrayType(items) => items
+                .iter()
+                .map(|s| s.len() + std::mem::size_of::<String>())
+                .sum(),
             NamedAttrValue::F32VecType(items) => items.len() * std::mem::size_of::<f32>(),
             NamedAttrValue::IntArrayType(items) => items.len() * std::mem::size_of::<i32>(),
             NamedAttrValue::BoolArrayType(items) => items.len(),
@@ -307,9 +318,7 @@ static CLOSURE_CACHE: Lazy<Mutex<ClosureCache>> =
 
 /// 全局那一份。锁内只做查表 / 写表，解析在锁外。
 pub(crate) fn closure_cache() -> MutexGuard<'static, ClosureCache> {
-    CLOSURE_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    CLOSURE_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -359,14 +368,11 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.entries, 2, "同键只存一份");
         assert_eq!(stats.inserts, 3);
-        let hit = cache
-            .get("ams", 5052, refu(5052, 1))
-            .expect("命中");
+        let hit = cache.get("ams", 5052, refu(5052, 1)).expect("命中");
         assert!(
-            hit.att
-                .map
-                .get("NAME")
-                .is_some_and(|v| matches!(v, NamedAttrValue::StringType(s) if s.ends_with("xxxxxxxx"))),
+            hit.att.map.get("NAME").is_some_and(
+                |v| matches!(v, NamedAttrValue::StringType(s) if s.ends_with("xxxxxxxx"))
+            ),
             "覆盖后拿到的是后写的那份"
         );
         assert_eq!(stats.bytes, cache.stats().bytes, "命中不改字节账");
@@ -380,16 +386,25 @@ mod tests {
         cache.insert("ams", 5052, element(5052, 1, 0));
         let refno = refu(5052, 1);
         assert!(cache.get("ams", 5052, refno).is_some());
-        assert!(cache.get("aps", 5052, refno).is_none(), "别的项目不共享（也没登记身份）");
+        assert!(
+            cache.get("aps", 5052, refno).is_none(),
+            "别的项目不共享（也没登记身份）"
+        );
         assert!(cache.get("ams", 5053, refno).is_none(), "别的库不共享");
         // 指纹变了：整库作废，同键 miss。
         cache.begin_catalogue("ams", 5052, &identity("2:2", 189));
-        assert!(cache.get("ams", 5052, refno).is_none(), "文件指纹变了就 miss");
+        assert!(
+            cache.get("ams", 5052, refno).is_none(),
+            "文件指纹变了就 miss"
+        );
         cache.insert("ams", 5052, element(5052, 1, 0));
         assert!(cache.get("ams", 5052, refno).is_some());
         // 只有会话号变了也一样。
         cache.begin_catalogue("ams", 5052, &identity("2:2", 190));
-        assert!(cache.get("ams", 5052, refno).is_none(), "目录会话号变了就 miss");
+        assert!(
+            cache.get("ams", 5052, refno).is_none(),
+            "目录会话号变了就 miss"
+        );
         assert_eq!(cache.stats().retired, 2);
     }
 
@@ -404,10 +419,19 @@ mod tests {
         for n in 1..=3 {
             cache.insert("ams", 5052, element(5052, n, 0));
         }
-        assert!(cache.get("ams", 5052, refu(5052, 1)).is_some(), "刷新 1 的使用序");
+        assert!(
+            cache.get("ams", 5052, refu(5052, 1)).is_some(),
+            "刷新 1 的使用序"
+        );
         cache.insert("ams", 5052, element(5052, 4, 0));
-        assert!(cache.get("ams", 5052, refu(5052, 2)).is_none(), "最旧的 2 被淘汰");
-        assert!(cache.get("ams", 5052, refu(5052, 1)).is_some(), "刚用过的 1 留着");
+        assert!(
+            cache.get("ams", 5052, refu(5052, 2)).is_none(),
+            "最旧的 2 被淘汰"
+        );
+        assert!(
+            cache.get("ams", 5052, refu(5052, 1)).is_some(),
+            "刚用过的 1 留着"
+        );
         assert!(cache.get("ams", 5052, refu(5052, 4)).is_some());
         assert_eq!(cache.stats().entries, 3);
         assert_eq!(cache.stats().evicted, 1);
@@ -424,7 +448,10 @@ mod tests {
         assert_eq!(cache.stats().entries, 2);
         cache.insert("ams", 5052, element(5052, 3, 0));
         assert_eq!(cache.stats().entries, 2, "按字节淘汰到线内");
-        assert!(cache.get("ams", 5052, refu(5052, 1)).is_none(), "最旧的 1 被淘汰");
+        assert!(
+            cache.get("ams", 5052, refu(5052, 1)).is_none(),
+            "最旧的 1 被淘汰"
+        );
         assert!(cache.stats().bytes <= one * 2 + one / 2);
         cache.insert("ams", 5052, element(5052, 9, 4096));
         assert!(
@@ -500,6 +527,10 @@ mod tests {
             "边表要算进去: {recounted} vs {}",
             small.approx_bytes
         );
-        assert!(small.approx_bytes < 2048, "三个属性的元素不该估到 2 KB 以上: {}", small.approx_bytes);
+        assert!(
+            small.approx_bytes < 2048,
+            "三个属性的元素不该估到 2 KB 以上: {}",
+            small.approx_bytes
+        );
     }
 }

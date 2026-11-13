@@ -35,14 +35,20 @@ use super::cata_closure::CataDbLocator;
 static ACTIVE_DIRECTORY: RwLock<Option<Arc<MdbRouteDirectory>>> = RwLock::new(None);
 
 pub fn register_active(directory: Arc<MdbRouteDirectory>) {
-    *ACTIVE_DIRECTORY.write().unwrap_or_else(PoisonError::into_inner) = Some(directory);
+    *ACTIVE_DIRECTORY
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(directory);
 }
 
 pub fn active(project: &str, mdb: &str) -> Option<Arc<MdbRouteDirectory>> {
-    ACTIVE_DIRECTORY.read().unwrap_or_else(PoisonError::into_inner)
+    ACTIVE_DIRECTORY
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .filter(|directory| directory.project() == project
-            && directory.mdb().trim_start_matches('/') == mdb.trim_start_matches('/'))
+        .filter(|directory| {
+            directory.project() == project
+                && directory.mdb().trim_start_matches('/') == mdb.trim_start_matches('/')
+        })
         .cloned()
 }
 
@@ -375,11 +381,13 @@ impl Clone for MdbRouteDirectory {
 
 impl MdbRouteDirectory {
     /// 从已解析的 MDB 成员清单造目录。零元素 I/O；`template_dir` 只参与拼模板路径。
+    /// 补充成员（`extra_element_dbnums`，ADR-095）排在 CURD 声明之后，与声明的库同样路由。
     pub fn from_membership(membership: &MdbMembership, template_dir: impl Into<PathBuf>) -> Self {
+        let databases: Vec<MdbDatabase> = membership.model_databases().cloned().collect();
         Self::from_databases(
             membership.project(),
             membership.mdb(),
-            membership.databases(),
+            &databases,
             template_dir,
         )
     }
@@ -679,7 +687,15 @@ impl MdbRouteDirectory {
                 Ok(identity) => identity,
                 Err(error) => {
                     if state.unreadable.insert(route.dbnum) {
-                        crate::process_diagnostics::event(0, "increment.file.failed", &format!("dbnum={} path={} error={error}", route.dbnum, route.path.display()));
+                        crate::process_diagnostics::event(
+                            0,
+                            "increment.file.failed",
+                            &format!(
+                                "dbnum={} path={} error={error}",
+                                route.dbnum,
+                                route.path.display()
+                            ),
+                        );
                         log::warn!(
                             "[route-poll] dbnum {} 的文件 {} stat 不到，本轮跳过：{error}",
                             route.dbnum,
@@ -697,48 +713,79 @@ impl MdbRouteDirectory {
                     let observed = (|| -> anyhow::Result<_> {
                         let mut view = e3d_io::session::DbView::open(&route.path)?;
                         let chain = view.walk_sessions()?;
-                        let latest = chain.first().ok_or_else(|| anyhow::anyhow!("empty session chain"))?;
-                        let crossed = previous.is_some_and(|old| chain.windows(2).any(|pair| {
-                            pair[0].sesno > old.latest_sesno && pair[0].tail.as_ref().is_some_and(|tail|
-                                tail.base_sesno != 0 && tail.base_sesno < pair[1].sesno)
-                        }));
-                        Ok((latest.sesno, latest.tail.as_ref().map(|tail| tail.base_sesno), crossed))
+                        let latest = chain
+                            .first()
+                            .ok_or_else(|| anyhow::anyhow!("empty session chain"))?;
+                        let crossed = previous.is_some_and(|old| {
+                            chain.windows(2).any(|pair| {
+                                pair[0].sesno > old.latest_sesno
+                                    && pair[0].tail.as_ref().is_some_and(|tail| {
+                                        tail.base_sesno != 0 && tail.base_sesno < pair[1].sesno
+                                    })
+                            })
+                        });
+                        Ok((
+                            latest.sesno,
+                            latest.tail.as_ref().map(|tail| tail.base_sesno),
+                            crossed,
+                        ))
                     })();
                     if read_started.elapsed() >= std::time::Duration::from_millis(250) {
-                        println!("[route-poll] slow-session dbnum={} elapsed_ms={} initial={} ok={} path={}",
-                            route.dbnum, read_started.elapsed().as_millis(), previous.is_none(),
-                            observed.is_ok(), route.path.display());
+                        println!(
+                            "[route-poll] slow-session dbnum={} elapsed_ms={} initial={} ok={} path={}",
+                            route.dbnum,
+                            read_started.elapsed().as_millis(),
+                            previous.is_none(),
+                            observed.is_ok(),
+                            route.path.display()
+                        );
                     }
                     match observed {
                         Ok(value) => value,
                         Err(error) => {
                             if state.unreadable.insert(route.dbnum) {
-                                crate::process_diagnostics::event(0, "increment.file.failed", &format!("dbnum={} session error={error:#}", route.dbnum));
+                                crate::process_diagnostics::event(
+                                    0,
+                                    "increment.file.failed",
+                                    &format!("dbnum={} session error={error:#}", route.dbnum),
+                                );
                             }
-                            log::warn!("[route-poll] dbnum {} session read failed: {error:#}", route.dbnum);
+                            log::warn!(
+                                "[route-poll] dbnum {} session read failed: {error:#}",
+                                route.dbnum
+                            );
                             continue;
                         }
                     }
                 }
             };
             if state.unreadable.remove(&route.dbnum) {
-                crate::process_diagnostics::event(0, "increment.file.recovered", &format!("dbnum={} path={}", route.dbnum, route.path.display()));
+                crate::process_diagnostics::event(
+                    0,
+                    "increment.file.recovered",
+                    &format!("dbnum={} path={}", route.dbnum, route.path.display()),
+                );
                 log::info!(
                     "[route-poll] dbnum {} 的文件 {} 又能读了",
                     route.dbnum,
                     route.path.display()
                 );
             }
-            if let Observation::Changed { from, to, kind } =
-                state.ledger.observe_session(route.dbnum, super::db_generation::Observed::new(identity, latest_sesno, base_sesno))
-            {
+            if let Observation::Changed { from, to, kind } = state.ledger.observe_session(
+                route.dbnum,
+                super::db_generation::Observed::new(identity, latest_sesno, base_sesno),
+            ) {
                 changes.push(RouteRefresh {
                     dbnum: route.dbnum,
                     db_type: route.db_type.clone(),
                     path: route.path.clone(),
                     from,
                     to,
-                    kind: if crossed_backtrack { super::db_generation::GenerationChange::RolledBack } else { kind },
+                    kind: if crossed_backtrack {
+                        super::db_generation::GenerationChange::RolledBack
+                    } else {
+                        kind
+                    },
                 });
             }
         }
@@ -767,10 +814,18 @@ impl MdbRouteDirectory {
     /// Process-local observation only; no filesystem access on a health request.
     pub fn health(&self) -> serde_json::Value {
         let state = self.poll_state();
-        let failed: BTreeSet<_> = state.unreadable.iter().copied()
-            .chain(self.declared_without_file.keys().copied()).collect();
-        let stale: Vec<_> = state.unreadable.iter().copied()
-            .filter(|dbnum| state.ledger.get(*dbnum).is_some()).collect();
+        let failed: BTreeSet<_> = state
+            .unreadable
+            .iter()
+            .copied()
+            .chain(self.declared_without_file.keys().copied())
+            .collect();
+        let stale: Vec<_> = state
+            .unreadable
+            .iter()
+            .copied()
+            .filter(|dbnum| state.ledger.get(*dbnum).is_some())
+            .collect();
         serde_json::json!({
             "status": if failed.is_empty() { "ready" } else { "degraded" },
             "route_count": self.len(),
@@ -1450,8 +1505,12 @@ mod tests {
     fn poll_detects_backtrack_between_two_observations() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_session_db(tmp.path(), "ams8000_0001", 8000, "DESI", 242, 0);
-        let directory = MdbRouteDirectory::from_databases("ams", "ALL",
-            &[declared(8000, 1, "/AMS/DESI", path.to_str())], TEMPLATE_DIR);
+        let directory = MdbRouteDirectory::from_databases(
+            "ams",
+            "ALL",
+            &[declared(8000, 1, "/AMS/DESI", path.to_str())],
+            TEMPLATE_DIR,
+        );
         assert!(directory.poll_generations().is_empty());
         // 244 is an ordinary save on 243, but 243 rolled back to 239 from 242.
         let full_pages = |sesno| {
@@ -1695,15 +1754,25 @@ mod tests {
                 shadowed: Vec::new(),
             },
         ];
-        let directory = MdbRouteDirectory::from_databases("AvevaMarineSample", "ALL", &databases, "T");
+        let directory =
+            MdbRouteDirectory::from_databases("AvevaMarineSample", "ALL", &databases, "T");
         let foreign = directory.route_dbno(7_001).unwrap_err().to_string();
-        assert!(foreign.contains("项目 ACP") && foreign.contains("acp000"), "{foreign}");
+        assert!(
+            foreign.contains("项目 ACP") && foreign.contains("acp000"),
+            "{foreign}"
+        );
         assert!(foreign.contains("project_search_paths"), "{foreign}");
         let own = directory.route_dbno(8_100).unwrap_err().to_string();
-        assert!(own.contains("本项目") && !own.contains("project_search_paths"), "{own}");
+        assert!(
+            own.contains("本项目") && !own.contains("project_search_paths"),
+            "{own}"
+        );
 
         let grouped = directory.declared_without_file_by_project();
-        assert_eq!(grouped.get(&Some("ACP".to_string())), Some(&vec![7_001, 7_009]));
+        assert_eq!(
+            grouped.get(&Some("ACP".to_string())),
+            Some(&vec![7_001, 7_009])
+        );
         assert_eq!(grouped.get(&None), Some(&vec![8_100]));
     }
 
@@ -1725,12 +1794,25 @@ mod tests {
         let raw = "14 geometry element(s) failed: [(17496/156982, \"db 7001 没注册进这个 DbSet，resolver 也给不出它的文件\"), (17496/156983, \"db 7001 没注册进这个 DbSet，resolver 也给不出它的文件\")]";
         let explained = explain_unregistered_dbs_with(raw, &directory);
         assert!(explained.starts_with(raw), "{explained}");
-        assert!(explained.contains("dbnum 7001：MDB /ALL 声明了 dbnum 7001"), "{explained}");
+        assert!(
+            explained.contains("dbnum 7001：MDB /ALL 声明了 dbnum 7001"),
+            "{explained}"
+        );
         assert!(explained.contains("项目 ACP"), "{explained}");
-        assert_eq!(explained.matches("项目 ACP").count(), 1, "同一个库号只解释一次");
-        assert_eq!(explain_unregistered_dbs_with("nothing to see", &directory), "nothing to see");
+        assert_eq!(
+            explained.matches("项目 ACP").count(),
+            1,
+            "同一个库号只解释一次"
+        );
+        assert_eq!(
+            explain_unregistered_dbs_with("nothing to see", &directory),
+            "nothing to see"
+        );
         let not_in_mdb = explain_unregistered_dbs_with("db 9999 没注册进这个 DbSet", &directory);
-        assert!(not_in_mdb.contains("不在 MDB /ALL 的声明里"), "{not_in_mdb}");
+        assert!(
+            not_in_mdb.contains("不在 MDB /ALL 的声明里"),
+            "{not_in_mdb}"
+        );
 
         // GitHub #46：依赖目录扫描补上的路由（MDB 没声明）也要说清——它有路由，但生成不读它。
         let mut directory = directory;

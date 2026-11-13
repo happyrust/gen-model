@@ -43,10 +43,13 @@ pub fn vendor_build_ids() -> &'static str {
 pub fn build_time() -> &'static str {
     static TIME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TIME.get_or_init(|| {
-        let epoch = BUILD_EPOCH.parse::<i64>().expect("valid embedded build epoch");
+        let epoch = BUILD_EPOCH
+            .parse::<i64>()
+            .expect("valid embedded build epoch");
         let utc = chrono::DateTime::from_timestamp(epoch, 0).expect("valid build timestamp");
         utc.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
-            .format("%Y-%m-%d %H:%M:%S %:z").to_string()
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string()
     })
 }
 
@@ -103,7 +106,8 @@ mod tests {
         assert!(info.build_id.starts_with(info.version));
         assert!(!info.git_commit.is_empty());
         assert!(!info.target.is_empty());
-        let parsed = chrono::DateTime::parse_from_str(info.build_time, "%Y-%m-%d %H:%M:%S %:z").unwrap();
+        let parsed =
+            chrono::DateTime::parse_from_str(info.build_time, "%Y-%m-%d %H:%M:%S %:z").unwrap();
         assert_eq!(parsed.timestamp().to_string(), BUILD_EPOCH);
         assert!(display_version().starts_with(&format!("{VERSION} (built ")));
         assert_eq!(info.e3d_model_build_id, E3D_MODEL_BUILD_ID);

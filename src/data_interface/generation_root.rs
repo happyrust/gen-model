@@ -773,13 +773,11 @@ fn durable_roots_from_pe_rows(
     let mut elements: HashMap<RefnoEnum, SubtreeElement> = HashMap::with_capacity(rows.len());
     let mut owners: HashMap<RefnoEnum, RefnoEnum> = HashMap::with_capacity(rows.len());
     for (refno, noun, owner) in rows {
-        elements
-            .entry(*refno)
-            .or_insert_with(|| SubtreeElement {
-                noun: noun.clone(),
-                name: String::new(),
-                members: Vec::new(),
-            });
+        elements.entry(*refno).or_insert_with(|| SubtreeElement {
+            noun: noun.clone(),
+            name: String::new(),
+            members: Vec::new(),
+        });
         if let Some(owner) = owner.filter(|owner| owner.is_valid() && owner != refno) {
             owners.insert(*refno, owner);
         }
@@ -809,9 +807,10 @@ fn durable_roots_from_pe_rows(
             top,
             unit_types,
             |refno| {
-                elements.get(&refno).cloned().with_context(|| {
-                    format!("pe row for {refno} missing from durable root plan")
-                })
+                elements
+                    .get(&refno)
+                    .cloned()
+                    .with_context(|| format!("pe row for {refno} missing from durable root plan"))
             },
         )?);
     }
@@ -1921,8 +1920,7 @@ mod tests {
             "test premise: FOOB is off the bit table"
         );
 
-        let roots =
-            durable_roots_from_pe_rows(&rows, &resolve_delivery_unit_types(&[])).unwrap();
+        let roots = durable_roots_from_pe_rows(&rows, &resolve_delivery_unit_types(&[])).unwrap();
         assert_eq!(
             keys(&roots),
             vec![

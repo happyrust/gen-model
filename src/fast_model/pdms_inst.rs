@@ -2946,7 +2946,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: writes fn defines + indexes + anc backfill to the configured Surreal"]
     async fn live_backfill_anc_on_configured_db() {
-        crate::test_support::init_test_db().await.expect("连接配置库");
+        crate::test_support::init_test_db()
+            .await
+            .expect("连接配置库");
 
         aios_core::function::define_common_functions_on(&SUL_DB)
             .await
@@ -2995,7 +2997,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual live: materializes insts_flat/aabb_d/world_trans_d on the configured Surreal"]
     async fn live_sweep_inst_relate_flat_on_configured_db() {
-        crate::test_support::init_test_db().await.expect("连接配置库");
+        crate::test_support::init_test_db()
+            .await
+            .expect("连接配置库");
 
         let started = std::time::Instant::now();
         let swept = sweep_inst_relate_flat().await.expect("清扫");
@@ -3051,7 +3055,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "按设计红（ADR-043 缺口，T18 闭环后转绿）：必须在可丢弃沙箱上跑（pytest testbed 8019 -Memory），会对全库跑两轮真实清扫并播种 zzflat_*/20260823_* 合成行"]
     async fn live_shared_geo_bad_retry_must_refresh_sibling_insts_flat_on_disposable_db() {
-        crate::test_support::init_test_db().await.expect("连接配置库");
+        crate::test_support::init_test_db()
+            .await
+            .expect("连接配置库");
 
         const SHARED_GEO_HASH: u64 = 20260823;
         const CLEANUP: &str = "DELETE inst_relate:⟨20260823_101⟩, inst_relate:⟨20260823_102⟩; \

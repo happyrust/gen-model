@@ -38,10 +38,12 @@ pub(crate) fn generator_recovery_plan(
     current: &str,
     enabled: bool,
 ) -> Option<StartupModelRecoveryPlan> {
-    (enabled && generator_stale(model_sesno, stamped, current)).then_some(StartupModelRecoveryPlan {
-        model_start_sesno: 0,
-        reason: "model_generator_changed",
-    })
+    (enabled && generator_stale(model_sesno, stamped, current)).then_some(
+        StartupModelRecoveryPlan {
+            model_start_sesno: 0,
+            reason: "model_generator_changed",
+        },
+    )
 }
 
 /// 水位行上的库级生成器落款：`dbnum → model_generator`。只选两列、不经水位镜像（镜像行没有这一格，读一次表就够）；
@@ -190,7 +192,9 @@ pub async fn reconcile_generator_now(origin: &'static str) -> GeneratorReconcile
     let design = match crate::data_interface::startup_reconcile::current_mdb_design_dbnums().await {
         Ok(set) => set,
         Err(error) => {
-            println!("生成器核对（{origin}）：读不到当前 MDB 的 DESI 成员名单，本次一库都不排: {error:#}");
+            println!(
+                "生成器核对（{origin}）：读不到当前 MDB 的 DESI 成员名单，本次一库都不排: {error:#}"
+            );
             receipt.error = Some(format!("mdb members: {error:#}"));
             return finish(receipt, started);
         }
@@ -218,7 +222,9 @@ pub async fn reconcile_generator_now(origin: &'static str) -> GeneratorReconcile
             Ok(crate::data_interface::batch_queue::Enqueued::New) => receipt.enqueued.push(dbnum),
             Ok(_) => receipt.already_covered.push(dbnum),
             Err(error) => {
-                println!("生成器核对（{origin}）跳过 dbnum={dbnum}（这次没排，下次执行再核）: {error:#}");
+                println!(
+                    "生成器核对（{origin}）跳过 dbnum={dbnum}（这次没排，下次执行再核）: {error:#}"
+                );
                 receipt.skipped.push(dbnum);
             }
         }
@@ -256,7 +262,10 @@ mod tests {
     /// 判据：只看盖过模型水位的库；落款缺席（旧行）或不等都算变了；相等不算。
     #[test]
     fn a_library_is_stale_when_its_stamp_is_missing_or_differs_from_the_running_generator() {
-        assert!(generator_stale(26, None, "gen-v2"), "旧行没有落款：换过 vendor 却从没按新口径算过");
+        assert!(
+            generator_stale(26, None, "gen-v2"),
+            "旧行没有落款：换过 vendor 却从没按新口径算过"
+        );
         assert!(generator_stale(26, Some("gen-v1"), "gen-v2"));
         assert!(!generator_stale(26, Some("gen-v2"), "gen-v2"));
         assert!(
@@ -273,7 +282,10 @@ mod tests {
         assert_eq!(plan.model_start_sesno, 0);
         assert_eq!(plan.reason, "model_generator_changed");
         assert!(generator_recovery_plan(26, Some("gen-v2"), "gen-v2", true).is_none());
-        assert!(generator_recovery_plan(26, None, "gen-v2", false).is_none(), "关着只点名");
+        assert!(
+            generator_recovery_plan(26, None, "gen-v2", false).is_none(),
+            "关着只点名"
+        );
         assert!(generator_recovery_plan(0, None, "gen-v2", true).is_none());
     }
 

@@ -70,17 +70,27 @@ pub fn rooms_availability() -> RoomsAvailability {
         };
     }
     let (status, reason) = match room_resident::lifecycle() {
-        ResidentLifecycle::Disabled { source } => (STATUS_DISABLED, Some(format!("房间模型未启用：{source}"))),
-        ResidentLifecycle::Loading { phase, .. } => {
-            (STATUS_INITIALIZING, Some(format!("房间模型正在装载（{phase}），稍后重试")))
+        ResidentLifecycle::Disabled { source } => {
+            (STATUS_DISABLED, Some(format!("房间模型未启用：{source}")))
         }
+        ResidentLifecycle::Loading { phase, .. } => (
+            STATUS_INITIALIZING,
+            Some(format!("房间模型正在装载（{phase}），稍后重试")),
+        ),
         ResidentLifecycle::Unsupported { reason } => (STATUS_UNSUPPORTED, Some(reason)),
         ResidentLifecycle::Blocked { problems } => (
             STATUS_FAILED,
-            Some(problems.first().cloned().unwrap_or_else(|| "房间模型被阻断".to_string())),
+            Some(
+                problems
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "房间模型被阻断".to_string()),
+            ),
         ),
         ResidentLifecycle::Ready { .. } => (STATUS_READY, None),
-        ResidentLifecycle::Degraded { problems, .. } => (STATUS_DEGRADED, problems.first().cloned()),
+        ResidentLifecycle::Degraded { problems, .. } => {
+            (STATUS_DEGRADED, problems.first().cloned())
+        }
     };
     if status != STATUS_READY && status != STATUS_DEGRADED {
         return RoomsAvailability {
@@ -143,11 +153,19 @@ pub fn room_list_items(
                 name: attrs.name_of(refno),
                 dbnum: attrs.dbnum_of(refno),
                 panel_count: room.panels.len(),
-                panel_refnos: room.panels.iter().map(|panel| panel.refno().to_string()).collect(),
+                panel_refnos: room
+                    .panels
+                    .iter()
+                    .map(|panel| panel.refno().to_string())
+                    .collect(),
             }
         })
         .collect::<Vec<_>>();
-    items.sort_by(|a, b| a.room_num.cmp(&b.room_num).then_with(|| a.refno.cmp(&b.refno)));
+    items.sort_by(|a, b| {
+        a.room_num
+            .cmp(&b.room_num)
+            .then_with(|| a.refno.cmp(&b.refno))
+    });
     items
 }
 
@@ -209,7 +227,10 @@ impl RoomScope {
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.library_alignment_current == Some(false) {
-            out.push("房间归属不是当前代：所在库的房间边还没对齐到当前房间模型，结果可能过期".to_string());
+            out.push(
+                "房间归属不是当前代：所在库的房间边还没对齐到当前房间模型，结果可能过期"
+                    .to_string(),
+            );
         }
         out
     }
@@ -263,7 +284,12 @@ fn select_rooms(
     let mut rooms = Vec::with_capacity(requested.len());
     let mut panels: PanelRooms = HashMap::new();
     for refno in requested {
-        let Some(room) = model.map.rooms.iter().find(|room| room.room.refno() == *refno) else {
+        let Some(room) = model
+            .map
+            .rooms
+            .iter()
+            .find(|room| room.room.refno() == *refno)
+        else {
             return Err(SpatialQueryError::BadRequest(format!(
                 "rooms 里的 {} 不是在册房间（名字不含房间关键词或房间号不合规），可先 GET /api/v1/spatial/rooms 看清单",
                 RefnoEnum::from(*refno).to_pdms_str()
@@ -303,9 +329,15 @@ fn resolve_members_in_memory(
         .iter()
         .map(|refno| refno.0 as i64)
         .collect::<BTreeSet<i64>>();
-    let records =
-        crate::fast_model::model_memory_store::ModelMemoryStore::global().room_records_for_members(&packed);
-    members_from_records(model, crate::options::meshes_dir(), panels, candidates, &records)
+    let records = crate::fast_model::model_memory_store::ModelMemoryStore::global()
+        .room_records_for_members(&packed);
+    members_from_records(
+        model,
+        crate::options::meshes_dir(),
+        panels,
+        candidates,
+        &records,
+    )
 }
 
 /// 纯算法部分：`records` 是候选的投影记录（可以不全——没有记录的候选计入 `unresolved`），`panels` 是所选房间的面板
@@ -323,7 +355,10 @@ pub(crate) fn members_from_records(
         .map(|record| record.source_refno)
         .map(|source| crate::data_interface::generation_root::refno_from_e3d(source).refno())
         .collect::<HashSet<_>>();
-    let mut unresolved = candidates.iter().filter(|refno| !present.contains(refno)).count();
+    let mut unresolved = candidates
+        .iter()
+        .filter(|refno| !present.contains(refno))
+        .count();
     if records.is_empty() {
         return Ok(Members {
             set: HashSet::new(),
@@ -342,7 +377,10 @@ pub(crate) fn members_from_records(
                     Ok(mut some) => edges.append(&mut some),
                     Err(_) => {
                         failed.insert(
-                            crate::data_interface::generation_root::refno_from_e3d(record.source_refno).refno(),
+                            crate::data_interface::generation_root::refno_from_e3d(
+                                record.source_refno,
+                            )
+                            .refno(),
                         );
                     }
                 }
@@ -371,7 +409,9 @@ pub(crate) fn members_from_records(
 }
 
 fn parse_record_id(id: &str) -> Option<RefU64> {
-    id.trim_matches(|c| c == '⟨' || c == '⟩' || c == '`').parse::<RefU64>().ok()
+    id.trim_matches(|c| c == '⟨' || c == '⟩' || c == '`')
+        .parse::<RefU64>()
+        .ok()
 }
 
 /// 摄入 / 落盘形态：`room_relate` 边里 `in ∈ 所选面板` 的 `out`，连同 `in` 一起取，好知道每个成员挂在哪几间房下。
@@ -390,7 +430,10 @@ async fn resolve_members_durable(panels: &PanelRooms) -> anyhow::Result<Members>
             unresolved: 0,
         });
     }
-    let mut keys = panels.keys().map(|panel| panel.to_pe_key()).collect::<Vec<_>>();
+    let mut keys = panels
+        .keys()
+        .map(|panel| panel.to_pe_key())
+        .collect::<Vec<_>>();
     keys.sort();
     // 每个面板走一次图遍历，再 `array::flatten` 拼成一批，**不要**写成
     // `FROM room_relate WHERE in IN [...]`：后者是全表扫，真库两块面板实测
@@ -424,8 +467,8 @@ async fn resolve_members_durable(panels: &PanelRooms) -> anyhow::Result<Members>
             continue;
         };
         set.insert(member);
-        let Some(room_indices) = parse_record_id(&row.panel)
-            .and_then(|panel| panels.get(&RefnoEnum::from(panel)))
+        let Some(room_indices) =
+            parse_record_id(&row.panel).and_then(|panel| panels.get(&RefnoEnum::from(panel)))
         else {
             continue;
         };
@@ -484,7 +527,12 @@ pub async fn resolve_tree_room_scope(
     }
     let availability = rooms_availability();
     let mut scope = if let Some(model) = availability.model {
-        let rooms = model.map.rooms.iter().map(|room| room.room.refno()).collect();
+        let rooms = model
+            .map
+            .rooms
+            .iter()
+            .map(|room| room.room.refno())
+            .collect();
         resolve_room_scope(&rooms, candidates, attrs).await?
     } else {
         RoomScope {
@@ -549,7 +597,9 @@ pub async fn resolve_room_scope(
             resolve_members_in_memory(model, &panels_for_task, &candidates)
         })
         .await
-        .map_err(|join| SpatialQueryError::Internal(anyhow::anyhow!("room scope task aborted: {join}")))?
+        .map_err(|join| {
+            SpatialQueryError::Internal(anyhow::anyhow!("room scope task aborted: {join}"))
+        })?
         .map_err(SpatialQueryError::Internal)?;
         return Ok(RoomScope {
             rooms,
@@ -589,7 +639,12 @@ pub fn room_scope_from_members(
     let first_room = (!rooms.is_empty()).then_some(0usize);
     let members = members.into_iter().collect::<HashSet<_>>();
     let member_rooms = first_room
-        .map(|index| members.iter().map(|member| (*member, vec![index])).collect())
+        .map(|index| {
+            members
+                .iter()
+                .map(|member| (*member, vec![index]))
+                .collect()
+        })
         .unwrap_or_default();
     RoomScope {
         rooms,
@@ -679,7 +734,10 @@ mod tests {
         };
         let items = room_list_items(&rooms(), &attrs);
         assert_eq!(
-            items.iter().map(|item| item.room_num.as_str()).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|item| item.room_num.as_str())
+                .collect::<Vec<_>>(),
             ["A101", "A101", "B202"]
         );
         assert_eq!(items[0].refno, refno(1).to_string());
@@ -687,8 +745,16 @@ mod tests {
         assert_eq!(items[0].dbnum, Some(4_000_000_013));
         assert_eq!(items[0].panel_count, 1);
         assert_eq!(items[0].panel_refnos, vec![refno(10).to_string()]);
-        assert_eq!(items[1].refno, refno(3).to_string(), "同房间号按 refno 兜底");
-        assert_eq!((items[1].name.as_deref(), items[1].dbnum), (None, None), "答不出就是 null");
+        assert_eq!(
+            items[1].refno,
+            refno(3).to_string(),
+            "同房间号按 refno 兜底"
+        );
+        assert_eq!(
+            (items[1].name.as_deref(), items[1].dbnum),
+            (None, None),
+            "答不出就是 null"
+        );
         assert_eq!(items[2].panel_count, 2);
     }
 
@@ -707,18 +773,32 @@ mod tests {
             &[],
             Arc::<crate::fast_model::room_resident::MeshCache>::default(),
         );
-        let (picked, panels) =
-            select_rooms(&model, &BTreeSet::from([refno(1), refno(2)])).expect("both rooms are registered");
+        let (picked, panels) = select_rooms(&model, &BTreeSet::from([refno(1), refno(2)]))
+            .expect("both rooms are registered");
         assert_eq!(
-            picked.iter().map(|room| room.room_num.as_str()).collect::<Vec<_>>(),
+            picked
+                .iter()
+                .map(|room| room.room_num.as_str())
+                .collect::<Vec<_>>(),
             ["A101", "B202"],
             "按请求里的 refno 序（BTreeSet）"
         );
         assert_eq!(panels.len(), 3);
-        assert_eq!(panels[&RefnoEnum::from(refno(10))], vec![0], "A101 的面板指回第 0 间");
-        assert_eq!(panels[&RefnoEnum::from(refno(21))], vec![1], "B202 的面板指回第 1 间");
-        let error = select_rooms(&model, &BTreeSet::from([refno(99)])).expect_err("unregistered room");
-        assert!(matches!(error, SpatialQueryError::BadRequest(message) if message.contains("不是在册房间")));
+        assert_eq!(
+            panels[&RefnoEnum::from(refno(10))],
+            vec![0],
+            "A101 的面板指回第 0 间"
+        );
+        assert_eq!(
+            panels[&RefnoEnum::from(refno(21))],
+            vec![1],
+            "B202 的面板指回第 1 间"
+        );
+        let error =
+            select_rooms(&model, &BTreeSet::from([refno(99)])).expect_err("unregistered room");
+        assert!(
+            matches!(error, SpatialQueryError::BadRequest(message) if message.contains("不是在册房间"))
+        );
     }
 
     /// 「判不出归属」是常态，不出警告；只有代次过期才提示。条数照旧进 `room_status`。
@@ -741,7 +821,11 @@ mod tests {
         scope.library_alignment_current = Some(false);
         assert_eq!(scope.warnings().len(), 1, "代次过期仍要提示");
         let status = scope.status_json();
-        assert_eq!((status.matched, status.unresolved), (2, 3), "条数仍如实上报");
+        assert_eq!(
+            (status.matched, status.unresolved),
+            (2, 3),
+            "条数仍如实上报"
+        );
         assert_eq!(status.rooms[0].room_num, "A101");
         scope.library_alignment_current = Some(true);
         assert!(scope.warnings().is_empty());
@@ -825,8 +909,15 @@ mod tests {
         )
         .expect("room calculation");
         assert_eq!(members.set, HashSet::from([refno(30)]));
-        assert_eq!(members.rooms_of, HashMap::from([(refno(30), vec![0])]), "成员经面板指回它所属的房间下标");
-        assert_eq!(members.unresolved, 1, "只有 32 没有记录；重复给的 30 有记录、不算（调用方本就先去重）");
+        assert_eq!(
+            members.rooms_of,
+            HashMap::from([(refno(30), vec![0])]),
+            "成员经面板指回它所属的房间下标"
+        );
+        assert_eq!(
+            members.unresolved, 1,
+            "只有 32 没有记录；重复给的 30 有记录、不算（调用方本就先去重）"
+        );
 
         // 另一间房的面板集：同一批记录一个都不命中。
         let other = members_from_records(

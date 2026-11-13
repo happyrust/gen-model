@@ -412,8 +412,7 @@ mod tests {
         option.surreal_ns = "plant".to_owned();
         option.project_name = "AMS".to_owned();
         assert!(WriterIdentity::from_db_option(&option, StoreMode::Mem).is_none());
-        let identity =
-            WriterIdentity::from_db_option(&option, StoreMode::RocksDb).expect("要拿锁");
+        let identity = WriterIdentity::from_db_option(&option, StoreMode::RocksDb).expect("要拿锁");
         assert_eq!(identity.endpoint, "127.0.0.1:8000");
         assert_eq!(identity.namespace, "plant");
         assert_eq!(identity.database, "AMS");

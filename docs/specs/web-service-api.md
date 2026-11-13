@@ -120,6 +120,8 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
     "dbnum_model_ready_roots": true,
     "model_records_batch_max_roots": 64,
     "mesh_formats": ["mesh", "glb"],
+    "mesh_batch_max_keys": 1024,
+    "mesh_batch_max_bytes": 33554432,
     "room_complete_publication_ack": true,
     "room_rebuild_executor": "memory"
   },
@@ -443,6 +445,10 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
   - `Generated` — 这次跑了生成，拿到了画得出来的实例；
   - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
+- 逐根的生成会话（2026-11-10，ADR-099）：回执多一格 `generation_root_sesnos`，与 `generation_roots` **逐项对应、等长**——
+  这一根在本进程投影里的回执是按哪个会话生成的（`RootReceipt.source_sesno`）；这一根此刻没有回执（生成失败、
+  或刚被别的请求清掉）记 `null`。命中缓存没重新生成的根给的是它原来的生成会话。前端拿它记「装的时候是哪一版」，
+  与 §4.5.3 的 `generated_at` 同一个来源。分组回执（见下）不带这一格。
 - 两档等待，**分开读**（都不回 `202`）：
   - **逐根飞行等待 110 秒**（`src/data_interface/on_demand_model.rs:397-398`）：等一根的生成超过 110 秒即映射为
     `ModelGenerationInProgress` → **`409 conflict`**；那一根的生成照跑、不取消。多根范围里它按下文「逐根记错」进
@@ -825,6 +831,25 @@ plant-ui 的单根调用零影响。
   **不再整批 409 `not_generated`**。
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
+- `Server-Timing` 响应头（2026-11-10）：`read;dur=<毫秒>;desc="<条数> rows", total;dur=<毫秒>`。`read` 是取记录那一段
+  （读库或读投影，含把行解成记录），`total` 是从进 handler 到交出响应体之前，都不含序列化与传输。浏览器开发者工具的
+  Timing 面板直接显示。只加头，响应体不变。
+  2026-11-11 起多一格 `conn;dur=<毫秒>;desc="<连接>"`：这次读库走的是哪条连接——`pool-<连接数>`（只读连接池，见下一条）/
+  `shared`（进程那一条共享连接）/ `mixed`（两条都走过，多半是读连接上失败后重读）/ `none`（没读库，记录全在进程内投影
+  里）；`dur` 是等空闲读连接的时间，已含在 `read` 里。分组请求（单根是 GPWL / GPSET）逐库取数，不报这一格。
+- 库路由的冷读走只读连接池（2026-11-11，`fast_model::model_read_pool`）：后端到数据库原本只有一条连接，而数据库把同一条
+  连接上的请求放在同一个任务里轮着算，前端并发几路到了库这一头仍是一句一句地算（实测一条连接上 6 句同时发与依次发一样
+  慢，6 条连接各发一句快 4.2–4.6 倍）。现在另开几条连接专给本接口的冷读用，一条连接同一时刻只借给一个读，所以库里同时
+  在算的冷读语句数不超过连接数。连接数由环境变量 `AIOS_MODEL_READ_CONNECTIONS` 给：缺省 `4`，上限 `16`，`0` = 不开
+  （一切照旧走共享连接，回退用）；只在持久层是外部那台库（`store_mode = rocksdb`）时开，第一次有冷读时才建。读连接只发
+  `SELECT`；增量批次的写入仍全部走共享连接。读连接开不出来、借不到（等 30 秒）、读失败时，这次读照旧在共享连接上重做，
+  连着失败 3 次整池收掉、60 秒后重开。回的内容与共享连接上读的逐字相同（同一句 SQL，只换了连接）。8 万件的 SITE
+  （ams7333 `23717/2`，531 个 ZONE、79,409 行，6 个 ZONE 同时在途）直连库实测：一条连接 7.9 s，4 条 2.4–2.8 s，6 条
+  1.6–1.7 s；多开连接不抬库的内存（1–6 条量下来工作集都在 ±6 MB 内）。
+- 库路由的冷读先读行上的扁平副本（2026-11-10）：`inst_relate` 行的包围盒与世界变换取 `aabb_d` / `world_trans_d`，没有副本
+  的行（老行）再解引用 `aabb.d` / `world_trans.d`；游标谓词排在「有几何」的谓词之前。回的内容逐条不变，只是每行少四次
+  点查。环境变量 `AIOS_MODEL_RECORDS_FLAT_READ=0` 退回旧写法（给前后对比和回退用）。实测与依据见
+  `output/model-load-20261110/a6-measure/`。
 - 实现说明：所属库逐根解（`dbnum_for_roots`，跨库 400）→ 一次 `route_for(dbnum)` → 内存形态先按 receipt 收齐缺的根
   再决定 409 → 逐根取记录（库形态 `model_record_reader::records_of_root`，内存形态投影 → `GeomInstQuery`）→
   `page_records_across_roots` 平铺切页（单根 = 一根的特例，切页与原来逐字相同）。单测：
@@ -833,6 +858,186 @@ plant-ui 的单根调用零影响。
   **未 live**：本机在跑的 `:9099` 是 0.1.21 出厂包，没有这段代码；起新构建后
   `curl -X POST :8022/api/v1/model/records -d '{"generation_roots":["24381/145018","24381/145052"],"limit":5}'`
   应回 `generation_roots` + `roots[]` + 平铺 `items`，单根请求回执与之前逐字段相同。
+
+### 4.5.3 `GET /api/v1/node/model-status` — 节点模型状态与生成预检（只读、不落库，ADR-099，2026-11-10）
+
+- 为什么有它：前端显示一个节点（含 SITE / ZONE）之前和之后，要知道三件事——这个节点下的模型**生成过没有**、
+  **是不是最新**、**要生成的话有多少**。此前只能拼：库一级看 `/dbnums`，节点一级看 `node/versions`，生成过没有
+  只能整库枚举 `dbnums/{dbnum}/model/roots`（15–40 秒）。这条路一次回答，并且未初始化的库也答得出。
+- 它是**按需算的派生量**：从水位行、库文件的会话链、进程内的回执与账本、任务登记表现算；不建表、不写任何东西、
+  不进任何放行判据（生成、增量规划、水位都不读它）。只读 `GET`。
+- 实现在 `fast_model::node_model_status`（判定）与 `web_service::node_model_status`（HTTP）。
+
+**请求**
+
+`GET /api/v1/node/model-status?refno=24381/535`
+
+| 参数 | 要求 |
+|---|---|
+| `refno` | 必填。`a/b` 或 `a_b`。任意节点：SITE、ZONE、生成单元的根、生成单元里面的构件 |
+| 身份字段 | 可省，同 §3 |
+
+不需要 `dbnum`：所属的库由服务端从 `refno` 解出，回在 `dbnum` 里。
+
+**响应 200**
+
+```json
+{ "refno": "24381/535", "noun": "SITE", "dbnum": 7997, "unit_root": null,
+  "verdict": "partial", "verdict_reason": null,
+  "library": {
+    "file_latest_sesno": 447, "file_latest_time": "2026-11-09T10:12:00+08:00",
+    "applied_sesno": 0, "model_sesno": 0, "model_sesno_time": null, "initialized": false,
+    "model_verdict": "not_judged", "model_verdict_reason": "data_watermark_unestablished",
+    "model_source": "memory", "model_source_reason": "data_watermark_unestablished",
+    "data_batch_running": false, "model_task_running": false, "in_watch_scope": true },
+  "units": { "total": 12, "generated": 5, "missing": 7, "failed": 0, "lagging": 0, "exact": true },
+  "generated_at": { "sesno_min": 447, "sesno_max": 447,
+                    "time_min": "2026-11-09T10:12:00+08:00", "time_max": "2026-11-09T10:12:00+08:00",
+                    "basis": "own_generation" },
+  "changes": null,
+  "precheck": { "units_to_generate": 7, "needs_confirm": false, "confirm_threshold_units": 20 },
+  "cached": false, "elapsed_ms": 41 }
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `refno` / `noun` / `dbnum` | string / string / number | 请求的节点（`a/b`）、它的类型、所属的库 |
+| `unit_root` | string \| null | 请求的节点在某个生成单元**之内**（BRAN 里的一个 VALV）时，是那个单元的根；此时下面的数字说的都是这一个单元。其余情形 `null` |
+| `verdict` | string | 总判定，七个值之一，见下表 |
+| `verdict_reason` | string \| null | 判定的原因码，见下表；没有可说的为 `null` |
+| `library` | object | 所属库的事实，见下 |
+| `units` | object | 子树里生成单元的计数，见下 |
+| `generated_at` | object \| null | 已生成的那部分对应到哪些会话；`units.generated = 0` 时为 `null` |
+| `changes` | object \| null | 生成之后到库文件最新之间，这个节点下变了什么；不需要比（没有已生成的单元，或它们都已对应到库文件最新）时为 `null` |
+| `precheck` | object | 生成预检 |
+| `cached` | bool | 这一次没有做文件侧的计算（根清单与差分都命中了进程内缓存） |
+| `elapsed_ms` | number | 服务端用时 |
+| `warnings` | string[] | 至多 20 条；空时不出现 |
+
+`library`（数值与 `GET /api/v1/dbnums` 那一行同源、同义，§4.7）：
+
+| 字段 | 说明 |
+|---|---|
+| `file_latest_sesno` / `file_latest_time` | 库文件最新会话与它的保存时刻（时刻读不出为 `null`）。读的是库文件头上此刻的数，与 `GET /api/v1/dbnums` 两种形态的 `file_latest_sesno` 是同一个数（§4.7「两种形态的一致性」；2026-11-11 之前全量形态报的是登记表里上次扫描的旧观察值，对被排除的库会偏小） |
+| `applied_sesno` | 数据水位。读透形态与未初始化的库是 0 |
+| `model_sesno` / `model_sesno_time` | 模型水位与它对应的保存时刻。0 = 从没追平过 |
+| `initialized` | 这个库有没有建立过数据水位 |
+| `model_verdict` / `model_verdict_reason` | 库级判决 `in_sync` / `lagging` / `not_judged`，与 `/dbnums` 同一个函数算出 |
+| `model_source` / `model_source_reason` | 这个库的模型从哪读：`database` / `memory`，及落在 `memory` 的原因（§4.12） |
+| `data_batch_running` | 这个库此刻有数据批次任务在跑 |
+| `model_task_running` | 这个库此刻有整库模型任务在跑（`dbnums/{dbnum}/model/ensure`、整库重建） |
+| `in_watch_scope` | 这个库在不在本进程的监听范围里。不在的库 `update/execute` 会拒绝 |
+
+`units`（「生成单元」= `/model/generate` 对这个节点会枚举出的生成根，同一段遍历）：
+
+| 字段 | 说明 |
+|---|---|
+| `total` | 子树里（库文件最新会话上）的生成单元数。恒有 `total = generated + missing + failed` |
+| `generated` | 有模型的单元数。判据见「一个单元算不算已生成」 |
+| `missing` | 没有模型的单元数 |
+| `failed` | 最近一次生成失败、还没重新成功的单元数（含已放弃的）。它们的旧模型不可信，不算已生成 |
+| `lagging` | 已生成的单元里，生成之后被改到了的个数（`lagging ≤ generated`）。判据见「落后」 |
+| `exact` | `lagging` 与 `missing` 是不是精确的。`false` 的三种情形见「落后」末尾 |
+
+`generated_at`：
+
+| 字段 | 说明 |
+|---|---|
+| `sesno_min` / `sesno_max` | 已生成的单元各自对应到的会话里，最小的和最大的 |
+| `time_min` / `time_max` | 这两个会话的保存时刻；读不出为 `null` |
+| `basis` | `library_watermark`：全部靠库的模型水位担保（已初始化的库的常态，两个号都等于 `library.model_sesno`）；`own_generation`：全部是本进程按需生成的（未初始化的库）；`mixed`：两种都有 |
+
+`changes`（比的是从 `from_sesno` 到 `to_sesno` 的**净**差分；数字与 `GET /api/v1/node/diff-summary?a=<from>&b=<to>&scope=subtree`
+对同一个节点的回执相同，§4.15.6）：
+
+| 字段 | 说明 |
+|---|---|
+| `from_sesno` | 比较的起点：已生成的单元对应到的会话里最早的那个（就是 `generated_at.sesno_min`） |
+| `to_sesno` | 比较的终点：`library.file_latest_sesno` |
+| `units_changed` | 这一段里有几何变化的交付单元数（含新增的、被删的），等于 `diff-summary` 的 `units.changed` |
+| `units_added` / `units_removed` | 其中新增的、被删的单元数 |
+| `elements` | 元素级计数 `{added, deleted, modified, noop}`，等于 `diff-summary` 的 `elements`。`noop` = 记录改了但不影响几何 |
+| `unattributed` | 有不属于任何生成单元的构件发生了几何变化（例如 ZONE 自己挪了位置），这类变化算不到某个单元头上 |
+
+`precheck`：
+
+| 字段 | 说明 |
+|---|---|
+| `units_to_generate` | 对这个节点发一次不带 `force` 的 `/model/generate` 至少要生成的单元数：`missing + failed` |
+| `needs_confirm` | 要不要先让人确认：`阈值 > 0 且 units_to_generate > 阈值` |
+| `confirm_threshold_units` | 阈值。与 §4.15.6 是同一个（环境变量 `MODEL_HISTORY_CONFIRM_UNITS`，缺省 20，0 = 从不要求确认） |
+
+**总判定**（`verdict`，从上到下第一条成立的为准）：
+
+| 值 | 含义 | 何时 | `verdict_reason` |
+|---|---|---|---|
+| `unknown` | 未知 | 判不了：两枚水位失配或读不到（库里那份不可信） | `watermarks_inconsistent` / `model_watermark_unavailable` |
+| `updating` | 更新中 | 这个库此刻正在被写：`data_batch_running` 或 `model_task_running` | `data_batch_running` / `model_task_running` |
+| `unknown` | 未知 | 判不了：要比的那一段差分算不出来（会话不在链上、超时） | `changes_unreadable` |
+| `empty` | 没有生成单元 | `units.total = 0`：这个节点下没有任何会产出模型的东西，不需要生成 | `null` |
+| `not_generated` | 未生成 | `units.generated = 0` | `null` |
+| `partial` | 部分生成 | `0 < units.generated < units.total` | `null` |
+| `lagging` | 落后 | 全部生成过，但生成之后这个节点下有影响模型的改动 | `units_changed`（`units.lagging > 0`）/ `other_changes`（只有归不到单元上的变化或被删的单元） |
+| `latest` | 最新 | 全部生成过，生成之后这个节点下没有影响模型的改动 | `null` |
+
+`unknown` 与 `updating` 时其余字段照常给出、按读到的事实计数，只是不下「最新 / 落后」的结论。
+
+**一个单元算不算已生成**（与 `/model/records` 读得到读不到是同一套依据）：
+
+1. 进程内账本里这个单元最近一次生成失败、还没重新成功 → `failed`。
+2. 进程内投影里有它的回执 → `generated`，对应到的会话是回执的生成会话。
+3. 库里的整库模型读得到（`model_source = database`，或 `memory` 且原因是 `model_lagging` / `initialization_publishing`，
+   并且 `model_sesno > 0`），而这个单元在 `model_sesno` 那个会话上已经存在 → `generated`，对应到 `model_sesno`。
+   模型水位的意思就是「到这个会话为止每个生成单元都已生成并落库」（ADR-079）。回执比水位旧的单元也对应到水位：
+   它没被之后的批次碰过，那份模型到水位仍然有效。
+4. 其余 → `missing`。包括：未初始化的库里本进程没生成过的单元；模型水位之后才新建、还没人生成的单元。
+
+后端重启后回执和账本都是空的：已初始化的库仍按第 3 条答；未初始化的库回到全部 `missing`——它们的模型本来就只在
+进程内存里，重启即失。
+
+**落后**（用户 2026-11-10 定的口径）：只有生成之后**真的有会话改到了这个节点下面的构件**——网格变、位置变、新增、
+删除——才算落后。E3D 登录产生的记账会话、只改名字或描述的修改都不算。所以库文件比模型水位新，不等于节点落后。
+
+- 算法：对每个已生成的单元，取它对应到的会话 V；V 等于库文件最新就不用比。否则做一次 V → 库文件最新的净差分
+  （与 `node/diff-summary` 同一份计算，影响判定用的是生成那条路自己的那把尺子），落在某个单元名下的几何变化把那个
+  单元记为 `lagging`。
+- 净差分：先改后改回、净结果没变的不算。
+- 这把尺子只看**节点子树里的记录**。两类情形它看不到，要等下一次数据批次由增量规划器裁决：上级节点挪了位置
+  （查 ZONE 时 SITE 动了）；跨节点的级联（连接对端、电缆端点、设计引用）。
+- `units.exact = false`：归不到单元上的变化被截断（`diff-summary` 每组最多列 500 行）；已生成的单元对应到 4 个以上
+  不同的会话（只比最早和最近的几段，其余按最早那一段算，可能多报）；或者要比的那一段差分算不出来
+  （`verdict_reason = changes_unreadable`，此时 `changes` 为 `null`）。
+- 「生成单元」比「交付单元」宽：交付单元（BRAN / HANG / SUPPO / EQUI 等）之外，不在任何交付单元下、自己有模型的构件
+  也各成一个生成单元（结构件多半如此）。`units.*` 数的是生成单元；`changes.units_changed` 数的是交付单元（与
+  `diff-summary` 同口径）。后一类生成单元**内部**的改动算不到它头上，记在 `changes.unattributed`，节点照样判 `lagging`
+  （`verdict_reason = other_changes`）。本机实测：1112 的 SITE `9304/2` 有 18 个生成单元、0 个交付单元；7999 的
+  `24383/80211` 是 3362 对 910；7333 的 `23717/2` 是 12433 对 12433。
+
+**与别的接口的关系**
+
+- `latest` **不保证** `/model/generate` 会跳过：它在库水位落后于库文件、或后端重启过时会把根整根重算一遍
+  （§4.5，ADR-089）。所以不要拿 generate 去「刷新到最新」。已初始化的库追到最新走 `POST /api/v1/update/execute`
+  （只重算被改到的根，并推进水位）；未初始化的库才对节点发不带 `force` 的 generate。
+- `node/versions?since_sesno=<model_sesno>` 没有非 `noop` 的行 ⇒ 这里一定不是 `lagging`。反过来不一定：那张表逐会话
+  算，先改后改回会各记一行，这里按净差分不算。
+- 分组（GPWL / GPSET）不展开：对分组问会回 `empty`。要看成员请逐个问。
+- 范围强制重生成（右键「重新生成模型」）进行到一半时不单列 `updating`，按当时读到的计数回（通常是 `partial`）。
+
+**错误**（信封同 §3，码沿用 §4.15 那一族）
+
+| HTTP | code | 场景 |
+|---|---|---|
+| 400 | `INVALID_REFNO` | `refno` 缺失或解不出 |
+| 404 | `REFNO_NOT_FOUND` | 库文件最新会话上没有这个元素；或它解出的库不在当前 MDB、不是设计库 |
+| 503 | `SOURCE_NOT_FOUND` | 库文件打不开，或水位读不到（数据库暂时不可用） |
+| 500 | `internal` | 其余 |
+
+**缓存与代价**
+
+- 进程内缓存两类**只由库文件决定**的中间结果：子树的生成单元清单；一段会话之间的净差分。键里带库文件指纹
+  （路径 + 长度 + 修改时刻），文件一动就失效；各最多 256 项，满了整体清空；重启即失。
+- 水位、回执、账本、任务登记每次现读，不缓存——它们变了，下一次请求就看得到。
+- 库文件已经追平（`model_sesno = file_latest_sesno`）时不做差分。
 
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元（已退役，ADR-072 D5）
 
@@ -860,9 +1065,23 @@ plant-ui 的单根调用零影响。
   （`model_sesno` / `model_verdict` / 四格根数）与 `model_source`。回执多一格
   `"summary": true` 与 `snapshot_epoch`。队列面板按 1–5 秒一拍，拿的就是这一份；库行
   「重算模型（整库）」「清理模型（整库）」据 `initialized` 判灰，所以那一格**必须**在。
-  不补的是 `blocked` / `excluded` / `not_in_project` / `anomaly` / `write_state` /
-  `room_alignment` / `cached_pe_rows`——它们要扫源文件与 MDB 范围才答得出来，缺席时
-  客户端按 `false` / 不画处理。要全量就带上身份三件套（本项目全量实测约 50 s）。
+  2026-11-11 起还带 `excluded` / `excluded_reason` / `excluded_detail`（与全量形态同一个谓词、同一套代号，
+  见下「两种形态的一致性」）；`not_in_project` 恒为 `false`（这一份只列有文件的库）。
+  不补的是 `blocked` / `anomaly` / `write_state` / `room_alignment` / `cached_pe_rows`
+  ——它们要扫源文件、拿登记身份对现场文件才答得出来，缺席时客户端按 `false` / 不画处理。
+  要全量就带上身份三件套（本项目全量实测约 50 s；监听名单收窄到 5 个库的现场 2026-11-11 实测约 5 s）。
+- **两种形态的一致性**（2026-11-11）：同一个库在两种形态里都有行时，下面这些格是同一个答案——
+  - `file_latest_sesno` / `file_size`：**库文件头上此刻的数**。引导形状读模型树骨架钉的会话；全量形态读 MDB 成员
+    绑定的那份文件的头（`model_source::latest_source_version_of_file`，与 §4.5.3 节点模型状态的
+    `library.file_latest_sesno` 同一个函数），不是成员的库（目录库、系统库、补充名单里的库）取这一趟扫描读到的头，
+    都拿不到才退回登记表里上次扫描的观察值并在 `warnings` 里说明。此前全量形态一律报登记表里的观察值：被监听名单
+    排除的库不再被扫，那个数就停在排除之前（现场 1112 / 7999 / 7333 报 739 / 219 / 1724，文件已到 748 / 236 / 1732）。
+  - `db_type` / `file_name` / `file_path`：登记行没有文件身份时（只被房间盖章一类的写入碰过、从没被扫描登记过的库）
+    取 MDB 成员绑定的那份文件，于是这些行在全量形态里同样带模型判决与 `room_alignment`。
+  - `applied_sesno` / `initialized` / `model_*` / `model_source*`：同一趟水位读（本来就一致）。
+  - `excluded` / `excluded_reason` / `excluded_detail`：见下面 `excluded` 那一条。
+  全量形态独有的行（不在当前 MDB 里的登记行、目录库、系统库）不受影响。MDB 声明了、成员绑定里有文件、却因为被排除
+  而没被扫到也没登记过的库，全量形态现在按「排除」报并带上身份与文件最新会话号，不再报成 `not_in_project`。
 - 响应：`{ "dbnums": [...], "warnings": [...] }`，每行：
 
 ```json
@@ -881,7 +1100,7 @@ plant-ui 的单根调用零影响。
   "room_alignment": { "generation": "efd4ebe1…", "resident_generation": "efd4ebe1…",
                       "current": true },
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
-  "blocked": false, "excluded": false }
+  "blocked": false, "excluded": false, "excluded_reason": null, "excluded_detail": null }
 ```
 
 - `write_state`（2026-09-10，ADR-072 D1）：**这个库有没有一次没写完的任务**。它不回答
@@ -953,9 +1172,22 @@ plant-ui 的单根调用零影响。
   不清库、不改登记、连观察值也不写，`old_path` / `new_path` 随 `anomaly` 带出。它先于回退判——不拿另一份
   文件的会话号去判回退、转整库重建。
 - `blocked`：阻断的库压根不入队，队列面板没有它们的行——这里是「这个库的水位为
-  什么一直不动」的唯一出处。`excluded`：不在本期执行范围，即**当前 MDB 没有声明
-  这个 DESI**（2026-08-06 起范围只由 MDB 定，`manual_db_nums` 一类手写名单不再参与），
-  与阻断不是一回事，界面上不许合成一行。
+  什么一直不动」的唯一出处。`excluded`：不在本期执行范围（增量摄入不处理它），与阻断不是一回事，界面上不许合成一行。
+  判定只有一处（`increment_manager::in_scope_with`，两种形态都经 `AiosDBManager::exclusion` 问它）。
+  `excluded_reason`（2026-11-11）说是哪一道门，没被排除时为 `null`：
+
+  | `excluded_reason` | 含义 |
+  |---|---|
+  | `watch_dbnums` | 监听名单没点这个库（`DbOption.toml` 的 `watch_dbnums` 或启动参数 `--watch-dbnum`）。名单是人为收窄的范围：库在 MDB 里、文件也在，只是这个进程不摄入它 |
+  | `debug_dbnum` | 启动参数 `--debug-dbnum` 的调试限定没点这个库 |
+  | `not_declared_by_mdb` | 当前 MDB 没声明这个设计库，`extra_element_dbnums` 补充名单里也没有（2026-08-06 起范围由 MDB 定，`manual_db_nums` 一类手写名单不参与） |
+  | `db_type_not_ingested` | 这种库类型不参与增量摄入；登记行没有类型、成员绑定里也找不到它时也落在这一档 |
+  | `foreign_project` | 别的项目的库（库号只在项目内唯一，本库按库号做键） |
+
+  几道门同时关着时报排在前面的那一道（次序同上表前三行，与跳过日志的分发点 `increment_manager::skip_reason`
+  相同）。`excluded_detail` 是同一件事说给人听的一句，与跳过日志是同一句，监听名单的内容与来源（配置文件还是命令行）
+  都在里面。被排除的库照样报得出 `file_latest_sesno`（文件此刻到了哪个会话）与两枚水位（它上次被摄入时停在哪）：
+  「落后多少」算得出来，只是这个进程不会去追。读透形态不做增量摄入，两种形态下 `excluded` 恒为 `false`。
 - `rollback` 的库在下一轮扫描/执行时按首次导入入队（窗口 `1..file_latest`），由 worker
   冻结点复核后整库清空重建，不再长期停留在 `blocked: true`；其余五种异常照旧阻断：`name_changed`（跳过该文件）/ `type_changed` / `duplicate` /
   `missing` / `foreign_project`（`FileAnomaly::blocks()` = 除 `path_migrated` 外全阻断，`dbnum_state.rs:627-629`；回退在查 `blocks()`
@@ -1469,6 +1701,103 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   快照里对不上（粗容差下 CSG 失败 / 被丢 / 变成了标准图元），不留标记、下次再试。
 - 幂等：再跑一次全是 `reused` / `known_skipped`，耗时只剩枚举与 L0 求值。同一账也进生成报表
   （`E3dPersistReport.lod1_*`）与逐根日志 `model root generated: … lod1={ms}`。
+
+### 4.11.4 `POST /api/v1/meshes/batch` — 一次取一批网格（`.mesh` 原样字节，2026-11-10）
+
+- 为什么有它：一个节点常有上千种网格，逐个 `GET`（§4.11）在浏览器里就是上千次请求——本机实测 1486 种网格
+  要 1.42 秒；生产的 nginx 只有 HTTP/1.1、同一主机 6 条连接，会更慢。这条路一次请求带一批键，响应是一段
+  二进制流，一个键一帧。**§4.11 的单个路由不变**：两条路读同一份文件、过同一道字符集门。
+- 只给**原网格**（§4.11 的 `lod=0`）的 `.mesh` 形态。粗网格（`?lod=1`）和 `.glb` 仍然只走 §4.11。
+- 实现在 `web_service::mesh_batch`。
+
+**请求**
+
+`Content-Type: application/json`，体：
+
+```json
+{ "keys": ["e3d_baked_v2_6f0c…", "1", "2"] }
+```
+
+| 字段 | 要求 |
+|---|---|
+| `keys` | 必填。`1..=1024` 条；每条 `[0-9A-Za-z_]{1,128}`（与 §4.11 的 `geo_hash` 是同一道门）；不许重复 |
+| `lod` | 可省。只接受 `0`，其他值 400——这条路不给粗网格，不能让 `lod=1` 被悄悄当成原网格 |
+
+其余字段忽略。不需要 `project` / `mdb`：网格键是内容寻址的，和 §4.11 一样不过身份门。
+
+**响应 200**
+
+`Content-Type: application/octet-stream`、`Cache-Control: no-store`，分块传输（没有 `Content-Length`）。
+体由一个流头、N 帧、一个流尾依次拼成，**整数一律小端**：
+
+| 段 | 长度 | 内容 |
+|---|---|---|
+| 流头 | 4 | 魔数，ASCII `PMB1`（`50 4D 42 31`）；末位是格式版本 |
+| | 4 | `u32` 帧数 N，等于请求里 `keys` 的条数 |
+| 帧 × N | 见下 | 第 i 帧对应 `keys[i]`，顺序与请求一致 |
+| 流尾 | 4 | 魔数，ASCII `PMBE`（`50 4D 42 45`） |
+| | 4 | `u32` 帧数 N，与流头相同 |
+
+一帧：
+
+| 相对帧首的偏移 | 长度 | 内容 |
+|---|---|---|
+| 0 | 1 | `u8` 状态，见下表 |
+| 1 | 1 | `u8` 键的字节数 `key_len`（1..=128） |
+| 2 | 2 | `u16` 保留，恒为 0 |
+| 4 | 4 | `u32` 内容字节数 `payload_len`（状态不是 0 时为 0） |
+| 8 | `key_len` | 键，ASCII，与 `keys[i]` 逐字节相同 |
+| | 0..7 | `00` 补齐到 8 的倍数 |
+| | `payload_len` | 内容 |
+| | 0..7 | `00` 补齐到 8 的倍数 |
+
+帧长 = `8 + ceil8(key_len) + ceil8(payload_len)`，`ceil8(n)` 是不小于 n 的最小的 8 的倍数。流头也是 8 字节，
+所以**每一帧、每一段内容相对响应体起点的偏移都是 8 的倍数**：整段收完再拆的话，可以直接在整块缓冲上
+按偏移建 `Float32Array` / `Uint32Array` 视图，不必先把每个网格拷出来。边收边拆的话，一帧有多长在收到它的
+前 8 个字节时就确定了。
+
+状态：
+
+| 值 | 含义 | 客户端怎么办 |
+|---|---|---|
+| 0 | 有。内容是这个键 `.mesh` 的原样字节，与 `GET /api/v1/meshes/{键}.mesh` 的响应体逐字节相同 | 解析；内容寻址，可以按键长期缓存 |
+| 1 | 没有这个文件 | 同 §4.11 的 404，可负缓存 |
+| 2 | 文件在，但这一次没读出来（I/O 错误，原因在服务端日志里） | 稍后重发，或对这个键走 §4.11 |
+| 3 | 没读：这一批的内容总量到了上限 | 把这一帧起的所有键再发一次 |
+| 其他 | 保留 | 当成这个键这次没拿到，走 §4.11 |
+
+**上限**
+
+- 个数：一次最多 1024 个键。超了整次 400，一个都不读。
+- 总字节：一次响应里状态为 0 的内容字节数之和不超过 32 MiB（33 554 432；帧头和补齐不计）。服务端按请求
+  顺序逐键累计：某个键的文件加上去会超、而此前已经给出过内容，那么**这一帧和它之后的所有帧**都是状态 3。
+  由此有两条保证：第 0 帧永远不是 3（单个网格再大也取得到）；3 一旦出现就一直到末尾，不会夹在中间。
+  现有网格的中位数是 5 KB、最大 2.3 MB，256 个键一批通常是几 MB，正常用法碰不到这条线。
+- 这两个数在 `/health` 的 `capabilities` 里：`mesh_batch_max_keys`、`mesh_batch_max_bytes`（§4.1）。
+  没有这两格的后端就没有这条路由。
+
+**完整性**
+
+响应体必须以流尾（`PMBE` + N）结束。没有流尾 = 中途断了（连接断开，或服务端异常）：已经收全的帧可用，
+其余的键重发。
+
+**错误**（都在发出任何响应体之前）
+
+| HTTP | code | 场景 |
+|---|---|---|
+| 400 | `bad_request` | 体不是 JSON 或形状不对；`keys` 缺失、为空、超过 1024 条、有重复、有键不合字符集；`lod` 不是 0。形状同 §3 |
+| 405 | — | **没有这条路由的旧后端**：路径落到 §4.11 的 `GET /api/v1/meshes/{file}` 上，方法不对，回 405（`Allow` 里只有 `GET`、`HEAD`，没有响应体）。客户端见 405（或经代理变成的 404）就退回逐个 `GET` |
+| 413 | `payload_too_large` | 请求体超过 2 MiB（框架的缺省上限）。1024 个键的合法请求不到 140 KB。形状同 §3 |
+
+有了这条路由之后，`GET /api/v1/meshes/batch`（方法不对）回 405，此前是 400；`batch` 不带后缀，本来就不是
+合法的单个网格路径。
+
+**服务端的做法**
+
+- 网格目录和 §4.11 是同一个解析口（`options::meshes_dir()`），键过了 `is_valid_geo_hash` 才拼路径。
+- 读盘限并发：一次请求同时在读的文件不超过 16 个，全进程这条路由同时在读的不超过 32 个。响应按请求顺序
+  流出，先读完的靠后的帧在队里等前面的。
+- 建议的用法：一批 256 个键上下，3–4 批并发。
 
 ### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
 

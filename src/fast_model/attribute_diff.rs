@@ -120,7 +120,12 @@ pub fn attribute_diff(
 }
 
 /// A / B 都得在链上，且 A 链序在 B 之前（纯函数；与差异摘要同一口径、同一组错误码）。
-pub fn pair_positions(chain: &[u32], dbnum: u32, a: u32, b: u32) -> Result<(usize, usize), UnitVersionsError> {
+pub fn pair_positions(
+    chain: &[u32],
+    dbnum: u32,
+    a: u32,
+    b: u32,
+) -> Result<(usize, usize), UnitVersionsError> {
     let position = |sesno: u32| chain.iter().position(|candidate| *candidate == sesno);
     let (Some(pos_a), Some(pos_b)) = (position(a), position(b)) else {
         let missing = if position(a).is_none() { a } else { b };
@@ -149,8 +154,14 @@ pub fn classify(
     visible_changes: usize,
 ) -> (AttributeDiffKind, Option<UnitVersionImpact>) {
     match (exists_a, exists_b) {
-        (false, true) => (AttributeDiffKind::Created, Some(UnitVersionImpact::Delivery)),
-        (true, false) => (AttributeDiffKind::Deleted, Some(UnitVersionImpact::Tombstone)),
+        (false, true) => (
+            AttributeDiffKind::Created,
+            Some(UnitVersionImpact::Delivery),
+        ),
+        (true, false) => (
+            AttributeDiffKind::Deleted,
+            Some(UnitVersionImpact::Tombstone),
+        ),
         (true, true) => match impact {
             None if visible_changes == 0 => (AttributeDiffKind::Unchanged, None),
             None => (AttributeDiffKind::Modified, Some(UnitVersionImpact::Noop)),
@@ -222,17 +233,25 @@ fn compute(
     stats.render_ms = render_started.elapsed().as_millis();
 
     // 不存在的那一侧就是空表：created 列 B 侧全部已设属性（before 空），deleted 反之
-    let before_table: &[AttributeValue] =
-        side_a.as_ref().and_then(|side| side.attributes.as_deref()).unwrap_or(&[]);
-    let after_table: &[AttributeValue] =
-        side_b.as_ref().and_then(|side| side.attributes.as_deref()).unwrap_or(&[]);
+    let before_table: &[AttributeValue] = side_a
+        .as_ref()
+        .and_then(|side| side.attributes.as_deref())
+        .unwrap_or(&[]);
+    let after_table: &[AttributeValue] = side_b
+        .as_ref()
+        .and_then(|side| side.attributes.as_deref())
+        .unwrap_or(&[]);
     // 某一端存在但渲染失败：不能拿空表去比（会把全部属性报成「删光 / 新增」），改成不列、只报原因
     let unavailable = side_a
         .as_ref()
         .and_then(|side| side.unavailable.clone())
         .or_else(|| side_b.as_ref().and_then(|side| side.unavailable.clone()));
-    let render_ok = side_a.as_ref().map_or(true, |side| side.attributes.is_some())
-        && side_b.as_ref().map_or(true, |side| side.attributes.is_some());
+    let render_ok = side_a
+        .as_ref()
+        .map_or(true, |side| side.attributes.is_some())
+        && side_b
+            .as_ref()
+            .map_or(true, |side| side.attributes.is_some());
     let changes: Vec<AttributeChange> = if render_ok {
         diff_attribute_tables(before_table, after_table)
     } else {
@@ -329,11 +348,17 @@ mod tests {
     fn classify_maps_presence_and_impact_onto_the_version_vocabulary() {
         assert_eq!(
             classify(false, true, None, 12),
-            (AttributeDiffKind::Created, Some(UnitVersionImpact::Delivery))
+            (
+                AttributeDiffKind::Created,
+                Some(UnitVersionImpact::Delivery)
+            )
         );
         assert_eq!(
             classify(true, false, None, 12),
-            (AttributeDiffKind::Deleted, Some(UnitVersionImpact::Tombstone))
+            (
+                AttributeDiffKind::Deleted,
+                Some(UnitVersionImpact::Tombstone)
+            )
         );
         assert_eq!(
             classify(true, true, None, 0),
@@ -352,7 +377,10 @@ mod tests {
         );
         assert_eq!(
             classify(true, true, Some(OperationImpact::TransformOnly), 2),
-            (AttributeDiffKind::Modified, Some(UnitVersionImpact::Placement))
+            (
+                AttributeDiffKind::Modified,
+                Some(UnitVersionImpact::Placement)
+            )
         );
         assert_eq!(
             classify(true, true, Some(OperationImpact::Regen), 3),

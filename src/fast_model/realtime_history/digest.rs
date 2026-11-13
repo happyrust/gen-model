@@ -288,7 +288,10 @@ mod tests {
         let t1 = tube("t1", "7997_1", 3);
         let t2 = tube("t2", "7997_3", 3);
         assert_eq!(
-            geometry_digest(&[a.clone(), b.clone(), c.clone()], &[t1.clone(), t2.clone()]),
+            geometry_digest(
+                &[a.clone(), b.clone(), c.clone()],
+                &[t1.clone(), t2.clone()]
+            ),
             geometry_digest(&[c, a, b], &[t2, t1]),
         );
     }
@@ -314,7 +317,10 @@ mod tests {
         assert_eq!(empty, geometry_digest(&[], &[]));
         // 空单元 = 不喂任何字节的 SHA-256 前 16 字节。
         assert_eq!(empty, "g:e3b0c44298fc1c149afbf4c8996fb924");
-        assert_ne!(empty, geometry_digest(&[instance("a", "7997_1", 3, "")], &[]));
+        assert_ne!(
+            empty,
+            geometry_digest(&[instance("a", "7997_1", 3, "")], &[])
+        );
     }
 
     fn pin(dbnum: i32, db_type: &str, file: PathBuf) -> DbPin {
@@ -362,7 +368,10 @@ mod tests {
             let value = value.to_string();
             move || Ok(value)
         };
-        assert_eq!(memo.get_or_compute(key, start, compute("v1")).unwrap(), "v1");
+        assert_eq!(
+            memo.get_or_compute(key, start, compute("v1")).unwrap(),
+            "v1"
+        );
         assert_eq!(
             memo.get_or_compute(key, start + Duration::from_millis(999), compute("v2"))
                 .unwrap(),
@@ -379,7 +388,10 @@ mod tests {
             memo.get_or_compute(other, start, || anyhow::bail!("boom"))
                 .is_err()
         );
-        assert_eq!(memo.get_or_compute(other, start, compute("ok")).unwrap(), "ok");
+        assert_eq!(
+            memo.get_or_compute(other, start, compute("ok")).unwrap(),
+            "ok"
+        );
     }
 
     // Feature: model-version-timeline-scrub, Property 35: geometryKey 是几何内容摘要（后端）。

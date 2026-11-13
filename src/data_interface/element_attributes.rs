@@ -202,7 +202,8 @@ impl ElementAttributeService {
         let schema = reader.schema.clone();
         let store = reader.view()?;
         let snapshot_epoch = store.epoch;
-        let catalog = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema.clone());
+        let catalog =
+            super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema.clone());
         let spool = Arc::new(MirrorSpool::for_process(&option.surreal_ns, project, mdb)?);
         let (backup_tx, backup_rx) = mpsc::channel(BACKUP_QUEUE_CAPACITY);
         Ok((
@@ -356,8 +357,7 @@ impl ElementAttributeService {
             .flat_map(|definition| [Some(definition.key), definition.old_key])
             .flatten()
             .collect::<HashSet<_>>();
-        catalog
-            .materialize_for_element(&mut snapshot.extraction, &snapshot.explicit_attributes);
+        catalog.materialize_for_element(&mut snapshot.extraction, &snapshot.explicit_attributes);
 
         let noun = snapshot
             .extraction
@@ -919,8 +919,16 @@ impl ElementAttributeProvider {
     }
 
     pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
-        self.service.read().await.as_ref().map(|service|
-            (service.store.opened_dbnums(), service.store.cached_elements()))
+        self.service
+            .read()
+            .await
+            .as_ref()
+            .map(|service| {
+                (
+                    service.store.opened_dbnums(),
+                    service.store.cached_elements(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -1255,7 +1263,10 @@ mod tests {
             .expect("render's doc follows read_pinned")
             .0;
         assert!(pinned.contains("self.render(snapshot, false)"), "{pinned}");
-        assert!(pinned.contains("return Ok(None);"), "不存在 → None，不是错误");
+        assert!(
+            pinned.contains("return Ok(None);"),
+            "不存在 → None，不是错误"
+        );
         for forbidden in ["offer_backup", "spool", "SUL_DB", "store.element_snapshot"] {
             assert!(
                 !pinned.contains(forbidden),
@@ -1377,12 +1388,44 @@ mod tests {
         let nulref = DescriptorValue::RefNo(e3d_io::refno::RefNo::new(0, 0));
         let empty_word = DescriptorValue::Word { raw: 0, text: None };
         let cases = [
-            ("HEADW", DescriptorValue::Real(0.0), "real", "0", "type-default", false, true),
-            ("BSTA", DescriptorValue::Int(0), "int", "0", "type-default", false, true),
-            ("TSFBR", DescriptorValue::Bool(false), "bool", "false", "type-default", false, true),
+            (
+                "HEADW",
+                DescriptorValue::Real(0.0),
+                "real",
+                "0",
+                "type-default",
+                false,
+                true,
+            ),
+            (
+                "BSTA",
+                DescriptorValue::Int(0),
+                "int",
+                "0",
+                "type-default",
+                false,
+                true,
+            ),
+            (
+                "TSFBR",
+                DescriptorValue::Bool(false),
+                "bool",
+                "false",
+                "type-default",
+                false,
+                true,
+            ),
             ("ORRF", nulref, "ref", "0/0", "type-default", false, true),
             ("HDMT", empty_word, "word", "unset", "unset", true, false),
-            ("DESC", DescriptorValue::Unset, "unset", "unset", "unset", true, false),
+            (
+                "DESC",
+                DescriptorValue::Unset,
+                "unset",
+                "unset",
+                "unset",
+                true,
+                false,
+            ),
         ];
         for (name, value, value_type, display, origin, is_unset, editable) in cases {
             let row = render_attribute(&valued(name, CatalogDefault, value))
@@ -1431,7 +1474,12 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            (width.origin, width.display.as_str(), width.is_unset, width.editable),
+            (
+                width.origin,
+                width.display.as_str(),
+                width.is_unset,
+                width.editable
+            ),
             ("derived", "0", false, false)
         );
         let inco = render_attribute(&valued(
@@ -1569,7 +1617,9 @@ mod tests {
             status_and_value("NAME"),
             (CatalogDefault, Some(DescriptorValue::Unset))
         );
-        assert!(is_unnamed_placeholder(extraction.find_attribute("NAME").unwrap()));
+        assert!(is_unnamed_placeholder(
+            extraction.find_attribute("NAME").unwrap()
+        ));
         assert_eq!(
             status_and_value("HBOR"),
             (Decoded, Some(DescriptorValue::Real(15.0)))
@@ -1970,7 +2020,10 @@ mod tests {
                 tty.page.len(),
                 missing_from_panel.len(),
                 unrendered.len(),
-                unrendered.iter().filter(|name| answer(name) == "ZZE").count(),
+                unrendered
+                    .iter()
+                    .filter(|name| answer(name) == "ZZE")
+                    .count(),
                 with_a_real_value.len(),
                 response.diagnostics.undecoded.len(),
                 response.diagnostics.shape_conflicts.len(),
@@ -1981,7 +2034,10 @@ mod tests {
                 response.complete,
             );
             for (name, display, _) in defaulted {
-                println!("TTY_ANSWER {refno}\t{name}\t{}\t面板={display}", answer(name));
+                println!(
+                    "TTY_ANSWER {refno}\t{name}\t{}\t面板={display}",
+                    answer(name)
+                );
             }
             for name in unrendered {
                 println!("TTY_ANSWER {refno}\t{name}\t{}\t面板=(不画)", answer(name));
@@ -2257,7 +2313,8 @@ mod tests {
         assert_eq!(response.dbnum, tree.dbnum_of(branch).unwrap() as i32);
         let after_attributes = e3d_io::read_stats::snapshot();
         assert_eq!(
-            after_attributes.database_opens, after_tree.database_opens,
+            after_attributes.database_opens,
+            after_tree.database_opens,
             "attribute service reopened an already-open database: {}",
             after_attributes.summary()
         );

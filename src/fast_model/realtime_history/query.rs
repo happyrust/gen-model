@@ -90,7 +90,11 @@ impl RealtimeError {
     /// 请求被取消（客户端断开或超时）：handler 通常已经丢弃了 future，走到这里说明
     /// 取消是在返回路径上才被观察到的。回 504 与超时同码，调用方不必分辨。
     fn cancelled() -> Self {
-        Self::new(504, "HISTORY_QUERY_TIMEOUT", "query cancelled before it finished")
+        Self::new(
+            504,
+            "HISTORY_QUERY_TIMEOUT",
+            "query cancelled before it finished",
+        )
     }
 
     fn timed_out(secs: u64) -> Self {
@@ -296,11 +300,7 @@ fn compute_error(
             ) {
                 absent_error(dbnum, unit, sesno)
             } else {
-                RealtimeError::new(
-                    500,
-                    "GEOMETRY_GENERATION_FAILED",
-                    format!("{error:#}"),
-                )
+                RealtimeError::new(500, "GEOMETRY_GENERATION_FAILED", format!("{error:#}"))
             }
         }
     }
@@ -313,11 +313,7 @@ fn absent_error(dbnum: u32, unit: e3d_io::refno::RefNo, sesno: u32) -> RealtimeE
         Err(error) => return error,
     };
     let kind = classify_absent(&rows.rows, sesno);
-    let mapped = RealtimeError::new(
-        kind.status() as u16,
-        kind.code(),
-        kind.message(sesno),
-    );
+    let mapped = RealtimeError::new(kind.status() as u16, kind.code(), kind.message(sesno));
     match kind.reason() {
         Some(reason) => mapped.with_detail(json!({ "reason": reason.as_str() })),
         None => mapped,
@@ -470,9 +466,8 @@ pub async fn query_realtime_with(
     let source_file = service
         .source_file(dbnum)
         .map_err(|error| RealtimeError::new(503, "SOURCE_NOT_FOUND", format!("{error:#}")))?;
-    let fingerprint = source_set_fingerprint(&source_file).map_err(|error| {
-        RealtimeError::new(503, "SOURCE_NOT_FOUND", format!("{error:#}"))
-    })?;
+    let fingerprint = source_set_fingerprint(&source_file)
+        .map_err(|error| RealtimeError::new(503, "SOURCE_NOT_FOUND", format!("{error:#}")))?;
     let key = RealtimeCacheKey {
         dbnum,
         unit: (unit.word0, unit.word1),
@@ -749,8 +744,14 @@ mod tests {
         // 只验证形状与取值来源：全局状态的读数与配置一致，且字段名与 design §1.8 对齐。
         let state = RealtimeHistoryState::global();
         let stats = state.cache().stats();
-        assert_eq!(stats.capacity, crate::options::model_history_realtime_cache());
-        assert_eq!(state.gate().limit(), crate::options::model_history_realtime_concurrency());
+        assert_eq!(
+            stats.capacity,
+            crate::options::model_history_realtime_cache()
+        );
+        assert_eq!(
+            state.gate().limit(),
+            crate::options::model_history_realtime_concurrency()
+        );
         assert_eq!(
             state.timeout_secs(),
             crate::options::model_history_query_timeout_secs() as u64
@@ -826,7 +827,11 @@ mod tests {
     fn resolve_errors_share_one_mapping_for_both_routes() {
         for (error, status, code) in [
             (ResolveError::InvalidFormat, 400u16, "INVALID_SELECTOR"),
-            (ResolveError::BeforeOldest, 422, "TIME_BEFORE_OLDEST_SESSION"),
+            (
+                ResolveError::BeforeOldest,
+                422,
+                "TIME_BEFORE_OLDEST_SESSION",
+            ),
             (ResolveError::NoResolvable, 422, "NO_RESOLVABLE_SESSION"),
         ] {
             assert_eq!(resolve_error_status(error), status, "{error:?}");
@@ -853,7 +858,10 @@ mod tests {
     #[test]
     fn timeout_and_cancel_share_the_504_code() {
         let timed_out = RealtimeError::timed_out(1);
-        assert_eq!((timed_out.status, timed_out.code), (504, "HISTORY_QUERY_TIMEOUT"));
+        assert_eq!(
+            (timed_out.status, timed_out.code),
+            (504, "HISTORY_QUERY_TIMEOUT")
+        );
         let cancelled = RealtimeError::cancelled();
         assert_eq!(
             (cancelled.status, cancelled.code),

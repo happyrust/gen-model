@@ -1,22 +1,30 @@
 //! Point room queries over the current projection, without stored room edges.
-use std::{path::Path, sync::Arc};
+use super::direct_tree::DirectTreeService;
+use crate::fast_model::{
+    e3d_model_service::{ModelFileTarget, ModelTarget, model_file_identity_digest},
+    model_memory_store::{ModelMemoryStore, ProjectionScope},
+    room_model::MemoryRoomCalculator,
+    room_resident,
+};
 use aios_core::RefnoEnum;
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
-use crate::fast_model::{e3d_model_service::{ModelFileTarget, ModelTarget, model_file_identity_digest},
-    model_memory_store::{ModelMemoryStore, ProjectionScope}, room_model::MemoryRoomCalculator,
-    room_resident};
-use super::direct_tree::DirectTreeService;
+use std::{path::Path, sync::Arc};
 
 #[derive(Debug)]
 pub(crate) struct RoomNotReady(pub &'static str);
 impl std::fmt::Display for RoomNotReady {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
 }
 impl std::error::Error for RoomNotReady {}
 
 fn require_stable(model: bool, source: bool, rooms: bool) -> anyhow::Result<()> {
-    ensure!(model && source && rooms, RoomNotReady("room inputs changed; retry"));
+    ensure!(
+        model && source && rooms,
+        RoomNotReady("room inputs changed; retry")
+    );
     Ok(())
 }
 
@@ -71,19 +79,29 @@ pub(crate) fn target_current(target: &ModelTarget) -> anyhow::Result<bool> {
 }
 
 /// [`target_current`] 的带规则版：读穿 / 只写内存形态没有库级承诺可听时传 [`SessionRule::Exact`]（ADR-089 D5）。
-pub(crate) fn target_current_under(target: &ModelTarget, rule: SessionRule) -> anyhow::Result<bool> {
+pub(crate) fn target_current_under(
+    target: &ModelTarget,
+    rule: SessionRule,
+) -> anyhow::Result<bool> {
     for file in std::iter::once(&target.design).chain(target.catalogue.iter()) {
         let path = Path::new(&file.file);
-        let latest = super::model_source::latest_source_version_of_file(file.dbnum, &file.db_type, path)?;
+        let latest =
+            super::model_source::latest_source_version_of_file(file.dbnum, &file.db_type, path)?;
         // 说清是哪一项、差在会话还是身份：此前这一句被 `unwrap_or(false)` 与「正在后台生成」
         // 盖住，日志里没有一行说得出这根的模型为什么不算新。
         let stale = |reason: String| {
-            println!("[模型目标核对] {} {} 已过期：{reason}（{}）", file.db_type, file.dbnum, file.file);
+            println!(
+                "[模型目标核对] {} {} 已过期：{reason}（{}）",
+                file.db_type, file.dbnum, file.file
+            );
             Ok(false)
         };
         if file.session_tracked() && file.session > latest.sesno {
             // 回拨：文件被换回更早的世代。锚在这个会话上算不出来，先说清再返回。
-            return stale(format!("回执会话 {} 超前于文件最新 {}（文件被回拨）", file.session, latest.sesno));
+            return stale(format!(
+                "回执会话 {} 超前于文件最新 {}（文件被回拨）",
+                file.session, latest.sesno
+            ));
         }
         let identity = crate::data_interface::frozen_source::model_file_identity(
             path,
@@ -91,28 +109,47 @@ pub(crate) fn target_current_under(target: &ModelTarget, rule: SessionRule) -> a
         )?;
         if !target_file_current(file, latest.sesno, &identity, rule) {
             return stale(if file.session_tracked() && file.session != latest.sesno {
-                format!("会话 {} → 文件最新 {}（没有库级承诺可听，按等值判）", file.session, latest.sesno)
+                format!(
+                    "会话 {} → 文件最新 {}（没有库级承诺可听，按等值判）",
+                    file.session, latest.sesno
+                )
             } else {
-                format!("身份 {} → 现算 {identity}（换了文件或同号会话内容不同）", file.digest)
+                format!(
+                    "身份 {} → 现算 {identity}（换了文件或同号会话内容不同）",
+                    file.digest
+                )
             });
         }
     }
     let attlib = super::direct_store::DirectSchema::template_dir_from_env()?.join("attlib.dat");
     let attlib_current = model_file_identity_digest(&attlib, 0)? == target.template_attlib_digest;
     if !attlib_current {
-        println!("[模型目标核对] 模板 attlib.dat 已换版：记摘要 {}（{}）",
-            target.template_attlib_digest, attlib.display());
+        println!(
+            "[模型目标核对] 模板 attlib.dat 已换版：记摘要 {}（{}）",
+            target.template_attlib_digest,
+            attlib.display()
+        );
     }
     Ok(attlib_current)
 }
 
-pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> anyhow::Result<Value> {
-    ensure!(crate::options::room_membership() && crate::options::spatial_compute(),
-        RoomNotReady("room calculation is disabled"));
+pub(crate) async fn lookup(
+    member: RefnoEnum,
+    tree: Arc<DirectTreeService>,
+) -> anyhow::Result<Value> {
+    ensure!(
+        crate::options::room_membership() && crate::options::spatial_compute(),
+        RoomNotReady("room calculation is disabled")
+    );
     let resolve_tree = tree.clone();
-    let Some(root) = tokio::task::spawn_blocking(move || resolve_tree.generation_root_of(member.refno(),
-        &super::generation_root::configured_delivery_unit_types()))
-        .await.context("room root task failed")??
+    let Some(root) = tokio::task::spawn_blocking(move || {
+        resolve_tree.generation_root_of(
+            member.refno(),
+            &super::generation_root::configured_delivery_unit_types(),
+        )
+    })
+    .await
+    .context("room root task failed")??
     else {
         // 容器（WORL / SITE / ZONE …）与不在任何交付单元之下的元素没有生成根，也就没有房间归属可算：
         // 与摄入形态（`query_service::room` 对 `generation_root = None`）同一口径回 `not_computed`。
@@ -124,53 +161,88 @@ pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> a
     let store = ModelMemoryStore::global();
     let scope = ProjectionScope::Current;
     let epoch = store.commit_epoch(root.dbno());
-    let receipt = store.receipt(scope, root).ok_or(RoomNotReady("model is not ready"))?;
-    let target = receipt.model_target.clone().ok_or(RoomNotReady("model has no source identity"))?;
-    ensure!(target.design.dbnum == root.dbno() && target.design.session == receipt.source_sesno,
-        RoomNotReady("model source identity is inconsistent"));
+    let receipt = store
+        .receipt(scope, root)
+        .ok_or(RoomNotReady("model is not ready"))?;
+    let target = receipt
+        .model_target
+        .clone()
+        .ok_or(RoomNotReady("model has no source identity"))?;
+    ensure!(
+        target.design.dbnum == root.dbno() && target.design.session == receipt.source_sesno,
+        RoomNotReady("model source identity is inconsistent")
+    );
     let before = target.clone();
     let source_tree = tree.clone();
-    ensure!(tokio::task::spawn_blocking(move || {
-        let selected = source_tree.source_metadata(root.dbno())?;
-        // 来源会话按「没落后」判（ADR-089 D6）：E3D 每次登录都给 DESI 前移一个只有 DBMDAT 的会话，按等值判
-        // 登录之后每个根的房间点查都是「model source has changed」；身份变了 / 回拨由 `target_current` 拦。
-        Ok::<_, anyhow::Error>(selected.source.sesno >= before.design.session
-            && selected.source.file.canonicalize()? == Path::new(&before.design.file).canonicalize()?
-            && target_current(&before)?)
-    }).await??,
-        RoomNotReady("model source has changed; regenerate model"));
+    ensure!(
+        tokio::task::spawn_blocking(move || {
+            let selected = source_tree.source_metadata(root.dbno())?;
+            // 来源会话按「没落后」判（ADR-089 D6）：E3D 每次登录都给 DESI 前移一个只有 DBMDAT 的会话，按等值判
+            // 登录之后每个根的房间点查都是「model source has changed」；身份变了 / 回拨由 `target_current` 拦。
+            Ok::<_, anyhow::Error>(
+                selected.source.sesno >= before.design.session
+                    && selected.source.file.canonicalize()?
+                        == Path::new(&before.design.file).canonicalize()?
+                    && target_current(&before)?,
+            )
+        })
+        .await??,
+        RoomNotReady("model source has changed; regenerate model")
+    );
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let rooms = room_resident::current_for_calculation()
         .map_err(|_| RoomNotReady("room definitions are not ready"))?;
     let definition = rooms.input_version();
-    let records = store.records_of_root(scope, root).into_iter()
-        .filter(|record| record.source_refno == native_member).collect::<Vec<_>>();
+    let records = store
+        .records_of_root(scope, root)
+        .into_iter()
+        .filter(|record| record.source_refno == native_member)
+        .collect::<Vec<_>>();
     let model = rooms.clone();
     let mesh_dir = crate::options::meshes_dir();
     let version = definition.clone();
     let session = i32::try_from(receipt.source_sesno).context("room session overflow")?;
-    let mut edges = tokio::task::spawn_blocking(move ||
-        MemoryRoomCalculator::new(model, mesh_dir)?.calculate(root.dbno(), session, &version, &records))
-        .await.context("room calculation task failed")??;
-    let source_current = tokio::task::spawn_blocking(move ||
-        Ok::<_, anyhow::Error>(tree.is_current() && target_current(&target)?)).await??;
+    let mut edges = tokio::task::spawn_blocking(move || {
+        MemoryRoomCalculator::new(model, mesh_dir)?.calculate(
+            root.dbno(),
+            session,
+            &version,
+            &records,
+        )
+    })
+    .await
+    .context("room calculation task failed")??;
+    let source_current = tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>(tree.is_current() && target_current(&target)?)
+    })
+    .await??;
     let after = room_resident::current_for_calculation()
         .map_err(|_| RoomNotReady("room definitions became unavailable"))?;
-    require_stable(store.commit_epoch(root.dbno()) == epoch && store.receipt(scope, root).as_ref() == Some(&receipt),
-        source_current, after.input_version() == definition)?;
-    edges.sort_by(|a, b| b.member.inside_count.cmp(&a.member.inside_count)
-        .then_with(|| a.member.center_dist.total_cmp(&b.member.center_dist))
-        .then_with(|| a.room_num.cmp(&b.room_num)));
+    require_stable(
+        store.commit_epoch(root.dbno()) == epoch
+            && store.receipt(scope, root).as_ref() == Some(&receipt),
+        source_current,
+        after.input_version() == definition,
+    )?;
+    edges.sort_by(|a, b| {
+        b.member
+            .inside_count
+            .cmp(&a.member.inside_count)
+            .then_with(|| a.member.center_dist.total_cmp(&b.member.center_dist))
+            .then_with(|| a.room_num.cmp(&b.room_num))
+    });
     let memberships = edges.iter().map(|edge| json!({
         "room_refno": rooms.map.rooms.iter().find(|room| room.panels.contains(&edge.panel)).map(|room| room.room.to_string()),
         "panel_refno": edge.panel.to_string(), "room_num": edge.room_num,
         "inside_count": edge.member.inside_count, "center_dist": edge.member.center_dist,
     })).collect::<Vec<_>>();
-    Ok(json!({"refno": member.to_string(), "memberships": memberships,
+    Ok(
+        json!({"refno": member.to_string(), "memberships": memberships,
         "room_membership": true, "calculation_status": "computed", "source": "memory",
         "model_epoch": epoch, "source_sesno": receipt.source_sesno,
         "room_definition_version": definition, "published_version": null,
-        "stale": null, "publication_status": "unsupported"}))
+        "stale": null, "publication_status": "unsupported"}),
+    )
 }
 
 #[cfg(test)]
@@ -197,12 +269,22 @@ mod tests {
     #[test]
     fn dictionary_targets_are_judged_by_identity_alone() {
         let file = |db_type: &str, session: u32, digest: &str| ModelFileTarget {
-            dbnum: 5100, db_type: db_type.into(), file: "acp5100".into(), session, digest: digest.into(),
+            dbnum: 5100,
+            db_type: db_type.into(),
+            file: "acp5100".into(),
+            session,
+            digest: digest.into(),
         };
         let dict = file("DICT", 0, "d@0");
         for rule in [SessionRule::NotBehind, SessionRule::Exact] {
-            assert!(target_file_current(&dict, 27, "d@0", rule), "字典库文件最新会话 27 ≠ 记的 0 不算过期");
-            assert!(!target_file_current(&dict, 27, "d@1", rule), "字典库换了文件 / 走了新会话才算过期");
+            assert!(
+                target_file_current(&dict, 27, "d@0", rule),
+                "字典库文件最新会话 27 ≠ 记的 0 不算过期"
+            );
+            assert!(
+                !target_file_current(&dict, 27, "d@1", rule),
+                "字典库换了文件 / 走了新会话才算过期"
+            );
         }
     }
 
@@ -212,16 +294,45 @@ mod tests {
     #[test]
     fn a_receipt_behind_the_file_is_stale_only_without_a_library_promise() {
         let design = ModelFileTarget {
-            dbnum: 8000, db_type: "DESI".into(), file: "ams8000_0001".into(), session: 11, digest: "anchor@11".into(),
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            file: "ams8000_0001".into(),
+            session: 11,
+            digest: "anchor@11".into(),
         };
-        assert!(target_file_current(&design, 11, "anchor@11", SessionRule::NotBehind));
-        assert!(target_file_current(&design, 11, "anchor@11", SessionRule::Exact));
-        assert!(target_file_current(&design, 12, "anchor@11", SessionRule::NotBehind), "落后不是过期（登录写的会话）");
-        assert!(!target_file_current(&design, 12, "anchor@11", SessionRule::Exact), "没有库级承诺时落后就是过期");
+        assert!(target_file_current(
+            &design,
+            11,
+            "anchor@11",
+            SessionRule::NotBehind
+        ));
+        assert!(target_file_current(
+            &design,
+            11,
+            "anchor@11",
+            SessionRule::Exact
+        ));
+        assert!(
+            target_file_current(&design, 12, "anchor@11", SessionRule::NotBehind),
+            "落后不是过期（登录写的会话）"
+        );
+        assert!(
+            !target_file_current(&design, 12, "anchor@11", SessionRule::Exact),
+            "没有库级承诺时落后就是过期"
+        );
         for rule in [SessionRule::NotBehind, SessionRule::Exact] {
-            assert!(!target_file_current(&design, 10, "anchor@11", rule), "回执超前于文件（回拨）是过期");
-            assert!(!target_file_current(&design, 11, "anchor@11-replaced", rule), "同号会话换了文件是过期");
-            assert!(!target_file_current(&design, 12, "anchor@11-replaced", rule), "落后且换了文件是过期");
+            assert!(
+                !target_file_current(&design, 10, "anchor@11", rule),
+                "回执超前于文件（回拨）是过期"
+            );
+            assert!(
+                !target_file_current(&design, 11, "anchor@11-replaced", rule),
+                "同号会话换了文件是过期"
+            );
+            assert!(
+                !target_file_current(&design, 12, "anchor@11-replaced", rule),
+                "落后且换了文件是过期"
+            );
         }
     }
 
@@ -237,9 +348,19 @@ mod tests {
             .split_once("pub(crate) async fn lookup(")
             .expect("target_current_under end")
             .0;
-        assert_eq!(current.matches("model_file_identity_digest(").count(), 1, "只有 attlib 那一处: {current}");
-        assert!(current.contains("model_file_identity_digest(&attlib, 0)"), "{current}");
-        assert!(current.contains("frozen_source::model_file_identity("), "{current}");
+        assert_eq!(
+            current.matches("model_file_identity_digest(").count(),
+            1,
+            "只有 attlib 那一处: {current}"
+        );
+        assert!(
+            current.contains("model_file_identity_digest(&attlib, 0)"),
+            "{current}"
+        );
+        assert!(
+            current.contains("frozen_source::model_file_identity("),
+            "{current}"
+        );
         let predicate = source
             .split_once("fn target_file_current(")
             .expect("target_file_current exists")
@@ -247,8 +368,14 @@ mod tests {
             .split_once("pub(crate) fn target_current(")
             .expect("target_file_current end")
             .0;
-        assert!(!predicate.contains("latest_sesno == file.session"), "{predicate}");
-        assert!(predicate.contains("SessionRule::NotBehind => file.session <= latest_sesno"), "{predicate}");
+        assert!(
+            !predicate.contains("latest_sesno == file.session"),
+            "{predicate}"
+        );
+        assert!(
+            predicate.contains("SessionRule::NotBehind => file.session <= latest_sesno"),
+            "{predicate}"
+        );
     }
 
     /// 容器 / 无生成根的元素回 `not_computed`（与摄入形态同口径），不再是 `RoomNotReady` → 409。
@@ -267,14 +394,24 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("lookup end")
             .0;
-        assert!(!body.contains("element has no owning generation root"), "{body}");
+        assert!(
+            !body.contains("element has no owning generation root"),
+            "{body}"
+        );
         assert!(body.contains("no_generation_root_reply(member)"), "{body}");
     }
 
     #[test]
     fn changes_to_any_room_input_reject_the_result() {
-        for model in [false, true] { for source in [false, true] { for rooms in [false, true] {
-            assert_eq!(require_stable(model, source, rooms).is_ok(), model && source && rooms);
-        }}}
+        for model in [false, true] {
+            for source in [false, true] {
+                for rooms in [false, true] {
+                    assert_eq!(
+                        require_stable(model, source, rooms).is_ok(),
+                        model && source && rooms
+                    );
+                }
+            }
+        }
     }
 }

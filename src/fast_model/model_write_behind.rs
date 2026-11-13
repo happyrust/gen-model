@@ -727,10 +727,9 @@ impl ModelWriteBehind {
                     format!("{} attempts used up: {}", entry.attempts, last_error()),
                 ));
             } else if !state.accepting {
-                outcome.exhausted.push((
-                    *root,
-                    "model write-behind is shutting down".to_owned(),
-                ));
+                outcome
+                    .exhausted
+                    .push((*root, "model write-behind is shutting down".to_owned()));
             } else if now >= deadline {
                 outcome.exhausted.push((
                     *root,
@@ -783,10 +782,7 @@ pub(crate) fn reconcile_replayed_roots(roots: &[RefNo]) -> Result<(), OverlayRej
 }
 
 impl ModelWriteBehind {
-    fn reconcile_roots_if_unacked(
-        &'static self,
-        roots: &[RefNo],
-    ) -> Result<(), OverlayRejected> {
+    fn reconcile_roots_if_unacked(&'static self, roots: &[RefNo]) -> Result<(), OverlayRejected> {
         let unacked: Vec<(RefNo, RootReceipt)> = roots
             .iter()
             .copied()
@@ -1377,10 +1373,7 @@ mod tests {
             entry.status = PendingStatus::Blocked;
             entry.next_retry_at = now + BLOCKED_RETRY;
         }
-        assert!(
-            take_due_roots(controller).is_none(),
-            "退避没走完之前不重试"
-        );
+        assert!(take_due_roots(controller).is_none(), "退避没走完之前不重试");
 
         controller
             .state()
@@ -1947,7 +1940,9 @@ mod tests {
         let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
-        controller.publish_commits(vec![commit(root, "dead")]).unwrap();
+        controller
+            .publish_commits(vec![commit(root, "dead")])
+            .unwrap();
         let started = Instant::now();
         let outcome = controller.await_roots(7997, &[root], budget(5, 600)).await;
         assert_eq!(
@@ -1986,7 +1981,9 @@ mod tests {
         let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
-        controller.publish_commits(vec![commit(root, "late")]).unwrap();
+        controller
+            .publish_commits(vec![commit(root, "late")])
+            .unwrap();
         let outcome = controller.await_roots(7997, &[root], budget(5, 600)).await;
         assert_eq!(outcome.exhausted.len(), 1, "{outcome:?}");
         let (exhausted, reason) = &outcome.exhausted[0];
@@ -2013,7 +2010,9 @@ mod tests {
         let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
-        controller.publish_commits(vec![commit(root, "stuck")]).unwrap();
+        controller
+            .publish_commits(vec![commit(root, "stuck")])
+            .unwrap();
         wait_until(|| adapter.calls.load(Ordering::SeqCst) == 1).await;
         let started = Instant::now();
         let outcome = controller.await_roots(7997, &[root], budget(5, 3)).await;
@@ -2021,7 +2020,10 @@ mod tests {
         assert_eq!(outcome.exhausted.len(), 1, "{outcome:?}");
         let (exhausted, reason) = &outcome.exhausted[0];
         assert_eq!(*exhausted, root);
-        assert!(reason.contains("3s") && reason.contains("0 attempts"), "{reason}");
+        assert!(
+            reason.contains("3s") && reason.contains("0 attempts"),
+            "{reason}"
+        );
         assert_eq!(
             snapshot_for(controller).in_flight_roots,
             1,
@@ -2124,11 +2126,16 @@ mod tests {
         let controller: &'static ModelWriteBehind =
             Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
 
-        controller.publish_commits(vec![commit(slow, "slow")]).unwrap();
-        controller.publish_commits(vec![commit(quick, "quick")]).unwrap();
-        let slow_waiter = tokio::spawn(async move {
-            controller.await_roots(7996, &[slow], budget(5, 600)).await
-        });
+        controller
+            .publish_commits(vec![commit(slow, "slow")])
+            .unwrap();
+        controller
+            .publish_commits(vec![commit(quick, "quick")])
+            .unwrap();
+        let slow_waiter =
+            tokio::spawn(
+                async move { controller.await_roots(7996, &[slow], budget(5, 600)).await },
+            );
         let outcome = controller.await_roots(7997, &[quick], budget(5, 600)).await;
         assert_eq!(outcome.acked, vec![quick]);
         assert!(outcome.all_acked());

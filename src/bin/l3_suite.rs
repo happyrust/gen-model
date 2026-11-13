@@ -469,12 +469,71 @@ impl Paths {
     }
 }
 
+/// The three control files an E3D project copy needs before a TTY session can open it:
+/// the `evars` batch, and the `MISC`/`SYST` files of the project's own database folder.
+///
+/// The names come from what is on disk rather than from a fixed `AMS` layout, so a gate can
+/// run against another sample project (`AvevaPlantSample` → `evarsAvevaPlantSample.bat` and
+/// `aps000/apssys`). The AMS case is unchanged: its folder is `ams000`, and that is what
+/// this used to hard-code.
 fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
-    let required = [
-        project.join("evarsAvevaMarineSample.bat"),
-        project.join("ams000/amscom"),
-        project.join("ams000/amssys"),
-    ];
+    let project_name = project
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let evars = project.join(format!("evars{project_name}.bat"));
+    // The database folder is the one under the project that holds a `*sys` file; its name
+    // gives the `MISC` / `SYST` pair (`ams000` → `amscom` / `amssys`). A copy whose folder
+    // exists but is still empty is the *incomplete* case this function reports, so fall back
+    // to the only candidate folder rather than claiming there is none.
+    let candidates: Vec<PathBuf> = fs::read_dir(project)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    let folder = candidates
+        .iter()
+        .find(|path| {
+            fs::read_dir(path).is_ok_and(|entries| {
+                entries.flatten().any(|file| {
+                    file.file_name()
+                        .to_str()
+                        .is_some_and(|name| name.ends_with("sys"))
+                })
+            })
+        })
+        .or_else(|| {
+            if candidates.len() == 1 {
+                candidates.first()
+            } else {
+                None
+            }
+        })
+        .cloned();
+    let mut required = vec![evars];
+    match folder {
+        Some(folder) => {
+            let stem = folder
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .trim_end_matches("000")
+                .to_string();
+            required.push(folder.join(format!("{stem}com")));
+            required.push(folder.join(format!("{stem}sys")));
+        }
+        None => {
+            ensure!(
+                false,
+                "E3D project copy has no database folder holding a `*sys` file: {}",
+                project.display()
+            );
+        }
+    }
     let missing = required
         .iter()
         .filter(|path| !path.is_file())
@@ -482,7 +541,7 @@ fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
         .collect::<Vec<_>>();
     ensure!(
         missing.is_empty(),
-        "E3D project copy is incomplete; copy the project evars plus ams000/amscom and ams000/amssys before launching a TTY session: {}",
+        "E3D project copy is incomplete; copy the project evars plus its database folder's MISC / SYST files before launching a TTY session: {}",
         missing.join(", ")
     );
     Ok(())
@@ -565,6 +624,21 @@ fn main() -> Result<()> {
         "the full suite is fixed to E3D project AMS and MDB /ALL"
     );
     let paths = Paths::discover(repo, cli.project_dir)?;
+    // The evars batch is named after the project directory (`evarsAvevaMarineSample.bat`,
+    // `evarsAvevaPlantSample.bat`); `--project-evar` overrides it outright. The directory
+    // name also has to reach the launcher as `L3_E3D_PROJECT_NAME`: the batch builds the
+    // project root as `<projects dir>\<project name>`, so leaving it at the AMS default would
+    // point a second project at the wrong directory.
+    let project_name = paths
+        .project_work
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string());
+    let project_evar = cli.project_evar.clone().unwrap_or_else(|| {
+        let name = project_name.as_deref().unwrap_or_default();
+        paths.project_work.join(format!("evars{name}.bat"))
+    });
     let driver = E3dDriver {
         launcher: paths.e3d_driver.clone(),
         projects_dir: paths
@@ -572,9 +646,9 @@ fn main() -> Result<()> {
             .parent()
             .ok_or_else(|| anyhow!("project directory has no project root"))?
             .to_path_buf(),
-        project_evar: paths.project_work.join("evarsAvevaMarineSample.bat"),
+        project_evar,
         project: cli.e3d_project,
-        project_name: None,
+        project_name,
         login: cli.e3d_login,
         mdb: cli.e3d_mdb,
         install_dir: None,
@@ -1706,11 +1780,16 @@ fn tree_locates(paths: &Paths, expected_refno: &str) -> Result<bool> {
 }
 
 fn tree_item_rect_center(tree: &str, expected_refno: &str) -> Option<(i32, i32)> {
-    let identity = format!("refno={expected_refno};");
+    // 当前 inspect.exe 把身份写成 `refno =24382/1299;`（等号前有空格）。
+    // 套件里的旧样本是 `refno=24382/1299;`。两种都要认，否则树上已经
+    // 有这一行，点击仍然会判成找不到。
+    let compact = format!("refno={expected_refno};");
+    let spaced = format!("refno ={expected_refno};");
     tree.lines()
         .skip(1)
         .filter(|line| {
-            line.split_whitespace().nth(1) == Some("TreeItem") && line.contains(&identity)
+            line.split_whitespace().nth(1) == Some("TreeItem")
+                && (line.contains(&compact) || line.contains(&spaced))
         })
         .filter_map(accesskit_rect)
         .min_by_key(|(_, y)| *y)
@@ -2763,7 +2842,11 @@ mod tests {
 
     #[test]
     fn isolated_e3d_project_requires_project_control_databases() {
-        let root = std::env::temp_dir().join(format!("l3-e3d-controls-{}", std::process::id()));
+        // The evars batch is named after the project directory, so the fixture has to carry
+        // a project-shaped name; a bare temp dir would look for `evarsl3-e3d-controls-<pid>.bat`.
+        let root = std::env::temp_dir()
+            .join(format!("l3-e3d-controls-{}", std::process::id()))
+            .join("AvevaMarineSample");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("ams000")).unwrap();
         fs::write(root.join("evarsAvevaMarineSample.bat"), b"@echo off\n").unwrap();
@@ -2777,7 +2860,31 @@ mod tests {
         fs::write(root.join("ams000/amscom"), b"fixture").unwrap();
         fs::write(root.join("ams000/amssys"), b"fixture").unwrap();
         ensure_e3d_project_control_files(&root).unwrap();
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// The same check on the other sample project: `AvevaPlantSample` keeps its databases in
+    /// `aps000`, and its evars batch is `evarsAvevaPlantSample.bat`. A gate that runs against
+    /// that project needs this to pass, and a hard-coded `ams000` would refuse it.
+    #[test]
+    fn a_second_project_layout_is_accepted() {
+        let root = std::env::temp_dir()
+            .join(format!("l3-e3d-aps-{}", std::process::id()))
+            .join("AvevaPlantSample");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("aps000")).unwrap();
+        fs::write(root.join("evarsAvevaPlantSample.bat"), b"@echo off\n").unwrap();
+        // The folder is found by the `*sys` file it holds, not by its name.
+        fs::write(root.join("aps000/apssys"), b"fixture").unwrap();
+
+        let error = ensure_e3d_project_control_files(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("apscom"), "{error}");
+
+        fs::write(root.join("aps000/apscom"), b"fixture").unwrap();
+        ensure_e3d_project_control_files(&root).unwrap();
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -2907,6 +3014,12 @@ mod tests {
                     matched 2\n";
         assert_eq!(tree_item_rect_center(tree, "24384/25734"), Some((25, 140)));
         assert_eq!(tree_item_rect_center(tree, "24384/99999"), None);
+
+        let live = "step=2353 ppp=1.5 nodes=333\n\
+                    7500735304580645507 Label 1308,152 66x11         =24382/1299\n\
+                    14364824135047479287 TreeItem 4,348 289x24           refno =24382/1299; name=/AIOS-INC-GEOM-BOX\n\
+                    matched 5\n";
+        assert_eq!(tree_item_rect_center(live, "24382/1299"), Some((148, 360)));
     }
 
     #[test]

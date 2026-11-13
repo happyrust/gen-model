@@ -1545,7 +1545,8 @@ fn spawn_generation_worker(
             crate::fast_model::mesh_lod1::lod1_enabled().then(CatalogueMeshCache::default);
         while let Some((slot, root)) = queue.claim() {
             // 崩溃留痕点得出这条线正在算哪一根（GitHub #78）。
-            let _working_on = crate::process_diagnostics::CurrentRoot::enter(root.word0, root.word1);
+            let _working_on =
+                crate::process_diagnostics::CurrentRoot::enter(root.word0, root.word1);
             // Bake here, not on the consumer: triangulation, the SHA-256 and
             // the mesh file write are the rest of this root's CPU cost, and
             // doing them here is what lets the `Manifold` die on this thread
@@ -1556,7 +1557,10 @@ fn spawn_generation_worker(
             let evaluate_micros = started.elapsed().as_micros();
             let mut outcome =
                 evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir, rooms.as_deref()));
-            let bake_micros = started.elapsed().as_micros().saturating_sub(evaluate_micros);
+            let bake_micros = started
+                .elapsed()
+                .as_micros()
+                .saturating_sub(evaluate_micros);
             // 粗网格（`AIOS_MESH_LOD1`）单独记时：它是 L0 之外的显示增强，不许混进 `bake=` 那一栏——
             // 那一栏是用来定位长尾的。稳态下这里只按盘分拣，几乎不花时间。
             let lod1_started = std::time::Instant::now();
@@ -1806,7 +1810,8 @@ fn historical_input(
 }
 
 /// 历史输入缓存此刻的条数与容量（`/health.model_cache.realtime_history.input_cache`）。
-pub(crate) fn historical_input_stats() -> crate::fast_model::historical_input::HistoricalInputStats {
+pub(crate) fn historical_input_stats() -> crate::fast_model::historical_input::HistoricalInputStats
+{
     historical_input_cache().stats()
 }
 
@@ -2623,12 +2628,11 @@ impl E3dModelService {
                 // GitHub #74：初始化是冷根（没有回执、没有旧行），`incomplete_root_policy(false, false)` 的判决是
                 // `Publish`——幸存件照发，没算出来的那几件记在 `partial` 里点名。此前这里把整根当死信丢掉，
                 // 一只零长 SCTN 名下的 SJOI 就让同框好杆件一并消失（ams7330 四根 → 整库 lagging）。
-                let failure = crate::data_interface::mdb_route_directory::explain_unregistered_dbs(
-                    &format!(
+                let failure =
+                    crate::data_interface::mdb_route_directory::explain_unregistered_dbs(&format!(
                         "{root_failed} geometry element(s) failed: {:?}",
                         snapshot.report.failed
-                    ),
-                );
+                    ));
                 log::warn!(
                     "e3d-model root {root} publishing {} element(s) of an incomplete candidate at initialization; {root_failed} did not evaluate: {failure}",
                     snapshot.elements.len()
@@ -3773,7 +3777,8 @@ fn current_mdb_source_inventory()
     let mut files = HashMap::new();
     let mut project_files = HashMap::new();
     let mut pins = Vec::new();
-    for item in membership.databases() {
+    // 补充成员（ADR-095）与 CURD 声明同一口径进模型面：解根、钉文件、开库都认它。
+    for item in membership.model_databases() {
         let Some(path) = item.path.clone() else {
             continue;
         };
@@ -4023,13 +4028,8 @@ fn compute_snapshot_source(
         .into());
     }
     let mut cache = CatalogueMeshCache::default();
-    let snapshot = generate_snapshot_from_set_with_hooks(
-        &input.set,
-        &input.index,
-        root,
-        &mut cache,
-        hooks,
-    )?;
+    let snapshot =
+        generate_snapshot_from_set_with_hooks(&input.set, &input.index, root, &mut cache, hooks)?;
     if !snapshot.report.failed.is_empty()
         && matches!(failure_policy, GeometryFailurePolicy::Required)
     {

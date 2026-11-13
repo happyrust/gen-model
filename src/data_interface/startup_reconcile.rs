@@ -700,15 +700,16 @@ pub(crate) async fn reconcile_model_catch_up() {
     let declared = match current_mdb_design_dbnums().await {
         Ok(dbnums) => dbnums,
         Err(error) => {
-            log::warn!("[reconcile] model catch-up：取不到当前 MDB 的 DESI 成员，这一拍不排: {error:#}");
+            log::warn!(
+                "[reconcile] model catch-up：取不到当前 MDB 的 DESI 成员，这一拍不排: {error:#}"
+            );
             return;
         }
     };
     if declared.is_empty() {
         return;
     }
-    let registered = match crate::data_interface::dbnum_state::DbnumState::list_registered().await
-    {
+    let registered = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(rows) => rows
             .into_iter()
             .map(|state| (state.dbnum, state))
@@ -958,7 +959,10 @@ mod tests {
         assert!(!enqueues(26, 20, 10, false, false, false));
         // 三条节流闸各自为真都不排。
         assert!(!enqueues(26, 20, 26, true, false, false), "队列已有该库行");
-        assert!(!enqueues(26, 20, 26, false, true, false), "欠账根全在退避期");
+        assert!(
+            !enqueues(26, 20, 26, false, true, false),
+            "欠账根全在退避期"
+        );
         assert!(!enqueues(26, 20, 26, false, false, true), "数据批次 park");
     }
 }

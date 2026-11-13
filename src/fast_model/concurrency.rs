@@ -409,7 +409,13 @@ mod tests {
             .expect("cpu_pool")
             .1
             .split_once("\n}\n")
-            .or_else(|| source.split_once("fn cpu_pool()").unwrap().1.split_once("\n}\r\n"))
+            .or_else(|| {
+                source
+                    .split_once("fn cpu_pool()")
+                    .unwrap()
+                    .1
+                    .split_once("\n}\r\n")
+            })
             .expect("cpu_pool end")
             .0;
         assert!(

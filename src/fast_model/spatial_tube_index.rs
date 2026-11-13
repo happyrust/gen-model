@@ -88,7 +88,12 @@ pub async fn read_from(db: &Surreal<Any>) -> anyhow::Result<HashMap<RefU64, Aabb
 fn fold(rows: Vec<TubeBoxRow>) -> HashMap<RefU64, Aabb> {
     let mut index: HashMap<RefU64, Aabb> = HashMap::new();
     for row in rows {
-        let Some(bran) = row.container.parse::<RefU64>().ok().filter(RefU64::is_valid) else {
+        let Some(bran) = row
+            .container
+            .parse::<RefU64>()
+            .ok()
+            .filter(RefU64::is_valid)
+        else {
             continue;
         };
         let aabb = row.world_aabb;
@@ -165,8 +170,16 @@ mod tests {
         .unwrap();
 
         let index = read_from(&db).await.unwrap();
-        assert_eq!(index.keys().copied().collect::<Vec<_>>(), [id(1)], "没有盒的行不进索引");
+        assert_eq!(
+            index.keys().copied().collect::<Vec<_>>(),
+            [id(1)],
+            "没有盒的行不进索引"
+        );
         let aabb = index[&id(1)];
-        assert_eq!((aabb.mins.x, aabb.maxs.x), (0.0, 300.0), "invalid 段不并进来");
+        assert_eq!(
+            (aabb.mins.x, aabb.maxs.x),
+            (0.0, 300.0),
+            "invalid 段不并进来"
+        );
     }
 }

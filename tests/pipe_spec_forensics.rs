@@ -6,10 +6,10 @@
 //!
 //! 跑法：`cargo test --test pipe_spec_forensics -- --nocapture`（需本机 ams 样例库 + 模板目录）。
 
+use aios_core::RefU64;
 use aios_database::data_interface::cata_closure::CataDbLocator;
 use aios_database::data_interface::direct_index::INDEX_DIR_ENV;
 use aios_database::data_interface::direct_store::{DbPin, DirectSchema, DirectStore};
-use aios_core::RefU64;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -45,9 +45,7 @@ fn fixtures() -> Option<(PathBuf, PathBuf)> {
 
 fn env_gate() -> std::sync::MutexGuard<'static, ()> {
     static GATE: OnceLock<Mutex<()>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("gate")
+    GATE.get_or_init(|| Mutex::new(())).lock().expect("gate")
 }
 
 fn attr_str(store: &DirectStore, r: RefU64, key: &str) -> String {
@@ -287,12 +285,16 @@ fn hit_bands_cover(store: &DirectStore, hit: RefU64, qa: &[(String, String)]) ->
     let mut bands: Vec<(String, Option<String>, Option<f64>, Option<f64>)> = Vec::new();
     let mut node = hit;
     for _ in 0..16 {
-        let Ok(map) = store.named_attmap(node) else { break };
+        let Ok(map) = store.named_attmap(node) else {
+            break;
+        };
         let owner: RefU64 = map.get_owner().into();
         if owner == RefU64::default() || owner == node {
             break;
         }
-        let Ok(omap) = store.named_attmap(owner) else { break };
+        let Ok(omap) = store.named_attmap(owner) else {
+            break;
+        };
         let ques = match omap.map.get("QUES") {
             Some(aios_core::NamedAttrValue::WordType(s))
             | Some(aios_core::NamedAttrValue::StringType(s)) => s.clone(),
@@ -426,7 +428,10 @@ fn spec_catalog_roundtrip_by_family() {
                     // 真库存在共界相邻档与重叠区间（见 §INSU 取证），
                     // 成员序首匹配下"前一档"是 E3D 合法选择，不算 resolver bug。
                     bucket.0 += 1;
-                    println!("  ~equivalent {ty} SPCO {} → hit {} (band-cover)", spco.0, hit.0);
+                    println!(
+                        "  ~equivalent {ty} SPCO {} → hit {} (band-cover)",
+                        spco.0, hit.0
+                    );
                 } else {
                     bucket.1 += 1;
                     failures.push(format!(
@@ -442,7 +447,9 @@ fn spec_catalog_roundtrip_by_family() {
         }
     }
 
-    println!("== family round-trip (sampled {sampled}, orphans {orphans}, derive_fail {derive_fail}) ==");
+    println!(
+        "== family round-trip (sampled {sampled}, orphans {orphans}, derive_fail {derive_fail}) =="
+    );
     for (fam, (p, f)) in &stats {
         println!("  {fam:<12} pass={p} fail={f}");
     }
@@ -465,9 +472,9 @@ fn spec_catalog_roundtrip_by_family() {
 #[test]
 fn pipe_catalog_session_probe() {
     use aios_database::data_interface::direct_pipe_catalog::{
-        probe_writable_dbnums, DirectPipeCatalog,
+        DirectPipeCatalog, probe_writable_dbnums,
     };
-    use aios_database::data_interface::mdb_membership::{DbAccess, MdbDatabase, DESI_STYP};
+    use aios_database::data_interface::mdb_membership::{DESI_STYP, DbAccess, MdbDatabase};
     use pipe_model::PipeCatalog;
 
     let Some((db, templates)) = fixtures() else {
@@ -522,16 +529,31 @@ fn pipe_catalog_session_probe() {
     // 声明面没留证据 → E3D 会话默认可写。
     let (writable, problems) = probe_writable_dbnums(&store, [declared.clone()].iter(), |_| None);
     println!("default writable={writable:?} problems={problems:?}");
-    assert!(writable.contains(&dbnum), "evidence-absent declared db must default writable");
-    assert!(problems.is_empty(), "readable bound file must not surface problems: {problems:?}");
+    assert!(
+        writable.contains(&dbnum),
+        "evidence-absent declared db must default writable"
+    );
+    assert!(
+        problems.is_empty(),
+        "readable bound file must not surface problems: {problems:?}"
+    );
     // 声明收窄 → 只读 + problem。
     let (ro, ro_problems) = probe_writable_dbnums(&store, [declared.clone()].iter(), |_| {
-        Some(DbAccess { access: Some("Read".into()), ..Default::default() })
+        Some(DbAccess {
+            access: Some("Read".into()),
+            ..Default::default()
+        })
     });
     assert!(!ro.contains(&dbnum), "ACCESSDB=Read must be read-only");
-    assert!(!ro_problems.is_empty(), "read-only narrowing must surface a problem");
+    assert!(
+        !ro_problems.is_empty(),
+        "read-only narrowing must surface a problem"
+    );
     let (ro2, _) = probe_writable_dbnums(&store, [declared].iter(), |_| {
-        Some(DbAccess { reference_only: true, ..Default::default() })
+        Some(DbAccess {
+            reference_only: true,
+            ..Default::default()
+        })
     });
     assert!(!ro2.contains(&dbnum), "LREFO must be read-only");
 
@@ -544,7 +566,11 @@ fn pipe_catalog_session_probe() {
         .expect("fixture db has elements");
     let cat = DirectPipeCatalog::new(store.clone(), writable.clone());
     let fresh = cat.alloc_refno(owner_ref);
-    assert_ne!(fresh, RefU64::default(), "alloc_refno must not return nulref");
+    assert_ne!(
+        fresh,
+        RefU64::default(),
+        "alloc_refno must not return nulref"
+    );
     if let Ok(resolved) = store.dbnum_of(fresh) {
         assert_eq!(
             resolved, dbnum,
@@ -578,9 +604,9 @@ fn pipe_catalog_session_probe() {
 #[test]
 fn pipe_service_end_to_end_on_real_db() {
     use aios_database::data_interface::direct_pipe_catalog::DirectPipeCatalog;
-    use aios_database::data_interface::pipe_model_adapter::rendered_batch_to_ele_operations;
     use aios_database::data_interface::ele_ops::EleOperationDetail;
-    use pipe_model::render::{render_batch, EditOp};
+    use aios_database::data_interface::pipe_model_adapter::rendered_batch_to_ele_operations;
+    use pipe_model::render::{EditOp, render_batch};
     use pipe_model::{Context, Flow, PipeCatalog, PipeModel, PipeModelService};
     use std::collections::BTreeSet;
 
@@ -610,11 +636,15 @@ fn pipe_service_end_to_end_on_real_db() {
     let cat = DirectPipeCatalog::new(store.clone(), writable);
     let render_cat = DirectPipeCatalog::new(store.clone(), [dbnum].into_iter().collect());
     let pipes = idx.refnos_of_noun("PIPE", None);
-    let pipe = pipes.iter().copied().find(|p| {
-        cat.attr(*p, "PSPE").is_some() && cat.attr(*p, "BORE").is_some()
-    });
+    let pipe = pipes
+        .iter()
+        .copied()
+        .find(|p| cat.attr(*p, "PSPE").is_some() && cat.attr(*p, "BORE").is_some());
     let Some(pipe) = pipe else {
-        eprintln!("dbnum={dbnum} 里没有 PSPE+BORE 齐的 PIPE（共 {} 个），跳过", pipes.len());
+        eprintln!(
+            "dbnum={dbnum} 里没有 PSPE+BORE 齐的 PIPE（共 {} 个），跳过",
+            pipes.len()
+        );
         return;
     };
     let pipe_name = cat.name_of(pipe).unwrap_or_default();
@@ -623,7 +653,11 @@ fn pipe_service_end_to_end_on_real_db() {
         .into_iter()
         .filter(|m| cat.noun_of(*m).as_deref() == Some("BRAN"))
         .collect();
-    println!("pipe={pipe_name} refno={} brans={:?}", pipe.0, brans_before.len());
+    println!(
+        "pipe={pipe_name} refno={} brans={:?}",
+        pipe.0,
+        brans_before.len()
+    );
 
     let ctx = Context {
         element: pipe,
@@ -634,7 +668,9 @@ fn pipe_service_end_to_end_on_real_db() {
     let service = PipeModelService::new(cat);
 
     // 1) create_branch：真 PIPE 上出批。
-    let batch = service.create_branch(&ctx, pipe).expect("create_branch on real PIPE");
+    let batch = service
+        .create_branch(&ctx, pipe)
+        .expect("create_branch on real PIPE");
     assert!(!batch.ops.is_empty(), "create_branch 应产 op");
 
     // 2) render_batch → EditOp::Add：noun=BRAN、owner=pipe、refno 同库。
@@ -648,17 +684,24 @@ fn pipe_service_end_to_end_on_real_db() {
         })
         .collect();
     assert!(
-        adds.iter().any(|el| el.noun_name == "BRAN" && el.owner == pipe),
+        adds.iter()
+            .any(|el| el.noun_name == "BRAN" && el.owner == pipe),
         "批里应有一条 Add(BRAN under 真 PIPE)；实际 ops={:?}",
-        rendered.ops.iter().map(|op| match op {
-            EditOp::Add(el) => format!("Add({} owner={})", el.noun_name, el.owner.0),
-            EditOp::Modify(_) => "Modify".into(),
-            EditOp::Delete { .. } => "Delete".into(),
-        }).collect::<Vec<_>>()
+        rendered
+            .ops
+            .iter()
+            .map(|op| match op {
+                EditOp::Add(el) => format!("Add({} owner={})", el.noun_name, el.owner.0),
+                EditOp::Modify(_) => "Modify".into(),
+                EditOp::Delete { .. } => "Delete".into(),
+            })
+            .collect::<Vec<_>>()
     );
     for el in &adds {
         assert_eq!(
-            store.dbnum_of(el.refno).expect("allocated refno must decode a dbnum"),
+            store
+                .dbnum_of(el.refno)
+                .expect("allocated refno must decode a dbnum"),
             dbnum,
             "新建元素 refno 必须落在属主同库"
         );
@@ -677,7 +720,8 @@ fn pipe_service_end_to_end_on_real_db() {
     // 3) 适配层 → EleOperationData::Add（可进 terminal_persist_changes）。
     let ops = rendered_batch_to_ele_operations(&rendered, 999);
     assert!(
-        ops.iter().any(|o| matches!(o.detail, EleOperationDetail::Add(_))),
+        ops.iter()
+            .any(|o| matches!(o.detail, EleOperationDetail::Add(_))),
         "适配层应吐 EleOperationData::Add"
     );
     assert!(ops.iter().all(|o| o.sesno == 999), "sesno 透传");
@@ -686,5 +730,8 @@ fn pipe_service_end_to_end_on_real_db() {
     let (status, messages) = service
         .validate_fabrication(&ctx, pipe)
         .expect("validate_fabrication on real PIPE");
-    println!("validate_fabrication: {status:?} messages={}", messages.len());
+    println!(
+        "validate_fabrication: {status:?} messages={}",
+        messages.len()
+    );
 }

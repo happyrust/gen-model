@@ -115,7 +115,13 @@ fn vendor_identity(name: &str, env_var: &str) -> (String, String) {
     let commit = command_stdout("git", &["-C", &vendor, "rev-parse", "--short=12", "HEAD"]);
     let dirty = command_stdout(
         "git",
-        &["-C", &vendor, "status", "--porcelain", "--untracked-files=no"],
+        &[
+            "-C",
+            &vendor,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
     )
     .is_some_and(|status| !status.is_empty());
     let identity = match commit {

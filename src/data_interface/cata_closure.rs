@@ -56,7 +56,9 @@ pub(crate) fn is_valid_ref0(ref0: u32) -> bool {
 /// 便于替换实现与单测。语义与参考项目 `data_interface::cata_closure::CataDbLocator` 对齐。
 pub trait CataDbLocator {
     /// Membership is independent of source-file availability.
-    fn contains_dbnum(&self, dbnum: u32) -> bool { self.file_of(dbnum).is_some() }
+    fn contains_dbnum(&self, dbnum: u32) -> bool {
+        self.file_of(dbnum).is_some()
+    }
     /// `ref0`（`RefU64::get_0()`）-> 所属 dbnum。
     fn dbnum_of_ref0(&self, ref0: u32) -> Option<u32>;
     /// Resolve an affiliation without hiding an ambiguous Ref0 behind iteration order.
@@ -1527,10 +1529,8 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                 // 命中的元素也要交出属性表——渲染那一侧分不出这一行是解出来的还是缓存来的。
                 if self.retain_attmaps {
                     for (refno, entry) in &cached {
-                        self.attmaps.insert(
-                            *refno,
-                            (entry.att.clone(), entry.parsed.children.clone()),
-                        );
+                        self.attmaps
+                            .insert(*refno, (entry.att.clone(), entry.parsed.children.clone()));
                     }
                 }
 
@@ -2097,11 +2097,7 @@ mod tests {
             HashMap::from([(dbnum, dbnum)]),
             HashMap::from([(
                 dbnum,
-                (
-                    "CATA".to_string(),
-                    project.to_string(),
-                    PathBuf::from(path),
-                ),
+                ("CATA".to_string(), project.to_string(), PathBuf::from(path)),
             )]),
         )
     }
@@ -2144,7 +2140,10 @@ mod tests {
         assert_eq!(manifest.missing, 0, "一个都没去文件里找");
         assert_eq!(manifest.account.cache_hits, 2);
         assert_eq!(manifest.account.cache_misses, 0);
-        assert_eq!(manifest.account.parse_requests, 0, "命中路不许调 parse_element");
+        assert_eq!(
+            manifest.account.parse_requests, 0,
+            "命中路不许调 parse_element"
+        );
         assert_eq!(manifest.account.sessions_opened, 0, "全命中的库不开会话");
 
         let attmaps = resolver.take_attmaps();
@@ -2181,8 +2180,14 @@ mod tests {
             let manifest = resolver.resolve().await.expect("resolve");
             assert_eq!(manifest.missing, 1, "第 {attempt} 次：打不开就是缺失");
             assert!(manifest.by_dbnum.is_empty(), "第 {attempt} 次：没有行");
-            assert_eq!(manifest.account.cache_hits, 0, "第 {attempt} 次：不该有命中");
-            assert_eq!(manifest.account.cache_misses, 1, "第 {attempt} 次：查了缓存、没有");
+            assert_eq!(
+                manifest.account.cache_hits, 0,
+                "第 {attempt} 次：不该有命中"
+            );
+            assert_eq!(
+                manifest.account.cache_misses, 1,
+                "第 {attempt} 次：查了缓存、没有"
+            );
         }
     }
 

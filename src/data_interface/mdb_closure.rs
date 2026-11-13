@@ -612,7 +612,11 @@ impl ClosurePlan {
                 self.unresolved.len(),
                 self.unresolved
                     .iter()
-                    .map(|unresolved| format!("{}({} 库)", unresolved.code, unresolved.dbnums.len()))
+                    .map(|unresolved| format!(
+                        "{}({} 库)",
+                        unresolved.code,
+                        unresolved.dbnums.len()
+                    ))
                     .collect::<Vec<_>>()
                     .join("、")
             )
@@ -953,17 +957,28 @@ mod tests {
         assert_eq!(main.dbnums, vec![8000, 7999]);
         assert_eq!(identities(&main.db_dirs), identities(&[ams]));
 
-        let acp_project = plan.projects.iter().find(|p| p.codes == ["ACP"]).expect("ACP");
+        let acp_project = plan
+            .projects
+            .iter()
+            .find(|p| p.codes == ["ACP"])
+            .expect("ACP");
         assert_eq!(acp_project.name, "AvevaCatalogue");
         assert_eq!(acp_project.dbnums, vec![7001, 7009, 7015]);
         assert_eq!(identities(&acp_project.db_dirs), identities(&[acp]));
 
-        let scb_project = plan.projects.iter().find(|p| p.codes == ["SCB"]).expect("SCB");
+        let scb_project = plan
+            .projects
+            .iter()
+            .find(|p| p.codes == ["SCB"])
+            .expect("SCB");
         assert_eq!(scb_project.dbnums, vec![6003]);
         assert_eq!(identities(&scb_project.db_dirs), identities(&[scb]));
         assert!(plan.unresolved.is_empty());
         assert!(!plan.is_degraded());
-        assert_eq!(plan.project_names(), vec!["Marine", "AvevaCatalogue", "SCB"]);
+        assert_eq!(
+            plan.project_names(),
+            vec!["Marine", "AvevaCatalogue", "SCB"]
+        );
     }
 
     /// 定位器全空 → `unresolved = [{code: "ACP", dbnums: [...]}]`，原因点名找过的根，且不拒绝。
@@ -973,7 +988,11 @@ mod tests {
         fixture.dir("Main/mai000");
         let declaration = declaration(
             "unresolved-Main",
-            &[(Some("ACP"), 7001, "/A"), (Some("ACP"), 7002, "/B"), (Some("ZDJ"), 7600, "/Z")],
+            &[
+                (Some("ACP"), 7001, "/A"),
+                (Some("ACP"), 7002, "/B"),
+                (Some("ZDJ"), 7600, "/Z"),
+            ],
         );
         let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
         let main = locate_project_folder(&scans, "Main");
@@ -984,8 +1003,16 @@ mod tests {
         assert_eq!(plan.unresolved[0].code, "ACP");
         assert_eq!(plan.unresolved[0].dbnums, vec![7001, 7002]);
         assert_eq!(plan.unresolved[0].names, vec!["/A", "/B"]);
-        assert!(plan.unresolved[0].reason.contains("acp000"), "{}", plan.unresolved[0].reason);
-        assert!(plan.unresolved[0].reason.contains(&fixture.root.display().to_string()));
+        assert!(
+            plan.unresolved[0].reason.contains("acp000"),
+            "{}",
+            plan.unresolved[0].reason
+        );
+        assert!(
+            plan.unresolved[0]
+                .reason
+                .contains(&fixture.root.display().to_string())
+        );
         assert!(plan.is_degraded());
         let watch = plan.watch_dir_plan();
         assert_eq!(watch.problems().len(), 2, "{:?}", watch.problems());
@@ -1003,14 +1030,21 @@ mod tests {
         let amx = fixture.dir("Marine/amx000");
         let declaration = declaration(
             "merge-Marine",
-            &[(None, 8000, "/D"), (Some("AMS"), 8001, "/E"), (Some("AMX"), 8002, "/F")],
+            &[
+                (None, 8000, "/D"),
+                (Some("AMS"), 8001, "/E"),
+                (Some("AMX"), 8002, "/F"),
+            ],
         );
         let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
         let main = locate_project_folder(&scans, "Marine");
         let plan = ClosurePlan::build("Marine", "ALL", scans, main, Ok(declaration));
         assert_eq!(plan.projects.len(), 1, "{:?}", plan.projects);
         assert_eq!(plan.projects[0].dbnums, vec![8000, 8001, 8002]);
-        assert_eq!(identities(&plan.projects[0].db_dirs), identities(&[ams, amx]));
+        assert_eq!(
+            identities(&plan.projects[0].db_dirs),
+            identities(&[ams, amx])
+        );
         assert_eq!(plan.watch_dir_plan().dirs().len(), 2);
     }
 
@@ -1020,14 +1054,29 @@ mod tests {
         let fixture = Fixture::new("no-main");
         fixture.dir("AvevaCatalogue/acp000");
         seed_declaration("Ghost-no-main", "ALL", &[(Some("ACP"), 7001, "/A")]);
-        let plan = resolve(&[fixture.root.clone()], "Ghost-no-main", "ALL", DEFAULT_ROOT_SCAN_TIMEOUT);
+        let plan = resolve(
+            &[fixture.root.clone()],
+            "Ghost-no-main",
+            "ALL",
+            DEFAULT_ROOT_SCAN_TIMEOUT,
+        );
         assert!(plan.main.is_none());
-        assert!(plan.problems.iter().any(|p| p.contains("主项目 \"Ghost-no-main\"")), "{:?}", plan.problems);
+        assert!(
+            plan.problems
+                .iter()
+                .any(|p| p.contains("主项目 \"Ghost-no-main\"")),
+            "{:?}",
+            plan.problems
+        );
         assert_eq!(plan.projects.len(), 1);
         assert_eq!(plan.projects[0].codes, vec!["ACP"]);
         assert!(plan.is_degraded());
         let watch = plan.watch_dir_plan();
-        assert!(watch.problems().iter().any(|p| p.contains("Ghost-no-main")), "{:?}", watch.problems());
+        assert!(
+            watch.problems().iter().any(|p| p.contains("Ghost-no-main")),
+            "{:?}",
+            watch.problems()
+        );
     }
 
     /// ADR-085 D2：先读后换。SYST 落库后重读 SYS 失败（目录里压根没有 SYS）时，手里那份声明原样留着；
@@ -1039,11 +1088,18 @@ mod tests {
         let fixture = Fixture::new("reload-no-sys");
         let empty = fixture.dir("Marine/ams000");
 
-        let error = reload_declaration(&[empty], project, "ALL").expect_err("目录里没有 SYS，必须报错");
-        assert!(error.to_string().contains("/ALL"), "错误要点名是哪个 MDB：{error:#}");
+        let error =
+            reload_declaration(&[empty], project, "ALL").expect_err("目录里没有 SYS，必须报错");
+        assert!(
+            error.to_string().contains("/ALL"),
+            "错误要点名是哪个 MDB：{error:#}"
+        );
 
         let kept = cached_declaration(project, "ALL").expect("旧声明必须还在");
-        assert_eq!(kept.databases.iter().map(|db| db.dbnum).collect::<Vec<_>>(), [8000]);
+        assert_eq!(
+            kept.databases.iter().map(|db| db.dbnum).collect::<Vec<_>>(),
+            [8000]
+        );
         forget_declaration(project, "ALL");
     }
 
@@ -1053,7 +1109,12 @@ mod tests {
         let fixture = Fixture::new("main-by-code");
         let dir = fixture.dir("SomeFolder/qzx000");
         seed_declaration("qzx", "ALL", &[(None, 8000, "/D")]);
-        let plan = resolve(&[fixture.root.clone()], "qzx", "ALL", DEFAULT_ROOT_SCAN_TIMEOUT);
+        let plan = resolve(
+            &[fixture.root.clone()],
+            "qzx",
+            "ALL",
+            DEFAULT_ROOT_SCAN_TIMEOUT,
+        );
         let main = &plan.projects[plan.main.expect("按码定位到")];
         assert_eq!(identities(&main.db_dirs), identities(&[dir]));
         assert_eq!(main.name, "qzx");
@@ -1068,7 +1129,11 @@ mod tests {
         fixture.dir("Cat/acp000");
         let declaration = declaration(
             "banner-Marine",
-            &[(None, 8000, "/D"), (Some("ACP"), 7001, "/A"), (Some("SCB"), 6003, "/S")],
+            &[
+                (None, 8000, "/D"),
+                (Some("ACP"), 7001, "/A"),
+                (Some("SCB"), 6003, "/S"),
+            ],
         );
         let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
         let main = locate_project_folder(&scans, "Marine");
@@ -1225,6 +1290,9 @@ mod tests {
         assert!(Arc::ptr_eq(&plan, &cached), "命中的必须就是写进去的那份");
 
         option.project_name = "Other".to_string();
-        assert!(cached_plan_for(&option).is_none(), "key 不符不命中、也不现算");
+        assert!(
+            cached_plan_for(&option).is_none(),
+            "key 不符不命中、也不现算"
+        );
     }
 }

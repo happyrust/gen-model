@@ -865,7 +865,10 @@ mod tests {
                 }));
             if !corpus_ready(
                 "aps 的两个单端窗口",
-                &[dir.join("aps7200_0001").as_path(), dir.join("aps250110_0001").as_path()],
+                &[
+                    dir.join("aps7200_0001").as_path(),
+                    dir.join("aps250110_0001").as_path(),
+                ],
             ) {
                 return;
             }

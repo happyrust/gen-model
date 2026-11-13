@@ -130,7 +130,9 @@ pub async fn load_tube_records_from(
 }
 
 /// 生产入口：全局投影 + `SUL_DB`。
-pub async fn load_tube_records(roots: &[RefU64]) -> anyhow::Result<HashMap<RefU64, Vec<TubeRecord>>> {
+pub async fn load_tube_records(
+    roots: &[RefU64],
+) -> anyhow::Result<HashMap<RefU64, Vec<TubeRecord>>> {
     load_tube_records_from(ModelMemoryStore::global(), &aios_core::SUL_DB, roots).await
 }
 
@@ -154,8 +156,18 @@ mod tests {
     }
 
     /// 挂在 BRAN `bran` 上的一段直管：`from → to`，长 `length`，绕 z 转 0.3 rad 再平移——z 轴列的模仍是长度。
-    fn tube(bran: u32, from: u32, to: u32, ordinal: u32, length: f64, invalid: bool) -> ProjectedGeometry {
-        let world = DMat4::from_rotation_translation(DQuat::from_rotation_z(0.3), DVec3::new(10.0, 20.0, 30.0));
+    fn tube(
+        bran: u32,
+        from: u32,
+        to: u32,
+        ordinal: u32,
+        length: f64,
+        invalid: bool,
+    ) -> ProjectedGeometry {
+        let world = DMat4::from_rotation_translation(
+            DQuat::from_rotation_z(0.3),
+            DVec3::new(10.0, 20.0, 30.0),
+        );
         let local = DMat4::from_translation(DVec3::new(0.0, 0.0, -length / 2.0))
             * DMat4::from_scale(DVec3::new(50.0, 50.0, length));
         ProjectedGeometry {
@@ -204,7 +216,11 @@ mod tests {
         assert!(record.invalid);
         assert_eq!(record.aabb.maxs.x, 1234.5);
 
-        assert_eq!(TubeRecord::from_projected(&element(11, 10)), None, "构件不是直段");
+        assert_eq!(
+            TubeRecord::from_projected(&element(11, 10)),
+            None,
+            "构件不是直段"
+        );
         let mut bad = tube(10, 11, 12, 0, 10.0, false);
         bad.world_bounds = [[5.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
         assert_eq!(TubeRecord::from_projected(&bad), None, "反向盒丢弃");
@@ -212,7 +228,13 @@ mod tests {
         assert_eq!(TubeRecord::from_projected(&bad), None, "NaN 盒丢弃");
     }
 
-    fn row(container: &str, from: &str, to: &str, ordinal: Option<u32>, length: f32) -> DurableTubeRow {
+    fn row(
+        container: &str,
+        from: &str,
+        to: &str,
+        ordinal: Option<u32>,
+        length: f32,
+    ) -> DurableTubeRow {
         DurableTubeRow {
             container: container.into(),
             tube_from: from.into(),
@@ -232,7 +254,11 @@ mod tests {
     #[test]
     fn durable_rows_are_numbered_within_the_same_end_pair_only() {
         let a = refno(10).to_string();
-        let (m1, m2, m3) = (refno(11).to_string(), refno(12).to_string(), refno(13).to_string());
+        let (m1, m2, m3) = (
+            refno(11).to_string(),
+            refno(12).to_string(),
+            refno(13).to_string(),
+        );
         let records = from_durable_rows(&[
             row(&a, &m1, &m2, None, 100.0),
             row(&a, &m2, &m3, None, 200.0),
@@ -312,7 +338,10 @@ mod tests {
                 .iter()
                 .map(|r| (r.from, r.to, r.length.round() as i32, r.invalid))
                 .collect::<Vec<_>>(),
-            [(refno(11), refno(12), 500, false), (refno(12), refno(10), 700, true)],
+            [
+                (refno(11), refno(12), 500, false),
+                (refno(12), refno(10), 700, true)
+            ],
             "有回执的根只看投影——库里那条挂在它名下的行不来"
         );
         assert_eq!(

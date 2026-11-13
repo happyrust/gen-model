@@ -1161,7 +1161,6 @@ pub async fn test_gen_geos_data_performance(
         }
     }
 
-
     let init_time = init_start.elapsed();
     info!("数据库初始化耗时: {}ms", init_time.as_millis());
 
@@ -1951,7 +1950,6 @@ pub async fn test_gen_geos_data_from_database(
             }
         }
     }
-
 
     // 查询参考号
     let mut all_refnos = Vec::new();

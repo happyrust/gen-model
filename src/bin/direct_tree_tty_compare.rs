@@ -302,7 +302,9 @@ fn compare_tty(
         let aligned = direct.len() == tty.len()
             && std::iter::zip(&direct, &tty).all(|(d, t)| same_member(d, t));
         if aligned {
-            udet_members += std::iter::zip(&direct, &tty).filter(|(d, t)| d != t).count();
+            udet_members += std::iter::zip(&direct, &tty)
+                .filter(|(d, t)| d != t)
+                .count();
         } else {
             mismatches.push(Mismatch {
                 parent: RefnoEnum::from(*parent).to_pdms_str(),

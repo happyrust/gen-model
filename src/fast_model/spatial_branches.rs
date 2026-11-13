@@ -206,7 +206,9 @@ pub fn assemble(
             false
         }
         TubeIndexState::Failed(reason) => {
-            warnings.push(format!("直管段索引读取失败（{reason}），没加载过的邻管可能漏检"));
+            warnings.push(format!(
+                "直管段索引读取失败（{reason}），没加载过的邻管可能漏检"
+            ));
             false
         }
     };
@@ -262,7 +264,13 @@ pub async fn nearby(
     let tubes = spatial_tube_index::current();
     let params = params.clone();
     tokio::task::spawn_blocking(move || {
-        assemble(scan, &params, attrs.as_ref(), ModelMemoryStore::global(), &tubes)
+        assemble(
+            scan,
+            &params,
+            attrs.as_ref(),
+            ModelMemoryStore::global(),
+            &tubes,
+        )
     })
     .await
     .map_err(|error| SpatialQueryError::Internal(anyhow::anyhow!("周边管道查询线程失败: {error}")))
@@ -371,12 +379,19 @@ mod tests {
 
     fn index(entries: &[(u32, Aabb)]) -> TubeIndexState {
         TubeIndexState::Ready(Arc::new(
-            entries.iter().map(|(seq, aabb)| (id(*seq), *aabb)).collect(),
+            entries
+                .iter()
+                .map(|(seq, aabb)| (id(*seq), *aabb))
+                .collect(),
         ))
     }
 
     fn refnos(response: &NearbyBranchesResponse) -> Vec<String> {
-        response.results.iter().map(|item| item.refno.clone()).collect()
+        response
+            .results
+            .iter()
+            .map(|item| item.refno.clone())
+            .collect()
     }
 
     /// 投影里一根只有一段几何、带回执的 BRAN。
@@ -429,10 +444,23 @@ mod tests {
             (2, aabb([5_000.0, 400.0, 0.0], [6_000.0, 500.0, 100.0])),
             (3, aabb([5_000.0, 900.0, 0.0], [6_000.0, 1_000.0, 100.0])),
         ]);
-        let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
-        assert_eq!(refnos(&response), [id(2).to_string()], "300 mm 的进，800 mm 的和源自己不进");
+        let response = assemble(
+            scan(),
+            &params(),
+            &Attrs,
+            &ModelMemoryStore::default(),
+            &tubes,
+        );
+        assert_eq!(
+            refnos(&response),
+            [id(2).to_string()],
+            "300 mm 的进，800 mm 的和源自己不进"
+        );
         assert!(!response.truncated_candidates && response.warnings.is_empty());
-        assert_eq!(response.coverage, "global-tree-bran-tube-index-and-current-projection");
+        assert_eq!(
+            response.coverage,
+            "global-tree-bran-tube-index-and-current-projection"
+        );
     }
 
     #[test]
@@ -444,19 +472,34 @@ mod tests {
         );
         let tubes = index(&[(2, aabb([5_000.0, 400.0, 0.0], [6_000.0, 500.0, 100.0]))]);
         let response = assemble(scan(), &params(), &Attrs, &memory, &tubes);
-        assert!(refnos(&response).is_empty(), "投影里那根已经挪远了，索引里的旧盒不算");
+        assert!(
+            refnos(&response).is_empty(),
+            "投影里那根已经挪远了，索引里的旧盒不算"
+        );
     }
 
     #[test]
     fn without_the_tube_index_coverage_is_reported_incomplete() {
         for (tubes, needle) in [
             (TubeIndexState::Building, "还在建立"),
-            (TubeIndexState::Failed("connection refused".into()), "connection refused"),
+            (
+                TubeIndexState::Failed("connection refused".into()),
+                "connection refused",
+            ),
         ] {
-            let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
+            let response = assemble(
+                scan(),
+                &params(),
+                &Attrs,
+                &ModelMemoryStore::default(),
+                &tubes,
+            );
             assert!(response.truncated_candidates);
             assert!(
-                response.warnings.iter().any(|warning| warning.contains(needle)),
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(needle)),
                 "{:?}",
                 response.warnings
             );
@@ -467,7 +510,13 @@ mod tests {
     #[test]
     fn an_index_entry_with_an_unknown_owner_marks_coverage_incomplete() {
         let tubes = index(&[(99, aabb([0.0, 200.0, 0.0], [100.0, 300.0, 100.0]))]);
-        let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
+        let response = assemble(
+            scan(),
+            &params(),
+            &Attrs,
+            &ModelMemoryStore::default(),
+            &tubes,
+        );
         assert!(refnos(&response).is_empty());
         assert!(response.truncated_candidates && !response.warnings.is_empty());
     }
@@ -551,13 +600,9 @@ mod tests {
             ),
         ]);
         let query = params();
-        let scan = spatial_query::scan_tree_for_branches(
-            &tree,
-            SpatialTreeState::Ready,
-            &query,
-            &memory,
-        )
-        .expect("scan");
+        let scan =
+            spatial_query::scan_tree_for_branches(&tree, SpatialTreeState::Ready, &query, &memory)
+                .expect("scan");
         let tubes = index(&[(2, aabb([3_000.0, 3_000.0, 0.0], [3_100.0, 3_100.0, 100.0]))]);
         let response = assemble(scan, &query, &Attrs, &memory, &tubes);
         assert_eq!(refnos(&response), [id(3).to_string()]);

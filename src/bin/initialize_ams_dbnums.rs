@@ -82,7 +82,10 @@ async fn main() -> anyhow::Result<()> {
     let mut failures = 0usize;
     for dbnum in dbnums {
         let started = std::time::Instant::now();
-        match manager.initialize_project_dbnum(&project, dbnum, model).await {
+        match manager
+            .initialize_project_dbnum(&project, dbnum, model)
+            .await
+        {
             Ok(outcome) if with_model => {
                 let generated = outcome
                     .units

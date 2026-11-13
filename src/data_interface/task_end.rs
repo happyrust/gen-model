@@ -139,7 +139,9 @@ fn render_watermark_update(end: &TaskEnd) -> String {
             let base = end.model_base_sesno.unwrap_or(0).max(0);
             let gate = |field: &str, expr: String| -> String {
                 if base > 0 {
-                    format!("{field} = IF {base} <= (model_sesno ?: 0) THEN {expr} ELSE {field} END")
+                    format!(
+                        "{field} = IF {base} <= (model_sesno ?: 0) THEN {expr} ELSE {field} END"
+                    )
                 } else {
                     format!("{field} = {expr}")
                 }
@@ -165,7 +167,9 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 "model_generator",
                 format!(
                     "'{}'",
-                    escape_surql_str(crate::fast_model::generator_identity::generator_fingerprint())
+                    escape_surql_str(
+                        crate::fast_model::generator_identity::generator_fingerprint()
+                    )
                 ),
             ));
             // 数据库架构版本（`storage_version:current`）**不在这里写**：它是整库一条记录，
@@ -287,7 +291,8 @@ pub(crate) async fn commit_task_end_on(
     db: &Surreal<Any>,
     end: &TaskEnd,
 ) -> anyhow::Result<TaskEndReceipt> {
-    let touched_model_sesno = commit_task_end_via(end, |sql| async move { db.query(sql).await }).await?;
+    let touched_model_sesno =
+        commit_task_end_via(end, |sql| async move { db.query(sql).await }).await?;
 
     DbnumState::invalidate_mirrored_on(db, end.dbnum);
 
@@ -579,8 +584,15 @@ mod tests {
         initialization.data = Some(TaskDataOutcome::default());
         for end in [end(), initialization] {
             let sql = render_task_end_tail(&end);
-            for retired in ["dbnum_info_table", "dbnum_stats_state", "ownership conflict"] {
-                assert!(!sql.contains(retired), "收尾不再写 Ref0 统计（{retired}）：{sql}");
+            for retired in [
+                "dbnum_info_table",
+                "dbnum_stats_state",
+                "ownership conflict",
+            ] {
+                assert!(
+                    !sql.contains(retired),
+                    "收尾不再写 Ref0 统计（{retired}）：{sql}"
+                );
             }
         }
     }
@@ -1082,7 +1094,11 @@ mod tests {
             .unwrap()
             .take(0)
             .unwrap();
-        assert_eq!(status.as_deref(), Some("finished"), "写入标记与水位同一笔关上");
+        assert_eq!(
+            status.as_deref(),
+            Some("finished"),
+            "写入标记与水位同一笔关上"
+        );
     }
 
     /// ADR-092 D2 连续性闸：模型左端越过库上当前 `model_sesno` 时，水位 / 落款 / 目录章
@@ -1137,13 +1153,11 @@ mod tests {
     #[tokio::test]
     async fn the_continuity_gate_refuses_a_skip_stamp_but_lets_contiguous_ones_through() {
         let db = database().await;
-        db.query(
-            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
 
         // 跳盖：本任务计划从左端 30 起算，库上模型水位才到 20——中间一段没人算过，拒盖。
         let mut skipping = end();

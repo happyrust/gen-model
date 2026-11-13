@@ -136,7 +136,8 @@ pub(crate) async fn scope_mesh_ids(
     let mut ids = projected_scope_mesh_ids(refno);
     if include_durable {
         ids.extend(
-            durable_scope_mesh_ids(&crate::data_interface::staging::active_data_db(), refno).await?,
+            durable_scope_mesh_ids(&crate::data_interface::staging::active_data_db(), refno)
+                .await?,
         );
     }
     Ok(ids)
@@ -186,9 +187,22 @@ pub(crate) async fn dbnum_mesh_ids(
     let mut ids = projected_dbnum_mesh_ids(dbnum);
     if include_durable {
         ids.extend(
-            durable_dbnum_mesh_ids(&crate::data_interface::staging::active_data_db(), dbnum).await?,
+            durable_dbnum_mesh_ids(&crate::data_interface::staging::active_data_db(), dbnum)
+                .await?,
         );
     }
+    Ok(ids)
+}
+
+/// [`dbnum_mesh_ids`] 的库那一半：进程内投影照旧按 `dbnum` 收（那是本进程的记忆，与哪个
+/// 库无关），库上那一份走传进来的 `db`。固定两边都收——升级清库删完行之后，谁也再说不
+/// 出这个库引用过哪些网格，少收一个就是留下一个删不掉的文件。
+pub(crate) async fn dbnum_mesh_ids_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut ids = projected_dbnum_mesh_ids(dbnum);
+    ids.extend(durable_dbnum_mesh_ids(db, dbnum).await?);
     Ok(ids)
 }
 
@@ -214,7 +228,10 @@ pub(crate) async fn durable_dbnum_mesh_ids(
 }
 
 /// 两句收集共用的解码：`inst_relate` 行 → 键集。
-async fn collect_durable_mesh_ids(db: &Surreal<Any>, sql: &str) -> anyhow::Result<BTreeSet<String>> {
+async fn collect_durable_mesh_ids(
+    db: &Surreal<Any>,
+    sql: &str,
+) -> anyhow::Result<BTreeSet<String>> {
     let mut response = db.query(sql).await?.check()?;
     let insts: Vec<DurableInstMeshRow> = response.take(0)?;
     let mut ids = BTreeSet::new();
@@ -365,7 +382,11 @@ mod tests {
     #[test]
     fn the_collection_sql_keeps_bare_index_predicates() {
         let sql = durable_scope_mesh_ids_sql(104724187644825, "pe:24383_66457");
-        assert_eq!(sql.matches("anc CONTAINS 104724187644825").count(), 1, "{sql}");
+        assert_eq!(
+            sql.matches("anc CONTAINS 104724187644825").count(),
+            1,
+            "{sql}"
+        );
         assert_eq!(sql.matches("in = pe:24383_66457").count(), 1, "{sql}");
         assert_eq!(sql.matches("inst_relate").count(), 1, "{sql}");
         assert!(
@@ -456,7 +477,10 @@ mod tests {
         );
         assert!(!dir.path().join("e3d_baked_v2_aa.mesh").exists());
         assert!(!dir.path().join("17.mesh").exists());
-        assert!(dir.path().join("room-input-cache").exists(), "别的东西不许碰");
+        assert!(
+            dir.path().join("room-input-cache").exists(),
+            "别的东西不许碰"
+        );
         assert_eq!(
             report.note(),
             "一并删除网格文件 2 个（另 1 个本来就不在盘上），2 个删失败"
@@ -487,7 +511,10 @@ mod tests {
         assert!(report.failed.is_empty(), "{report:?}");
         assert!(!lod1_mesh_path(dir.path(), "e3d_baked_v2_aa").exists());
         assert!(!lod1_marker_path(dir.path(), "e3d_baked_v2_bb").exists());
-        assert!(lod1_mesh_path(dir.path(), "e3d_baked_v2_keep").exists(), "别的键的粗网格不碰");
+        assert!(
+            lod1_mesh_path(dir.path(), "e3d_baked_v2_keep").exists(),
+            "别的键的粗网格不碰"
+        );
         assert_eq!(report.note(), "一并删除网格文件 2 个、粗网格 1 个");
     }
 
@@ -614,7 +641,10 @@ mod tests {
         let rows = purge.find("delete_inst_geo_rows(").expect("先删行");
         let files = purge.find("remove_mesh_files_in(").expect("再删文件");
         assert!(rows < files, "几何行在前、文件在后：{purge}");
-        assert!(purge.contains("spawn_blocking"), "删文件不占 tokio worker：{purge}");
+        assert!(
+            purge.contains("spawn_blocking"),
+            "删文件不占 tokio worker：{purge}"
+        );
     }
 
     /// 整库那一档的收集句：与子树同一形状，谓词是 `dbnum =`（不是 Ref0 区间、不挂别的

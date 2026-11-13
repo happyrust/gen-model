@@ -494,8 +494,16 @@ impl ScopeState {
                 bounds = Some(match bounds {
                     None => [min, max],
                     Some([cmin, cmax]) => [
-                        [cmin[0].min(min[0]), cmin[1].min(min[1]), cmin[2].min(min[2])],
-                        [cmax[0].max(max[0]), cmax[1].max(max[1]), cmax[2].max(max[2])],
+                        [
+                            cmin[0].min(min[0]),
+                            cmin[1].min(min[1]),
+                            cmin[2].min(min[2]),
+                        ],
+                        [
+                            cmax[0].max(max[0]),
+                            cmax[1].max(max[1]),
+                            cmax[2].max(max[2]),
+                        ],
                     ],
                 });
             }
@@ -507,7 +515,8 @@ impl ScopeState {
     }
 
     fn refresh_root_bounds(&mut self, packed_root: i64) {
-        if self.receipts.contains_key(&packed_root) || self.invalidated_roots.contains(&packed_root) {
+        if self.receipts.contains_key(&packed_root) || self.invalidated_roots.contains(&packed_root)
+        {
             let summary = self.compute_root_bounds(packed_root);
             self.root_bounds.insert(packed_root, summary);
         } else {
@@ -1320,7 +1329,11 @@ impl ModelMemoryStore {
         }
         let ids = state.record_ids_under(root);
         for id in ids {
-            if state.geometries.get(&id).is_some_and(|row| row.dbnum == dbnum) {
+            if state
+                .geometries
+                .get(&id)
+                .is_some_and(|row| row.dbnum == dbnum)
+            {
                 state.remove(&id);
             }
         }
@@ -1389,7 +1402,9 @@ impl ModelMemoryStore {
             state.receipts.insert(packed, receipt);
             state.refresh_root_bounds(packed);
         }
-        state.root_bounds.retain(|packed, _| state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed));
+        state.root_bounds.retain(|packed, _| {
+            state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed)
+        });
         true
     }
 
@@ -1467,7 +1482,11 @@ impl ModelMemoryStore {
     ///
     /// 调用时机归调用方守：每次发布之后、每次 durable ACK 记下之后（`model_write_behind`），且只在
     /// `store_mode().is_durable()` 下——嵌入 kv-mem 时 overlay 就是唯一一份。
-    pub fn enforce_root_limit(&self, limit: usize, room_membership_enabled: bool) -> OverlayEviction {
+    pub fn enforce_root_limit(
+        &self,
+        limit: usize,
+        room_membership_enabled: bool,
+    ) -> OverlayEviction {
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
             return OverlayEviction {
@@ -1872,6 +1891,25 @@ impl ModelMemoryStore {
         receipt
     }
 
+    /// 一批根各自的回执生成会话（没有回执为 `None`），与 `roots` 逐项对应。一把读锁、不复制回执：
+    /// 节点模型状态（ADR-099）与 `/model/generate` 回执的逐根会话按根数调它，一个 SITE 下可以有几千根，
+    /// 而回执上还挂着模型目标和（落库确认之前的）房间边，逐根 [`Self::receipt`] 复制不起。
+    pub fn receipt_sesnos(&self, scope: ProjectionScope<'_>, roots: &[RefNo]) -> Vec<Option<u32>> {
+        let scopes = self.read();
+        let Some(state) = scopes.get(&scope.key()) else {
+            return vec![None; roots.len()];
+        };
+        roots
+            .iter()
+            .map(|root| {
+                state
+                    .receipts
+                    .get(&packed_refno(*root))
+                    .map(|receipt| receipt.source_sesno)
+            })
+            .collect()
+    }
+
     pub fn publication_ack(
         &self,
         scope: ProjectionScope<'_>,
@@ -2115,12 +2153,7 @@ mod tests {
         let upserts = (0..9u32)
             .map(|index| {
                 let source = RefNo::new(24384, 26313 + index);
-                record(
-                    &format!("24384_{}", 26313 + index),
-                    source,
-                    root,
-                    8000,
-                )
+                record(&format!("24384_{}", 26313 + index), source, root, 8000)
             })
             .collect::<Vec<_>>();
         let sibling = record("24384_9", RefNo::new(24384, 9), other, 8000);
@@ -2161,13 +2194,20 @@ mod tests {
 
         assert_eq!(store.retire_deleted_root(ProjectionScope::Current, root), 0);
         assert!(store.receipt(ProjectionScope::Current, root).is_none());
-        assert!(store.root_snapshot(ProjectionScope::Current, root).is_none());
+        assert!(
+            store
+                .root_snapshot(ProjectionScope::Current, root)
+                .is_none()
+        );
         assert_eq!(
             store.retire_deleted_root(ProjectionScope::Current, root),
             0,
             "a second delete is a no-op"
         );
-        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, other).len(),
+            1
+        );
         assert!(store.receipt(ProjectionScope::Current, other).is_some());
 
         let again = (0..9u32)
@@ -2189,9 +2229,20 @@ mod tests {
             }],
         );
         assert_eq!(store.retire_deleted_root(ProjectionScope::Current, root), 9);
-        assert!(store.root_snapshot(ProjectionScope::Current, root).is_none());
-        assert!(store.records_of_root(ProjectionScope::Current, root).is_empty());
-        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
+        assert!(
+            store
+                .root_snapshot(ProjectionScope::Current, root)
+                .is_none()
+        );
+        assert!(
+            store
+                .records_of_root(ProjectionScope::Current, root)
+                .is_empty()
+        );
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, other).len(),
+            1
+        );
     }
 
     /// `Current` 里某个库、盒与给定任一盒相交的记录的构件（打包 refno）。替代 2026-09-22 删掉的每库房间
@@ -2209,7 +2260,11 @@ mod tests {
             .records(ProjectionScope::Current)
             .iter()
             .filter(|record| record.dbnum == dbnum)
-            .filter(|record| bounds.iter().any(|probe| intersects(&record.world_bounds, probe)))
+            .filter(|record| {
+                bounds
+                    .iter()
+                    .any(|probe| intersects(&record.world_bounds, probe))
+            })
             .map(|record| packed_refno(record.source_refno))
             .collect()
     }
@@ -2816,13 +2871,22 @@ mod tests {
         let root = RefNo::new(24384, 1);
         let other = RefNo::new(24384, 2);
         assert_eq!(root.dbno(), 8000);
-        let receipt = RootReceipt { source_sesno: 1, model_target: None,
-            manifest_hash: "test".into(), geometry_count: 1, published_via: "regen".into(), room: None };
+        let receipt = RootReceipt {
+            source_sesno: 1,
+            model_target: None,
+            manifest_hash: "test".into(),
+            geometry_count: 1,
+            published_via: "regen".into(),
+            room: None,
+        };
         let commit = ProjectionCommit {
-            upserts: vec![record("deleted", root, root, 8000),
+            upserts: vec![
+                record("deleted", root, root, 8000),
                 record("same-db-survivor", other, other, 8000),
-                record("other-db-survivor", root, root, 7997)],
-            receipt: Some((root, receipt)), ..Default::default()
+                record("other-db-survivor", root, root, 7997),
+            ],
+            receipt: Some((root, receipt)),
+            ..Default::default()
         };
         store.commit(ProjectionScope::Current, vec![commit.clone()]);
         store.commit(ProjectionScope::Historical("before"), vec![commit]);
@@ -2830,8 +2894,14 @@ mod tests {
         let epoch = store.commit_epoch(8000);
         assert!(store.evict_missing_root(root, epoch));
         assert_eq!(store.current_counts(), (2, 0));
-        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
-        assert_eq!(store.records(ProjectionScope::Historical("before")).len(), 3);
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, other).len(),
+            1
+        );
+        assert_eq!(
+            store.records(ProjectionScope::Historical("before")).len(),
+            3
+        );
         assert_eq!(store.commit_epoch(7997), other_epoch);
         assert!(store.commit_epoch(8000) > epoch);
         let epoch = store.commit_epoch(8000);
@@ -2843,9 +2913,15 @@ mod tests {
     fn missing_root_eviction_rejects_a_concurrent_publication() {
         let store = store();
         let root = RefNo::new(24384, 1);
-        let put = || store.commit(ProjectionScope::Current, vec![ProjectionCommit {
-            upserts: vec![record("model", root, root, 8000)], ..Default::default()
-        }]);
+        let put = || {
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![record("model", root, root, 8000)],
+                    ..Default::default()
+                }],
+            )
+        };
         put();
         let epoch = store.commit_epoch(8000);
         put();
@@ -3034,7 +3110,8 @@ mod tests {
         );
         assert!(members_intersecting(&store, 7997, &[original.world_bounds]).is_empty());
         assert!(
-            members_intersecting(&store, 7997, &[moved.world_bounds]).contains(&packed_refno(member))
+            members_intersecting(&store, 7997, &[moved.world_bounds])
+                .contains(&packed_refno(member))
         );
         store.commit(
             ProjectionScope::Current,
@@ -3622,6 +3699,31 @@ mod tests {
         receipt
     }
 
+    /// ADR-099：一批根的回执会话与输入逐项对应；没有回执、回执被作废的根是 `None`；别的投影域里的回执不算。
+    #[test]
+    fn receipt_sesnos_answer_each_root_in_order_and_only_for_live_receipts() {
+        let store = store();
+        let generated = RefNo::new(7997, 11);
+        let never = RefNo::new(7997, 12);
+        let invalidated = RefNo::new(7997, 13);
+        commit_root(&store, generated, "g");
+        commit_root(&store, invalidated, "i");
+        store.invalidate_receipt(ProjectionScope::Current, invalidated);
+
+        assert_eq!(
+            store.receipt_sesnos(
+                ProjectionScope::Current,
+                &[never, generated, invalidated, generated]
+            ),
+            vec![None, Some(42), None, Some(42)]
+        );
+        assert_eq!(
+            store.receipt_sesnos(ProjectionScope::Historical("7997_11@42"), &[generated]),
+            vec![None]
+        );
+        assert!(store.receipt_sesnos(ProjectionScope::Current, &[]).is_empty());
+    }
+
     /// ADR-086 D1：拿一个不是生成根的祖先来问，展成投影里它名下盖过章的根（按打包 refno 升序）；
     /// 祖先自己就是根时只有它自己；名下一根都没有就是空——`/model/records` 据此回 200 空而不是 409。
     #[test]
@@ -3656,9 +3758,11 @@ mod tests {
             store.receipt_roots_under(ProjectionScope::Current, bran_a),
             vec![bran_a]
         );
-        assert!(store
-            .receipt_roots_under(ProjectionScope::Current, RefNo::new(7997, 99))
-            .is_empty());
+        assert!(
+            store
+                .receipt_roots_under(ProjectionScope::Current, RefNo::new(7997, 99))
+                .is_empty()
+        );
         // 根以下的节点：顺着它名下记录的祖先链找到头上盖过章的根；根自己、没记录的节点都不算。
         assert_eq!(
             store.receipt_root_above(ProjectionScope::Current, RefNo::new(7997, 1011)),
@@ -3915,7 +4019,11 @@ mod tests {
         // 房间开关关着盖章（`Cleared`）：没有库上那一代可比，只看 stray 集合——仍是证据。
         store.note_room_generation_stamped(7997, None);
         let cleared = store.enforce_root_limit(1, false);
-        assert_eq!((cleared.evicted, cleared.resident_after), (0, 2), "{cleared:?}");
+        assert_eq!(
+            (cleared.evicted, cleared.resident_after),
+            (0, 2),
+            "{cleared:?}"
+        );
 
         // 库上盖到 g2：这一代的边就是库上的边，ACK 不再是证据——最旧的 evidence_a 出，收到上限。
         store.note_room_generation_stamped(7997, Some("g2"));
@@ -4047,17 +4155,31 @@ mod tests {
             },
             "{outcome:?}"
         );
-        assert!(store.receipt(ProjectionScope::Current, owed).is_some(), "欠房间边的根留着");
-        assert!(store.receipt(ProjectionScope::Current, with_rooms).is_none());
+        assert!(
+            store.receipt(ProjectionScope::Current, owed).is_some(),
+            "欠房间边的根留着"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, with_rooms)
+                .is_none()
+        );
 
         commit_root(&store, RefNo::new(7997, 3), "third");
         let stuck = store.enforce_root_limit(1, true);
         assert_eq!((stuck.evicted, stuck.resident_after), (0, 2), "{stuck:?}");
-        assert!(stuck.still_over_limit(), "owed 不进候选、third 没 ACK：收不下去");
+        assert!(
+            stuck.still_over_limit(),
+            "owed 不进候选、third 没 ACK：收不下去"
+        );
 
         // 开关关着：房间边没人问，owed 就是一根普通的已落盘根——按提交序出。
         let released = store.enforce_root_limit(1, false);
-        assert_eq!((released.evicted, released.resident_after), (1, 1), "{released:?}");
+        assert_eq!(
+            (released.evicted, released.resident_after),
+            (1, 1),
+            "{released:?}"
+        );
         assert!(store.receipt(ProjectionScope::Current, owed).is_none());
         assert_eq!(store.overlay_evictions_total(), 2);
     }
@@ -4093,8 +4215,16 @@ mod tests {
             (1, 1, 1),
             "ACK 跟回执一起走，不留孤儿: {after:?}"
         );
-        assert!(store.publication_ack(ProjectionScope::Current, gone).is_none());
-        assert!(store.publication_ack(ProjectionScope::Current, kept).is_some());
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, gone)
+                .is_none()
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, kept)
+                .is_some()
+        );
         {
             let scopes = store.read();
             let state = scopes.get(&ScopeKey::Current).expect("current scope");
@@ -4118,7 +4248,11 @@ mod tests {
         // 只剩 kept 一根、上限 1：数的是回执，不逐——孤儿不会把 resident_before 数错。
         let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
-            (outcome.resident_before, outcome.evicted, outcome.resident_after),
+            (
+                outcome.resident_before,
+                outcome.evicted,
+                outcome.resident_after
+            ),
             (1, 0, 1),
             "{outcome:?}"
         );
@@ -4409,7 +4543,11 @@ mod tests {
         assert_eq!(
             scopes
                 .iter()
-                .map(|scope| (scope.snapshot_key.as_str(), scope.footprint.records, scope.footprint.roots))
+                .map(|scope| (
+                    scope.snapshot_key.as_str(),
+                    scope.footprint.records,
+                    scope.footprint.roots
+                ))
                 .collect::<Vec<_>>(),
             vec![("a@1", 2, 1), ("b@2", 1, 0)],
             "按键升序、Current 不在里面: {scopes:?}"

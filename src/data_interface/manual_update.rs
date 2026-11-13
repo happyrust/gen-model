@@ -2929,6 +2929,11 @@ pub struct DbnumStatus {
     /// （ADR-0013 之后范围由 MDB 定）。与阻断不是一回事，界面上不许合成一行
     /// （QUEUE-FIELD-MAP §3）。
     pub excluded: bool,
+    /// 为什么被排除（[`Exclusion::reason`] 的代号）；没被排除时是 `null`。`/dbnums` 两种形态
+    /// 同一个谓词、同一套代号（2026-11-11）。
+    pub excluded_reason: Option<&'static str>,
+    /// 同一件事说给人听的那一句（与跳过日志、回执 `warnings` 里的是同一句）。
+    pub excluded_detail: Option<String>,
     /// 当前 MDB **声明了**这个库，但当前项目目录里没有它的文件。
     ///
     /// 它与 `excluded` 恰好是相反的意思，而队列面板此前只有那两档——于是同一个库
@@ -3004,6 +3009,84 @@ impl From<crate::data_interface::write_state::WriteState> for WriteStateColumns 
 pub struct DbnumStatusReport {
     pub dbnums: Vec<DbnumStatus>,
     pub warnings: Vec<String>,
+}
+
+/// 一个库被排除在本期执行范围之外的原因（`/dbnums` 的 `excluded_reason` / `excluded_detail`，spec §4.7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Exclusion {
+    /// 代号，五选一：
+    ///
+    /// - `watch_dbnums`：监听名单（`DbOption.toml` 的 `watch_dbnums` / `serve --watch-dbnum`）没点它；
+    /// - `debug_dbnum`：`--debug-dbnum` 调试限定没点它；
+    /// - `not_declared_by_mdb`：当前 MDB 没声明这个设计库，`extra_element_dbnums` 补充名单里也没有；
+    /// - `db_type_not_ingested`：这种库类型不参与增量摄入（登记行没有类型也落在这一档）；
+    /// - `foreign_project`：别的项目的库（库号只在项目内唯一，本库按库号做键）。
+    pub reason: &'static str,
+    /// 说给人听的那一句：与跳过日志同一个出处（[`skip_reason`]），名单与它的来源都在里面。
+    ///
+    /// [`skip_reason`]: crate::data_interface::increment_manager::skip_reason
+    pub detail: String,
+}
+
+/// 已知 [`in_scope_with`] 判了「不进」，说出是哪一道门。
+///
+/// 次序与跳过日志的唯一分发点 `increment_manager::skip_reason` 相同——监听限定 → 调试限定 → MDB 范围——
+/// 所以面板上的原因与日志里的那一句不会各说各的。三道都放行还被挡，只剩 `in_scope_with` 开头那两道跨项目过滤。
+fn exclusion_of(scope: &UpdateScope, db_type: &str, dbnum: u32) -> Exclusion {
+    use crate::data_interface::increment_manager::{
+        debug_scope_admits, skip_reason, watch_scope_admits,
+    };
+    // 监听 / 调试限定只收窄 watcher 自己扫出来的活，对按库号点名的不设限范围不生效（同 `in_scope_with`）。
+    let gated = !scope.is_unrestricted();
+    let reason = if gated && !watch_scope_admits(db_type, dbnum) {
+        "watch_dbnums"
+    } else if gated && !debug_scope_admits(db_type, dbnum) {
+        "debug_dbnum"
+    } else if scope.admits(db_type, dbnum) {
+        "foreign_project"
+    } else if matches!(db_type, "DESI" | "ISOD") {
+        "not_declared_by_mdb"
+    } else {
+        "db_type_not_ingested"
+    };
+    let detail = if reason == "foreign_project" {
+        format!(
+            "别的项目的库，不进本库的数据域: 类型={db_type}, 编号={dbnum}\
+             （库号只在项目内唯一，本库的状态层按库号做键）"
+        )
+    } else {
+        skip_reason(scope, db_type, dbnum)
+    };
+    Exclusion { reason, detail }
+}
+
+/// 当前 MDB 的一个元素库此刻的文件事实：成员绑定的那份文件，和它文件头上的最新会话号。
+///
+/// `/dbnums` 带身份的形态拿它盖掉登记表里「上次扫描看到的」那几格（[`AiosDBManager::dbnum_statuses`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveMemberFile {
+    db_type: String,
+    file_name: String,
+    file_path: String,
+    file_size: u64,
+    file_latest_sesno: i32,
+}
+
+/// `/dbnums` 一个登记行报哪个 `(file_latest_sesno, file_size)`：**文件此刻的，不是登记表里上次扫描看到的**。
+///
+/// 1. 当前 MDB 的成员：成员绑定的那份文件此刻的头——引导形状、节点模型状态读的也是它；
+/// 2. 不是成员的库（目录库、系统库、补充名单里的库）：这一趟刚扫到的那份（`scanned`，只在恰好扫到一份时给）；
+/// 3. 都没有（被排除又不是成员、文件够不着）：才退回登记表里的观察值 `stored`。
+fn reported_file_facts(
+    live: Option<&LiveMemberFile>,
+    scanned: Option<(i32, u64)>,
+    stored: (i32, u64),
+) -> (i32, u64) {
+    match (live, scanned) {
+        (Some(live), _) => (live.file_latest_sesno, live.file_size),
+        (None, Some(scanned)) => scanned,
+        (None, None) => stored,
+    }
 }
 
 /// A candidate DB file discovered during the project scan.
@@ -3369,7 +3452,8 @@ impl AiosDBManager {
         // Direct initializers do not run the automatic watcher's sweep. Install
         // the same full Catalogue/identity manifests first; watch_dbnums only
         // chooses DESI work and must not remove dependencies of that work.
-        self.prepare_dependency_manifests_for_initialization()?;
+        self.prepare_dependency_manifests_for_initialization()
+            .await?;
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
@@ -3814,6 +3898,11 @@ impl AiosDBManager {
         }
         let scope = self.update_scope(mdb).await?;
         report.warnings.extend(scope.warning().map(str::to_owned));
+        // 当前 MDB 里各元素库此刻的文件事实（2026-11-11）。登记表里的 `file_latest_sesno` / `file_size` 是
+        // 「上次扫描看到的」：被监听名单排除的库不再被扫，那两格就停在排除之前——现场 1112 / 7999 / 7333
+        // 登记的是 739 / 219 / 1724，文件已经到 748 / 236 / 1732，于是本形态与引导形状对同一个库报两个数。
+        // 下面逐行改报文件头上此刻的数，与引导形状、节点模型状态同一个出处。
+        let live_files = self.live_member_files(&scope, &mut report.warnings);
 
         let mut duplicate_paths = BTreeMap::new();
         let by_dbnum = self.scan_project_candidates(
@@ -3851,7 +3940,18 @@ impl AiosDBManager {
         );
 
         for state in registered {
-            let excluded = !self.in_scope(&scope, project, &state.db_type, state.dbnum);
+            let live = live_files.get(&state.dbnum);
+            // 登记行可以没有文件身份：只被房间盖章一类的写入碰过、从没被扫描登记过的库（现场 9 个，都是
+            // 监听名单之外的 MDB 成员）。成员绑定里有它的文件，身份就取自那里——否则这一行类型是空的，
+            // 既报不出文件，也会因为「类型不对」被说成另一种排除。
+            let from_member =
+                live.filter(|_| state.db_type.is_empty() && state.file_path.is_empty());
+            let db_type = match from_member {
+                Some(live) => live.db_type.clone(),
+                None => state.db_type.clone(),
+            };
+            let exclusion = self.exclusion(&scope, project, &db_type, state.dbnum);
+            let excluded = exclusion.is_some();
             let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
             let in_this_project =
                 !state.file_path.is_empty() && stored_path.starts_with(&project_prefix);
@@ -3888,18 +3988,38 @@ impl AiosDBManager {
                 None
             };
             let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+            // 文件最新会话号与大小报此刻的，不报登记表里上次扫描看到的（[`reported_file_facts`]）。
+            let scanned = by_dbnum
+                .get(&state.dbnum)
+                .filter(|candidates| candidates.len() == 1)
+                .map(|candidates| (candidates[0].file_latest_sesno, candidates[0].file_size));
+            let (file_latest_sesno, file_size) = reported_file_facts(
+                live,
+                scanned,
+                (state.file_latest_sesno, state.file_size),
+            );
+            let (file_name, file_path) = match from_member {
+                Some(live) => (live.file_name.clone(), live.file_path.clone()),
+                None => (state.file_name, state.file_path),
+            };
+            let (excluded_reason, excluded_detail) = match exclusion {
+                Some(exclusion) => (Some(exclusion.reason), Some(exclusion.detail)),
+                None => (None, None),
+            };
             report.dbnums.push(DbnumStatus {
                 dbnum: state.dbnum,
-                db_type: state.db_type,
-                file_name: state.file_name,
-                file_path: state.file_path,
-                file_size: state.file_size,
-                file_latest_sesno: state.file_latest_sesno,
+                db_type,
+                file_name,
+                file_path,
+                file_size,
+                file_latest_sesno,
                 applied_sesno: state.applied_sesno,
                 initialized: state.initialized,
                 anomaly,
                 blocked,
                 excluded,
+                excluded_reason,
+                excluded_detail,
                 not_in_project: false,
                 model: None,
                 write_state: None,
@@ -3932,6 +4052,8 @@ impl AiosDBManager {
                 anomaly,
                 blocked,
                 excluded: false,
+                excluded_reason: None,
+                excluded_detail: None,
                 not_in_project: false,
                 model: None,
                 write_state: None,
@@ -3944,6 +4066,26 @@ impl AiosDBManager {
         // 「不在 MDB 声明的名单里」，而那正好是相反的意思。
         for dbnum in scope.declared_desi() {
             if registered_dbnums.contains(&dbnum) || by_dbnum.contains_key(&dbnum) {
+                continue;
+            }
+            // 成员绑定里有它的文件、这一趟却没扫到，而且范围判定把它挡在外面：它是被监听 / 调试限定挡在扫描
+            // 之外的，不是「项目目录里没有这个文件」。照引导形状给出身份与文件最新会话号，标成排除并说明原因
+            // ——说成「够不着」就和引导形状讲反了。范围内却没扫到的仍按「够不着」报，那一档的含义不变。
+            if let Some(live) = live_files.get(&dbnum)
+                && let Some(exclusion) = self.exclusion(&scope, project, &live.db_type, dbnum)
+            {
+                report.dbnums.push(DbnumStatus {
+                    dbnum,
+                    db_type: live.db_type.clone(),
+                    file_name: live.file_name.clone(),
+                    file_path: live.file_path.clone(),
+                    file_size: live.file_size,
+                    file_latest_sesno: live.file_latest_sesno,
+                    excluded: true,
+                    excluded_reason: Some(exclusion.reason),
+                    excluded_detail: Some(exclusion.detail),
+                    ..Default::default()
+                });
                 continue;
             }
             report.dbnums.push(DbnumStatus {
@@ -4045,6 +4187,90 @@ impl AiosDBManager {
         dbnum: u32,
     ) -> bool {
         in_scope_with(&self.db_option, scope, project, db_type, dbnum)
+    }
+
+    /// 这个库为什么不进本期执行范围；进范围的回 `None`。
+    ///
+    /// 进不进仍只由 [`Self::in_scope`] 一个谓词定，这里只在它判了「不进」之后补上原因
+    /// （[`exclusion_of`]）。`/dbnums` 的两种形态都从这里取 `excluded` 与原因（2026-11-11）：
+    /// 带身份的那种在 [`Self::dbnum_statuses`] 里逐行取，引导形状在 handler 里对骨架的每个库取。
+    pub(crate) fn exclusion(
+        &self,
+        scope: &UpdateScope,
+        project: &str,
+        db_type: &str,
+        dbnum: u32,
+    ) -> Option<Exclusion> {
+        (!self.in_scope(scope, project, db_type, dbnum))
+            .then(|| exclusion_of(scope, db_type, dbnum))
+    }
+
+    /// 当前 MDB 各元素库此刻的文件事实，按库号。
+    ///
+    /// 文件取进程里登记的成员绑定（`current_mdb_sources`），最新会话号读文件头
+    /// （`model_source::latest_source_version_of_file`，按文件长度 + 修改时刻记忆，文件没动就不重读）
+    /// ——节点模型状态用的是同一个函数，引导形状读的是同一份文件的同一个头，所以三处是同一个数。
+    ///
+    /// 只在 `scope` 就是配置的那个 MDB 时才答：别的 MDB 的成员绑定不在进程里，拿这一份去答就是张冠李戴。
+    /// 读不到不是错：告警记一笔，这一趟那些行照旧报登记表里的观察值。
+    fn live_member_files(
+        &self,
+        scope: &UpdateScope,
+        warnings: &mut Vec<String>,
+    ) -> HashMap<u32, LiveMemberFile> {
+        let configured = self.db_option.mdb_name.trim();
+        if configured.is_empty()
+            || scope.mdb() != aios_core::helper::to_e3d_name(configured).as_ref()
+        {
+            return HashMap::new();
+        }
+        let pins = match crate::fast_model::e3d_model_service::current_mdb_sources() {
+            Ok((pins, _)) => pins,
+            Err(error) => {
+                warnings.push(format!(
+                    "读不到当前 MDB 的成员文件清单，本次 file_latest_sesno 报的是登记表里上次扫描的观察值: {error:#}"
+                ));
+                return HashMap::new();
+            }
+        };
+        let mut files = HashMap::new();
+        for pin in pins {
+            if !crate::data_interface::model_source::is_element_db(&pin.db_type) {
+                continue;
+            }
+            let Ok(dbnum) = u32::try_from(pin.dbnum) else {
+                continue;
+            };
+            match crate::data_interface::model_source::latest_source_version_of_file(
+                dbnum,
+                &pin.db_type,
+                &pin.file,
+            ) {
+                Ok(version) => {
+                    files.insert(
+                        dbnum,
+                        LiveMemberFile {
+                            db_type: pin.db_type.to_ascii_uppercase(),
+                            file_name: pin
+                                .file
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            file_path: pin.file.display().to_string(),
+                            file_size: std::fs::metadata(&pin.file)
+                                .map(|metadata| metadata.len())
+                                .unwrap_or_default(),
+                            file_latest_sesno: i32::try_from(version.sesno).unwrap_or(i32::MAX),
+                        },
+                    );
+                }
+                Err(error) => warnings.push(format!(
+                    "dbnum={dbnum}: 读不到库文件的最新会话，file_latest_sesno 报的是登记表里上次扫描的观察值: {error:#}"
+                )),
+            }
+        }
+        files
     }
 
     /// 本期执行范围。
@@ -6630,6 +6856,91 @@ mod tests {
             !report.contains("should_process_database"),
             "MDB 声明过的库不许再被第二道手写名单筛一遍: {report}"
         );
+    }
+
+    /// `/dbnums` 的 `excluded_reason`：同一句「不参与」背后是哪一道门，面板要分得开——issue #10 就是
+    /// 「被监听名单划掉」与「MDB 里没这个库」长得一样。次序与跳过日志的分发点相同，原因句就是日志那一句。
+    #[test]
+    fn an_excluded_library_names_the_gate_that_kept_it_out() {
+        let _lease = watch_scope::test_guard();
+        let scope = UpdateScope::for_tests("/ALL", &[1112, 7997]);
+
+        // 监听名单只点了 7997：MDB 声明的 1112 是被名单挡掉的，不是 MDB 没声明。
+        watch_scope::set_dbnums_for_tests(vec![7997], watch_scope::Origin::Config);
+        let watched_out = exclusion_of(&scope, "DESI", 1112);
+        assert_eq!(watched_out.reason, "watch_dbnums");
+        assert!(
+            watched_out.detail.contains(watch_scope::WATCH_CONFIG_KEY)
+                && watched_out.detail.contains("7997")
+                && watched_out.detail.contains("DbOption.toml"),
+            "原因句要带上名单和它的来源: {}",
+            watched_out.detail
+        );
+        assert_eq!(
+            watched_out.detail,
+            crate::data_interface::increment_manager::skip_reason(&scope, "DESI", 1112),
+            "与跳过日志同一句"
+        );
+        // 没有类型的登记行（只被房间盖章碰过）同样先撞上监听名单。
+        assert_eq!(exclusion_of(&scope, "", 5052).reason, "watch_dbnums");
+
+        // 没有监听名单时，剩下的是 MDB 范围那一道。
+        watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
+        let undeclared = exclusion_of(&scope, "DESI", 8000);
+        assert_eq!(undeclared.reason, "not_declared_by_mdb");
+        assert!(undeclared.detail.contains("/ALL"), "{}", undeclared.detail);
+        assert_eq!(exclusion_of(&scope, "CATA", 7000).reason, "db_type_not_ingested");
+        assert_eq!(exclusion_of(&scope, "", 5052).reason, "db_type_not_ingested");
+        // 三道门都放行还被挡在外面，只剩跨项目那两道过滤。
+        let foreign = exclusion_of(&scope, "DESI", 7997);
+        assert_eq!(foreign.reason, "foreign_project");
+        assert!(foreign.detail.contains("7997"), "{}", foreign.detail);
+        watch_scope::clear_for_tests();
+
+        // 两种形态取 `excluded` 与原因走的是同一个入口，带身份的那种把登记表里的旧观察值换成文件头上的数。
+        let source = include_str!("manual_update.rs");
+        let report = source
+            .split_once("pub async fn dbnum_statuses(")
+            .expect("dbnum_statuses 必须存在")
+            .1
+            .split_once("\n    /// 这个库进不进本期执行范围")
+            .expect("函数体到下一个条目为止")
+            .0;
+        assert!(
+            report.contains("self.exclusion(&scope, project, &db_type, state.dbnum)"),
+            "登记行的排除与原因取自同一个入口: {report}"
+        );
+        assert!(
+            report.contains("self.live_member_files(&scope, &mut report.warnings)")
+                && report.contains("reported_file_facts("),
+            "文件最新会话号报文件此刻的头，不报登记表里的旧观察值: {report}"
+        );
+    }
+
+    /// `/dbnums` 带身份的形态报的 `file_latest_sesno` 是文件此刻的头，不是登记表里上次扫描看到的。
+    ///
+    /// 2026-11-11 现场：1112 被监听名单排除后不再被扫，登记表停在 739，文件已经到 748——引导形状报 748，
+    /// 这一形态报 739，「模型生成」面板和模型树对同一个库说了两个数。
+    #[test]
+    fn a_registered_row_reports_the_file_as_it_is_now_not_as_last_scanned() {
+        let member = LiveMemberFile {
+            db_type: "DESI".to_owned(),
+            file_name: "ams1112_0001".to_owned(),
+            file_path: "D:/proj/ams1112_0001".to_owned(),
+            file_size: 21_344_256,
+            file_latest_sesno: 748,
+        };
+        let stored = (739, 20_938_752);
+        // 当前 MDB 的成员：认成员绑定那份文件此刻的头，哪怕这一趟也扫到了它。
+        assert_eq!(reported_file_facts(Some(&member), None, stored), (748, 21_344_256));
+        assert_eq!(
+            reported_file_facts(Some(&member), Some((747, 21_000_000)), stored),
+            (748, 21_344_256)
+        );
+        // 不是成员、但这一趟扫到了（目录库、系统库、补充名单里的库）：认刚扫到的。
+        assert_eq!(reported_file_facts(None, Some((27, 4_096)), (25, 2_048)), (27, 4_096));
+        // 两头都没有：只剩登记表里的观察值可报。
+        assert_eq!(reported_file_facts(None, None, stored), stored);
     }
 
     /// `/dbnums` 每行的 `write_state` 格（ADR-072 D1，spec §4.7）：有标记行时六个字段整格出，

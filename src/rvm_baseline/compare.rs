@@ -983,10 +983,7 @@ mod tests {
 
         summary.surface_compared = 1;
         summary.surface_unavailable = 1;
-        assert!(
-            !summary.passed(),
-            "一个成员的姿态没量到，整轮就不能算通过"
-        );
+        assert!(!summary.passed(), "一个成员的姿态没量到，整轮就不能算通过");
 
         summary.surface_compared = 2;
         summary.surface_unavailable = 0;

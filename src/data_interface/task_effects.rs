@@ -30,7 +30,10 @@ pub(crate) struct TaskEffects {
 }
 
 pub(crate) fn mark_room_topology_changed(dbnum: u32, sesno: i32) {
-    effects().entry((dbnum, sesno)).or_default().room_topology_changed = true;
+    effects()
+        .entry((dbnum, sesno))
+        .or_default()
+        .room_topology_changed = true;
 }
 
 impl TaskEffects {

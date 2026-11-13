@@ -545,8 +545,13 @@ pub fn draft_tree(
     } else {
         HashSet::new()
     };
-    let Filtered { mut hits, .. } =
-        filter_candidates(scan.candidates, params, &scan.center, attrs, params.rooms.as_ref().map(|_| scope));
+    let Filtered { mut hits, .. } = filter_candidates(
+        scan.candidates,
+        params,
+        &scan.center,
+        attrs,
+        params.rooms.as_ref().map(|_| scope),
+    );
     sort_hits(&mut hits, SortBy::Distance);
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert(hit.refno));
@@ -738,7 +743,8 @@ impl TreeDraft {
                 {
                     continue;
                 }
-                let Some(distance) = measure_box_in_range(&self.center, &self.params, &record.aabb) else {
+                let Some(distance) = measure_box_in_range(&self.center, &self.params, &record.aabb)
+                else {
                     continue;
                 };
                 // D4 (i)：两端管件任一属该房就挂到该房；两端都不是任一所选房间的成员时再分两档——在范围里（是候选）却不是成员
@@ -993,7 +999,8 @@ impl TreeDraft {
             });
         }
 
-        let mut warnings = response_warnings(&center, params.rooms.as_ref().map(|_| scope)).unwrap_or_default();
+        let mut warnings =
+            response_warnings(&center, params.rooms.as_ref().map(|_| scope)).unwrap_or_default();
         if params.rooms.is_none() {
             // 「未归属房间」这一组本身就是正常归宿：房间模型只覆盖有面板的房间，
             // 场地、支架、跨房间的管道都不属于任何一间房。这类构件照旧挂进
@@ -1016,12 +1023,14 @@ impl TreeDraft {
 
         let mut room_status = scope.status_json();
         if params.rooms.is_none() {
-            room_status.rooms = rooms_out.iter()
+            room_status.rooms = rooms_out
+                .iter()
                 .filter(|room| room.refno != "unassigned")
                 .map(|room| crate::fast_model::spatial_rooms::RoomRef {
                     refno: room.refno.clone(),
                     room_num: room.room_num.clone(),
-                }).collect();
+                })
+                .collect();
             room_status.matched = total_count;
         }
         TreeResponse {
@@ -1358,7 +1367,10 @@ mod tests {
     #[test]
     fn tree_folds_hits_into_room_spec_unit_type_unit_and_others_with_dedup_and_shared_rooms() {
         let tree = tree_of(&TreeOptions::default());
-        assert_eq!(tree.total_count, 6, "refno 4 的两条条目只算一条；5 不是房间成员");
+        assert_eq!(
+            tree.total_count, 6,
+            "refno 4 的两条条目只算一条；5 不是房间成员"
+        );
         assert_eq!(tree.candidate_count, 8);
         assert_eq!(tree.leaf_count, 7, "6 跨两房、各算一次放置");
         assert!(tree.leaves_inline);
@@ -1535,7 +1547,14 @@ mod tests {
 
     // ---- 直段（tubes=1，方案 B）----
 
-    fn tube_record(bran: u32, from: u32, to: u32, ordinal: u32, min: [f32; 3], max: [f32; 3]) -> TubeRecord {
+    fn tube_record(
+        bran: u32,
+        from: u32,
+        to: u32,
+        ordinal: u32,
+        min: [f32; 3],
+        max: [f32; 3],
+    ) -> TubeRecord {
         TubeRecord {
             bran: refno(bran),
             ordinal,
@@ -1644,7 +1663,14 @@ mod tests {
         let (tree, attrs, scope) = fixture();
         let params = origin_params(&format!("{},{}", refno(51), refno(52)));
         let one_shot = assemble_tree(
-            scan_tree(&tree, SpatialTreeState::Ready, &params, None, &ModelMemoryStore::default()).expect("scan"),
+            scan_tree(
+                &tree,
+                SpatialTreeState::Ready,
+                &params,
+                None,
+                &ModelMemoryStore::default(),
+            )
+            .expect("scan"),
             &params,
             &attrs,
             &scope,
@@ -1652,7 +1678,14 @@ mod tests {
             &TreeOptions::default(),
         );
         let two_step = draft_tree(
-            scan_tree(&tree, SpatialTreeState::Ready, &params, None, &ModelMemoryStore::default()).expect("scan"),
+            scan_tree(
+                &tree,
+                SpatialTreeState::Ready,
+                &params,
+                None,
+                &ModelMemoryStore::default(),
+            )
+            .expect("scan"),
             &params,
             &attrs,
             &scope,
@@ -1661,8 +1694,17 @@ mod tests {
         .finish(&attrs, &scope, &types(), Some(supplement()));
         assert_eq!(one_shot, two_step, "关着时给了直段也不用");
         let json = serde_json::to_string(&one_shot).expect("json");
-        for key in ["tube_count", "tubes", "total_tube_count", "tubes_truncated", "from_noun"] {
-            assert!(!json.contains(&format!("\"{key}\"")), "{key} 不该出现: {json}");
+        for key in [
+            "tube_count",
+            "tubes",
+            "total_tube_count",
+            "tubes_truncated",
+            "from_noun",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{key}\"")),
+                "{key} 不该出现: {json}"
+            );
         }
         assert_eq!(one_shot.leaf_count, 7, "直段不算进 leaf_count");
     }
@@ -1679,17 +1721,30 @@ mod tests {
             "b 在范围外、h 一端是范围里的非成员（属于别处）、BRAN 12 不在树上；f 跨两房只算一次"
         );
         assert_eq!(tree.tubes_truncated, Some(false));
-        assert_eq!(tree.leaf_count, 7 + 7, "7 个构件放置 + 7 个直段放置（f 两间房各一次）");
+        assert_eq!(
+            tree.leaf_count,
+            7 + 7,
+            "7 个构件放置 + 7 个直段放置（f 两间房各一次）"
+        );
         assert!(tree.leaves_inline);
         assert!(tree.warnings.is_none());
 
         let r1 = &tree.rooms[0];
-        assert_eq!((r1.room_num.as_str(), r1.count, r1.tube_count), ("R1", 2, Some(2)));
+        assert_eq!(
+            (r1.room_num.as_str(), r1.count, r1.tube_count),
+            ("R1", 2, Some(2))
+        );
         assert_eq!(r1.specs[0].tube_count, Some(0), "「其他」专业没有直段");
         assert_eq!(r1.specs[1].tube_count, Some(2));
         let bran11_in_r1 = &r1.specs[1].unit_types[0].units[0];
-        assert_eq!((bran11_in_r1.refno.as_str(), bran11_in_r1.count, bran11_in_r1.tube_count),
-            (refno(11).to_string().as_str(), 1, Some(2)));
+        assert_eq!(
+            (
+                bran11_in_r1.refno.as_str(),
+                bran11_in_r1.count,
+                bran11_in_r1.tube_count
+            ),
+            (refno(11).to_string().as_str(), 1, Some(2))
+        );
         assert_eq!(
             tube_ends(&bran11_in_r1.tubes),
             [
@@ -1699,24 +1754,45 @@ mod tests {
             "f 经 6 跨两房、g 经 7 只在房 1"
         );
         let f = &bran11_in_r1.tubes.as_ref().unwrap()[0];
-        assert_eq!((f.shared_rooms, f.to_noun.as_str()), (Some(2), "BRAN"), "到容器尾那一端的 noun 是 BRAN 自己");
+        assert_eq!(
+            (f.shared_rooms, f.to_noun.as_str()),
+            (Some(2), "BRAN"),
+            "到容器尾那一端的 noun 是 BRAN 自己"
+        );
         assert_eq!(f.distance, 5.5);
         assert_eq!(f.length, 500.0);
         assert_eq!(f.aabb.min, [5.5, 0.0, 0.0]);
         let g = &bran11_in_r1.tubes.as_ref().unwrap()[1];
-        assert_eq!((g.shared_rooms, g.from_noun.as_str(), g.to_noun.as_str()), (None, "FLOOR", ""));
+        assert_eq!(
+            (g.shared_rooms, g.from_noun.as_str(), g.to_noun.as_str()),
+            (None, "FLOOR", "")
+        );
 
         let r2 = &tree.rooms[1];
-        assert_eq!((r2.room_num.as_str(), r2.count, r2.tube_count), ("R2", 5, Some(5)));
+        assert_eq!(
+            (r2.room_num.as_str(), r2.count, r2.tube_count),
+            ("R2", 5, Some(5))
+        );
         let spec1 = &r2.specs[1];
         assert_eq!(spec1.tube_count, Some(5));
         assert_eq!(
-            spec1.unit_types.iter().map(|g| (g.noun.as_str(), g.count, g.tube_count)).collect::<Vec<_>>(),
+            spec1
+                .unit_types
+                .iter()
+                .map(|g| (g.noun.as_str(), g.count, g.tube_count))
+                .collect::<Vec<_>>(),
             [("BRAN", 3, Some(5)), ("EQUI", 1, Some(0))]
         );
         let bran10 = &spec1.unit_types[0].units[0];
-        assert_eq!((bran10.refno.as_str(), bran10.count, bran10.tube_count, bran10.min_distance),
-            (refno(10).to_string().as_str(), 2, Some(4), 1.0));
+        assert_eq!(
+            (
+                bran10.refno.as_str(),
+                bran10.count,
+                bran10.tube_count,
+                bran10.min_distance
+            ),
+            (refno(10).to_string().as_str(), 2, Some(4), 1.0)
+        );
         assert_eq!(
             tube_ends(&bran10.tubes),
             [
@@ -1729,8 +1805,16 @@ mod tests {
         );
         let tubes = bran10.tubes.as_ref().unwrap();
         assert_eq!(
-            tubes.iter().map(|t| (t.from_noun.as_str(), t.to_noun.as_str(), t.invalid)).collect::<Vec<_>>(),
-            [("BRAN", "TUBI", false), ("TUBI", "ELBO", false), ("ELBO", "VALV", true), ("VALV", "", false)],
+            tubes
+                .iter()
+                .map(|t| (t.from_noun.as_str(), t.to_noun.as_str(), t.invalid))
+                .collect::<Vec<_>>(),
+            [
+                ("BRAN", "TUBI", false),
+                ("TUBI", "ELBO", false),
+                ("ELBO", "VALV", true),
+                ("VALV", "", false)
+            ],
             "两端 noun：容器 = BRAN、命中里的用命中、不在命中里的读一次、读不出为空"
         );
         assert_eq!(
@@ -1740,17 +1824,35 @@ mod tests {
         );
         assert!(tubes.iter().all(|t| t.shared_rooms.is_none()));
         let bran11_in_r2 = &spec1.unit_types[0].units[1];
-        assert_eq!((bran11_in_r2.tube_count, tube_ends(&bran11_in_r2.tubes).len()), (Some(1), 1), "g 不在房 0");
+        assert_eq!(
+            (
+                bran11_in_r2.tube_count,
+                tube_ends(&bran11_in_r2.tubes).len()
+            ),
+            (Some(1), 1),
+            "g 不在房 0"
+        );
 
         let json = serde_json::to_value(&tree).expect("json");
         let mut keys = HashSet::new();
         walk_json(&json, &mut |key| {
             keys.insert(key.to_string());
         });
-        for key in ["tube_count", "tubes", "total_tube_count", "tubes_truncated", "from_noun", "length", "aabb"] {
+        for key in [
+            "tube_count",
+            "tubes",
+            "total_tube_count",
+            "tubes_truncated",
+            "from_noun",
+            "length",
+            "aabb",
+        ] {
             assert!(keys.contains(key), "{key} 该出现");
         }
-        assert_eq!(json["rooms"][1]["specs"][1]["unit_types"][1]["units"][0]["tube_count"], 0, "EQUI 单元也带 tube_count=0");
+        assert_eq!(
+            json["rooms"][1]["specs"][1]["unit_types"][1]["units"][0]["tube_count"], 0,
+            "EQUI 单元也带 tube_count=0"
+        );
     }
 
     /// D7：直段放置数与叶子共用 `leaf_cap`——超了就连 `tubes` 一起省略；`unit=` 点到的单元连直段一起内联。
@@ -1761,12 +1863,24 @@ mod tests {
             ..TreeOptions::default()
         }));
         assert!(!capped.leaves_inline, "7 + 7 > 10");
-        assert_eq!((capped.leaf_count, capped.total_tube_count), (14, Some(6)), "计数不受省略影响");
+        assert_eq!(
+            (capped.leaf_count, capped.total_tube_count),
+            (14, Some(6)),
+            "计数不受省略影响"
+        );
         for room in &capped.rooms {
             for spec in &room.specs {
                 for group in &spec.unit_types {
-                    assert!(group.units.iter().all(|u| u.elements.is_none() && u.tubes.is_none()));
-                    assert!(group.units.iter().all(|u| u.tube_count.is_some()), "计数照给");
+                    assert!(
+                        group
+                            .units
+                            .iter()
+                            .all(|u| u.elements.is_none() && u.tubes.is_none())
+                    );
+                    assert!(
+                        group.units.iter().all(|u| u.tube_count.is_some()),
+                        "计数照给"
+                    );
                 }
             }
         }
@@ -1777,8 +1891,15 @@ mod tests {
         }));
         let bran_units = &one_unit.rooms[1].specs[1].unit_types[0].units;
         assert_eq!(leaf_refnos(&bran_units[0].elements).len(), 2);
-        assert_eq!(tube_ends(&bran_units[0].tubes).len(), 4, "点到的单元连直段一起带");
-        assert!(bran_units[1].elements.is_none() && bran_units[1].tubes.is_none(), "别的单元不带");
+        assert_eq!(
+            tube_ends(&bran_units[0].tubes).len(),
+            4,
+            "点到的单元连直段一起带"
+        );
+        assert!(
+            bran_units[1].elements.is_none() && bran_units[1].tubes.is_none(),
+            "别的单元不带"
+        );
 
         let (loose, _) = tube_tree_of(&tubes_on(TreeOptions {
             leaf_cap: 14,
@@ -1811,15 +1932,32 @@ mod tests {
             tube_tree_with(&tubes_on(TreeOptions::default()), &params, supplement()).0
         };
         let elbo_only = with(&[("nouns", "elbo")]);
-        assert_eq!((elbo_only.total_count, elbo_only.total_tube_count), (1, Some(0)), "BRAN 10 在树上（经 ELBO 2），直段不出");
+        assert_eq!(
+            (elbo_only.total_count, elbo_only.total_tube_count),
+            (1, Some(0)),
+            "BRAN 10 在树上（经 ELBO 2），直段不出"
+        );
         let elbo_and_tubi = with(&[("nouns", "elbo,tubi")]);
-        assert_eq!((elbo_and_tubi.total_count, elbo_and_tubi.total_tube_count), (3, Some(6)));
+        assert_eq!(
+            (elbo_and_tubi.total_count, elbo_and_tubi.total_tube_count),
+            (3, Some(6))
+        );
         let keyword_elbo = with(&[("keyword", "elbo")]);
-        assert_eq!((keyword_elbo.total_count, keyword_elbo.total_tube_count), (1, Some(0)), "TUBI / BRAN refno 都不含 ELBO");
+        assert_eq!(
+            (keyword_elbo.total_count, keyword_elbo.total_tube_count),
+            (1, Some(0)),
+            "TUBI / BRAN refno 都不含 ELBO"
+        );
         let keyword_tubi = with(&[("keyword", "tubi")]);
-        assert_eq!((keyword_tubi.total_count, keyword_tubi.total_tube_count), (2, Some(6)));
+        assert_eq!(
+            (keyword_tubi.total_count, keyword_tubi.total_tube_count),
+            (2, Some(6))
+        );
         let keyword_bran11 = with(&[("keyword", &refno(11).to_string())]);
-        assert_eq!(keyword_bran11.total_count, 0, "命中里没有含 BRAN 11 refno 的，树是空的，直段没地方挂");
+        assert_eq!(
+            keyword_bran11.total_count, 0,
+            "命中里没有含 BRAN 11 refno 的，树是空的，直段没地方挂"
+        );
         assert_eq!(keyword_bran11.total_tube_count, Some(0));
     }
 
@@ -1829,13 +1967,29 @@ mod tests {
     fn tube_roots_are_the_nearest_bran_units_up_to_the_budget() {
         let (tree, attrs, scope) = fixture();
         let params = origin_params(&format!("{},{}", refno(51), refno(52)));
-        let scan = || scan_tree(&tree, SpatialTreeState::Ready, &params, None, &ModelMemoryStore::default()).expect("scan");
+        let scan = || {
+            scan_tree(
+                &tree,
+                SpatialTreeState::Ready,
+                &params,
+                None,
+                &ModelMemoryStore::default(),
+            )
+            .expect("scan")
+        };
         assert_eq!(
             draft_tree(scan(), &params, &attrs, &scope, &TreeOptions::default()).tube_roots(),
             TubeRoots::default(),
             "关着不读"
         );
-        let all = draft_tree(scan(), &params, &attrs, &scope, &tubes_on(TreeOptions::default())).tube_roots();
+        let all = draft_tree(
+            scan(),
+            &params,
+            &attrs,
+            &scope,
+            &tubes_on(TreeOptions::default()),
+        )
+        .tube_roots();
         assert_eq!(
             all,
             TubeRoots {
@@ -1851,21 +2005,32 @@ mod tests {
         });
         let draft = draft_tree(scan(), &params, &attrs, &scope, &budget);
         let roots = draft.tube_roots();
-        assert_eq!((roots.roots.clone(), roots.total, roots.truncated), (vec![refno(10)], 2, true));
+        assert_eq!(
+            (roots.roots.clone(), roots.total, roots.truncated),
+            (vec![refno(10)], 2, true)
+        );
         let mut only_read = supplement();
-        only_read.by_root.retain(|root, _| roots.roots.contains(root));
+        only_read
+            .by_root
+            .retain(|root, _| roots.roots.contains(root));
         only_read.roots_total = roots.total;
         only_read.truncated = roots.truncated;
         let response = draft.finish(&attrs, &scope, &types(), Some(only_read));
         assert_eq!(response.tubes_truncated, Some(true));
         assert_eq!(response.total_tube_count, Some(4));
         assert!(
-            response.warnings.as_ref().is_some_and(|w| w.iter().any(|line| line.contains("预算 1") && line.contains("2 个"))),
+            response.warnings.as_ref().is_some_and(|w| w
+                .iter()
+                .any(|line| line.contains("预算 1") && line.contains("2 个"))),
             "{:?}",
             response.warnings
         );
         let bran11 = &response.rooms[0].specs[1].unit_types[0].units[0];
-        assert_eq!((bran11.refno.as_str(), bran11.tube_count), (refno(11).to_string().as_str(), Some(0)), "没读的根计 0");
+        assert_eq!(
+            (bran11.refno.as_str(), bran11.tube_count),
+            (refno(11).to_string().as_str(), Some(0)),
+            "没读的根计 0"
+        );
     }
 
     /// `include_self=false` 的 refno 目标：目标子树里的 BRAN 是「自己」，它的直段不列（成员被剔、单元也不在树上是常态；
@@ -1887,16 +2052,37 @@ mod tests {
             .expect("params")
         };
         let run = |params: &SpatialQueryParams| {
-            let scan = scan_tree(&tree_entries, SpatialTreeState::Ready, params, None, &ModelMemoryStore::default()).expect("scan");
-            draft_tree(scan, params, &attrs, &scope, &tubes_on(TreeOptions::default()))
-                .finish(&attrs, &scope, &types(), Some(supplement()))
+            let scan = scan_tree(
+                &tree_entries,
+                SpatialTreeState::Ready,
+                params,
+                None,
+                &ModelMemoryStore::default(),
+            )
+            .expect("scan");
+            draft_tree(
+                scan,
+                params,
+                &attrs,
+                &scope,
+                &tubes_on(TreeOptions::default()),
+            )
+            .finish(&attrs, &scope, &types(), Some(supplement()))
         };
         let excluded = run(&query("false"));
         let bran10 = &excluded.rooms[1].specs[1].unit_types[0].units[0];
-        assert_eq!((bran10.refno.as_str(), bran10.count, bran10.tube_count), (refno(10).to_string().as_str(), 2, Some(0)), "目标 BRAN 自己的直段不列");
+        assert_eq!(
+            (bran10.refno.as_str(), bran10.count, bran10.tube_count),
+            (refno(10).to_string().as_str(), 2, Some(0)),
+            "目标 BRAN 自己的直段不列"
+        );
         assert_eq!(excluded.total_tube_count, Some(2), "BRAN 11 的 f / g 照列");
         let included = run(&query("true"));
-        assert_eq!(included.total_tube_count, Some(2 + 4), "include_self=true 才连它自己的直段一起列");
+        assert_eq!(
+            included.total_tube_count,
+            Some(2 + 4),
+            "include_self=true 才连它自己的直段一起列"
+        );
     }
 
     #[test]

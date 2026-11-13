@@ -290,9 +290,7 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
                 "last_attempt": recompute_attempt_for(state_dbnum),
             });
             match &expected {
-                Some(scope) if !scope.contains(&state_dbnum) => {
-                    owed_outside_scope.push(entry)
-                }
+                Some(scope) if !scope.contains(&state_dbnum) => owed_outside_scope.push(entry),
                 _ => owed_dbnums.push(entry),
             }
         }
@@ -324,12 +322,7 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
                 stray: Vec::new(),
                 stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
             };
-            push_owed(
-                dbnum,
-                alignment,
-                &mut owed_dbnums,
-                &mut owed_outside_scope,
-            );
+            push_owed(dbnum, alignment, &mut owed_dbnums, &mut owed_outside_scope);
         }
     }
     Some(serde_json::json!({
@@ -861,8 +854,10 @@ pub(crate) fn plan_startup_room_check(
     if current_generation.trim().is_empty() || record.generation != current_generation {
         return StartupRoomCheckPlan::NeedsFullInit;
     }
-    let state_by_dbnum: std::collections::BTreeMap<u32, &crate::data_interface::dbnum_state::DbnumState> =
-        states.iter().map(|s| (s.dbnum, s)).collect();
+    let state_by_dbnum: std::collections::BTreeMap<
+        u32,
+        &crate::data_interface::dbnum_state::DbnumState,
+    > = states.iter().map(|s| (s.dbnum, s)).collect();
     let mut outdated_dbnums = Vec::new();
     for &dbnum in room_dbnums {
         let Some(state) = state_by_dbnum.get(&dbnum).copied() else {
@@ -905,8 +900,10 @@ pub(crate) fn build_latest_room_update_record(
     generation: &str,
     now_rfc3339: &str,
 ) -> crate::fast_model::room_resident::RoomUpdateRecord {
-    let state_by_dbnum: std::collections::BTreeMap<u32, &crate::data_interface::dbnum_state::DbnumState> =
-        states.iter().map(|s| (s.dbnum, s)).collect();
+    let state_by_dbnum: std::collections::BTreeMap<
+        u32,
+        &crate::data_interface::dbnum_state::DbnumState,
+    > = states.iter().map(|s| (s.dbnum, s)).collect();
     let mut room_dbnum_sesnos = std::collections::BTreeMap::new();
     let mut latest_ts = now_rfc3339.to_string();
     let mut latest_dt = chrono::DateTime::parse_from_rfc3339(now_rfc3339).ok();
@@ -1122,7 +1119,9 @@ pub(crate) async fn refresh_room_update_record_with_model(
     let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(states) => states,
         Err(error) => {
-            eprintln!("[房间启动检查] 读取 dbnum_watermark 列表失败，无法刷新房间更新时间记录: {error:#}");
+            eprintln!(
+                "[房间启动检查] 读取 dbnum_watermark 列表失败，无法刷新房间更新时间记录: {error:#}"
+            );
             return false;
         }
     };
@@ -1210,9 +1209,9 @@ async fn unresolved_elements_are_ignorable(
         .map(crate::data_interface::generation_root::refno_from_e3d)
         .collect();
     stuck.iter().all(|r| {
-        unresolved_ancestors
-            .get(r)
-            .is_some_and(|chain| !chain.is_empty() && chain.iter().all(|lvl| !gone_anc_set.contains(lvl)))
+        unresolved_ancestors.get(r).is_some_and(|chain| {
+            !chain.is_empty() && chain.iter().all(|lvl| !gone_anc_set.contains(lvl))
+        })
     })
 }
 
@@ -1373,13 +1372,16 @@ async fn apply_targeted_room_update_for_dbnum(
     // No complete reverse lookup: recomputing only the defining library cannot
     // prove that members in other MDB libraries are current. Do not use watch scope.
     let targets = startup_room_fallback_targets(
-        dbnum, &outcome.expected_dbnums(), &outcome.model.room_dbnums(),
+        dbnum,
+        &outcome.expected_dbnums(),
+        &outcome.model.room_dbnums(),
     );
     startup_room_update_after_foreign(
         targets,
         |dbnum| recompute_dbnum_room_edges_now(dbnum, "startup_alignment"),
         || async { true },
-    ).await
+    )
+    .await
 }
 
 /// 启动时的房间初始化与基于时间戳的增量检测入口（在常驻房间模型就绪后调用）：
@@ -1393,17 +1395,17 @@ async fn apply_targeted_room_update_for_dbnum(
 pub(crate) async fn check_and_init_rooms_at_startup(
     outcome: &crate::fast_model::room_resident::StartupInitOutcome,
 ) {
-    let existing_record =
-        match crate::fast_model::room_resident::read_room_update_record_on(&aios_core::SUL_DB).await
-        {
-            Ok(record) => record,
-            Err(error) => {
-                eprintln!(
-                    "[房间启动检查] 读取 room_build:main.room_update_record 失败: {error:#}"
-                );
-                None
-            }
-        };
+    let existing_record = match crate::fast_model::room_resident::read_room_update_record_on(
+        &aios_core::SUL_DB,
+    )
+    .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("[房间启动检查] 读取 room_build:main.room_update_record 失败: {error:#}");
+            None
+        }
+    };
     let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(states) => states,
         Err(error) => {
@@ -1482,7 +1484,9 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                     unchecked.insert(dbnum);
                     continue;
                 }
-                match detect_room_window_hits_on(&aios_core::SUL_DB, dbnum, from_sesno, to_sesno).await {
+                match detect_room_window_hits_on(&aios_core::SUL_DB, dbnum, from_sesno, to_sesno)
+                    .await
+                {
                     Ok(Some(detection)) => {
                         let window_delta = build_panel_delta_from_window_hits(
                             &outcome.model,
@@ -1513,11 +1517,8 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                         eprintln!(
                             "[房间启动检查] dbnum={dbnum} 检查窗口房间数据失败（{error:#}），保守执行房间增量更新"
                         );
-                        let fallback_delta = build_panel_delta_from_window_hits(
-                            &outcome.model,
-                            dbnum,
-                            &[],
-                        );
+                        let fallback_delta =
+                            build_panel_delta_from_window_hits(&outcome.model, dbnum, &[]);
                         if !apply_targeted_room_update_for_dbnum(
                             dbnum,
                             outcome,
@@ -1582,12 +1583,22 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32, trigger: &'static
     let stamped = recompute_dbnum_room_edges_now_inner(dbnum).await;
     // 留底账本里比开工时刻新的那一笔才是这一轮的；没有（房间算不了、整轮跳过）就说没有。
     let attempt = recompute_attempt_for(dbnum).filter(|attempt| attempt.at >= started_at);
-    let detail = attempt.as_ref().map(|attempt| attempt.detail.clone()).unwrap_or_else(|| {
-        format!("整库房间重算跳过：{}", crate::options::room_membership_off_reason())
-    });
+    let detail = attempt
+        .as_ref()
+        .map(|attempt| attempt.detail.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "整库房间重算跳过：{}",
+                crate::options::room_membership_off_reason()
+            )
+        });
     registry.finish(
         &task_id,
-        if stamped { TaskState::Succeeded } else { TaskState::Failed },
+        if stamped {
+            TaskState::Succeeded
+        } else {
+            TaskState::Failed
+        },
         serde_json::json!({
             "status": if stamped { "success" } else { "failed" },
             "stamped": stamped,
@@ -1654,11 +1665,8 @@ async fn recompute_dbnum_room_edges_now_inner(dbnum: u32) -> bool {
     } else {
         // 覆盖面分母 = 文件侧 DbSet@T ∪ 持久层 pe 的同口径并集（issue #56）：部署包不带
         // E3D 工程文件的纯数据节点上文件侧枚举必败，持久清单是唯一拿得到的根集。
-        match crate::data_interface::window_root_plan::library_target_roots(
-            dbnum,
-            target_sesno,
-        )
-        .await
+        match crate::data_interface::window_root_plan::library_target_roots(dbnum, target_sesno)
+            .await
         {
             Ok(roots) => roots,
             Err(error) => {
@@ -3367,9 +3375,7 @@ mod tests {
     #[test]
     fn window_hits_build_targeted_panel_delta_for_registered_and_removed_panels() {
         use crate::fast_model::room_model::{RoomPanelMap, RoomPanels};
-        use crate::fast_model::room_resident::{
-            ResidentForm, ResidentManifest, ResidentRoomModel,
-        };
+        use crate::fast_model::room_resident::{ResidentForm, ResidentManifest, ResidentRoomModel};
         use crate::fast_model::room_topology::RoomGroup;
         use std::sync::Arc;
 
@@ -3446,7 +3452,11 @@ mod tests {
     fn an_unchecked_library_keeps_its_previous_sesno_in_the_record() {
         let mut record = crate::fast_model::room_resident::RoomUpdateRecord {
             room_updated_at: "2026-10-15T22:00:00+08:00".into(),
-            room_dbnum_sesnos: std::collections::BTreeMap::from([(7997, 401), (8000, 77), (8210, 12)]),
+            room_dbnum_sesnos: std::collections::BTreeMap::from([
+                (7997, 401),
+                (8000, 77),
+                (8210, 12),
+            ]),
             generation: "g9".into(),
         };
         let previous = crate::fast_model::room_resident::RoomUpdateRecord {
@@ -3463,7 +3473,10 @@ mod tests {
             record.room_dbnum_sesnos[&8210], 0,
             "上一笔没有基线：写 0，不替它说看过最新"
         );
-        assert_eq!(record.room_dbnum_sesnos[&8000], 77, "看过的库照旧写当前水位");
+        assert_eq!(
+            record.room_dbnum_sesnos[&8000], 77,
+            "看过的库照旧写当前水位"
+        );
         assert_eq!(
             record.room_updated_at, "2026-10-15T22:00:00+08:00",
             "整体时间戳照旧推进"

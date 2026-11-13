@@ -658,6 +658,9 @@ fn model_capabilities() -> Value {
         "dbnum_model_ready_roots": true,
         "model_records_batch_max_roots": MAX_MODEL_RECORDS_ROOTS,
         "mesh_formats": ["mesh", "glb"],
+        // 打包取网格（spec §4.11.4）：有这两格 = 有 `POST /api/v1/meshes/batch`，数值是它的两条上限。
+        "mesh_batch_max_keys": crate::web_service::mesh_batch::MAX_MESH_BATCH_KEYS,
+        "mesh_batch_max_bytes": crate::web_service::mesh_batch::MAX_MESH_BATCH_BYTES,
         "room_complete_publication_ack": true,
         "room_rebuild_executor": if crate::options::data_face().is_read_through() {
             "memory"
@@ -913,13 +916,29 @@ async fn run_rooms_rebuild() {
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // 这两个分项同样读库，也在预算内：库里正收大事务时一次无上限的 await 就能
+    // 把整个端点吊死（与下面七个分项同一个道理），超时降级为沿用进程内既有
+    // 快照并记名。
+    let mut degraded: Vec<&'static str> = Vec::new();
     // 存储架构版本未追平时先重读一次库里的记录：重建完成后那条记录才写进去，
     // 一次性缓存会让 `/health` 一直报 `caught_up: false` 直到进程重启，而「重建
     // 有没有生效」正是运维要当场看见的事。已追平则不加库往返。
-    let _ = crate::data_interface::storage_version_reconcile::refresh_if_stale().await;
+    if within_health_budget(
+        crate::data_interface::storage_version_reconcile::refresh_if_stale(),
+    )
+    .await
+    .is_none()
+    {
+        degraded.push("storage_version_refresh");
+    }
     // 升级账：进程重启后第一次 `/health` 时装载；之后每轮顺手做一次完成判定，
     // 让面板在队列仍忙时也能看到 `done` 逐个增长（空闲轮是另一处判定点）。
-    let _ = crate::data_interface::storage_upgrade::reconcile_progress().await;
+    if within_health_budget(crate::data_interface::storage_upgrade::reconcile_progress())
+        .await
+        .is_none()
+    {
+        degraded.push("storage_upgrade_reconcile");
+    }
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let web_options = crate::get_db_option_ext();
     let http_bind_addr = super::runtime_http_api_addr(
@@ -1049,7 +1068,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
                 "history": {"status": "degraded", "reason": "mirror unavailable"},
                 "operations": {"status": "degraded", "reason": "mirror unavailable"},
             },
-            "degraded_sections": ["mirror", "room", "history", "operations"],
+            "degraded_sections": degraded
+                .iter()
+                .cloned()
+                .chain(["mirror", "room", "history", "operations"])
+                .collect::<Vec<_>>(),
             "blocking_conditions": Vec::<&str>::new(),
             "project": state.identity.project,
             "mdb": state.identity.mdb,
@@ -1109,7 +1132,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
     // degraded_sections，绝不让任何一项把整个端点拖住。
-    let mut degraded: Vec<&'static str> = Vec::new();
     // `window_blocks` / `spatial_reconcile` / `model_update_pending`（含 `_observation`）/
     // `model_drain` 这几格随第二条异步账退了（ADR-072 D5，spec §7 退役格清单）：没有 pending
     // 表、没有空间意图行、没有文件轮次，也就没有死信与页级停滞可报。写库中途死掉的库由
@@ -1180,7 +1202,13 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // （开关关着 / 非落盘 / 常驻没装上），别拿它当零欠账。
         "alignment_debt": crate::data_interface::room_recompute::alignment_debt_health().await,
     });
-    let read_through = state.element_attributes.health().await;
+    let read_through = match within_health_budget(state.element_attributes.health()).await {
+        Some(health) => health,
+        None => {
+            degraded.push("read_through");
+            crate::data_interface::element_attributes::ReadThroughHealth::default()
+        }
+    };
     Json(json!({
         // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
         // 信号，剩下的看 degraded_sections。
@@ -1461,6 +1489,9 @@ pub struct TreeReq {
     pub identity: ProjectReq,
     #[serde(default)]
     pub refno: Option<String>,
+    /// `/tree/roots` 的根 noun 过滤（`SITE,APPLDW`、分组入口 `GPWL`）；缺省 `SITE`。见 [`requested_root_nouns`]。
+    #[serde(default)]
+    pub nouns: Option<String>,
     /// `/tree/children` 的视图：`1` / `true` 回解析视图（GPWL / GPSET 的 GPITEM 换成 `GPREF` 指向的
     /// 设计元素），缺省回存储视图。见 [`tree_resolved_view`]。
     #[serde(default)]
@@ -1509,7 +1540,11 @@ fn tree_nodes_with_dbnum(
         .collect()
 }
 
-/// GET /api/v1/tree/roots — SITE roots decoded from DESI files by e3d-io.
+/// GET /api/v1/tree/roots[?nouns=SITE,APPLDW] — roots decoded from DESI files by e3d-io.
+///
+/// 库的 WORLD 直接成员里有两类生成根：`SITE` 与 `APPLDW`，构件集合互不重叠、合起来才是整库
+/// （`docs/guides/rvm-check-batch.md`）。缺省只给 `SITE`，保持模型树等既有调用方的形状；
+/// 要整库口径得显式点名 `?nouns=SITE,APPLDW`（`rvm-check` 的批量根枚举就是这个口径）。
 ///
 /// 逐库读 WORL 成员表是文件 I/O，放 `spawn_blocking`。
 pub async fn tree_roots(
@@ -1517,25 +1552,64 @@ pub async fn tree_roots(
     Query(request): Query<TreeReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     resolve_identity(&state, &request.identity)?;
+    let nouns = requested_root_nouns(request.nouns.as_deref())?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
     let worker = service.clone();
-    let nodes = tokio::task::spawn_blocking(move || worker.roots())
-        .await
-        .map_err(|error| {
-            ApiError::from_domain(anyhow::anyhow!("tree roots 任务异常结束: {error}"))
-        })?
-        .map_err(ApiError::from_domain)?;
+    let nouns_for_scan = nouns.clone();
+    let nodes = tokio::task::spawn_blocking(move || {
+        let nouns = nouns_for_scan
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        worker.roots_of_nouns(&nouns)
+    })
+    .await
+    .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree roots 任务异常结束: {error}")))?
+    .map_err(ApiError::from_domain)?;
     let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
         "source": "direct",
         "project": service.project(),
         "mdb": service.mdb(),
+        "nouns": nouns,
         "nodes": nodes,
     })))
+}
+
+/// `/tree/roots` 的 `nouns=` 过滤：缺省 `["SITE"]`，接受 `SITE` / `APPLDW` / `GPWL`（大小写不敏感）。
+///
+/// 只放这三类 WORLD 直接成员：`SITE` / `APPLDW` 是生成根；`GPWL` 是分组（GPSET）的入口，只供树导航，
+/// 自己不是生成根。其余 noun 出现在 WORLD 下属于数据异常，静默放过会让「整库」这个词失去意义。
+pub(crate) fn requested_root_nouns(raw: Option<&str>) -> Result<Vec<String>, ApiError> {
+    let Some(raw) = raw else {
+        return Ok(vec!["SITE".to_string()]);
+    };
+    let mut out = Vec::new();
+    for noun in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|noun| !noun.is_empty())
+    {
+        let upper = noun.to_ascii_uppercase();
+        if upper != "SITE" && upper != "APPLDW" && upper != "GPWL" {
+            return Err(ApiError::bad_request(format!(
+                "nouns 只接受 SITE / APPLDW（WORLD 直接成员里的生成根）与 GPWL（分组入口）: {noun}"
+            )));
+        }
+        if !out.contains(&upper) {
+            out.push(upper);
+        }
+    }
+    if out.is_empty() {
+        return Err(ApiError::bad_request(
+            "nouns 不能为空；要整库口径请写 nouns=SITE,APPLDW".to_string(),
+        ));
+    }
+    Ok(out)
 }
 
 /// GET /api/v1/tree/children?refno=a/b — exact stored member order.
@@ -3953,6 +4027,19 @@ pub async fn model_generate(
         req.refno, result.model_available
     ));
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
+    // 逐根的生成会话（ADR-099 D7，spec §4.5）：与 `generation_roots` 逐项对应。前端拿它记「装的时候是哪一版」，
+    // 与节点模型状态读的是同一个字段（投影回执的 `source_sesno`）。
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "generation_root_sesnos".into(),
+            json!(generation_root_sesnos(&result.generation_roots, |roots| {
+                crate::fast_model::model_memory_store::ModelMemoryStore::global().receipt_sesnos(
+                    crate::fast_model::model_memory_store::ProjectionScope::Current,
+                    roots,
+                )
+            })),
+        );
+    }
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
             ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
@@ -4016,6 +4103,25 @@ pub async fn model_generate(
             .map_err(ApiError::from_domain)?;
     }
     Ok(Json(payload))
+}
+
+/// `/model/generate` 回执上逐根的生成会话（ADR-099 D7）：与 `roots` 逐项对应、等长；这一根此刻在投影里没有回执
+/// （生成失败、或刚被别的请求清掉）、或写法解不出来的记 `None`。`lookup` 交回这批根各自的回执会话
+/// （生产是 `ModelMemoryStore::receipt_sesnos`），取数走闭包是为了不依赖进程全局的投影也能测。
+pub(crate) fn generation_root_sesnos(
+    roots: &[String],
+    lookup: impl FnOnce(&[e3d_io::refno::RefNo]) -> Vec<Option<u32>>,
+) -> Vec<Option<u32>> {
+    let parsed: Vec<Option<e3d_io::refno::RefNo>> = roots
+        .iter()
+        .map(|root| crate::fast_model::e3d_model_service::parse_refno(root).ok())
+        .collect();
+    let known: Vec<e3d_io::refno::RefNo> = parsed.iter().flatten().copied().collect();
+    let mut sesnos = lookup(&known).into_iter();
+    parsed
+        .into_iter()
+        .map(|root| root.and_then(|_| sesnos.next().flatten()))
+        .collect()
 }
 
 /// `/model/generate` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
@@ -4130,7 +4236,11 @@ async fn generate_group_scope(
     use crate::data_interface::on_demand_model::{ScopeRootFailure, root_failure_is_retryable};
 
     let requested = refno.to_pdms_str();
-    let tree = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
+    let tree = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
     let group = refno.refno();
     let (noun, scope, batches, unrouted) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -4156,7 +4266,9 @@ async fn generate_group_scope(
         })
         .await
         .map_err(|error| {
-            ApiError::from_domain(anyhow::anyhow!("group generation-scope task failed: {error}"))
+            ApiError::from_domain(anyhow::anyhow!(
+                "group generation-scope task failed: {error}"
+            ))
         })?
         .map_err(ApiError::from_domain)?;
     let mut failed_roots: Vec<ScopeRootFailure> = unrouted
@@ -4352,7 +4464,11 @@ fn group_generate_receipt(
         model_instance_count: tally.model_instance_count,
         generated_instance_count: tally.generated_instance_count,
         generation_root_count: scope.roots.len(),
-        generation_roots: scope.roots.iter().map(|root| root.root.to_pdms_str()).collect(),
+        generation_roots: scope
+            .roots
+            .iter()
+            .map(|root| root.root.to_pdms_str())
+            .collect(),
         cached_root_count: tally.cached_root_count,
         generated_root_count: tally.generated_root_count,
         failed_root_count: tally.failed_roots.len(),
@@ -4367,16 +4483,21 @@ fn group_generate_receipt(
         [(route, _)] => Some(*route),
         _ => None,
     };
-    object.insert("dbnum".into(), json!(single.as_ref().map(|route| route.dbnum)));
+    object.insert(
+        "dbnum".into(),
+        json!(single.as_ref().map(|route| route.dbnum)),
+    );
     object.insert(
         "model_source".into(),
         json!(single.as_ref().map(|route| route.source.as_str())),
     );
     object.insert(
         "model_source_reason".into(),
-        json!(single
-            .as_ref()
-            .and_then(|route| route.reason.map(|reason| reason.as_str()))),
+        json!(
+            single
+                .as_ref()
+                .and_then(|route| route.reason.map(|reason| reason.as_str()))
+        ),
     );
     object.insert(
         "durable".into(),
@@ -4385,11 +4506,13 @@ fn group_generate_receipt(
     object.insert("scope_kind".into(), json!("group"));
     object.insert(
         "scope_refnos".into(),
-        json!(scope
-            .members
-            .iter()
-            .map(|member| RefnoEnum::from(*member).to_pdms_str())
-            .collect::<Vec<_>>()),
+        json!(
+            scope
+                .members
+                .iter()
+                .map(|member| RefnoEnum::from(*member).to_pdms_str())
+                .collect::<Vec<_>>()
+        ),
     );
     object.insert("unresolved_count".into(), json!(scope.unresolved.len()));
     // 坏槽明细（`validation-contract.md` VAL-GEN-004）：`unresolved_count` 只是个数字，
@@ -4403,7 +4526,6 @@ fn group_generate_receipt(
             Value::Array(unresolved_slots_json(&scope.unresolved)),
         );
     }
-    object.insert("routes".into(), json!(routes));
     object.insert("routes".into(), json!(routes));
     object.insert(
         "publication_status".into(),
@@ -4915,6 +5037,10 @@ pub async fn datacenter_deletes(
 /// 三种请求形状：**不带身份三件套** = 启动引导那一份（骨架 + 两枚水位与模型判决，
 /// 不扫项目目录、不碰源文件——队列面板按 1–5 秒一拍，拿的就是它）；读透形态另一条；
 /// 其余走 `dbnum_statuses` 全量。引导那一份的字段取舍见 [`annotate_skeleton_status`]。
+///
+/// 两种形态都有的库，`file_latest_sesno` / `file_size` / `excluded` 及原因是同一个答案（2026-11-11）：
+/// 文件那两格都读库文件头上此刻的数（全量那一支不再报登记表里上次扫描的旧观察值），排除与原因
+/// 都出自 `AiosDBManager::exclusion`。
 pub async fn dbnums(
     State(state): State<AppState>,
     Query(query): Query<ProjectReq>,
@@ -4961,6 +5087,24 @@ pub async fn dbnums(
                 Err(error) => warnings.push(format!(
                     "读不到两枚水位与模型判决（库一致性读取失败），本次不报库状态\
                      ——这是取数失败，不是「未初始化」: {error:#}"
+                )),
+            }
+        }
+        // 「是否被排除」及原因（2026-11-11）：与带身份的形态同一个谓词、同一套代号
+        // （`AiosDBManager::exclusion`）。配置的 MDB 的范围读的是进程里登记的成员声明，不扫目录、不读库，
+        // 这一份付得起。读透形态不做增量摄入，没有「排除」可言——与带身份的形态一样恒为 false。
+        if crate::options::data_face().is_read_through() {
+            annotate_exclusion(&mut dbnums, |_, _| None);
+        } else {
+            match state.mgr.update_scope(Some(&identity.mdb)).await {
+                Ok(scope) => annotate_exclusion(&mut dbnums, |db_type, dbnum| {
+                    state
+                        .mgr
+                        .exclusion(&scope, &identity.project, db_type, dbnum)
+                }),
+                // 解不出范围不是「没被排除」：这一格缺席，另记一句让面板把这次降级说出来。
+                Err(error) => warnings.push(format!(
+                    "解不出本期执行范围，本次不报 excluded——这是取数失败，不是「没被排除」: {error:#}"
                 )),
             }
         }
@@ -5126,7 +5270,10 @@ fn append_cold_read_through_dbnums(
             "applied_sesno": 0,
             "initialized": false,
             "blocked": false,
+            // 读透形态不做增量摄入，没有「排除」可言（引导形状在这一档同样恒为 false）。
             "excluded": false,
+            "excluded_reason": Value::Null,
+            "excluded_detail": Value::Null,
             "not_in_project": false,
             "model_sesno": model.model_sesno,
             "model_sesno_time": model.model_sesno_time,
@@ -5240,8 +5387,9 @@ fn annotate_ref0s(rows: &mut [Value], ref0s_of: impl Fn(u32) -> Vec<u32>) {
 /// 「重算模型（整库）」「清理模型（整库）」永远按不下去。水位与判决本来就不在项目目录里
 /// （`dbnum_watermark` 一张小表 + 进程内根账本），所以在这里补齐，代价与骨架同量级。
 ///
-/// **不补的**：`blocked` / `excluded` / `not_in_project` 要扫源文件与 MDB 范围才答得出来，
-/// 留着缺席（客户端按 `false` 读）——那三档只是「画不画」，不是「按不按得下去」。
+/// **不补的**：`blocked` / `anomaly` 要扫源文件、拿登记身份对现场文件才答得出来，留着缺席
+/// （客户端按 `false` 读）——那两档只是「画不画」，不是「按不按得下去」。`excluded` 不在这里补：
+/// 它由 [`annotate_exclusion`] 按真正的范围谓词写（2026-11-11），不是从水位猜出来的。
 ///
 /// 取数走参数而不是在这里读库，让整形逻辑不依赖一份真水位表也能测（与 `annotate_model_source`
 /// 同一纪律）。
@@ -5287,6 +5435,48 @@ fn annotate_skeleton_status(
         );
         object.insert("model_dead_roots".into(), json!(model.model_dead_roots));
         object.insert("model_lazy_roots".into(), json!(model.model_lazy_roots));
+    }
+}
+
+/// 给引导形状的每一行写 `excluded` / `excluded_reason` / `excluded_detail`（2026-11-11，spec §4.7）。
+///
+/// 此前引导形状不带 `excluded`、客户端按 `false` 读，而带身份的形态对同一个库报 `excluded: true`
+/// ——模型树与「模型生成」面板对监听名单之外的库说了两种话。现在两种形态同一个谓词、同一套原因代号
+/// （`AiosDBManager::exclusion`）：没被排除也照写 `false` 与两个 `null`，「没被排除」与「这次没答」分得开。
+///
+/// 判定走闭包（库类型、库号 → 原因），让整形逻辑不依赖一份真的范围与监听名单也能测
+/// （与 `annotate_model_source` 同一纪律）。
+fn annotate_exclusion(
+    rows: &mut [Value],
+    exclusion_of: impl Fn(&str, u32) -> Option<crate::data_interface::manual_update::Exclusion>,
+) {
+    for row in rows.iter_mut() {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(dbnum) = object
+            .get("dbnum")
+            .and_then(Value::as_u64)
+            .and_then(|dbnum| u32::try_from(dbnum).ok())
+        else {
+            continue;
+        };
+        let exclusion = exclusion_of(
+            object
+                .get("db_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            dbnum,
+        );
+        object.insert("excluded".into(), json!(exclusion.is_some()));
+        object.insert(
+            "excluded_reason".into(),
+            json!(exclusion.as_ref().map(|exclusion| exclusion.reason)),
+        );
+        object.insert(
+            "excluded_detail".into(),
+            json!(exclusion.map(|exclusion| exclusion.detail)),
+        );
     }
 }
 
@@ -5679,12 +5869,43 @@ pub(crate) fn page_records_across_roots<T>(
     }
 }
 
+/// `/model/records` 响应上的 `Server-Timing` 头（A6，2026-11-10；spec §4.5.2）：`read` = 取记录那一段（读库或读投影，
+/// 含把行解成记录），`total` = 从进 handler 到交出响应体之前。浏览器开发者工具的 Timing 面板直接显示，`curl -i` 也看得到
+/// ——量这条接口时不必再猜一发请求里后端占了多少、其中多少花在取数上。只加头，响应体一个字不变。
+///
+/// `conn`（2026-11-11）= 这次读库走的是哪条连接：`desc` 是 `pool-<连接数>`（只读连接池，`model_read_pool`）/
+/// `shared`（进程那一条共享连接）/ `mixed` / `none`（没读库，记录全在进程内投影里），`dur` 是等空闲读连接的时间
+/// （含在 `read` 里）。分组请求逐库取数、不报这一格（`reads` 传 `None`）。
+type RecordsTiming = [(axum::http::HeaderName, String); 1];
+
+fn records_timing(
+    read: Duration,
+    total: Duration,
+    rows: usize,
+    reads: Option<&crate::fast_model::model_read_pool::ReadTally>,
+) -> RecordsTiming {
+    let mut value = format!(
+        "read;dur={:.1};desc=\"{rows} rows\", total;dur={:.1}",
+        read.as_secs_f64() * 1000.0,
+        total.as_secs_f64() * 1000.0
+    );
+    if let Some(reads) = reads {
+        value.push_str(&format!(
+            ", conn;dur={:.1};desc=\"{}\"",
+            reads.waited().as_secs_f64() * 1000.0,
+            reads.label()
+        ));
+    }
+    [(axum::http::HeaderName::from_static("server-timing"), value)]
+}
+
 /// POST /api/v1/model/records — 按生成根分页取模型记录：单根（原有形状）或
 /// `generation_roots[]` 多根批量（spec §4.5.2，决策 d-181）。
 pub async fn model_records(
     State(state): State<AppState>,
     Json(request): Json<ModelRecordsReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(RecordsTiming, Json<serde_json::Value>), ApiError> {
+    let started = std::time::Instant::now();
     resolve_identity(&state, &request.identity)?;
     let (roots, batch) = requested_generation_roots(
         request.generation_root.as_deref(),
@@ -5707,7 +5928,15 @@ pub async fn model_records(
         if requested_is_group(&state, refno).await {
             return model_records_of_group(&state, &roots[0], refno, cursor, limit)
                 .await
-                .map(Json);
+                .map(|body| {
+                    // 分组的取数在展开成员那一侧，这里只有总数可报。
+                    let total = started.elapsed();
+                    let rows = body
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
+                    (records_timing(total, total, rows, None), Json(body))
+                });
         }
     }
     // 取数源按**根所属的库**选（plan 2026-09-06 §8 R3/R4），不按进程介质：库在 rocksdb 里
@@ -5735,13 +5964,28 @@ pub async fn model_records(
     let route = crate::data_interface::model_read_route::route_for(dbnum)
         .await
         .map_err(ApiError::from_domain)?;
+    let read_started = std::time::Instant::now();
     let CollectedRecords {
         per_root,
+        ready_page,
         durable_fallback_roots,
         incomplete_roots,
         source,
-    } = collect_model_records(&route, &roots, &parsed_roots).await?;
-    let page = page_records_across_roots(per_root, cursor, limit);
+        db_reads,
+    } = collect_model_records(
+        &route,
+        &roots,
+        &parsed_roots,
+        // 单根显示按页读：每一页只向后多读一页，不再为了切出第 N 页把整根重读一遍。
+        // 批量请求仍取全量再切，逐根 total 才是整批的。
+        if batch { None } else { Some((cursor, limit)) },
+    )
+    .await?;
+    let read = read_started.elapsed();
+    let page = match ready_page {
+        Some(page) => page,
+        None => page_records_across_roots(per_root, cursor, limit),
+    };
     let snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
     let session_vector = snapshot
@@ -5784,7 +6028,10 @@ pub async fn model_records(
         // 单根：形状一字不改。
         object.insert("generation_root".into(), json!(roots[0]));
     }
-    Ok(Json(payload))
+    Ok((
+        records_timing(read, started.elapsed(), page.items.len(), Some(&db_reads)),
+        Json(payload),
+    ))
 }
 
 /// `/model/records` 一批同库根的取数结果（[`collect_model_records`]）。
@@ -5793,9 +6040,13 @@ struct CollectedRecords {
         String,
         Vec<crate::fast_model::model_record_reader::ModelRecord>,
     )>,
+    /// 单根按页读取时，行已经按 cursor/limit 切好。`None` 表示 `per_root` 是全量。
+    ready_page: Option<RecordsPage<crate::fast_model::model_record_reader::ModelRecord>>,
     durable_fallback_roots: Vec<String>,
     incomplete_roots: Vec<String>,
     source: &'static str,
+    /// 这批读库走的是哪条连接、等读连接等了多久（`Server-Timing` 的 `conn` 那一格）。
+    db_reads: crate::fast_model::model_read_pool::ReadTally,
 }
 
 /// 按 `route` 取一批同属 `route.dbnum` 的根的记录：每个请求根先按祖先展成要读的生成根、逐根读出，
@@ -5804,6 +6055,7 @@ async fn collect_model_records(
     route: &crate::data_interface::model_read_route::ModelReadRoute,
     roots: &[String],
     parsed_roots: &[e3d_io::refno::RefNo],
+    page: Option<(usize, usize)>,
 ) -> Result<CollectedRecords, ApiError> {
     let dbnum = route.dbnum;
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
@@ -5842,18 +6094,52 @@ async fn collect_model_records(
         expanded_roots.push((name.clone(), under));
     }
     let mut memory_overlay_used = false;
+    let mut db_reads = crate::fast_model::model_read_pool::ReadTally::default();
     let mut per_root: Vec<(
         String,
         Vec<crate::fast_model::model_record_reader::ModelRecord>,
     )> = Vec::with_capacity(roots.len());
+    let mut page_skip = 0usize;
+    let mut page_room = 0usize;
+    let mut page_rows = Vec::new();
+    let mut page_accounted = 0usize;
+    let mut page_more = false;
+    if let Some((skip, limit)) = page {
+        page_skip = skip;
+        page_room = limit;
+    }
+    let paging = page.is_some();
     for (name, under) in &expanded_roots {
+        if paging && page_room == 0 {
+            page_more = true;
+            break;
+        }
         let mut records = Vec::new();
         for (root, below) in under {
+            if paging && page_room == 0 {
+                page_more = true;
+                break;
+            }
             // Durable reads never hydrate kv-mem.  A resident receipt is a complete
             // newer root snapshot and shadows the RocksDB root; cold roots continue
             // to be served directly by RocksDB.
             let memory_overlay = store.receipt(scope, *root).is_some();
             memory_overlay_used |= memory_overlay;
+            if paging {
+                let (window, read) =
+                    load_model_record_window(*root, *below, page_skip, page_room).await?;
+                db_reads.add(read);
+                page_accounted += window.skip_consumed + window.rows.len();
+                page_skip = page_skip.saturating_sub(window.skip_consumed);
+                page_room = page_room.saturating_sub(window.rows.len());
+                let more = window.more;
+                page_rows.extend(window.rows);
+                if more {
+                    page_more = true;
+                    break;
+                }
+                continue;
+            }
             // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
             // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
             match below {
@@ -5865,19 +6151,30 @@ async fn collect_model_records(
                 ),
                 None => {
                     let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-                    records.extend(
-                        crate::fast_model::model_record_reader::model_records_of_root(
-                            &aios_core::SUL_DB,
-                            refno,
-                        )
-                        .await
-                        .map_err(ApiError::from_domain)?,
-                    );
+                    // 冷读优先走只读连接池；池子没开、借不到、读失败都退回共享连接（`model_read_pool`）。
+                    let (rows, read) =
+                        crate::fast_model::model_read_pool::model_records_of_root(refno)
+                            .await
+                            .map_err(ApiError::from_domain)?;
+                    db_reads.add(read);
+                    records.extend(rows);
                 }
             }
         }
         per_root.push((name.clone(), records));
+        if page_more {
+            break;
+        }
     }
+    let returned = page_rows.len();
+    let ready_page = page.map(|(cursor, _limit)| {
+        RecordsPage {
+            items: page_rows,
+            total: if page_more { page_accounted + 1 } else { page_accounted },
+            next_cursor: page_more.then_some(cursor + returned),
+            per_root_total: Vec::new(),
+        }
+    });
     let source = if route.is_database() && memory_overlay_used {
         "rocksdb+memory-overlay"
     } else if !durable_fallback_roots.is_empty() {
@@ -5914,10 +6211,45 @@ async fn collect_model_records(
     };
     Ok(CollectedRecords {
         per_root,
+        ready_page,
         durable_fallback_roots,
         incomplete_roots,
         source,
+        db_reads,
     })
+}
+
+async fn load_model_record_window(
+    root: e3d_io::refno::RefNo,
+    below: Option<e3d_io::refno::RefNo>,
+    skip: usize,
+    limit: usize,
+) -> Result<
+    (
+        crate::fast_model::model_record_reader::RecordWindow,
+        crate::fast_model::model_read_pool::ReadReport,
+    ),
+    ApiError,
+> {
+    if let Some(node) = below {
+        let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+        let records = crate::fast_model::model_record_reader::overlay_records_under_node(
+            store, root, node,
+        )
+        .map_err(ApiError::from_domain)?;
+        return Ok((
+            crate::fast_model::model_record_reader::slice_model_records(records, skip, limit),
+            crate::fast_model::model_read_pool::ReadReport {
+                via: crate::fast_model::model_read_pool::ReadVia::Memory,
+                waited: Duration::ZERO,
+            },
+        ));
+    }
+    let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+    // 冷读优先走只读连接池，规则同 `collect_model_records` 里整根那一路。
+    crate::fast_model::model_read_pool::model_records_window(refno, skip, limit)
+        .await
+        .map_err(ApiError::from_domain)
 }
 
 /// `/model/records` 的单根是分组（GPWL / GPSET）时的取数（服务端展开）：分组不拥有模型，记录取它管到的
@@ -5933,7 +6265,11 @@ async fn model_records_of_group(
     cursor: usize,
     limit: usize,
 ) -> Result<serde_json::Value, ApiError> {
-    let tree = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
+    let tree = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
     let (scope, batches) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let scope = tree
             .group_scope(group)?
@@ -5971,7 +6307,7 @@ async fn model_records_of_group(
             .map(|name| crate::fast_model::e3d_model_service::parse_refno(name))
             .collect::<anyhow::Result<Vec<_>>>()
             .map_err(ApiError::from_domain)?;
-        let batch = collect_model_records(&route, &names, &parsed).await?;
+        let batch = collect_model_records(&route, &names, &parsed, None).await?;
         by_member.extend(batch.per_root);
         durable_fallback_roots.extend(batch.durable_fallback_roots);
         incomplete_roots.extend(batch.incomplete_roots);
@@ -5997,7 +6333,10 @@ async fn model_records_of_group(
             durable_fallback_roots,
             incomplete_roots,
         },
-        snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
+        snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.epoch())
+            .unwrap_or_default(),
         session_vector
             .iter()
             .map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno}))
@@ -6664,7 +7003,10 @@ mod tests {
         );
         assert_eq!(
             lod_mesh_dir(base.clone(), 1).unwrap(),
-            base.join(format!("lod1-v{}", crate::fast_model::mesh_lod1::LOD1_POLICY_VERSION))
+            base.join(format!(
+                "lod1-v{}",
+                crate::fast_model::mesh_lod1::LOD1_POLICY_VERSION
+            ))
         );
         for other in [2u8, 7, u8::MAX] {
             let error = lod_mesh_dir(base.clone(), other).unwrap_err();
@@ -6679,7 +7021,10 @@ mod tests {
             .expect("handler reads the file after the gates")
             .0;
         assert!(body.contains("Query(query): Query<MeshQuery>"), "{body}");
-        assert!(body.contains("query.lod.unwrap_or(0)"), "缺省 = 原网格: {body}");
+        assert!(
+            body.contains("query.lod.unwrap_or(0)"),
+            "缺省 = 原网格: {body}"
+        );
         assert!(body.contains("lod_mesh_dir("), "档位在读盘前解析: {body}");
     }
 
@@ -6693,10 +7038,138 @@ mod tests {
             .split_once("\n}")
             .expect("handler must close")
             .0;
-        assert!(body.contains("\"public, max-age=31536000, immutable\""), "{body}");
+        assert!(
+            body.contains("\"public, max-age=31536000, immutable\""),
+            "{body}"
+        );
         assert!(body.contains("\"public, max-age=604800\""), "{body}");
         assert!(body.contains("-lod1v{}"), "ETag 带策略版本: {body}");
-        assert!(body.contains("没有粗精度副本"), "lod=1 的 404 说清是粗网格缺: {body}");
+        assert!(
+            body.contains("没有粗精度副本"),
+            "lod=1 的 404 说清是粗网格缺: {body}"
+        );
+    }
+
+    /// ADR-099 D7：`/model/generate` 回执上逐根的生成会话与 `generation_roots` 逐项对应、等长；
+    /// 没有回执的、写法解不出来的记 null，解不出来的不去问投影。
+    #[test]
+    fn generation_root_sesnos_line_up_with_the_roots() {
+        let roots = vec![
+            "24381/100677".to_string(),
+            "not-a-refno".to_string(),
+            "24381_100700".to_string(),
+            "24381/100800".to_string(),
+        ];
+        let sesnos = generation_root_sesnos(&roots, |known| {
+            assert_eq!(
+                known,
+                [
+                    e3d_io::refno::RefNo::new(24381, 100677),
+                    e3d_io::refno::RefNo::new(24381, 100700),
+                    e3d_io::refno::RefNo::new(24381, 100800),
+                ]
+            );
+            vec![Some(447), None, Some(440)]
+        });
+        assert_eq!(sesnos, vec![Some(447), None, None, Some(440)]);
+        assert_eq!(json!(sesnos), json!([447, null, null, 440]));
+        assert!(generation_root_sesnos(&[], |_| Vec::new()).is_empty());
+
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn model_generate(")
+            .expect("model_generate handler must exist")
+            .1
+            .split_once("\n}")
+            .expect("handler must close")
+            .0;
+        assert!(
+            body.contains("\"generation_root_sesnos\""),
+            "回执必须带逐根的生成会话: {body}"
+        );
+        assert!(
+            body.contains("generation_root_sesnos(&result.generation_roots"),
+            "逐根会话必须按回执里的 generation_roots 顺序取: {body}"
+        );
+    }
+
+    /// A6：`/model/records` 的 `Server-Timing` 头——取数与总用时各一格，毫秒、一位小数；只加头，响应体不动。
+    /// 第二步多一格 `conn`：读库走的是哪条连接、等读连接等了多久。
+    #[test]
+    fn model_records_report_read_and_total_time_in_a_server_timing_header() {
+        use crate::fast_model::model_read_pool::{ReadReport, ReadTally, ReadVia};
+
+        // 分组请求不报 `conn`：前两格与第一步逐字相同。
+        let [(name, value)] = records_timing(
+            Duration::from_micros(123_456),
+            Duration::from_millis(130),
+            1888,
+            None,
+        );
+        assert_eq!(name.as_str(), "server-timing");
+        assert_eq!(value, "read;dur=123.5;desc=\"1888 rows\", total;dur=130.0");
+        assert!(
+            HeaderValue::from_str(&value).is_ok(),
+            "头的值必须是合法的 HTTP 头: {value}"
+        );
+
+        let mut pooled = ReadTally::default();
+        pooled.add(ReadReport {
+            via: ReadVia::Pool(4),
+            waited: Duration::from_micros(1_300),
+        });
+        let [(_, value)] = records_timing(
+            Duration::from_micros(123_456),
+            Duration::from_millis(130),
+            1888,
+            Some(&pooled),
+        );
+        assert_eq!(
+            value,
+            "read;dur=123.5;desc=\"1888 rows\", total;dur=130.0, conn;dur=1.3;desc=\"pool-4\""
+        );
+        assert!(HeaderValue::from_str(&value).is_ok(), "{value}");
+
+        // 没读库（记录全在进程内投影里）也报这一格，写明 `none`——缺席会被读成「旧二进制」。
+        let [(_, value)] = records_timing(
+            Duration::from_millis(2),
+            Duration::from_millis(3),
+            7,
+            Some(&ReadTally::default()),
+        );
+        assert_eq!(
+            value,
+            "read;dur=2.0;desc=\"7 rows\", total;dur=3.0, conn;dur=0.0;desc=\"none\""
+        );
+
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_records(")
+            .expect("records handler must exist")
+            .1
+            .split_once("\n}")
+            .expect("handler must close")
+            .0;
+        assert!(
+            body.contains(
+                "records_timing(read, started.elapsed(), page.items.len(), Some(&db_reads))"
+            ),
+            "取数那一段、总用时与读库走的连接都要报: {body}"
+        );
+
+        // `/model/records` 的冷读两路（整根、按页）都经只读连接池取连接，不再直接点名共享连接。
+        let reads = source
+            .split_once("async fn collect_model_records(")
+            .expect("collect_model_records must exist")
+            .1
+            .split_once("async fn model_records_of_group(")
+            .expect("group handler follows")
+            .0;
+        assert!(reads.contains("model_read_pool::model_records_of_root(refno)"));
+        assert!(reads.contains("model_read_pool::model_records_window(refno, skip, limit)"));
+        assert!(
+            !reads.contains("&aios_core::SUL_DB"),
+            "冷读用哪条连接由 model_read_pool 定: {reads}"
+        );
     }
 
     /// `.mesh` 直连形态（plant3d-web 2026-09-09 拍板）：读盘之后原样吐字节，
@@ -6885,6 +7358,68 @@ mod tests {
         assert!(guard < read, "读透判定要在水位读之前：{bootstrap}");
     }
 
+    /// 引导形状带「是否被排除」及原因（2026-11-11）：模型树拿的是这一份，「模型生成」面板拿的是带身份的那一份，
+    /// 两边对监听名单之外的库必须说同一句话。没被排除也照写 `false` 与两个 `null`——缺席是「这次没答」。
+    #[test]
+    fn the_bootstrap_shape_says_whether_a_library_is_excluded_and_why() {
+        use crate::data_interface::manual_update::Exclusion;
+
+        let mut rows = skeleton_dbnums(&[
+            crate::data_interface::direct_tree::TreeDatabase {
+                dbnum: 7997,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams7997_0001"),
+                sesno: 447,
+            },
+            crate::data_interface::direct_tree::TreeDatabase {
+                dbnum: 1112,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams1112_0001"),
+                sesno: 748,
+            },
+        ]);
+        annotate_exclusion(&mut rows, |db_type, dbnum| {
+            assert_eq!(db_type, "DESI", "判定吃的是这一行自己的库类型");
+            (dbnum == 1112).then(|| Exclusion {
+                reason: "watch_dbnums",
+                detail: "监听名单没点它".to_string(),
+            })
+        });
+        let row = |dbnum: u64| {
+            rows.iter()
+                .find(|row| row["dbnum"] == dbnum)
+                .expect("这一行")
+        };
+        assert_eq!(row(1112)["excluded"], true);
+        assert_eq!(row(1112)["excluded_reason"], "watch_dbnums");
+        assert_eq!(row(1112)["excluded_detail"], "监听名单没点它");
+        // 文件最新会话号仍是文件头上的数：排除的库照样报得出它此刻到了哪个会话。
+        assert_eq!(row(1112)["file_latest_sesno"], 748);
+        assert_eq!(row(7997)["excluded"], false);
+        assert!(row(7997)["excluded_reason"].is_null());
+        assert!(row(7997)["excluded_detail"].is_null());
+        assert!(
+            row(7997).get("excluded_reason").is_some(),
+            "没被排除也写出这一格（null），不留缺席"
+        );
+
+        // 引导分支两档都写：读透恒为 false，摄入形态问 `AiosDBManager::exclusion`；解不出范围时不伪造 false。
+        let source = include_str!("handlers.rs");
+        let bootstrap = source
+            .split_once("if bootstrap_request {")
+            .expect("引导分支")
+            .1
+            .split_once("let mut report = state")
+            .expect("下一个分支")
+            .0;
+        assert!(bootstrap.contains("annotate_exclusion(&mut dbnums, |_, _| None);"));
+        assert!(bootstrap.contains(".exclusion(&scope, &identity.project, db_type, dbnum)"));
+        assert!(
+            bootstrap.contains("解不出本期执行范围，本次不报 excluded"),
+            "取数失败要说出来，不能落成「没被排除」: {bootstrap}"
+        );
+    }
+
     #[tokio::test]
     async fn timeout_does_not_cancel_background_work() {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -7068,6 +7603,9 @@ mod tests {
             MAX_MODEL_RECORDS_ROOTS
         );
         assert_eq!(capabilities["mesh_formats"], json!(["mesh", "glb"]));
+        // 打包取网格的两条上限是给前端的契约数（spec §4.11.4），改数要先改 spec。
+        assert_eq!(capabilities["mesh_batch_max_keys"], 1024);
+        assert_eq!(capabilities["mesh_batch_max_bytes"], 32 * 1024 * 1024);
         assert_eq!(capabilities["room_complete_publication_ack"], true);
         assert!(
             matches!(
@@ -7312,8 +7850,12 @@ mod tests {
         let gate = body
             .find("let durable_fallback = route.allows_durable_fallback();")
             .expect("回读与否只看 model_read_route");
-        let under = body.find("store.receipt_roots_under(scope, *root)").expect("名下");
-        let above = body.find("store.receipt_root_above(scope, *root)").expect("头上");
+        let under = body
+            .find("store.receipt_roots_under(scope, *root)")
+            .expect("名下");
+        let above = body
+            .find("store.receipt_root_above(scope, *root)")
+            .expect("头上");
         let fallback = body
             .find("durable_fallback_roots.push(name.clone());")
             .expect("回读的根点名");
@@ -7354,7 +7896,10 @@ mod tests {
             .find("ApiError::group_scope(")
             .expect("cleanup of a group is refused");
         let route = delete.find("model_read_route::route_for(").expect("route");
-        assert!(guard < refuse && refuse < route, "拦在路由与清理之前: {delete}");
+        assert!(
+            guard < refuse && refuse < route,
+            "拦在路由与清理之前: {delete}"
+        );
 
         let generate = slice(
             "pub async fn model_generate(",
@@ -7369,13 +7914,18 @@ mod tests {
         let expand = generate
             .find("generate_group_scope(&state, refno).await")
             .expect("a group generates its members");
-        let route = generate.find("model_read_route::route_for(").expect("route");
+        let route = generate
+            .find("model_read_route::route_for(")
+            .expect("route");
         assert!(
             guard < refuse && refuse < expand && expand < route,
             "分组走自己的路、不进单根生成: {generate}"
         );
 
-        let group = slice("async fn generate_group_scope(", "fn memory_dbnum_task_error(");
+        let group = slice(
+            "async fn generate_group_scope(",
+            "fn memory_dbnum_task_error(",
+        );
         let empty = group
             .find("if routed.is_empty() {")
             .expect("an empty scope is answered without generating");
@@ -7385,7 +7935,10 @@ mod tests {
         assert!(empty < scoped, "空范围不进范围生成: {group}");
         assert!(!group.contains("ensure_model_generated("), "{group}");
 
-        let records = slice("pub async fn model_records(", "async fn collect_model_records(");
+        let records = slice(
+            "pub async fn model_records(",
+            "async fn collect_model_records(",
+        );
         let expand = records
             .find("model_records_of_group(")
             .expect("a single group root expands its members");

@@ -422,12 +422,16 @@ async fn mem_startup_define_replay_applies_and_hd_room_code_wins() {
         let value: surrealdb::Value = response.take(0).expect("take table info");
         value.to_string()
     };
-    for index in ["pe_refno_index", "pe_noun_dbnum_index", "fulltext_name"] {
+    for index in ["pe_refno_index", "pe_noun_dbnum_index"] {
         assert!(
             table_info.contains(index),
             "pe 表应有索引 {index}: {table_info}"
         );
     }
+    assert!(
+        !table_info.contains("fulltext_name"),
+        "启动 schema 不该再建 pe.name 全文索引（无读者，且在有数据的库上会撑爆服务端）: {table_info}"
+    );
 }
 
 /// fn:: 覆盖顺序的执行面验收：`fn::room_num_of` 按归属强度取最强一条
@@ -2294,7 +2298,11 @@ fn unique_in_out_tables_are_not_queried_with_in_in_literal() {
             .collect::<Vec<_>>()
             .join("\n");
         for hit in pattern.find_iter(&code) {
-            offenders.push(format!("{}: {}", path.display(), hit.as_str().replace('\n', " ")));
+            offenders.push(format!(
+                "{}: {}",
+                path.display(),
+                hit.as_str().replace('\n', " ")
+            ));
         }
     }
     assert!(
@@ -2389,7 +2397,10 @@ async fn probe_traversal_with(
     );
     let out = exec_capture(&db, &setup).await;
     for (index, item) in out.iter().enumerate() {
-        assert!(item.is_ok(), "[{case}] setup 第 {index} 条语句失败: {item:?}");
+        assert!(
+            item.is_ok(),
+            "[{case}] setup 第 {index} 条语句失败: {item:?}"
+        );
     }
 
     let mut dirty_insert_error = None;
@@ -2412,7 +2423,11 @@ async fn probe_traversal_with(
             .unwrap_or_else(|error| panic!("[{case}] 图遍历语句本身报错: {error}"));
         let hits = count_array(body);
 
-        let out = exec_capture(&db, "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;").await;
+        let out = exec_capture(
+            &db,
+            "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;",
+        )
+        .await;
         let body = out[0]
             .as_ref()
             .unwrap_or_else(|error| panic!("[{case}] 等值查询本身报错: {error}"));
@@ -2497,7 +2512,10 @@ async fn inst_relate_graph_traversal_needs_relate_type_or_clean_rows() {
 
     // 走 `INSERT RELATION` 的四组：完整边必须可遍历，表类型与 id 形制都不影响。
     assert_eq!(a.hits, 2, "TYPE ANY + INSERT RELATION 应当可遍历: {a:?}");
-    assert_eq!(c.hits, 2, "TYPE RELATION + INSERT RELATION 应当可遍历: {c:?}");
+    assert_eq!(
+        c.hits, 2,
+        "TYPE RELATION + INSERT RELATION 应当可遍历: {c:?}"
+    );
     assert_eq!(e.hits, 2, "镜像 id 形制不该让遍历变空: {e:?}");
 
     // 脏行不影响图遍历：B 组等值查到 22 条，图遍历只回 2 条——引擎遍历时
@@ -2547,8 +2565,11 @@ async fn inst_relate_graph_traversal_needs_relate_type_or_clean_rows() {
             count_array(out[0].as_ref().expect("G 组图遍历"))
         };
         let eq_hits = {
-            let out =
-                exec_capture(&db, "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;").await;
+            let out = exec_capture(
+                &db,
+                "SELECT VALUE <string>id FROM inst_relate WHERE in = pe:a;",
+            )
+            .await;
             count_array(out[0].as_ref().expect("G 组等值查询"))
         };
         let has_out = {

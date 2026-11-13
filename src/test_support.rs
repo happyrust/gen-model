@@ -104,7 +104,6 @@ pub async fn manual_update_project() -> String {
     if let Ok(value) = std::env::var("AIOS_MANUAL_UPDATE_PROJECT") {
         return value;
     }
-    let option = init_test_db_or_panic("读取项目名以推导 AIOS_MANUAL_UPDATE_PROJECT 默认值")
-        .await;
+    let option = init_test_db_or_panic("读取项目名以推导 AIOS_MANUAL_UPDATE_PROJECT 默认值").await;
     option.project_name
 }

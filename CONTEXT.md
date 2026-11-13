@@ -62,6 +62,50 @@ _Avoid_: 单元根、unit root
 `datacenter_delete` 是“曾发生过删除或改名”的事件表。主键只取 refno 值：`datacenter_delete:⟨ref0_ref1⟩`，不把 `pe` 记录链接或 `name` 放进 ID；写入用 `INSERT IGNORE`，同一 refno 只保留首次事件，重放与后续再改名均忽略。写前批量点查同 ID 的 `datacenter_version`，只有已经发布到中台的 refno 才记录。字段 `refno / name（首次事件的老位号）/ type（单元 noun）/ zone_refno（沿 owner 链最近的 ZONE，链断为 NONE）/ dbnum / sesno / sesno_time / reason（deleted | renamed）`。两种来源、都只看交付单元**自身**：被删（S 侧墓碑上的位号）、`NAME` 改了（改前的位号）；下属管件的增删改名不记。写者只有增量的随窗语句（`increment_pipeline::render_datacenter_delete_insert_ignore`）；本仓不消费也不删除，后续处理交给第三方。不进 `fast_delete::RANGE_TABLES`：回退 / 重初始化 / 删库都不清。预览回执 `DbnumPreview.datacenter_delete_rows` 只计本窗口实际符合发布存在性门的尝试写入数。对外只有一条**只读**口 `GET /api/v1/datacenter/deletes`（spec §4.14，`datacenter_delete_reader`）：分页、按 ZONE / dbnum / reason / sesno 起点 / 时间范围（`sesno_time`，`[from, to)`）筛，每行附 `published` 和版本状态（新写事件正常恒为已发布），不带 `instance_code`。来源 plant-ui #1，计划 `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`。
 _Avoid_: 删除标记、`datacent_delete`（issue 原文的笔误）、把它当 `datacenter_version` 的 Delete 状态（那条照旧并存，消费端按 `instance_code` 去重）
 
+**提资 (Datacenter Submission)**：
+把最小交付单元的数据交给数据中台的动作，由 rs-server 执行、plant-ui 发起。需求文字里的「发布」「预发布」「二次发布」说的都是它。
+_Avoid_: 发布（本文件里的「发布」专指模型记录落地，见「单元级发布」「模型发布策略」）、预发布、推送
+
+**提资版本记录 (Submission Version Record)**：
+`datacenter_version` 的一行，记一个提资过的单元：实例编码、状态、上一次提资时的基准。rs-server 在提资成功时写；本仓的增量只改它的状态（`Modify` / `Delete`），其余只读。
+_Avoid_: 版本表、单元版本表（那是从会话链按需算的模型版本，ADR-081）、发布记录
+
+**提资基准 (Submission Baseline)**：
+名称口径缺省拿来和当前状态比的那个会话，代表上一次提资时的内容。取提资版本记录上的「提资时的会话号」（rs-server 在提资成功时记下）；旧记录没有这个数时，退回用记录上已有的那个会话号；两个都没有的单元按已修改处理。
+_Avoid_: 发布水位、基线（单说时指测试的金基线或文档的基线提交）、第一次提资时的状态
+
+**refno 口径 (Refno-keyed Identity)**：
+把参考号当作构件唯一身份的认法：参考号相同才是同一个构件，删掉后同名重建算「旧的删除、新的新增」。增量处理、任务回执、模型落库和现有接口都按它，不因名称口径而改。
+_Avoid_: 参考号过滤、旧口径
+
+**名称口径 (Name-keyed Identity)**：
+把 E3D 里存的 `NAME` 当作构件身份的认法：同一个库里名称整串相同（带前导斜杠、只去首尾空白、区分大小写）就是同一个构件，不看参考号。它是对同一份数据的另一种读法，按需算出、不落库；结果只有新增、删除、修改、未修改四类，另标是否换号。它只覆盖有真实名字的最小交付单元；没有真实名字的单元不在结果里，提资对它们照旧判断。ADR-098，方案 `docs/plans/2026-11-10-name-keyed-increment-dev-plan.md`。
+_Avoid_: 按名称过滤（它不筛掉任何数据）、名称增量、后处理表、跨库配对
+
+**真实名字 (Real Name)**：
+设计人员起的名称：`NAME` 非空，并且不是自动命名。有真实名字的元素叫有名构件。
+_Avoid_: 有效名称、非空名称（自动命名的名称也非空）
+
+**有名构件 (Named Element)**：
+`NAME` 非空、且不属于自动命名的元素。名称口径只给有名构件出行；没有名字的和自动命名的元素不出行。
+_Avoid_: 具名元素、命名构件
+
+**自动命名 (Auto-generated Name)**：
+以配置的前缀开头的名称，缺省是 `/Copy-of-` 和 `/Copy-(数字)-of-`：E3D 复制元素时带出来的，不是设计人员起的。名称口径把自动命名的元素当作没有名字。
+_Avoid_: 复制件（rs-server 的说法，按「名字里含 Copy-of」判，范围不同）、缺省名（rs-server 指「类型 序号」这种显示名）、临时名
+
+**名下 (Under a Name)**：
+一个有名构件名下的东西，是它自己加上挂在它下面、没有真实名字的成员（无名的和自动命名的）。这些成员的增、删、改算作这个有名构件的修改；只是换了参考号、内容和顺序都没变的不算。这叫上卷到名下。
+_Avoid_: 忽略无名成员、上卷（单说时指沿属主链折到生成根，与上卷到名下是两回事）
+
+**换号 (Renumbering)**：
+名称口径下，同一个名称前后对应的参考号不同：删掉后同名重建，或复制一份改回原名再删掉原件。它是标注，不是类别，换号的构件可以是未修改，也可以是修改。
+_Avoid_: 仅参考号变化（需求表的说法，还包含「内容没变」；换号本身不含这层意思）、refno 漂移
+
+**接替 (Succession)**：
+已提资的单元让出了名称，同一个库里又有新单元用上这个名称，新单元接替旧单元。名称让出来有两种来法：旧单元被删掉；或者旧单元先改了名（同库不能重名，想让复制件用回原名，得先把原件删掉或改名）。两种都算接替：旧参考号的那条交付删除记录（原因是删除或改名）标为「已被接替」，提资不再为它推送删除，提资版本记录转到新参考号。
+_Avoid_: 顶替、覆盖、`superseded`（任务回执的 `supersedes` / `superseded_by` 指补排任务之间的替代）
+
 **正常颗粒 (Normal Granularity)**：
 生成根的另一种：当变化元素**没有** MDU 祖先时采用的默认口径，等同于自动 watch 路径长期使用的 significant owner 口径（而非「整个 ZONE 兜底」，也非「跳过」）。
 _Avoid_: 常规颗粒、默认颗粒、ZONE 兜底
@@ -289,6 +333,26 @@ _Avoid_: 解析管线、增量管线（泛指时）、数据增量（当与模�
 模型面在持久层里属于自己的记录——产物行（`inst_relate` / `inst_info` / `tubi_relate`）、模型水位与库级目录落款（水位行上那两格）——与设计数据本身无关；逐根的完成凭证 / 发布版本随 `gen_root` 退役（ADR-079），只活在进程内的生成根账本与投影回执里。它和随之而来的副作用（发布、排队、派生面通告）不属于模型面的纯函数部分。
 _Avoid_: 模型元数据、gen_root 表（已退役）、模型缓存
 
+**模型左端 / 数据左端 (Model Left Edge / Data Left Edge)**：
+一窗规划的两个起点：数据左端是数据面已应用到的会话（`applied_sesno`，窗从它的下一会话起），模型左端是模型面已发布到的会话（`model_sesno`）。两者相等是常态；模型落后时模型规划必须从模型左端起算，收尾只在本任务模型左端不高于当前模型水位时盖章（ADR-092）。
+_Avoid_: 基线会话（泛指时）、S（不说明是哪一面时）、起点会话
+
+**水位跳盖 (Watermark Skip-Stamp)**：
+模型水位被一次成功收尾从 S 直接推到 T'，而 S→T 之间有根没做完、又没被任何落库的名单记住——欠账从此在库上不可见。只发生在跨窗；由「规划左端取 min + 收尾连续性闸」堵住（ADR-092）。
+_Avoid_: 水位越级、水位跳跃、漏盖、水位虚进（那是「没做就盖」，单窗内的事）
+
+**退避期 (Backoff Window)**：
+一个生成失败的根在下一次允许重试之前的冷却时段，按根指数增长（30 s 起、翻倍、10 min 封顶），只活在进程内账本里；退避期内的根不并进 regen、不触发稳态补偿，判死线不变（ADR-090 D1）。
+_Avoid_: 重试间隔（泛指时）、park（那是数据面的一次即停）、冷却（泛指时）
+
+**稳态补偿 (Steady-State Catch-Up)**：
+没有新会话、没有重启、没有人工执行时，周期对账那一拍对监听域内每个 DESI 库比一次两枚水位，模型落后就排一条 `ModelOnly` 的那条路；与启动核对同一判据（`startup_model_recovery_plan`），受退避期节流，一拍一库最多一条。
+_Avoid_: idle 重试、后台补算、定时重建、周期重排
+
+**语料门 (Corpus Gate)**：
+翻一个默认开关之前必须先过的那条真语料用例：在真实库文件上证明新行为正确（与整库重建逐条相等）且净收益为正。门没过，默认值不动（ADR-080 D9 ③、ADR-090 D2）。
+_Avoid_: 验收用例（泛指时）、灰度、开关前置（泛指时）
+
 ## 模型生成执行（Model Generation Execution）
 
 **dbnum 任务 (Dbnum Task)**：
@@ -456,6 +520,21 @@ _Avoid_: 软删（当指「只翻 pe.deleted、别的行不动」的旧写法时
 **模型凭证前移 (Credential Advance)**——ADR-079 起只剩回执：
 窗口选根的 `advance` 去向：两端都是根、e3d-model `plan_update(S→T)` 判定**未被触到**、又不在生成根账本的欠账里的根，什么都不做——不重生成、不动几何 / manifest，「这份几何到 T 仍有效」由任务收尾盖到 T 的 `model_sesno` 一并承诺；库里没有任何一行要为它改（2026-09-15 之前是一条 `UPDATE gen_root SET source_end_sesno = T`，随表退役）。护栏不变：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗不信闭包、`roots_S ∩ roots_T` 全部进 regen，回执记 `credential_advance_degraded`。回执那一格（`DataBatchResult.credential_advance = { requested, advanced, degraded }`）字段名与形状不动——跨仓契约——只是它现在是**账**（这一窗省掉了多少根的重生成），不是一次写库。
 _Avoid_: 凭证刷新、水位前移、跳过生成、与模型水位混用、把它当成还会写库的动作
+
+**双水位 (Two Watermarks)**：
+同一个 `dbnum_watermark:{dbnum}` 行上并排的两枚水位，各写各的时点，**不是一笔事务同时盖三枚**：**应用水位** `applied_sesno` 在数据窗口的尾事务写下（数据面承诺：数据已经落库到这一版），**模型水位** `model_sesno` 由该 dbnum 任务收尾那一笔写下，且只在全部根生成并序列化成功、`T <= applied_sesno` 时才推（模型面承诺）。两枚的判据不同：数据侧看「写回成功」，模型侧看「所有根都成」。第三枚「房间水位」`room_sesno` 已退役（ADR-073），房间归属不是独立阶段，它随模型根一起写、一起承诺。
+一致性判决是等值而非不等式：`applied_sesno > 0 && model_sesno == applied_sesno && 无未安定根` 才算最新一致；`model_sesno < applied_sesno` 是常态（还在赶），不是告警。
+_Avoid_: 三枚水位、三水位同笔、生成水位、把 `applied_sesno` 当模型追平判据、把两枚水位当同一件事
+
+**切片删 (Slice Delete)**：
+按**回执谓词整片删**、而不是按「本次重生成的实例键」删：模型面刷新一根时，先以该根这次发布的回执为条件把旧行整片删掉（`DELETE … WHERE root = …`），再 `INSERT IGNORE` 重插新行。被删元素不必出现在本次生成结果里——它已经不在目标索引里了，回执谓词天然覆盖。这条取代了旧写法「只删本次重算到的键、被删元素靠 `deleted=true` 墓碑过滤、因而永远进不了删除集」（ADR-088）。
+同根的 legacy 带几何指针行按**键**替换、**不跟随指针**去删它指向的共享网格（ADR-088）：指针可能被别的根共用，跟着删就是互踩。
+_Avoid_: 按实例键删、靠 owner 重生成顺带清理、跟随几何指针删、`replace_exist` 的旧语义（它已不是增量写路）
+
+**生成根账本 (Generation Root Ledger)**：
+`model_root_ledger`——**进程内**的逐根三态记账（`Generated` / `Failed{error}` / `Refused{error}`），不是持久表。它回答「这一窗哪些根没成、为什么」，`census(dbnum)` / `census_all()` 给按 dbnum 的计数，`chasing_entries(dbnum)` 列失败根与 `last_error`。**持久事实只有模型水位**（ADR-079）：库里没有逐根凭证行，重启后「这个库欠到哪」只由 `model_sesno` 一个说法；账本是仪表，进程重启即清零，欠账范围从水位重新推出。它参与 `root_credential_covers` 的根级半边判定，但**没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链**。
+四格分类（已追平 / 还在赶 / 已放弃 / 没生成过）里前三格来自它，第四格「没生成过」是懒生成、账本里根本没有这一行。
+_Avoid_: 持久队列、待重试表、`gen_root`（表已退役）、把账本当崩溃恢复依据、把「没生成过」也算进账本
 
 **窗口阻断 (Window Block)**：
 稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断数据窗口**（ADR-056 D1）：根级失败只留痕、不排队（ADR-065 D4），数据水位照常推进。房间归属开启时算不出会让该根成为模型失败；房间开关关闭时不运行计算，因此不产生这类失败。
@@ -677,6 +756,27 @@ _Avoid_: 宏日志（泛指时）、输出文件
 **双侧对拍 (Dual-side Parity)**：
 同一属性在 E3D 会话内查询到的源头真值与增量落库后库侧值的比对。抓「解析层把值写歪」一类只有拿到源头真值才能发现的缺陷。
 _Avoid_: 数据校验（泛指时）、一致性检查（泛指时）
+
+**覆盖四格 (Four-cell Coverage)**：
+判一种变更类型是否「已覆盖」的四个格子：① 场景宏对在 E3D TTY 跑通、会话推进；② E3D 前后两份 RVM 符合预期变化（纯元数据类的预期就是「RVM 不变」），restore 回到 before；③ gen-model 增量结果对 E3D after-RVM，AABB ≤ 1 mm；④ 双侧对拍。四格全满才算覆盖，缺哪格就记哪格的缺口。
+_Avoid_: 覆盖率（泛指时）、「测过了」
+
+**run-owned 对象 (Run-owned Object)**：
+测试运行自己建出来、也由它自己删掉的元素（宏对的 setup / apply 腿新建，restore 腿删除）。只有它们可以在真实工程里原地改（跑前备份）；工程里既有的对象只在隔离副本上改。
+_Avoid_: 测试数据、临时元素
+
+**净窗口 (Net Window)**：
+gen-model 消费一个库的会话区间 (S, T] 时看到的两端净差，由「净窗口收集器」给出。同窗内建了又删、对同一属性写两次这类中间步骤看不见，是设计如此；对应 E3D 的 GETWORK / 跨会话对比路径，不是会话内的事件流。
+_Avoid_: 事件流、逐次变化（指窗口内容时）
+
+**变更类型 (Change Type)**：
+一次存盘在 E3D 侧能落下的变化种类，分五族：结构 `CT-S`、属性 `CT-A`、目录 / 跨库 `CT-C`、派生 / 级联 `CT-D`、会话 / 窗口 `CT-W`，总表见 `docs/specs/incr-gen-audit-aux/increment-change-types.md`。登记表的 `change_types` 字段引用这些编号；`CT-` 前缀用来和 INC 登记号区分（`CT-A3` 是位姿变化，`INC-A03` 是 HVAC 案例）。和 L3 账本的 `ChangeKind`（gen-model 内部的 8 类）不是一回事。
+_Avoid_: 增量类型、变化分类（与 `ChangeKind` 混用时）
+
+**执行资产 (Execution Asset)**：
+挂在 INC 案例下、真正去 E3D 里跑的东西：增量套件用例（`suite:`，`scripts/e3d/increment_suite/suite-manifest.json`）和原地宏对（`inplace:`，P79–P85）。INC 登记表是唯一的案例目录，资产只是它的执行载体；套件用例 ID 的前缀是登记表建立前的旧编号，不代表 INC 归属，归属看登记表的 `assets` 和清单的 `registration`。
+_Avoid_: 用例（指 INC 案例时）、案例（指套件用例时）
+
 # 严格初始化阶段（Strict Initialization Phase）
 
 初始化不是一条链，是**两条并行链**：模型面在文件身份解析完成后即可开工，数据面走

@@ -228,7 +228,11 @@ mod tests {
         assert_eq!(classify_site_name(&rules, "/pipe_area"), 1, "大小写不敏感");
         assert_eq!(classify_site_name(&rules, "/ELEC-1"), 2);
         assert_eq!(classify_site_name(&rules, "/DIANQI"), 2);
-        assert_eq!(classify_site_name(&rules, "/一号电气房"), 2, "中文关键字原样比较");
+        assert_eq!(
+            classify_site_name(&rules, "/一号电气房"),
+            2,
+            "中文关键字原样比较"
+        );
         assert_eq!(classify_site_name(&rules, "/INSTR-A"), 3);
         assert_eq!(classify_site_name(&rules, "/HVAC-B"), 4);
         assert_eq!(classify_site_name(&rules, "/CIVIL-01"), 5);
@@ -248,7 +252,11 @@ mod tests {
             keywords: vec!["RACK".into()],
         }];
         assert_eq!(classify_site_name(&custom, "/STRU-PIPE-RACK"), 9);
-        assert_eq!(classify_site_name(&custom, "/PIPE"), 0, "自定义表不带缺省那几条");
+        assert_eq!(
+            classify_site_name(&custom, "/PIPE"),
+            0,
+            "自定义表不带缺省那几条"
+        );
     }
 
     /// 查表实现：`(refno → (noun, name, owner))`，并数一数被读了几次。
@@ -313,7 +321,11 @@ mod tests {
         assert_eq!(memo.spec_value_of(&lineage, &rules, refno(5)), 1);
         assert_eq!(lineage.reads.get(), reads_before, "父已算过，子不再读记录");
         assert_eq!(memo.spec_value_of(&lineage, &rules, refno(8)), 6);
-        assert_eq!(lineage.reads.get(), reads_before + 2, "SCTN + 它的 SITE 各读一次");
+        assert_eq!(
+            lineage.reads.get(),
+            reads_before + 2,
+            "SCTN + 它的 SITE 各读一次"
+        );
     }
 
     #[test]
@@ -368,7 +380,11 @@ mod tests {
         };
 
         assert_eq!(spec_value_of_in(&slot, rules, &probe, 7, refno(6)), 1);
-        assert_eq!(probe.inner.reads.get(), 5, "ELBO → BRAN → PIPE → ZONE → SITE");
+        assert_eq!(
+            probe.inner.reads.get(),
+            5,
+            "ELBO → BRAN → PIPE → ZONE → SITE"
+        );
         assert_eq!(probe.lock_free_reads.get(), 5, "五次记录读都在锁外");
 
         // 同代：整段路径都记下了，BRAN 一次都不读；另一棵只读 SCTN + 它的 SITE。
@@ -379,7 +395,11 @@ mod tests {
 
         // 换代（会话指纹变了）：记忆整体清空，同一个 BRAN 要重新爬到 SITE。
         assert_eq!(spec_value_of_in(&slot, rules, &probe, 8, refno(5)), 1);
-        assert_eq!(probe.inner.reads.get(), 11, "BRAN → PIPE → ZONE → SITE 四次");
+        assert_eq!(
+            probe.inner.reads.get(),
+            11,
+            "BRAN → PIPE → ZONE → SITE 四次"
+        );
         assert_eq!(
             probe.lock_free_reads.get(),
             probe.inner.reads.get(),

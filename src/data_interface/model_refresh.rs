@@ -144,7 +144,8 @@ impl ModelRefreshPolicy {
     /// `collect_window` + `plan_update` 半边做选根与凭证前移。`execute_plan` 半边原写
     /// 「单元级落库，D3 已否，届时摘除」——★0917 作废：ADR-080（单元级发布）把 `execute_plan`
     /// 转正为生产执行体，`e3d_model_service::UnitDeltaProducer::produce` 逐根切子计划喂它、
-    /// 产出 `UnitDelta` 以 `Partial` 提交叠在根回执之下（开关 `model_unit_level_publish`，默认关）。
+    /// 产出 `UnitDelta` 以 `Partial` 提交叠在根回执之下（开关 `model_unit_level_publish`，2026-10-14 起默认开，
+    /// ADR-080 D9 追记）。
     /// 本方法仍是整窗一口气生成 + 落库的旧形态，生产不调；在那之前不删。
     #[allow(dead_code)]
     pub(crate) async fn apply_window(
@@ -251,7 +252,8 @@ impl ModelRefreshPolicy {
                 .iter()
                 .map(|failure| failure.root.as_str())
                 .collect::<std::collections::HashSet<_>>();
-            roots.iter()
+            roots
+                .iter()
                 .filter(|root| !failed.contains(root.as_str()))
                 .cloned()
                 .collect()
@@ -289,8 +291,13 @@ impl ModelRefreshPolicy {
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
         // ADR-071 D1：没有初始化 run、不等 ACK、不等别的写者——同一 dbnum 只有本任务一个写者，
         // 生成完就地把行写进库。冻结源在手（任务窗口内）就钉它那一版文件，否则取文件最新。
-        let mut diagnostic = crate::process_diagnostics::Operation::begin("model.source.begin",
-            format!("dbnum={dbnum} roots={roots:?} frozen={}", explicit_source.is_some()));
+        let mut diagnostic = crate::process_diagnostics::Operation::begin(
+            "model.source.begin",
+            format!(
+                "dbnum={dbnum} roots={roots:?} frozen={}",
+                explicit_source.is_some()
+            ),
+        );
         let service = match explicit_source {
             Some(source) => {
                 anyhow::ensure!(
@@ -312,10 +319,19 @@ impl ModelRefreshPolicy {
                 None => E3dModelService::from_current().await?,
             },
         };
-        diagnostic.stage("model.geometry.begin", format!("dbnum={dbnum} roots={roots:?}"));
+        diagnostic.stage(
+            "model.geometry.begin",
+            format!("dbnum={dbnum} roots={roots:?}"),
+        );
         let persisted = service
-            .generate_and_persist_roots(dbnum, roots_for_generate, failure_policy, task_rooms.clone())
-            .await.map_err(|error| {
+            .generate_and_persist_roots(
+                dbnum,
+                roots_for_generate,
+                failure_policy,
+                task_rooms.clone(),
+            )
+            .await
+            .map_err(|error| {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error
             })?;
@@ -323,8 +339,18 @@ impl ModelRefreshPolicy {
         // 常态里（2026-09-18 的 HBOR 探针：E3D 与本引擎同样不画，但只有 E3D 那边报得出来）。
         // 点名账非空时就挂在同一行上——查的人本来就在看它。
         let tubes_not_drawn = persisted.tubes_not_drawn.clone();
-        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}{}", persisted.failed, persisted.failed_roots,
-            tubes_not_drawn.as_deref().map(|line| format!(" {line}")).unwrap_or_default()));
+        diagnostic.stage(
+            "model.geometry.done",
+            format!(
+                "dbnum={dbnum} failed={} failures={:?}{}",
+                persisted.failed,
+                persisted.failed_roots,
+                tubes_not_drawn
+                    .as_deref()
+                    .map(|line| format!(" {line}"))
+                    .unwrap_or_default()
+            ),
+        );
         let generation_failures = persisted
             .failed_roots
             .iter()
@@ -622,11 +648,20 @@ impl ModelRefreshPolicy {
             report.commits = commits;
             report.max_transaction_bytes = max_transaction_bytes;
             report.tubes_not_drawn = tubes_not_drawn;
-            diagnostic.finish(format!("dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
-                report.completed, report.failures, report.rows_upserted, report.commits, report.room_edges_written));
+            diagnostic.finish(format!(
+                "dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
+                report.completed,
+                report.failures,
+                report.rows_upserted,
+                report.commits,
+                report.room_edges_written
+            ));
             Ok(report)
         } else {
-            diagnostic.finish(format!("dbnum={dbnum} geometry_failed={} roots={roots:?}", persisted.failed));
+            diagnostic.finish(format!(
+                "dbnum={dbnum} geometry_failed={} roots={roots:?}",
+                persisted.failed
+            ));
             Ok(TargetedGenerationReport {
                 completed: Vec::new(),
                 failures: roots

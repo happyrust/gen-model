@@ -1380,16 +1380,32 @@ mod tests {
     fn declared_missing_file_is_not_an_outside_mdb_reference() {
         struct Missing;
         impl CataDbLocator for Missing {
-            fn dbnum_of_ref0(&self, _: u32) -> Option<u32> { None }
-            fn contains_dbnum(&self, dbnum: u32) -> bool { dbnum == 8000 }
-            fn db_type_of(&self, _: u32) -> Option<String> { Some("DESI".into()) }
-            fn file_of(&self, _: u32) -> Option<(String, PathBuf)> { None }
+            fn dbnum_of_ref0(&self, _: u32) -> Option<u32> {
+                None
+            }
+            fn contains_dbnum(&self, dbnum: u32) -> bool {
+                dbnum == 8000
+            }
+            fn db_type_of(&self, _: u32) -> Option<String> {
+                Some("DESI".into())
+            }
+            fn file_of(&self, _: u32) -> Option<(String, PathBuf)> {
+                None
+            }
         }
-        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None, catalog_files: None });
+        let schema = Arc::new(DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: "unused".into(),
+            version: None,
+            catalog_files: None,
+        });
         let store = DirectStore::new(schema, Arc::new(Missing));
         let reference = RefU64::from_two_nums(24384, 42);
         assert_eq!(store.dbnum_of(reference).unwrap(), 8000);
-        assert!(matches!(store.attrs(reference), Err(DirectStoreError::NoFileForDbnum { dbnum: 8000 })));
+        assert!(matches!(
+            store.attrs(reference),
+            Err(DirectStoreError::NoFileForDbnum { dbnum: 8000 })
+        ));
     }
 
     fn store_without_files() -> DirectStore {

@@ -23,7 +23,6 @@
 
 use std::time::{Duration, Instant};
 
-use aios_core::SUL_DB;
 use surrealdb::{Surreal, engine::any::Any};
 
 /// 属性 lane 的有界队列容量：解析最多领先写者这么多笔事务。
@@ -212,15 +211,9 @@ async fn execute_job(
 }
 
 /// 起一个单写者：逐笔从队列取事务、逐笔执行（含期限与冲突重试），直到队列关闭并排空。
-pub(crate) fn spawn_writer(
-    receiver: flume::Receiver<WriteJob>,
-    context: &'static str,
-    on_error: OnWriteError,
-) -> tokio::task::JoinHandle<WriterOutcome> {
-    spawn_writer_on(SUL_DB.clone(), receiver, context, on_error)
-}
-
-/// [`spawn_writer`] 的显式句柄版（测试对一次性 `mem://` 实例用）。
+///
+/// 库由调用方给（测试对一次性 `mem://` 实例用）。过去还有一个取本进程 `SUL_DB` 的包装，
+/// 它没有任何调用方——写者要写哪个库是任务自己的事，不该由这里默认成进程那一个。
 pub(crate) fn spawn_writer_on(
     db: Surreal<Any>,
     receiver: flume::Receiver<WriteJob>,

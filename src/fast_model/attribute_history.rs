@@ -438,7 +438,10 @@ fn compute_table(
                 let exists = element.exists().map_err(|e| {
                     UnitVersionsError::new(
                         "SESSION_NOT_FOUND",
-                        format!("查 {} 在会话 {current} 是否存在失败: {e}", refno_text(refno)),
+                        format!(
+                            "查 {} 在会话 {current} 是否存在失败: {e}",
+                            refno_text(refno)
+                        ),
                     )
                 })?;
                 if exists {
@@ -591,10 +594,7 @@ fn compute_table(
     let Some(noun) = noun else {
         return Err(UnitVersionsError::new(
             "REFNO_NOT_FOUND",
-            format!(
-                "dbnum {dbnum} 的整条会话链上都没有 {}",
-                refno_text(refno)
-            ),
+            format!("dbnum {dbnum} 的整条会话链上都没有 {}", refno_text(refno)),
         ));
     };
 
@@ -765,7 +765,10 @@ mod tests {
         assert_eq!(all.entries.len(), 3);
         assert_eq!(all.unit_root.as_deref(), Some("24384/23257"));
         let tail = slice_table(&table, Some(7), None, true).expect("sliced");
-        assert_eq!(tail.entries.iter().map(|e| e.sesno).collect::<Vec<_>>(), vec![9]);
+        assert_eq!(
+            tail.entries.iter().map(|e| e.sesno).collect::<Vec<_>>(),
+            vec![9]
+        );
         assert!(tail.cached);
         let limited = slice_table(&table, None, Some(1), false).expect("limited");
         assert!(limited.truncated);

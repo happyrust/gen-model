@@ -1,6 +1,6 @@
 use crate::fast_model::cal_model::update_cal_equip_wtrans;
-use aios_core::spatial::pipe::cal_valve_nearest_floor;
 use aios_core::SUL_DB;
+use aios_core::spatial::pipe::cal_valve_nearest_floor;
 
 //计算管道元件的计算属性
 pub async fn update_cal_bran_component() -> anyhow::Result<()> {
@@ -49,8 +49,9 @@ async fn note_unlinked_valves() {
 
 /// 把已经挂上楼板边的阀门从账本里销掉。
 ///
-/// 只发 DELETE 给账本里确实有行的目标（`clear_equip_floor_miss` 内部靠 `KNOWN` 播种），
-/// 所以这一步对正常库是空操作，不会为了 588 台阀门逐条打一次删库请求。
+/// 只发 DELETE 给账本里确实有行的目标（`clear_equip_floor_misses` 内部靠 `KNOWN`
+/// 播种），所以这一步对正常库是空操作，不会为了 588 台阀门逐条打一次删库请求；
+/// 真要删时合成一条 `WHERE target IN [...]`，不是逐条一个请求。
 ///
 /// 口径与 [`note_unlinked_valves`] 严格互补：两边都走 `pe` 的 `->nearest_relate`，
 /// 用同一个 `noun = 'VALV' AND deleted != true` 过滤。混用 `VALV.REFNO->nearest_relate`
@@ -71,12 +72,11 @@ async fn clear_linked_valves() {
             return;
         }
     };
-    for target in targets {
-        if let Err(error) =
-            crate::data_interface::geom_error::clear_equip_floor_miss(&target).await
-        {
-            log::warn!("[geom_error] 阀门销账失败 target={target}: {error:#}");
-        }
+    // 一条 DELETE 替掉 500+ 条逐条销账：逐条一个请求在真库实测要 2～3 秒。
+    if let Err(error) =
+        crate::data_interface::geom_error::clear_equip_floor_misses(&targets).await
+    {
+        log::warn!("[geom_error] 阀门批量销账失败 {} 个目标: {error:#}", targets.len());
     }
 }
 
@@ -138,9 +138,7 @@ mod valve_nearest_floor_live_tests {
             .await?;
         let stale: Option<i64> = r.take(0)?;
         let mut r = SUL_DB
-            .query(
-                "RETURN count(SELECT * FROM VALV WHERE array::len(REFNO->nearest_relate) = 0);",
-            )
+            .query("RETURN count(SELECT * FROM VALV WHERE array::len(REFNO->nearest_relate) = 0);")
             .await?;
         let unlinked: Option<i64> = r.take(0)?;
         let (missing, stale, unlinked) = (

@@ -50,7 +50,10 @@ pub(crate) async fn converge_tree_after_persist(
     boxes: Vec<RStarBoundingBox>,
     removed: &[RefnoEnum],
 ) -> usize {
-    let present = boxes.iter().map(|entry| entry.refno).collect::<HashSet<_>>();
+    let present = boxes
+        .iter()
+        .map(|entry| entry.refno)
+        .collect::<HashSet<_>>();
     let mut evict = removed.iter().map(RefnoEnum::refno).collect::<HashSet<_>>();
     let vanished = refreshed
         .iter()
@@ -226,8 +229,8 @@ fn decode_snapshot(
     project: &str,
     namespace: &str,
 ) -> anyhow::Result<(SpatialTreeSnapshot, AccelerationTree)> {
-    let snapshot: SpatialTreeSnapshot = bincode::deserialize(bytes)
-        .map_err(|e| anyhow::anyhow!("反序列化空间树快照失败: {e}"))?;
+    let snapshot: SpatialTreeSnapshot =
+        bincode::deserialize(bytes).map_err(|e| anyhow::anyhow!("反序列化空间树快照失败: {e}"))?;
     anyhow::ensure!(
         snapshot.format_version == SNAPSHOT_FORMAT_VERSION,
         "快照格式版本 {} 不是 {SNAPSHOT_FORMAT_VERSION}",
@@ -353,9 +356,7 @@ fn read_snapshot_for_startup(project: &str, namespace: &str) -> SnapshotReadOutc
     match std::fs::read(&path) {
         Ok(bytes) => match decode_snapshot(&bytes, project, namespace) {
             Ok(decoded) => SnapshotReadOutcome::Usable(Box::new(decoded)),
-            Err(error) => {
-                SnapshotReadOutcome::Unusable(format!("快照 {path} 校验失败: {error:#}"))
-            }
+            Err(error) => SnapshotReadOutcome::Unusable(format!("快照 {path} 校验失败: {error:#}")),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             SnapshotReadOutcome::Unusable(format!("快照 {path} 不存在"))
@@ -429,13 +430,15 @@ pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
 /// 一个在快照之后才初始化的库，靠头里已有的键是列举不出来的。只算已建立数据水位的库
 /// （`initialized`）：只被扫到、还没初始化的登记行没有模型行，也就不在树上。
 pub(crate) async fn current_watermark_pairs() -> anyhow::Result<WatermarkPairs> {
-    Ok(crate::data_interface::dbnum_state::DbnumState::list_registered()
-        .await
-        .map_err(|e| anyhow::anyhow!("读取各库水位数对失败: {e}"))?
-        .into_iter()
-        .filter(|state| state.initialized)
-        .map(|state| (state.dbnum, (state.applied_sesno, state.model_sesno)))
-        .collect())
+    Ok(
+        crate::data_interface::dbnum_state::DbnumState::list_registered()
+            .await
+            .map_err(|e| anyhow::anyhow!("读取各库水位数对失败: {e}"))?
+            .into_iter()
+            .filter(|state| state.initialized)
+            .map(|state| (state.dbnum, (state.applied_sesno, state.model_sesno)))
+            .collect(),
+    )
 }
 
 /// 库侧当前的完整空间指纹：epoch 章 + 各库水位数对，两次读同一处失败语义。
@@ -1242,7 +1245,11 @@ mod tests {
         use crate::fast_model::spatial_state::{SpatialStateSnapshot, SpatialTreeState};
 
         let header = header_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 163, 163)]));
-        let db = Ok(db_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 163, 163)])));
+        let db = Ok(db_with(
+            7,
+            "d'2026-08-12T00:00:00Z'",
+            pairs(&[(7997, 163, 163)]),
+        ));
         let state = SpatialStateSnapshot {
             state: SpatialTreeState::Ready,
             last_error: None,
@@ -1276,8 +1283,16 @@ mod tests {
         for key in keys {
             assert!(object.contains_key(key), "缺键 {key}: {healthy}");
         }
-        for retired in ["pending", "published_version", "published_input_files", "published_input_sha256"] {
-            assert!(!object.contains_key(retired), "退役格 {retired} 不许回来: {healthy}");
+        for retired in [
+            "pending",
+            "published_version",
+            "published_input_files",
+            "published_input_sha256",
+        ] {
+            assert!(
+                !object.contains_key(retired),
+                "退役格 {retired} 不许回来: {healthy}"
+            );
         }
         assert_eq!(healthy["state"], "ready");
         assert_eq!(healthy["ready"], true);
@@ -1294,17 +1309,31 @@ mod tests {
             serde_json::json!({ "7997": [163, 163] }),
             "水位数对渲成 dbnum → [applied, model]: {healthy}"
         );
-        assert_eq!(healthy["db_watermarks"], serde_json::json!({ "7997": [163, 163] }));
+        assert_eq!(
+            healthy["db_watermarks"],
+            serde_json::json!({ "7997": [163, 163] })
+        );
 
         // 计数相等而库侧时刻不同 = 快照回滚撞回同一计数，必须按漂移报。
-        let rolled_back = Ok(db_with(7, "d'2026-08-11T00:00:00Z'", pairs(&[(7997, 163, 163)])));
+        let rolled_back = Ok(db_with(
+            7,
+            "d'2026-08-11T00:00:00Z'",
+            pairs(&[(7997, 163, 163)]),
+        ));
         let drifted = render_spatial_tree_status(42, Some(&header), &rolled_back, "reused", &state);
         assert_eq!(drifted["drift"], true, "指纹双字段必须都相等: {drifted}");
 
         // epoch 一致而某个库的水位前进了：快照没跟上，同样是漂移。
-        let advanced = Ok(db_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 165, 163)])));
+        let advanced = Ok(db_with(
+            7,
+            "d'2026-08-12T00:00:00Z'",
+            pairs(&[(7997, 165, 163)]),
+        ));
         let drifted = render_spatial_tree_status(42, Some(&header), &advanced, "reused", &state);
-        assert_eq!(drifted["drift"], true, "水位数对不等必须按漂移报: {drifted}");
+        assert_eq!(
+            drifted["drift"], true,
+            "水位数对不等必须按漂移报: {drifted}"
+        );
 
         // 诊断失败/头缺失：键一个不少，快照侧如实为 null，last_error 报得出原因，
         // ready 只由状态机决定。
@@ -1387,7 +1416,8 @@ mod tests {
             "盒必须直接取投影记录的 world_bounds: {body}"
         );
         assert!(
-            body.contains("tree.sync_refnos(boxes)") && body.contains("tree.remove_by_refnos(&evict)"),
+            body.contains("tree.sync_refnos(boxes)")
+                && body.contains("tree.remove_by_refnos(&evict)"),
             "收敛 = sync_refnos 换新 + remove_by_refnos 摘旧: {body}"
         );
         assert!(
@@ -1466,7 +1496,10 @@ mod tests {
             world_bounds: [[4.0, 2.0, 3.0], [1.0, 5.0, 6.0]],
             ..record.clone()
         };
-        assert!(projected_tree_entry(&reversed).is_none(), "反向盒是空集语义");
+        assert!(
+            projected_tree_entry(&reversed).is_none(),
+            "反向盒是空集语义"
+        );
         let nan = ProjectedGeometry {
             world_bounds: [[f32::NAN, 2.0, 3.0], [4.0, 5.0, 6.0]],
             ..record
@@ -1621,22 +1654,49 @@ mod tests {
     #[test]
     fn a_header_matches_only_when_epoch_and_every_watermark_pair_agree() {
         let header = header_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)]));
-        assert!(header.matches(&db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)]))));
+        assert!(header.matches(&db_with(
+            7,
+            "t7",
+            pairs(&[(7997, 163, 163), (8000, 40, 40)])
+        )));
         assert_eq!(
             startup_action(
                 true,
-                header.matches(&db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)])))
+                header.matches(&db_with(
+                    7,
+                    "t7",
+                    pairs(&[(7997, 163, 163), (8000, 40, 40)])
+                ))
             ),
             StartupAction::Reuse
         );
 
         let mismatches: [(&str, DbSpatialFingerprint); 6] = [
-            ("数据水位前进", db_with(7, "t7", pairs(&[(7997, 165, 163), (8000, 40, 40)]))),
-            ("模型水位前进", db_with(7, "t7", pairs(&[(7997, 163, 165), (8000, 40, 40)]))),
-            ("回退到水位", db_with(7, "t7", pairs(&[(7997, 160, 160), (8000, 40, 40)]))),
-            ("多了一个库", db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40), (8001, 1, 1)]))),
+            (
+                "数据水位前进",
+                db_with(7, "t7", pairs(&[(7997, 165, 163), (8000, 40, 40)])),
+            ),
+            (
+                "模型水位前进",
+                db_with(7, "t7", pairs(&[(7997, 163, 165), (8000, 40, 40)])),
+            ),
+            (
+                "回退到水位",
+                db_with(7, "t7", pairs(&[(7997, 160, 160), (8000, 40, 40)])),
+            ),
+            (
+                "多了一个库",
+                db_with(
+                    7,
+                    "t7",
+                    pairs(&[(7997, 163, 163), (8000, 40, 40), (8001, 1, 1)]),
+                ),
+            ),
             ("少了一个库", db_with(7, "t7", pairs(&[(7997, 163, 163)]))),
-            ("epoch 撞值时刻不同", db_with(7, "t-old", pairs(&[(7997, 163, 163), (8000, 40, 40)]))),
+            (
+                "epoch 撞值时刻不同",
+                db_with(7, "t-old", pairs(&[(7997, 163, 163), (8000, 40, 40)])),
+            ),
         ];
         for (why, db) in mismatches {
             assert!(!header.matches(&db), "{why} 必须判不等");
@@ -1857,7 +1917,11 @@ mod tests {
         // 本用例独占这一组 refno（4000000009/*），与同进程其它用例不撞。
         {
             let mut tree = GLOBAL_AABB_TREE.write().await;
-            tree.sync_refnos(vec![bbox(1, 0.0, 1.0), bbox(2, 0.0, 1.0), bbox(3, 0.0, 1.0)]);
+            tree.sync_refnos(vec![
+                bbox(1, 0.0, 1.0),
+                bbox(2, 0.0, 1.0),
+                bbox(3, 0.0, 1.0),
+            ]);
         }
         AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
 
@@ -1879,7 +1943,11 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        assert_eq!(entries_of(1), vec![bbox(1, 10.0, 11.0)], "换新盒，旧盒不堆叠");
+        assert_eq!(
+            entries_of(1),
+            vec![bbox(1, 10.0, 11.0)],
+            "换新盒，旧盒不堆叠"
+        );
         assert!(entries_of(2).is_empty(), "没有可用盒的刷新来源必须摘树");
         assert!(entries_of(3).is_empty(), "被对账掉的来源必须摘树");
         drop(tree);
@@ -2036,7 +2104,12 @@ mod tests {
             body.contains("SnapshotReadOutcome::Unusable"),
             "校验失败必须判不可用: {body}"
         );
-        for legacy in ["read_project_tree_file", "read_tree_meta", "TreeFileMeta", "Legacy"] {
+        for legacy in [
+            "read_project_tree_file",
+            "read_tree_meta",
+            "TreeFileMeta",
+            "Legacy",
+        ] {
             assert!(
                 !body.contains(legacy),
                 "不得再读旧格式树文件（{legacy}）: {body}"

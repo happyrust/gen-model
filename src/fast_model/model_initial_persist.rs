@@ -273,14 +273,20 @@ mod tests {
             mesh_id: format!("e3d_baked_v2_{ordinal:08x}"),
             world_transform: DMat4::IDENTITY,
             world_bounds: [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]],
-            ancestors: vec![packed_refno(refno), packed_refno(root), packed_refno(RefNo::new(24383, 1))],
+            ancestors: vec![
+                packed_refno(refno),
+                packed_refno(root),
+                packed_refno(RefNo::new(24383, 1)),
+            ],
             shape: ProjectedShape::Baked,
             tube: None,
         }
     }
 
     fn commit(root: RefNo, records: usize) -> ProjectionCommit {
-        let upserts = (0..records as u32).map(|n| record(root, n)).collect::<Vec<_>>();
+        let upserts = (0..records as u32)
+            .map(|n| record(root, n))
+            .collect::<Vec<_>>();
         ProjectionCommit {
             tube_branch_resets: Vec::new(),
             removals: Vec::new(),
@@ -303,7 +309,10 @@ mod tests {
 
     async fn database(label: &str) -> Surreal<Any> {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("model_initial_persist").use_db(label).await.unwrap();
+        db.use_ns("model_initial_persist")
+            .use_db(label)
+            .await
+            .unwrap();
         db
     }
 
@@ -313,7 +322,14 @@ mod tests {
     }
 
     async fn count(db: &Surreal<Any>, sql: &str) -> i64 {
-        let rows: Vec<Count> = db.query(sql).await.unwrap().check().unwrap().take(0).unwrap();
+        let rows: Vec<Count> = db
+            .query(sql)
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
         rows.first().map(|row| row.n).unwrap_or(0)
     }
 
@@ -322,7 +338,12 @@ mod tests {
     #[tokio::test]
     async fn one_root_on_an_empty_database_lands_rows_and_carries_its_root_for_the_ledger() {
         let db = database("one_root").await;
-        let slice = render_slice(7997, &[(ROOT, commit(ROOT, 3))], None, default_transaction_cap());
+        let slice = render_slice(
+            7997,
+            &[(ROOT, commit(ROOT, 3))],
+            None,
+            default_transaction_cap(),
+        );
         assert!(slice.dead_letters.is_empty(), "{:?}", slice.dead_letters);
         assert_eq!(slice.transactions.len(), 1);
         let tx = &slice.transactions[0];
@@ -334,9 +355,16 @@ mod tests {
         assert!(tx.label().contains("roots=[24383/73948]"), "{}", tx.label());
         assert!(tx.sql.starts_with("BEGIN TRANSACTION;"), "{}", tx.sql);
         assert!(!tx.sql.contains("DELETE"), "初始化不删：{}", tx.sql);
-        assert!(!tx.sql.contains("gen_root"), "回执不落库（ADR-079）：{}", tx.sql);
+        assert!(
+            !tx.sql.contains("gen_root"),
+            "回执不落库（ADR-079）：{}",
+            tx.sql
+        );
         db.query(tx.sql.clone()).await.unwrap().check().unwrap();
-        assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 3);
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await,
+            3
+        );
         #[derive(serde::Deserialize)]
         struct Epoch {
             value: u64,
@@ -388,10 +416,20 @@ mod tests {
         );
         assert!(!tx.sql.contains("DELETE"), "初始化不清旧行：{}", tx.sql);
         db.query(tx.sql.clone()).await.unwrap().check().unwrap();
-        assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 2);
-        assert_eq!(count(&db, "SELECT count() AS n FROM pe_ptset GROUP ALL;").await, 1);
         assert_eq!(
-            count(&db, "SELECT count() AS n FROM pe_ptset WHERE sesno = 42 GROUP ALL;").await,
+            count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await,
+            2
+        );
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM pe_ptset GROUP ALL;").await,
+            1
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count() AS n FROM pe_ptset WHERE sesno = 42 GROUP ALL;"
+            )
+            .await,
             1,
             "行上的 sesno 是回执的 source_sesno"
         );
@@ -402,7 +440,12 @@ mod tests {
     #[tokio::test]
     async fn a_root_without_geometry_still_rides_a_transaction_for_the_ledger() {
         let db = database("empty_root").await;
-        let slice = render_slice(7997, &[(ROOT, commit(ROOT, 0))], None, default_transaction_cap());
+        let slice = render_slice(
+            7997,
+            &[(ROOT, commit(ROOT, 0))],
+            None,
+            default_transaction_cap(),
+        );
         assert!(slice.dead_letters.is_empty());
         assert_eq!(slice.transactions.len(), 1);
         assert_eq!(slice.transactions[0].roots, vec![ROOT]);
@@ -412,7 +455,10 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
-        assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 0);
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await,
+            0
+        );
     }
 
     /// 装笔：两根装得下就一笔；上限压到刚够一根时拆成两笔，根不劈。
@@ -444,7 +490,11 @@ mod tests {
         let slice = render_slice(7997, &commits, None, small);
         assert_eq!(slice.dead_letters.len(), 1);
         assert_eq!(slice.dead_letters[0].0, ROOT);
-        assert!(slice.dead_letters[0].1.contains("over the"), "{}", slice.dead_letters[0].1);
+        assert!(
+            slice.dead_letters[0].1.contains("over the"),
+            "{}",
+            slice.dead_letters[0].1
+        );
         assert_eq!(slice.transactions.len(), 1);
         assert_eq!(slice.transactions[0].roots, vec![OTHER]);
     }
@@ -490,9 +540,19 @@ mod tests {
         a.receipt.as_mut().unwrap().1.model_target = Some(target.clone());
         let mut b = commit(OTHER, 1);
         b.receipt.as_mut().unwrap().1.model_target = Some(target);
-        let slice = render_slice(7997, &[(ROOT, a), (OTHER, b)], None, default_transaction_cap());
+        let slice = render_slice(
+            7997,
+            &[(ROOT, a), (OTHER, b)],
+            None,
+            default_transaction_cap(),
+        );
         let sql = &slice.transactions[0].sql;
-        for forbidden in ["LET $mt", "desired_model_target", "gen_root", "root_dependency"] {
+        for forbidden in [
+            "LET $mt",
+            "desired_model_target",
+            "gen_root",
+            "root_dependency",
+        ] {
             assert!(!sql.contains(forbidden), "{forbidden} in {sql}");
         }
         assert_eq!(slice.transactions[0].roots, vec![ROOT, OTHER]);

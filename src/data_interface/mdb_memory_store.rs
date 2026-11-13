@@ -37,7 +37,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static ELEMENT_SCAN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub fn element_scan_count() -> usize { ELEMENT_SCAN_COUNT.load(Ordering::Relaxed) }
+pub fn element_scan_count() -> usize {
+    ELEMENT_SCAN_COUNT.load(Ordering::Relaxed)
+}
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;

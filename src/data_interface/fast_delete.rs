@@ -449,7 +449,11 @@ async fn noun_tables_on(db: &Surreal<Any>) -> anyhow::Result<Vec<String>> {
 /// 的核心，那条路的契约是「队列保持暂停，让人先看结果」。启动扫描的重排在
 /// [`startup_reconcile::rollback_unfinished_writes`](crate::data_interface::startup_reconcile::rollback_unfinished_writes)，
 /// 任务开工前那一次由任务自己的 S→T 顶上。
+///
+/// 读写都落在传进来的 `db` 上（整库 wipe、标记行、痕迹删除三处同一个库）；进程内那几份
+/// 作废是**本进程**的记忆，与库无关，照样按 `dbnum` 作废。
 pub async fn rollback_to_watermark(
+    db: &Surreal<Any>,
     dbnum: u32,
     target_watermark: i32,
     intent: crate::data_interface::write_state::WriteIntent,
@@ -464,8 +468,8 @@ pub async fn rollback_to_watermark(
 
     // 初始化 / 重初始化的 S 恒为 0：库里本来就没有「S 版本」可退，整库清空重排（§4.3-1）。
     if intent.wipes_whole_dbnum() {
-        let wipe = wipe_dbnum_for_reinit(dbnum).await?;
-        crate::data_interface::write_state::clear_marker(dbnum).await?;
+        let wipe = wipe_dbnum_for_reinit_on(db, dbnum).await?;
+        crate::data_interface::write_state::clear_marker_on(db, dbnum).await?;
         return Ok(RollbackReport {
             dbnum,
             target_watermark: 0,
@@ -485,7 +489,7 @@ pub async fn rollback_to_watermark(
         .write()
         .await;
 
-    let report = rollback_to_watermark_on(&SUL_DB, dbnum, target_watermark, intent).await?;
+    let report = rollback_to_watermark_on(db, dbnum, target_watermark, intent).await?;
 
     // 进程内那一半（§4.3-7）：镜像格作废（下一次读回填）、空间树置脏，启动判据落到指针重建；
     // 生成根账本这一页整页作废（ADR-079）——S 之后生成的根的「成了 / 失败了」都随痕迹一起退，
@@ -841,6 +845,15 @@ fn forget_dbnum_model_in_process(dbnum: u32, spool_tombstones: bool) -> anyhow::
 /// 固定收库上那一份，不看路由。几何文件排在删行之后。单位几何 1、2、3 不删。
 /// 人工重新解析和回退重建不走这里。
 pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
+    wipe_dbnum_for_upgrade_on(&SUL_DB, dbnum).await
+}
+
+/// [`wipe_dbnum_for_upgrade`] 的库那一半：删的是 `db` 那个库的行与几何，锁与进程内作废
+/// 与公开入口同一串（那些是本进程的，与哪个库无关）。
+pub(crate) async fn wipe_dbnum_for_upgrade_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<FastDeleteDbnumResult> {
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
@@ -859,7 +872,7 @@ pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnu
             queued.purged, queued.stale
         );
     }
-    super::pe_batch::require_no_event_on(&SUL_DB).await?;
+    super::pe_batch::require_no_event_on(db).await?;
     let started = Instant::now();
     let commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
@@ -870,16 +883,16 @@ pub async fn wipe_dbnum_for_upgrade(dbnum: u32) -> anyhow::Result<FastDeleteDbnu
     // 升级清的是库上这一代。读路由这时常常已经是内存（模型水位落后，或重新解析任务在飞），
     // 进程内投影还没有键。键必须从即将删掉的 `inst_relate` 上收，不能按路由跳过。
     // 整库模型清理仍看路由：那条路在「只写内存」时不该去删库上另一代的几何。
-    let keys = mesh_purge::dbnum_mesh_ids(dbnum, true).await?;
-    let mut result = wipe_dbnum_rows_on(&SUL_DB, dbnum, WatermarkDisposal::ResetForReinit).await?;
+    let keys = mesh_purge::dbnum_mesh_ids_on(db, dbnum).await?;
+    let mut result = wipe_dbnum_rows_on(db, dbnum, WatermarkDisposal::ResetForReinit).await?;
     forget_dbnum_model_in_process(dbnum, false)?;
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
     drop(state_guard);
     drop(commit_guard);
-    let geometry = mesh_purge::purge_geometry(&SUL_DB, keys.clone(), true).await?;
-    delete_aabb_mesh_rows(&SUL_DB, &keys).await?;
+    let geometry = mesh_purge::purge_geometry(db, keys.clone(), true).await?;
+    delete_aabb_mesh_rows(db, &keys).await?;
     println!(
         "存储架构升级：dbnum={dbnum} 已清网格几何（{}）",
         geometry.note()
@@ -1965,8 +1978,8 @@ mod tests {
             .0;
         assert!(
             body.contains("if intent.wipes_whole_dbnum()")
-                && body.contains("wipe_dbnum_for_reinit("),
-            "初始化那一档必须走整库 wipe: {body}"
+                && body.contains("wipe_dbnum_for_reinit_on(db, dbnum)"),
+            "初始化那一档必须走整库 wipe，且清的是传进来的那个库: {body}"
         );
         assert!(WriteIntent::Initialize.wipes_whole_dbnum());
         assert!(!WriteIntent::ApplyWindow.wipes_whole_dbnum());
@@ -2347,7 +2360,7 @@ mod tests {
             .expect("shared wipe follows")
             .0;
         let collect = body
-            .find("mesh_purge::dbnum_mesh_ids(dbnum, true)")
+            .find("mesh_purge::dbnum_mesh_ids_on(db, dbnum)")
             .expect("收键");
         let wipe = body.find("wipe_dbnum_rows_on(").expect("删行");
         let purge = body.find("mesh_purge::purge_geometry(").expect("删几何");
@@ -2357,7 +2370,7 @@ mod tests {
             "顺序必须是 收键 → 删行 → 删 inst_geo/.mesh → 删哈希 aabb: {body}"
         );
         assert!(
-            body.contains("purge_geometry(&SUL_DB, keys.clone(), true)"),
+            body.contains("purge_geometry(db, keys.clone(), true)"),
             "升级清库必须删库上的 inst_geo，不能按读路由跳过: {body}"
         );
         assert!(

@@ -446,9 +446,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         }
         let t_stale = std::time::Instant::now();
         let (stale_by_refno, stale_tree_entries) = {
-            let tree = direct_tree
-                .as_ref()
-                .expect("两条分支到这里都已持有树写锁");
+            let tree = direct_tree.as_ref().expect("两条分支到这里都已持有树写锁");
             let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
                 stale.entry(old.refno).or_default().push(old.aabb);
@@ -646,7 +644,10 @@ mod aabb_write_order_tests {
             .expect("pointer statement is not part of the direct transaction");
         // 逐目标的房间重算行不再随这笔事务写（ADR-072 D5）：房间随任务整库算。
         for retired in ["render_room_recalc_upserts", "room_upserts"] {
-            assert!(!body.contains(retired), "房间重算行不得回到直写事务 `{retired}`: {body}");
+            assert!(
+                !body.contains(retired),
+                "房间重算行不得回到直写事务 `{retired}`: {body}"
+            );
         }
         let epoch_at = body
             .find("render_spatial_epoch_bump")

@@ -64,7 +64,10 @@ impl BranCenterline {
                     Ok(refno) if refno.is_valid() => {
                         member_refnos.insert(refno);
                     }
-                    _ => warnings.push(format!("成员 refno 解析失败，未进自身剔除集: {}", member.refno)),
+                    _ => warnings.push(format!(
+                        "成员 refno 解析失败，未进自身剔除集: {}",
+                        member.refno
+                    )),
                 }
             }
             if outside_diameter_mm.is_none() {
@@ -229,7 +232,8 @@ pub fn segment_aabb_nearest(
         let distance_sq = (target_point - source_point).length_squared();
         let better = distance_sq < best_distance_sq
             || ((distance_sq - best_distance_sq).abs() <= 1.0e-5
-                && source_point.to_array().map(f32::to_bits) < best_source.to_array().map(f32::to_bits));
+                && source_point.to_array().map(f32::to_bits)
+                    < best_source.to_array().map(f32::to_bits));
         if better {
             best_source = source_point;
             best_target = target_point;
@@ -268,9 +272,27 @@ pub fn segment_aabb_nearest(
         let mut numerator = 0.0_f32;
         let mut denominator = 0.0_f32;
         for (start_axis, delta_axis, point_axis, min_axis, max_axis) in [
-            (segment.start.x, axis.x, mid_point.x, aabb.mins.x, aabb.maxs.x),
-            (segment.start.y, axis.y, mid_point.y, aabb.mins.y, aabb.maxs.y),
-            (segment.start.z, axis.z, mid_point.z, aabb.mins.z, aabb.maxs.z),
+            (
+                segment.start.x,
+                axis.x,
+                mid_point.x,
+                aabb.mins.x,
+                aabb.maxs.x,
+            ),
+            (
+                segment.start.y,
+                axis.y,
+                mid_point.y,
+                aabb.mins.y,
+                aabb.maxs.y,
+            ),
+            (
+                segment.start.z,
+                axis.z,
+                mid_point.z,
+                aabb.mins.z,
+                aabb.maxs.z,
+            ),
         ] {
             let bound = if point_axis < min_axis {
                 Some(min_axis)
@@ -299,7 +321,10 @@ pub fn segment_aabb_nearest(
 }
 
 /// 整条走廊到一个盒的最近点对：各段取最小，同距按段序、再按线段上点的坐标位，稳定。
-pub fn centerline_aabb_nearest(segments: &[CenterlineSegment], aabb: &Aabb) -> Option<SegmentNearest> {
+pub fn centerline_aabb_nearest(
+    segments: &[CenterlineSegment],
+    aabb: &Aabb,
+) -> Option<SegmentNearest> {
     segments
         .iter()
         .enumerate()
@@ -307,7 +332,11 @@ pub fn centerline_aabb_nearest(segments: &[CenterlineSegment], aabb: &Aabb) -> O
         .min_by(|a, b| {
             a.distance
                 .total_cmp(&b.distance)
-                .then_with(|| segments[a.segment_index].order.cmp(&segments[b.segment_index].order))
+                .then_with(|| {
+                    segments[a.segment_index]
+                        .order
+                        .cmp(&segments[b.segment_index].order)
+                })
                 .then_with(|| a.segment_index.cmp(&b.segment_index))
                 .then_with(|| {
                     a.source_point
@@ -423,8 +452,11 @@ pub fn centerline_response_with_diameters(
             }
         })
         .collect::<Vec<_>>();
-    let first_od = result.members.iter().find(|member| member.outside_diameter
-        .is_some_and(|od| od.is_finite() && od > 0.0));
+    let first_od = result.members.iter().find(|member| {
+        member
+            .outside_diameter
+            .is_some_and(|od| od.is_finite() && od > 0.0)
+    });
     CenterlineResponse {
         source_version: None,
         refno: centerline.branch_refno.to_string(),
@@ -432,7 +464,9 @@ pub fn centerline_response_with_diameters(
         segment_count: segments.len(),
         outside_diameter_mm: centerline.outside_diameter_mm,
         outside_diameter_refno: first_od.map(|member| member.refno.clone()),
-        diameter_evidence: first_od.and_then(|member| diameters.get(&member.refno)).cloned(),
+        diameter_evidence: first_od
+            .and_then(|member| diameters.get(&member.refno))
+            .cloned(),
         centerline_bbox: centerline.bbox().as_ref().map(Into::into),
         segments,
         warnings: centerline.warnings.clone(),
@@ -464,7 +498,13 @@ mod tests {
     /// 时立刻编不过（`E0063: missing field`），而这里只关心 refno / 两端点 / 序号 /
     /// 外径——调整焊的 `adjust_len`、P 点 `ppoints`、焊缝 `weld_number` 这些都不参与
     /// 中心线计算。省略的字段一律走契约里的 `#[serde(default)]`。
-    fn member(refno: &str, order: u32, start: [f64; 3], end: [f64; 3], od: Option<f64>) -> BranchMember {
+    fn member(
+        refno: &str,
+        order: u32,
+        start: [f64; 3],
+        end: [f64; 3],
+        od: Option<f64>,
+    ) -> BranchMember {
         let mut value = serde_json::json!({
             "refno": refno,
             "owner_refno": "1_100",
@@ -475,8 +515,7 @@ mod tests {
         if let Some(od) = od {
             value["outside_diameter"] = serde_json::json!(od);
         }
-        serde_json::from_value(value)
-            .expect("BranchMember 的测试夹具字段名必须与 vendor 契约一致")
+        serde_json::from_value(value).expect("BranchMember 的测试夹具字段名必须与 vendor 契约一致")
     }
 
     #[test]
@@ -494,9 +533,14 @@ mod tests {
         assert!((side.target_point.y - 5.0).abs() < 1.0e-4);
         assert!((40.0..=60.0).contains(&side.source_point.x));
         // 盒在线段延长线外：最近点是线段端点到盒角
-        let beyond = segment_aabb_nearest(0, &segment, &cube([130.0, 40.0, 0.0], [140.0, 50.0, 0.0]));
+        let beyond =
+            segment_aabb_nearest(0, &segment, &cube([130.0, 40.0, 0.0], [140.0, 50.0, 0.0]));
         assert_eq!(beyond.source_point, Vec3::new(100.0, 0.0, 0.0));
-        assert!((beyond.distance - 50.0).abs() < 1.0e-3, "{}", beyond.distance);
+        assert!(
+            (beyond.distance - 50.0).abs() < 1.0e-3,
+            "{}",
+            beyond.distance
+        );
     }
 
     #[test]
@@ -537,7 +581,13 @@ mod tests {
             members: vec![
                 member("1_401", 0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], None),
                 // 隐式管身：有几何、没有 refno
-                member("1_401~1_402", 1, [10.0, 0.0, 0.0], [90.0, 0.0, 0.0], Some(219.1)),
+                member(
+                    "1_401~1_402",
+                    1,
+                    [10.0, 0.0, 0.0],
+                    [90.0, 0.0, 0.0],
+                    Some(219.1),
+                ),
                 // 穿过件：只有位置，不成段，但仍是成员
                 member("1_777", 2, [50.0, 0.0, 0.0], [50.0, 0.0, 0.0], None),
                 member("1_402", 3, [90.0, 0.0, 0.0], [100.0, 0.0, 0.0], Some(114.3)),
@@ -548,14 +598,25 @@ mod tests {
         let centerline = BranCenterline::from_branch(branch, &result).unwrap();
         assert_eq!(centerline.segments.len(), 3);
         assert_eq!(
-            centerline.segments.iter().map(|s| s.order).collect::<Vec<_>>(),
+            centerline
+                .segments
+                .iter()
+                .map(|s| s.order)
+                .collect::<Vec<_>>(),
             vec![0, 1, 3]
         );
-        let mut members: Vec<_> = centerline.member_refnos.iter().map(|r| r.to_string()).collect();
+        let mut members: Vec<_> = centerline
+            .member_refnos
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
         members.sort();
         assert_eq!(members, vec!["1_401", "1_402", "1_777"]);
         assert_eq!(centerline.outside_diameter_mm, Some(219.1));
-        assert_eq!(centerline.warnings, vec!["1 个成员没有长度（穿过件），不参与走廊".to_string()]);
+        assert_eq!(
+            centerline.warnings,
+            vec!["1 个成员没有长度（穿过件），不参与走廊".to_string()]
+        );
         assert_eq!(centerline.bbox().unwrap().maxs, [100.0, 0.0, 0.0].into());
 
         let hollow = BranchQueryResult {
@@ -578,7 +639,13 @@ mod tests {
             branch_refno: "1_100".to_string(),
             members: vec![
                 elbow,
-                member("1_401~1_402", 1, [10.0, 0.0, 0.0], [90.0, 0.0, 0.0], Some(219.1)),
+                member(
+                    "1_401~1_402",
+                    1,
+                    [10.0, 0.0, 0.0],
+                    [90.0, 0.0, 0.0],
+                    Some(219.1),
+                ),
                 member("1_777", 2, [50.0, 0.0, 0.0], [50.0, 0.0, 0.0], None),
                 valve,
             ],
@@ -597,7 +664,16 @@ mod tests {
         let summary: Vec<_> = response
             .segments
             .iter()
-            .map(|s| (s.refno.as_str(), s.order, s.noun.as_str(), s.implicit, s.length_mm, s.outside_diameter_mm))
+            .map(|s| {
+                (
+                    s.refno.as_str(),
+                    s.order,
+                    s.noun.as_str(),
+                    s.implicit,
+                    s.length_mm,
+                    s.outside_diameter_mm,
+                )
+            })
             .collect();
         assert_eq!(
             summary,
@@ -611,20 +687,44 @@ mod tests {
         assert_eq!(response.segments[1].end.x, 90.0);
         // Keep catalogue and bore-estimate evidence distinct, including implicit tubes.
         let evidence = std::collections::HashMap::from([
-            ("1_401".to_string(), crate::mbd::branch_query::DiameterEvidence {
-                source: "bore-estimate", catalogue_od_mm: None, arrive_bore_mm: Some(104.3),
-            }),
-            ("1_401~1_402".to_string(), crate::mbd::branch_query::DiameterEvidence {
-                source: "catalogue", catalogue_od_mm: Some(219.1), arrive_bore_mm: Some(200.0),
-            }),
+            (
+                "1_401".to_string(),
+                crate::mbd::branch_query::DiameterEvidence {
+                    source: "bore-estimate",
+                    catalogue_od_mm: None,
+                    arrive_bore_mm: Some(104.3),
+                },
+            ),
+            (
+                "1_401~1_402".to_string(),
+                crate::mbd::branch_query::DiameterEvidence {
+                    source: "catalogue",
+                    catalogue_od_mm: Some(219.1),
+                    arrive_bore_mm: Some(200.0),
+                },
+            ),
         ]);
-        let enriched = centerline_response_with_diameters(&centerline, &result, Some(7997), &evidence);
+        let enriched =
+            centerline_response_with_diameters(&centerline, &result, Some(7997), &evidence);
         assert_eq!(enriched.outside_diameter_refno.as_deref(), Some("1_401"));
-        assert_eq!(enriched.diameter_evidence.as_ref().unwrap().source, "bore-estimate");
-        assert_eq!(enriched.segments[1].diameter_evidence.as_ref().unwrap().source, "catalogue");
+        assert_eq!(
+            enriched.diameter_evidence.as_ref().unwrap().source,
+            "bore-estimate"
+        );
+        assert_eq!(
+            enriched.segments[1]
+                .diameter_evidence
+                .as_ref()
+                .unwrap()
+                .source,
+            "catalogue"
+        );
         assert!(enriched.segments[2].diameter_evidence.is_none());
         let json = serde_json::to_value(&enriched).unwrap();
-        assert_eq!(json["segments"][1]["diameter_evidence"]["catalogue_od_mm"], 219.1);
+        assert_eq!(
+            json["segments"][1]["diameter_evidence"]["catalogue_od_mm"],
+            219.1
+        );
         // 成员没给 noun → UNKNOWN，不猜
         let mut bare = member("1_401", 0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], None);
         bare.noun = None;
@@ -634,6 +734,9 @@ mod tests {
             ..Default::default()
         };
         let bare_centerline = BranCenterline::from_branch(branch, &bare_result).unwrap();
-        assert_eq!(centerline_response(&bare_centerline, &bare_result, None).segments[0].noun, "UNKNOWN");
+        assert_eq!(
+            centerline_response(&bare_centerline, &bare_result, None).segments[0].noun,
+            "UNKNOWN"
+        );
     }
 }

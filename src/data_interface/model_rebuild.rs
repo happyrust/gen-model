@@ -104,10 +104,13 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         crate::data_interface::model_source::latest_source_version(dbnum)
     })
     .await
-    .map_err(|error| anyhow::anyhow!("model rebuild dbnum={dbnum} source read panicked: {error}"))??;
+    .map_err(|error| {
+        anyhow::anyhow!("model rebuild dbnum={dbnum} source read panicked: {error}")
+    })??;
     let latest = version.sesno as i32;
-    let roots = crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, version.sesno)
-        .await?;
+    let roots =
+        crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, version.sesno)
+            .await?;
     let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
         project: mgr.db_option.project_name.clone(),
         dbnum,

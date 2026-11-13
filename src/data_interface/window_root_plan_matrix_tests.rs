@@ -2,7 +2,7 @@
 use super::*;
 use crate::data_interface::direct_store::DirectSchema;
 use crate::data_interface::generation_root::resolve_delivery_unit_types;
-use e3d_io::db_element::{DbFilePin, template_file_for};
+use e3d_io::db_element::{template_file_for, DbFilePin};
 
 #[derive(serde::Deserialize)]
 struct RecordedWindow {

@@ -100,12 +100,24 @@ impl ResidentPanel {
     pub(crate) fn room_inst(&self) -> GeomInstQuery {
         use bevy_transform::components::Transform;
         GeomInstQuery {
-            refno: self.panel, old_refno: None, owner: self.room,
-            world_aabb: self.world_aabb, world_trans: Transform::IDENTITY,
-            insts: self.insts.iter().map(|inst| aios_core::ModelHashInst {
-                geo_hash: inst.geo_hash.clone(), transform: Transform::from_matrix(inst.matrix), ..Default::default()
-            }).collect(),
-            has_neg: self.has_neg, generic: "PANE".into(), pts: None, date: None,
+            refno: self.panel,
+            old_refno: None,
+            owner: self.room,
+            world_aabb: self.world_aabb,
+            world_trans: Transform::IDENTITY,
+            insts: self
+                .insts
+                .iter()
+                .map(|inst| aios_core::ModelHashInst {
+                    geo_hash: inst.geo_hash.clone(),
+                    transform: Transform::from_matrix(inst.matrix),
+                    ..Default::default()
+                })
+                .collect(),
+            has_neg: self.has_neg,
+            generic: "PANE".into(),
+            pts: None,
+            date: None,
         }
     }
 }
@@ -1292,8 +1304,15 @@ pub(crate) async fn load_published(
     match_room_fn: impl Fn(&str) -> bool,
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<Option<ResidentRoomModel>> {
-    load_file_backed(ResidentForm::Published, hierarchy, room_key_words, match_room_fn, meshes)
-        .await.map(Some)
+    load_file_backed(
+        ResidentForm::Published,
+        hierarchy,
+        room_key_words,
+        match_room_fn,
+        meshes,
+    )
+    .await
+    .map(Some)
 }
 
 /// Current MDB room inputs come exclusively from frozen E3D sources and local
@@ -1666,9 +1685,7 @@ pub(crate) async fn write_room_update_record_on(
 pub(crate) async fn clear_room_update_record_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
 ) -> anyhow::Result<()> {
-    db.query(render_room_update_record_clear())
-        .await?
-        .check()?;
+    db.query(render_room_update_record_clear()).await?.check()?;
     Ok(())
 }
 
@@ -1695,7 +1712,6 @@ pub(crate) async fn read_room_update_record_on(
     }
     Ok(None)
 }
-
 
 /// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比；臂表 d-42，两形态同一张）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2599,9 +2615,7 @@ fn reset_progress(phase: &str) {
 /// 当「还在飞」等于把重建口焊死到进程重启
 /// （`room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`）。
 fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {
-    let mut slot = progress
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut slot = progress.write().unwrap_or_else(PoisonError::into_inner);
     let in_flight = slot.edge_recompute_in_flight;
     *slot = ResidentProgress {
         phase: phase.to_owned(),
@@ -2696,9 +2710,7 @@ pub(crate) fn note_mesh_warm_failed(failed: usize) {
 /// 第三段开工的账：报要重算的库数、立起「在飞」。只有 [`start_edge_recompute_in`] 会走它；
 /// 放开走 [`RoomRebuildFlight`] 的 [`Drop`]，没有第二个写者（2026-10-15）。
 fn note_recompute_dbnums_total_in(progress: &RwLock<ResidentProgress>, total: usize) {
-    let mut slot = progress
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut slot = progress.write().unwrap_or_else(PoisonError::into_inner);
     slot.dbnums_total = total;
     slot.dbnums_done = 0;
     slot.edge_recompute_in_flight = true;
@@ -2739,9 +2751,7 @@ fn try_begin_rebuild_in(
     lifecycle: &RwLock<ResidentLifecycle>,
     progress: &RwLock<ResidentProgress>,
 ) -> bool {
-    let mut slot = lifecycle
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut slot = lifecycle.write().unwrap_or_else(PoisonError::into_inner);
     if matches!(*slot, ResidentLifecycle::Loading { .. }) {
         return false;
     }

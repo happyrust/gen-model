@@ -39,9 +39,9 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 
 use super::db_file_header::session_chain;
-use super::pe_batch;
 use super::e3d_collector::{PageSessions, read_ele_data, read_ele_data_with_uda_catalog};
 use super::ele_ops::{ElementRows, UdaKeyMap, UdaRowPolicy};
+use super::pe_batch;
 
 /// 一次读透读的是哪个 DESI 库的哪一版文件。
 ///
@@ -475,8 +475,11 @@ pub(crate) fn spool_write_through(
     let started = Instant::now();
     let option = aios_core::get_db_option();
     let membership = super::mdb_membership::get(&option.project_name, &option.mdb_name)
-        .map(Ok).unwrap_or_else(|| super::mdb_membership::resolve(
-            option, &option.project_name, &option.mdb_name).map(Arc::new))?;
+        .map(Ok)
+        .unwrap_or_else(|| {
+            super::mdb_membership::resolve(option, &option.project_name, &option.mdb_name)
+                .map(Arc::new)
+        })?;
     let schema = Arc::new(super::direct_store::DirectSchema::open_from_env()?);
     let provider = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema);
     // Dictionary epoch and the source (dbnum, sesno) below describe this job;

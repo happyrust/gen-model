@@ -458,8 +458,11 @@ pub fn render_item_transactions_with_limits(
             return Ok(());
         }
         let rendered = render_items(items, dbnum, mode);
-        match crate::data_interface::pe_batch::transaction(dbnum as u32, &rendered.ids, &rendered.sql)
-        {
+        match crate::data_interface::pe_batch::transaction(
+            dbnum as u32,
+            &rendered.ids,
+            &rendered.sql,
+        ) {
             Ok(sql) => {
                 report.max_transaction_bytes = report.max_transaction_bytes.max(sql.len());
                 report.transactions += 1;
@@ -659,12 +662,19 @@ mod tests {
     /// 插入点是开头那个 `{` 的后面——对象结构不许被破坏，没有 `{` 的输入原样返回。
     #[test]
     fn the_stamp_goes_right_after_the_opening_brace_and_keeps_the_object_valid() {
-        let stamped = stamp_owner_columns("{\n  \"id\": \"24384_1\",\n  \"TYPE\": \"EQUI\"\n}", 8000, 7);
+        let stamped = stamp_owner_columns(
+            "{\n  \"id\": \"24384_1\",\n  \"TYPE\": \"EQUI\"\n}",
+            8000,
+            7,
+        );
         assert_eq!(
             stamped,
             "{ \"dbnum\": 8000, \"sesno\": 7,\n  \"id\": \"24384_1\",\n  \"TYPE\": \"EQUI\"\n}"
         );
-        assert!(serde_json::from_str::<serde_json::Value>(&stamped).is_ok(), "{stamped}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&stamped).is_ok(),
+            "{stamped}"
+        );
         assert_eq!(stamp_owner_columns("", 8000, 7), "");
     }
 

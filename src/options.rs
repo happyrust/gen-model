@@ -413,7 +413,10 @@ pub const DEFAULT_REVIEW_ATTACHMENTS_DIR: &str = "review_attachments";
 
 /// 空白串按「没配」处理：TOML 里留一对空引号是「我还没填」，不是「我要一个空值」。
 fn non_blank(value: Option<&String>) -> Option<&str> {
-    value.map(String::as_str).map(str::trim).filter(|value| !value.is_empty())
+    value
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 impl ReviewAuthSection {
@@ -472,7 +475,10 @@ pub fn platform_auth() -> PlatformAuthSection {
 
 /// `[review_attachments]` 的取值（没写就是一整段缺省）。
 pub fn review_attachments() -> ReviewAttachmentsSection {
-    load_ext_fields().review_attachments.clone().unwrap_or_default()
+    load_ext_fields()
+        .review_attachments
+        .clone()
+        .unwrap_or_default()
 }
 
 /// 环境变量名：明知校审数据活不过重启也要启用校审域。
@@ -2293,7 +2299,9 @@ pub fn spec_value_rules() -> Vec<SpecValueRuleConfig> {
     effective_spec_value_rules(load_ext_fields().spec_value_rules.as_deref())
 }
 
-fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec<SpecValueRuleConfig> {
+fn effective_spec_value_rules(
+    configured: Option<&[SpecValueRuleConfig]>,
+) -> Vec<SpecValueRuleConfig> {
     let rules: Vec<SpecValueRuleConfig> = configured
         .filter(|rules| !rules.is_empty())
         .map(|rules| rules.to_vec())
@@ -3494,10 +3502,12 @@ mod tests {
         let fields = read_ext_fields(Some(path.into())).unwrap();
         assert_eq!(fields.e3d_version.as_deref(), Some("e3d210"));
         let (_dir, path) = write_probe_config("missing-key.toml", "startup_autorun = false\n");
-        assert!(read_ext_fields(Some(path.into()))
-            .unwrap()
-            .e3d_version
-            .is_none());
+        assert!(
+            read_ext_fields(Some(path.into()))
+                .unwrap()
+                .e3d_version
+                .is_none()
+        );
         let (_dir, path) = write_probe_config("bad.toml", "e3d_version = []\n");
         assert!(read_ext_fields(Some(path.into())).is_err());
     }
@@ -3824,7 +3834,10 @@ mod tests {
         );
         // 环境变量没说，或说了但认不出：文件那一层说了算（向导持久化的选择）。
         assert_eq!(effective_store_mode(None, Some("mem")), StoreMode::Mem);
-        assert_eq!(effective_store_mode(Some("mem_"), Some("mem")), StoreMode::Mem);
+        assert_eq!(
+            effective_store_mode(Some("mem_"), Some("mem")),
+            StoreMode::Mem
+        );
         assert_eq!(
             effective_store_mode(None, Some("external")),
             StoreMode::RocksDb,
@@ -3877,7 +3890,11 @@ mod tests {
         assert_eq!(parse_store_mode(Some("kv-mem")), Some(StoreMode::Mem));
 
         let notices = store_mode_notices_for(Some("spawned-rocksdb"), None, None, None);
-        assert_eq!(notices.len(), 1, "退役写法必须出声，且只这一条：{notices:?}");
+        assert_eq!(
+            notices.len(),
+            1,
+            "退役写法必须出声，且只这一条：{notices:?}"
+        );
         let notice = &notices[0];
         assert!(notice.contains("spawned-rocksdb"), "{notice}");
         assert!(notice.contains("rocksdb"), "{notice}");
@@ -3936,7 +3953,10 @@ mod tests {
         // 环境变量压了文件的档：点名「两边不是同一档」并给出该去掉的环境变量。
         let notices = store_mode_notices_for(Some("mem"), Some("rocksdb"), None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains(r#"store_mode = "rocksdb""#), "{notices:?}");
+        assert!(
+            notices[0].contains(r#"store_mode = "rocksdb""#),
+            "{notices:?}"
+        );
         assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
         assert!(notices[0].contains("AIOS_STORE_MODE"), "{notices:?}");
         // 文件里那句认不出：当没设，但要出声。
@@ -3973,16 +3993,21 @@ mod tests {
         let notices = store_mode_notices_for(Some("rocksdb"), None, Some(true), None);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("in_memory_db = true"), "{notices:?}");
-        assert!(notices[0].contains("rocksdb"), "要把实际跑的那档念出来：{notices:?}");
-        assert!(notices[0].contains("AIOS_STORE_MODE"), "要指路：{notices:?}");
+        assert!(
+            notices[0].contains("rocksdb"),
+            "要把实际跑的那档念出来：{notices:?}"
+        );
+        assert!(
+            notices[0].contains("AIOS_STORE_MODE"),
+            "要指路：{notices:?}"
+        );
         let notices = store_mode_notices_for(None, None, None, Some("1"));
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("AIOS_IN_MEMORY_DB"), "{notices:?}");
         assert!(notices[0].contains("AIOS_STORE_MODE"), "{notices:?}");
         // 几个过期来源同时在场：一条一条都要念，不许只挑一条。文件里那句
         // `store_mode = "rocksdb"` 是生效层（环境变量认不出、落给文件），不是过期来源。
-        let notices =
-            store_mode_notices_for(Some("memm"), Some("rocksdb"), Some(false), Some("0"));
+        let notices = store_mode_notices_for(Some("memm"), Some("rocksdb"), Some(false), Some("0"));
         assert_eq!(notices.len(), 3, "{notices:?}");
     }
 
@@ -4149,10 +4174,22 @@ mod tests {
     #[test]
     fn rebuild_on_generator_change_is_on_by_default_and_can_be_shut() {
         assert!(effective_model_rebuild_on_generator_change(None, None));
-        assert!(!effective_model_rebuild_on_generator_change(Some(false), None));
-        assert!(!effective_model_rebuild_on_generator_change(Some(true), Some("0")));
-        assert!(effective_model_rebuild_on_generator_change(Some(false), Some("on")));
-        assert!(!effective_model_rebuild_on_generator_change(Some(false), Some("maybe")));
+        assert!(!effective_model_rebuild_on_generator_change(
+            Some(false),
+            None
+        ));
+        assert!(!effective_model_rebuild_on_generator_change(
+            Some(true),
+            Some("0")
+        ));
+        assert!(effective_model_rebuild_on_generator_change(
+            Some(false),
+            Some("on")
+        ));
+        assert!(!effective_model_rebuild_on_generator_change(
+            Some(false),
+            Some("maybe")
+        ));
     }
 
     /// 刚体前移便宜路径**默认开**（ADR-066 D7，2026-10-14 翻默认，Issue #36），配置能关、环境变量
@@ -4199,7 +4236,10 @@ mod tests {
                 .any(|name| name == "model_unit_level_publish"),
             "新键要进配置读坏时的告警名单"
         );
-        assert_eq!(MODEL_UNIT_LEVEL_PUBLISH_ENV, "AIOS_MODEL_UNIT_LEVEL_PUBLISH");
+        assert_eq!(
+            MODEL_UNIT_LEVEL_PUBLISH_ENV,
+            "AIOS_MODEL_UNIT_LEVEL_PUBLISH"
+        );
     }
 
     /// 房间归属不再是开关（2026-10-23）：算得了房间的进程恒开，配置键与环境变量都不再参与裁决；
@@ -4224,7 +4264,10 @@ mod tests {
     fn the_room_unavailable_reason_names_which_gate_is_shut() {
         assert_eq!(room_unavailable_reason_for(true, true), None);
         let spatial_off = room_unavailable_reason_for(false, true).expect("空间计算关着要有原因");
-        assert!(spatial_off.contains("AIOS_SPATIAL_COMPUTE=0"), "{spatial_off}");
+        assert!(
+            spatial_off.contains("AIOS_SPATIAL_COMPUTE=0"),
+            "{spatial_off}"
+        );
         let no_feature = room_unavailable_reason_for(true, false).expect("没编特性要有原因");
         assert!(no_feature.contains("project_hd"), "{no_feature}");
         assert!(room_membership_off_reason().starts_with("本进程算不了房间"));
@@ -4242,9 +4285,15 @@ mod tests {
 
         let from_config = room_membership_notices_for(Some(false), None, true, true);
         assert_eq!(from_config.len(), 1, "{from_config:?}");
-        assert!(from_config[0].contains("room_membership = false"), "{from_config:?}");
+        assert!(
+            from_config[0].contains("room_membership = false"),
+            "{from_config:?}"
+        );
         assert!(from_config[0].contains("已退役"), "{from_config:?}");
-        assert!(from_config[0].contains("按开跑"), "要把实际跑的那档念出来：{from_config:?}");
+        assert!(
+            from_config[0].contains("按开跑"),
+            "要把实际跑的那档念出来：{from_config:?}"
+        );
 
         let from_env = room_membership_notices_for(None, Some("0"), true, true);
         assert_eq!(from_env.len(), 1, "{from_env:?}");
@@ -4252,7 +4301,10 @@ mod tests {
 
         let spatial_off = room_membership_notices_for(None, None, false, true);
         assert_eq!(spatial_off.len(), 1, "{spatial_off:?}");
-        assert!(spatial_off[0].contains("AIOS_SPATIAL_COMPUTE=0"), "{spatial_off:?}");
+        assert!(
+            spatial_off[0].contains("AIOS_SPATIAL_COMPUTE=0"),
+            "{spatial_off:?}"
+        );
 
         let everything = room_membership_notices_for(Some(true), Some("1"), true, false);
         assert_eq!(everything.len(), 3, "{everything:?}");
@@ -4303,8 +4355,7 @@ mod tests {
                 .and_then(toml::Value::as_integer)
                 .unwrap_or_else(|| panic!("模板写了 {key}"));
             assert_eq!(
-                configured,
-                default as i64,
+                configured, default as i64,
                 "出厂模板的 {key} 与代码默认分叉了"
             );
         }
@@ -4956,10 +5007,13 @@ mod tests {
     fn a_retired_scope_cache_env_is_named_not_swallowed() {
         assert_eq!(retired_scope_cache_notice_for(None), None);
         for value in ["0", "300", ""] {
-            let notice = retired_scope_cache_notice_for(Some(OsStr::new(value)))
-                .expect("设着就要出声");
+            let notice =
+                retired_scope_cache_notice_for(Some(OsStr::new(value))).expect("设着就要出声");
             assert!(notice.contains(RETIRED_SCOPE_CACHE_SECS_ENV), "{notice}");
-            assert!(notice.contains(&format!("{value:?}")), "要念出原值: {notice}");
+            assert!(
+                notice.contains(&format!("{value:?}")),
+                "要念出原值: {notice}"
+            );
             assert!(notice.contains("ADR-085"), "{notice}");
         }
     }
@@ -5289,7 +5343,10 @@ dir = "review_attachments"
             Some("http://123.57.182.243")
         );
         assert_eq!(
-            fields.review_attachments.expect("[review_attachments]").dir(),
+            fields
+                .review_attachments
+                .expect("[review_attachments]")
+                .dir(),
             "review_attachments"
         );
     }
@@ -5370,8 +5427,7 @@ dir = "review_attachments"
         assert_eq!(parse_bool_flag("ture"), None, "拼错不是放行");
         assert_eq!(parse_bool_flag("yes please"), None);
         assert_eq!(
-            REVIEW_ALLOW_EPHEMERAL_STORE_ENV,
-            "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
+            REVIEW_ALLOW_EPHEMERAL_STORE_ENV, "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
             "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
         );
     }

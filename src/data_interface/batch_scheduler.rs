@@ -667,8 +667,11 @@ impl BatchScheduler {
             crate::data_interface::debug_scope::TracePoint::Enqueue,
             found.dbnum,
             || {
-                let phase_admits =
-                    InitializationCoordinator::global().allows(found.phase, found.epoch_id);
+                let phase_admits = InitializationCoordinator::global().allows_dbnum(
+                    found.phase,
+                    found.epoch_id,
+                    Some(found.dbnum),
+                );
                 let snapshot = InitializationCoordinator::global().snapshot();
                 serde_json::json!({
                     "origin": "scheduler",
@@ -722,7 +725,11 @@ impl BatchScheduler {
             &is_exclusive,
             |batch| {
                 batch.epoch_id == 0
-                    || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id)
+                    || InitializationCoordinator::global().allows_dbnum(
+                        batch.phase,
+                        batch.epoch_id,
+                        Some(batch.dbnum),
+                    )
             },
         ) {
             batch_queue::NextDispatch::Freeze(index) => index,
@@ -1084,7 +1091,11 @@ impl BatchScheduler {
                     phase: b.phase.as_str(),
                     epoch_id: b.epoch_id,
                     blocked_by_phase: (b.epoch_id != 0
-                        && !InitializationCoordinator::global().allows(b.phase, b.epoch_id))
+                        && !InitializationCoordinator::global().allows_dbnum(
+                            b.phase,
+                            b.epoch_id,
+                            Some(b.dbnum),
+                        ))
                     .then(|| {
                         InitializationCoordinator::global()
                             .snapshot()

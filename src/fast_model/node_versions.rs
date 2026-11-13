@@ -272,7 +272,9 @@ impl WindowChanges {
 
 /// 把一窗归好堆的变化折成一版（纯函数）：范围影响走单元表同一把尺子，单元数按「折叠影响是不是 noop」分两格。
 /// 一个都没碰到 → `None`（这一会话不是这个节点的版本）。
-pub fn fold_window(changes: &WindowChanges) -> Option<(UnitVersionImpact, Option<UnitVersionImpact>, usize, usize)> {
+pub fn fold_window(
+    changes: &WindowChanges,
+) -> Option<(UnitVersionImpact, Option<UnitVersionImpact>, usize, usize)> {
     let members = changes.by_unit.values().flatten().copied();
     let impact = fold_window_impact(changes.node, members)?;
     let self_impact = match changes.node {
@@ -440,7 +442,12 @@ fn compute_table(
                         }
                     };
                     stats.head_subtree_elements = walked;
-                    Some((UnitVersionImpact::Delivery, Some(UnitVersionImpact::Delivery), units, units))
+                    Some((
+                        UnitVersionImpact::Delivery,
+                        Some(UnitVersionImpact::Delivery),
+                        units,
+                        units,
+                    ))
                 } else {
                     None
                 }
@@ -494,7 +501,9 @@ fn compute_table(
                                 match resolve_unit_root(side, node, &unit_types) {
                                     Ok(unit) => (true, unit),
                                     Err(reason) => {
-                                        warnings.push(format!("会话 {current}：解节点所属单元失败：{reason}"));
+                                        warnings.push(format!(
+                                            "会话 {current}：解节点所属单元失败：{reason}"
+                                        ));
                                         (true, None)
                                     }
                                 }
@@ -542,18 +551,19 @@ fn compute_table(
                                 }
                                 last_alive = Some(current);
                             }
-                            let operation = match modified_impact(&base_set, &target, other, current) {
-                                // 差分为空 = 原样重写换页，不是一版
-                                Ok(None) => None,
-                                Ok(Some(operation)) => Some(operation),
-                                Err(reason) => {
-                                    warnings.push(format!(
-                                        "会话 {current} {}：{reason}，按重生成记",
-                                        refno_text(other)
-                                    ));
-                                    Some(OperationImpact::Regen)
-                                }
-                            };
+                            let operation =
+                                match modified_impact(&base_set, &target, other, current) {
+                                    // 差分为空 = 原样重写换页，不是一版
+                                    Ok(None) => None,
+                                    Ok(Some(operation)) => Some(operation),
+                                    Err(reason) => {
+                                        warnings.push(format!(
+                                            "会话 {current} {}：{reason}，按重生成记",
+                                            refno_text(other)
+                                        ));
+                                        Some(OperationImpact::Regen)
+                                    }
+                                };
                             if let Some(operation) = operation {
                                 if other == node {
                                     changes.node = RootChange::Modified(operation);
@@ -599,10 +609,7 @@ fn compute_table(
             if !exists {
                 return Err(UnitVersionsError::new(
                     "REFNO_NOT_FOUND",
-                    format!(
-                        "dbnum {dbnum} 的整条会话链上都没有 {}",
-                        refno_text(node)
-                    ),
+                    format!("dbnum {dbnum} 的整条会话链上都没有 {}", refno_text(node)),
                 ));
             }
             last_alive = Some(latest);

@@ -15,14 +15,17 @@
 //! ```text
 //! db_session_fixture pack --recording <recording.json> --out <夹具目录> [--source <db文件>]
 //! db_session_fixture verify --fixture <夹具目录>
-//! db_session_fixture replay-init --fixture <夹具目录> | --source <终稿> --to <sesno> --out <工作文件>
-//! db_session_fixture replay-step --fixture <夹具目录> | --source <终稿> --work <工作文件> --to <sesno> [--half pages|header] [--rollback]
+//! db_session_fixture replay-init --fixture <夹具目录> | --source <终稿> --to <sesno> --out <工作文件> [--allow-hardlink]
+//! db_session_fixture replay-step --fixture <夹具目录> | --source <终稿> --work <工作文件> --to <sesno> [--half pages|header] [--rollback] [--allow-hardlink]
 //! ```
 //!
 //! `replay-*` 是 L2 回放夹具的文件半边（计划 2026-10-25 §3.1）：把工作文件就地推到下一个会话，文件身份不变。
+//! 工作文件若还有别的硬链接（影子工程根里漏列进 `-Replayed` 的库就是到真工程原件的硬链接），就地覆写一律拒绝，
+//! 除非 `--allow-hardlink`（计划 2026-11-03 TH-1）。
 
-// 回放单测要核「就地追加不换文件」：Windows 上读卷序列号 + 文件索引，与 lib 的 `FrozenSource` 同一个特性门。
-#![cfg_attr(all(test, windows), feature(windows_by_handle))]
+// 回放要读文件的硬链接数（覆写前的护栏），单测还要核「就地追加不换文件」（卷序列号 + 文件索引）：
+// Windows 上都走 `windows_by_handle`，与 lib 的 `FrozenSource` 同一个特性门。
+#![cfg_attr(windows, feature(windows_by_handle))]
 
 #[path = "db_session_fixture/archive_util.rs"]
 mod archive_util;
@@ -74,7 +77,7 @@ enum Command {
         #[arg(long)]
         source: PathBuf,
     },
-    /// L2 回放：从终稿切出会话 `to` 写成工作文件（已存在则就地覆写 = 重置）
+    /// L2 回放：从终稿切出会话 `to` 写成工作文件（已存在则就地覆写 = 重置；有别的硬链接则拒绝）
     ReplayInit {
         /// 夹具目录（manifest.json + zip）
         #[arg(long)]
@@ -86,6 +89,9 @@ enum Command {
         to: u32,
         #[arg(long)]
         out: PathBuf,
+        /// 工作文件有多个硬链接时仍就地覆写（缺省拒绝：会写穿到真工程的原件）
+        #[arg(long, default_value_t = false)]
+        allow_hardlink: bool,
     },
     /// L2 回放：把工作文件就地推到会话 `to`（追加页 + 改头，文件身份不变）
     ReplayStep {
@@ -103,6 +109,9 @@ enum Command {
         /// 往回走（截回更早的会话）要显式说
         #[arg(long, default_value_t = false)]
         rollback: bool,
+        /// 工作文件有多个硬链接时仍就地覆写（缺省拒绝：会写穿到真工程的原件）
+        #[arg(long, default_value_t = false)]
+        allow_hardlink: bool,
     },
 }
 
@@ -132,9 +141,11 @@ fn main() -> anyhow::Result<()> {
             source,
             to,
             out,
+            allow_hardlink,
         } => {
             let final_bytes = replay::load_final(fixture.as_deref(), source.as_deref())?;
-            replay::replay_init(&final_bytes, to, &out)?.print();
+            let hard_links = replay::HardLinks::from_flag(allow_hardlink);
+            replay::replay_init(&final_bytes, to, &out, hard_links)?.print();
         }
         Command::ReplayStep {
             fixture,
@@ -143,10 +154,12 @@ fn main() -> anyhow::Result<()> {
             to,
             half,
             rollback,
+            allow_hardlink,
         } => {
             let final_bytes = replay::load_final(fixture.as_deref(), source.as_deref())?;
             let half = half.as_deref().map(replay::Half::parse).transpose()?;
-            replay::replay_step(&final_bytes, &work, to, half, rollback)?.print();
+            let hard_links = replay::HardLinks::from_flag(allow_hardlink);
+            replay::replay_step(&final_bytes, &work, to, half, rollback, hard_links)?.print();
         }
     }
     Ok(())

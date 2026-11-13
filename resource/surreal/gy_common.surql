@@ -38,6 +38,8 @@ remove function fn::elbo_len;
 define function fn::elbo_len($pe:record) {
     return if $pe.noun != 'ELBO' && $pe.noun != 'BEND' {
         return 0;
+    } else if $pe.refno.ARRI == none || $pe.refno.LEAV == none {
+        return 0.0;
     } else {
         let $ptset = fn::pe_ptset_of($pe);
         let $arri = $ptset[<string> $pe.refno.ARRI];
@@ -68,8 +70,10 @@ define function fn::tee_len($pe:record) {
         0
     } else {
         let $ptset = fn::pe_ptset_of($pe);
-        let $a = $ptset['1'].pt ?? $ptset[<string> $pe.refno.ARRI].pt;
-        let $b = $ptset['2'].pt ?? $ptset[<string> $pe.refno.LEAV].pt;
+        let $arri_pt = if $pe.refno.ARRI == none { none } else { $ptset[<string> $pe.refno.ARRI].pt };
+        let $leav_pt = if $pe.refno.LEAV == none { none } else { $ptset[<string> $pe.refno.LEAV].pt };
+        let $a = $ptset['1'].pt ?? $arri_pt;
+        let $b = $ptset['2'].pt ?? $leav_pt;
         let $p3 = $ptset['3'].pt;
         return if $a == none || $b == none {
             return 0.0;
@@ -100,6 +104,8 @@ define function fn::bran_comp_len($pe:record) {
        return fn::elbo_len($pe);
    } else if $pe.noun == 'TEE' {
        return fn::tee_len($pe);
+   } else if $pe.refno.LEAV == none || $pe.refno.ARRI == none {
+       return 0.0;
    } else {
        let $ptset = fn::pe_ptset_of($pe);
        let $l = <string> $pe.refno.LEAV;

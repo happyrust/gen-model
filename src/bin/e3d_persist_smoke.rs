@@ -85,7 +85,9 @@ async fn main() -> anyhow::Result<()> {
             }
             "--bind-noindex" => bind_noindex = true,
             "--roots" => {
-                roots_level = args.next().context("--roots 少了取值（zone | file | site）")?;
+                roots_level = args
+                    .next()
+                    .context("--roots 少了取值（zone | file | site）")?;
             }
             other => {
                 anyhow::bail!(
@@ -224,7 +226,9 @@ async fn main() -> anyhow::Result<()> {
     );
     println!(
         "PHASES {}",
-        e3d_model::perf::snapshot().delta_from(phases_before).summary()
+        e3d_model::perf::snapshot()
+            .delta_from(phases_before)
+            .summary()
     );
     println!(
         "READS {}",
@@ -343,7 +347,10 @@ async fn bind_bench(
     use surrealdb::opt::auth::Root;
     use surrealdb::sql::{Array as SurArray, Value as SurValue};
 
-    anyhow::ensure!(rows > 0 && rounds > 0, "--bind-rows / --bind-rounds 要大于 0");
+    anyhow::ensure!(
+        rows > 0 && rounds > 0,
+        "--bind-rows / --bind-rounds 要大于 0"
+    );
 
     // 这一批行：与 `--analyze` 同一套取法（按 record_id 去重，嵌套根之间会重复），再**等距**
     // 抽 N 条。不取前 N 条：投影是按根排下来的，头上那几千条清一色同形状（7997 上前 2000 条
@@ -470,8 +477,10 @@ async fn bind_bench(
             let mut response = if bind {
                 let mut query = db.query(bind_sql.clone());
                 for (index, table) in prepared_bound.into_iter().enumerate() {
-                    query =
-                        query.bind((format!("p{index}"), SurValue::Array(SurArray::from(table.rows))));
+                    query = query.bind((
+                        format!("p{index}"),
+                        SurValue::Array(SurArray::from(table.rows)),
+                    ));
                 }
                 query.with_stats().await?
             } else {
@@ -634,7 +643,10 @@ fn analyze_grouping(service: &E3dModelService, dbnum: u32) -> anyhow::Result<()>
     let mut owners = HashMap::<i64, i64>::with_capacity(hierarchy.len());
     for (refno, owner, noun) in &hierarchy {
         nouns.insert(pack(refno.word0, refno.word1), noun.clone());
-        owners.insert(pack(refno.word0, refno.word1), pack(owner.word0, owner.word1));
+        owners.insert(
+            pack(refno.word0, refno.word1),
+            pack(owner.word0, owner.word1),
+        );
     }
     let mut noun_hist = BTreeMap::<&str, usize>::new();
     for (_, _, noun) in &hierarchy {
@@ -753,7 +765,9 @@ fn analyze_grouping(service: &E3dModelService, dbnum: u32) -> anyhow::Result<()>
     {
         let mut groups = BTreeMap::<String, (usize, BTreeSet<String>)>::new();
         for (index, k) in keyed.iter().enumerate() {
-            let entry = groups.entry(format!("chunk-{:04}", index / CHUNK)).or_default();
+            let entry = groups
+                .entry(format!("chunk-{:04}", index / CHUNK))
+                .or_default();
             entry.0 += 1;
             entry.1.insert(k.mesh.clone());
         }
@@ -763,7 +777,11 @@ fn analyze_grouping(service: &E3dModelService, dbnum: u32) -> anyhow::Result<()>
         });
     }
 
-    let all_meshes = keyed.iter().map(|k| k.mesh.as_str()).collect::<BTreeSet<_>>().len();
+    let all_meshes = keyed
+        .iter()
+        .map(|k| k.mesh.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     for scheme in &schemes {
         let mut sizes = scheme.groups.values().map(|(n, _)| *n).collect::<Vec<_>>();
         sizes.sort_unstable_by(|a, b| b.cmp(a));
@@ -801,7 +819,11 @@ fn analyze_grouping(service: &E3dModelService, dbnum: u32) -> anyhow::Result<()>
             "SCHEME {} · groups={} records={total} max={max} ({:.0}%) median={median} p90={p90} txns={txns} est_bytes_max={:.1}MB shared_mesh={shared}/{all_meshes} makespan K=1:{:.1}s K=2:{:.1}s K=4:{:.1}s K=8:{:.1}s K=16:{:.1}s",
             scheme.name,
             scheme.groups.len(),
-            if total > 0 { max as f64 * 100.0 / total as f64 } else { 0.0 },
+            if total > 0 {
+                max as f64 * 100.0 / total as f64
+            } else {
+                0.0
+            },
             max as f64 * BYTES_PER_RECORD / 1_048_576.0,
             makespan(1),
             makespan(2),

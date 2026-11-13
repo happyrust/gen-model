@@ -718,7 +718,10 @@ fn start_fixture_stack(
             &run_dir.join("stack-service.log"),
         )?,
     );
-    wait_http(&format!("{}/health", fixture_api()), Duration::from_secs(180))?;
+    wait_http(
+        &format!("{}/health", fixture_api()),
+        Duration::from_secs(180),
+    )?;
     if cli.fixture_ui {
         let ui = tools.join("plant-ui-app.exe");
         let inspect = tools.join("inspect.exe");
@@ -950,7 +953,10 @@ fn write_runtime_config(
         ("surreal_ns", namespace.to_owned()),
         ("mdb_name", format!("\"{}\"", mdb.trim_start_matches('/'))),
         ("v_port", fixture_surreal_port().to_string()),
-        ("http_api_addr", format!("\"127.0.0.1:{}\"", fixture_api_port())),
+        (
+            "http_api_addr",
+            format!("\"127.0.0.1:{}\"", fixture_api_port()),
+        ),
         // Keep the portable fixture's room coverage barrier scoped to the two
         // rooms created by setup.mac. The real AMS database contains hundreds
         // of unrelated PANE rows whose models are intentionally not seeded by
@@ -2924,7 +2930,9 @@ mod tests {
             .0;
         assert!(service.contains(".current_dir(run_dir)"));
         assert!(
-            !service.lines().any(|line| line.trim() == ".current_dir(repo)"),
+            !service
+                .lines()
+                .any(|line| line.trim() == ".current_dir(repo)"),
             "fixture service must not share the checkout instance lock"
         );
         assert!(

@@ -173,7 +173,11 @@ pub fn ensure_mesh_file(path: &Path, mesh: &PlantMesh) -> anyhow::Result<MeshWri
 }
 
 /// 在目标同目录写一份校验过、刷过盘的临时文件，返回它的路径。
-fn stage_mesh_file(parent: &Path, path: &Path, mesh: &PlantMesh) -> anyhow::Result<std::path::PathBuf> {
+fn stage_mesh_file(
+    parent: &Path,
+    path: &Path,
+    mesh: &PlantMesh,
+) -> anyhow::Result<std::path::PathBuf> {
     let temp = parent.join(format!(
         ".{}.{}.{}.tmp",
         path.file_name()
@@ -221,7 +225,10 @@ fn repair_mesh_file(
     if verify_mesh_file(path, mesh).is_ok() {
         return Ok(MeshWrite::Reused);
     }
-    log::warn!("[mesh] {} 与它的身份不符，原子重写: {mismatch:#}", path.display());
+    log::warn!(
+        "[mesh] {} 与它的身份不符，原子重写: {mismatch:#}",
+        path.display()
+    );
     let parent = path.parent().context("mesh 路径没有父目录")?;
     let temp = stage_mesh_file(parent, path, mesh)?;
     if let Err(error) = std::fs::rename(&temp, path) {
@@ -230,7 +237,8 @@ fn repair_mesh_file(
         if verify_mesh_file(path, mesh).is_ok() {
             return Ok(MeshWrite::Reused);
         }
-        return Err(error).with_context(|| format!("重写 {}（原文件: {mismatch:#}）", path.display()));
+        return Err(error)
+            .with_context(|| format!("重写 {}（原文件: {mismatch:#}）", path.display()));
     }
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
@@ -330,19 +338,30 @@ mod tests {
     fn checked_mesh_reader_preserves_legacy_archive_bytes_and_rejects_corruption() {
         #[derive(rkyv::Archive, rkyv::Serialize)]
         struct LegacyMesh {
-            indices: Vec<u32>, vertices: Vec<glam::Vec3>, normals: Vec<glam::Vec3>,
-            wire_vertices: Vec<Vec<glam::Vec3>>, aabb: Option<parry3d::bounding_volume::Aabb>,
+            indices: Vec<u32>,
+            vertices: Vec<glam::Vec3>,
+            normals: Vec<glam::Vec3>,
+            wire_vertices: Vec<Vec<glam::Vec3>>,
+            aabb: Option<parry3d::bounding_volume::Aabb>,
         }
         let mut mesh = box_mesh();
         mesh.wire_vertices = vec![vec![glam::Vec3::new(-0.0, 2.5, -3.0)], vec![]];
         for with_aabb in [false, true] {
             let legacy = LegacyMesh {
-                indices: mesh.indices.clone(), vertices: mesh.vertices.clone(), normals: mesh.normals.clone(),
-                wire_vertices: mesh.wire_vertices.clone(), aabb: if with_aabb { mesh.aabb.clone() } else { None },
+                indices: mesh.indices.clone(),
+                vertices: mesh.vertices.clone(),
+                normals: mesh.normals.clone(),
+                wire_vertices: mesh.wire_vertices.clone(),
+                aabb: if with_aabb { mesh.aabb.clone() } else { None },
             };
-            let mut current = mesh.clone(); current.aabb = legacy.aabb.clone();
+            let mut current = mesh.clone();
+            current.aabb = legacy.aabb.clone();
             let bytes = rkyv::to_bytes::<_, 1024>(&legacy).unwrap();
-            assert_eq!(bytes.as_slice(), current.ser_to_bytes(), "existing .mesh byte format must not change");
+            assert_eq!(
+                bytes.as_slice(),
+                current.ser_to_bytes(),
+                "existing .mesh byte format must not change"
+            );
             let loaded = PlantMesh::des_from_bytes(&bytes).unwrap();
             assert_eq!(loaded.indices, current.indices);
             assert!(vec3_buffers_bit_equal(&loaded.vertices, &current.vertices));
@@ -352,8 +371,12 @@ mod tests {
                 // validation may accept it, but must never read outside input.
                 let _ = PlantMesh::des_from_bytes(&bytes[..end]);
             }
-            let mut unaligned = vec![0u8]; unaligned.extend_from_slice(&bytes);
-            assert_eq!(PlantMesh::des_from_bytes(&unaligned[1..]).unwrap().indices, current.indices);
+            let mut unaligned = vec![0u8];
+            unaligned.extend_from_slice(&bytes);
+            assert_eq!(
+                PlantMesh::des_from_bytes(&unaligned[1..]).unwrap().indices,
+                current.indices
+            );
         }
         for bytes in [b"".as_slice(), b"damaged", &[255u8; 256]] {
             assert!(PlantMesh::des_from_bytes(bytes).is_err());
@@ -362,7 +385,8 @@ mod tests {
         invalid_index.indices[0] = u32::MAX;
         assert!(PlantMesh::des_from_bytes(&invalid_index.ser_to_bytes()).is_err());
         let mut invalid_offsets = mesh.ser_to_bytes();
-        let root_start = invalid_offsets.len() - std::mem::size_of::<aios_core::shape::pdms_shape::ArchivedPlantMesh>();
+        let root_start = invalid_offsets.len()
+            - std::mem::size_of::<aios_core::shape::pdms_shape::ArchivedPlantMesh>();
         invalid_offsets[root_start..].fill(255);
         assert!(PlantMesh::des_from_bytes(&invalid_offsets).is_err());
     }
@@ -492,7 +516,11 @@ mod tests {
             );
         }
         assert!(dir.path().read_dir().unwrap().all(|entry| {
-            !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
         }));
     }
 
@@ -546,7 +574,9 @@ mod tests {
             "+0.0 与 -0.0 按位不同，不能当同一份复用"
         );
         assert_eq!(
-            PlantMesh::des_mesh_file(&path).unwrap().vertices[0].x.to_bits(),
+            PlantMesh::des_mesh_file(&path).unwrap().vertices[0]
+                .x
+                .to_bits(),
             (-0.0f32).to_bits()
         );
 

@@ -87,7 +87,8 @@ impl StorageVersionReport {
 
 /// 库里那条记录的三格。读失败时返回 `Err`——调用方应当把这一轮当作「没核对成」，
 /// 不要据此判断库落后（一次读失败不该把库点名成老库）。
-pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<String>, Option<String>)>> {
+pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<String>, Option<String>)>>
+{
     stored_version_on(&aios_core::SUL_DB).await
 }
 
@@ -128,8 +129,7 @@ async fn stored_version_on(
 ///
 /// 这里**不能**用 `OnceLock`：重建完成后版本记录才写进库，一次性的缓存会让 `/health`
 /// 一直报 `caught_up: false` 直到进程重启，而「重建有没有生效」恰恰是运维要当场看见的那件事。
-static LAST_REPORT: std::sync::RwLock<Option<StorageVersionReport>> =
-    std::sync::RwLock::new(None);
+static LAST_REPORT: std::sync::RwLock<Option<StorageVersionReport>> = std::sync::RwLock::new(None);
 
 fn report_lock() -> std::sync::RwLockReadGuard<'static, Option<StorageVersionReport>> {
     LAST_REPORT
@@ -206,10 +206,7 @@ pub(crate) async fn report_and_log(dbnums: &[u32]) -> anyhow::Result<StorageVers
         for hint in report.upgrade_hints() {
             log::warn!("{hint}");
         }
-        log::warn!(
-            "升级会清空并重新解析、生成以下库：{:?}",
-            dbnums
-        );
+        log::warn!("升级会清空并重新解析、生成以下库：{:?}", dbnums);
     }
     Ok(report)
 }
@@ -248,7 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn hints_are_copy_pasteable_and_only_when_stale() {        let stale = StorageVersionReport::from_stored(None);
+    fn hints_are_copy_pasteable_and_only_when_stale() {
+        let stale = StorageVersionReport::from_stored(None);
         assert_eq!(
             stale.upgrade_hints(),
             vec!["POST /api/v1/storage-version/upgrade".to_string()]

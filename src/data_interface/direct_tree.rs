@@ -185,6 +185,20 @@ impl DirectTreeService {
     ///
     /// Enumerating every SITE explicitly needs each library WORLD; ancestors/children do not.
     pub fn roots(&self) -> anyhow::Result<Vec<EleTreeNode>> {
+        self.roots_of_nouns(&["SITE"])
+    }
+
+    /// 与 [`Self::roots`] 同一条枚举路，按 noun 过滤；`nouns` 为空等价于不过滤。
+    ///
+    /// 库的 WORLD 直接成员里有**两类**生成根：`SITE` 与 `APPLDW`（`rvm-check` 的根枚举口径，
+    /// `docs/guides/rvm-check-batch.md`）。两类根的构件集合互不重叠——2026-11-07 现场 ams7326：
+    /// `23710_1`（SITE）与 `23710_22444`（APPLDW）各自 `anc CONTAINS` 14328 行，`refno` 交集为 0，
+    /// 合起来才是整库的 28656 行。此前 [`Self::roots`] 只认 SITE，`/tree/roots` 与页面的
+    /// `runAllSites()` 因此长期只核对了整库的一半（2026-11-07 沙箱验收发现）。
+    ///
+    /// 缺省仍只给 SITE：模型树面板等既有调用方的形状不变，要 APPLDW 得显式点名
+    /// （`/tree/roots?nouns=SITE,APPLDW`）。
+    pub fn roots_of_nouns(&self, nouns: &[&str]) -> anyhow::Result<Vec<EleTreeNode>> {
         let metadata = self.metadata()?;
 
         let mut out = Vec::new();
@@ -195,7 +209,11 @@ impl DirectTreeService {
             for world in metadata.worlds.get(&db.dbnum).copied() {
                 for (order, child) in self.store.members(world)?.into_iter().enumerate() {
                     let node = self.node(child, Some(world), order)?;
-                    if node.noun.eq_ignore_ascii_case("SITE") {
+                    if nouns.is_empty()
+                        || nouns
+                            .iter()
+                            .any(|noun| node.noun.eq_ignore_ascii_case(noun))
+                    {
                         out.push(node);
                     }
                 }
@@ -961,6 +979,68 @@ mod lazy_live_tests {
             chain.len(),
             stats.summary()
         );
+    }
+
+    /// APS 的分组库（`aps250204` / `aps250220`）：WORL → GPWL → GPSET。本机 APS / AMS 的 /ALL 里没有
+    /// 带 GPITEM 的 GPSET（APS 的 28 个 GPSET 都是存储成员为 0 的 SCOSEL 规则组，归 G3；AMS 没有
+    /// 挂在 WORLD 下的 GPWL），GPREF 解引用由 `group_membership` 的单测覆盖。这里钉住真库上分组
+    /// 层级走得通：GPWL 能当根取到、GPWL 层解析视图与存储视图同序同元素、GPSET 行的 `children_count`
+    /// 与下一层对得上、反查表在真库上建得成。
+    #[test]
+    #[ignore = "requires local APS source files"]
+    fn aps_group_worlds_are_navigable_in_the_resolved_view() {
+        let service = DirectTreeService::open("AvevaPlantSample", "ALL").unwrap();
+        let group_worlds = service.roots_of_nouns(&["GPWL"]).unwrap();
+        assert!(!group_worlds.is_empty(), "APS 应有 GPWL");
+        let mut set_count = 0;
+        for world in &group_worlds {
+            let world_refno = world.refno.refno();
+            let sets = service.resolved_children(world_refno).unwrap();
+            let stored: Vec<_> = service
+                .children(world_refno)
+                .unwrap()
+                .into_iter()
+                .map(|node| node.refno)
+                .collect();
+            let resolved: Vec<_> = sets.nodes.iter().map(|row| row.node.refno).collect();
+            assert_eq!(resolved, stored, "GPWL → GPSET 是主链，两个视图同序同元素");
+            assert!(service.secondary_parents(world_refno).unwrap().is_empty());
+            for set in sets
+                .nodes
+                .iter()
+                .filter(|row| row.node.noun.eq_ignore_ascii_case("GPSET"))
+            {
+                let set_refno = set.node.refno.refno();
+                let layer = service.resolved_children(set_refno).unwrap();
+                assert_eq!(
+                    layer.nodes.len(),
+                    usize::from(set.node.children_count),
+                    "{set_refno}"
+                );
+                for row in &layer.nodes {
+                    assert!(!row.node.noun.eq_ignore_ascii_case("GPITEM"), "{row:?}");
+                    let element = row.node.refno.refno();
+                    if row.via.is_some() {
+                        assert!(
+                            service
+                                .secondary_parents(element)
+                                .unwrap()
+                                .iter()
+                                .any(|parent| parent.group == set_refno),
+                            "{element}"
+                        );
+                    }
+                }
+                eprintln!(
+                    "GPSET {set_refno} {}: resolved={} unresolved={:?}",
+                    set.node.name,
+                    layer.nodes.len(),
+                    layer.unresolved
+                );
+                set_count += 1;
+            }
+        }
+        assert!(set_count > 0, "APS 的 GPWL 下应有 GPSET");
     }
 
     // ── G3 接线：SCOSEL 求值域 ─────────────────────────────────────────────────

@@ -253,7 +253,9 @@ fn room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact() {
     let guard = rebuild
         .find("let _flight = resident::start_edge_recompute(")
         .expect("第三段开工：相位 / 库数 / 「在飞」由守卫一次立起，且要绑在名字上活到函数末尾");
-    let loop_start = rebuild.find("for dbnum in &dbnums {").expect("逐库循环存在");
+    let loop_start = rebuild
+        .find("for dbnum in &dbnums {")
+        .expect("逐库循环存在");
     assert!(guard < loop_start, "开工在循环之前: {rebuild}");
     assert!(
         !rebuild.contains("note_edge_recompute_finished("),
@@ -345,7 +347,13 @@ fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
         .expect("rebuild body exists")
         .1
         .split_once("\n}\r\n")
-        .or_else(|| source.split_once("async fn run_rooms_rebuild(").expect("rebuild body exists").1.split_once("\n}\n"))
+        .or_else(|| {
+            source
+                .split_once("async fn run_rooms_rebuild(")
+                .expect("rebuild body exists")
+                .1
+                .split_once("\n}\n")
+        })
         .expect("rebuild body ends")
         .0;
     assert!(
@@ -415,7 +423,9 @@ fn room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp() {
     let all_ok = rebuild
         .find("let mut all_ok = clear_succeeded;")
         .expect("逐库全成功也不能盖过全表清边失败");
-    let loop_start = rebuild.find("for dbnum in &dbnums {").expect("逐库循环存在");
+    let loop_start = rebuild
+        .find("for dbnum in &dbnums {")
+        .expect("逐库循环存在");
     let stamp = rebuild
         .find("if all_ok {")
         .expect("成功记录只在全表清边 + 逐库重算都成功时写入");
@@ -463,7 +473,7 @@ fn room_update_record_write_failures_are_never_reported_as_done() {
 // Behavior tests and narrowly scoped source contracts; no production DB.
 #[test]
 fn room_startup_audit_regression_missing_watermark_is_not_up_to_date() {
-    use crate::data_interface::room_recompute::{plan_startup_room_check, StartupRoomCheckPlan};
+    use crate::data_interface::room_recompute::{StartupRoomCheckPlan, plan_startup_room_check};
     use crate::fast_model::room_resident::RoomUpdateRecord;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -480,10 +490,13 @@ fn room_startup_audit_regression_missing_watermark_is_not_up_to_date() {
         initialized: true,
         ..Default::default()
     };
-    assert!(matches!(
-        plan_startup_room_check(&rooms, &[control], Some(&record), "g1"),
-        StartupRoomCheckPlan::UpToDate { .. }
-    ), "control: an unchanged known watermark can be up to date");
+    assert!(
+        matches!(
+            plan_startup_room_check(&rooms, &[control], Some(&record), "g1"),
+            StartupRoomCheckPlan::UpToDate { .. }
+        ),
+        "control: an unchanged known watermark can be up to date"
+    );
     let plan = plan_startup_room_check(&rooms, &[], Some(&record), "g1");
     assert!(
         !matches!(plan, StartupRoomCheckPlan::UpToDate { .. }),
@@ -494,7 +507,7 @@ fn room_startup_audit_regression_missing_watermark_is_not_up_to_date() {
 #[test]
 fn room_startup_audit_regression_current_generation_is_checked_before_up_to_date() {
     // Behavior test: unchanged timestamps do not certify edges against a new model.
-    use crate::data_interface::room_recompute::{plan_startup_room_check, StartupRoomCheckPlan};
+    use crate::data_interface::room_recompute::{StartupRoomCheckPlan, plan_startup_room_check};
     use crate::fast_model::room_resident::RoomUpdateRecord;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -511,10 +524,13 @@ fn room_startup_audit_regression_current_generation_is_checked_before_up_to_date
         room_dbnum_sesnos: BTreeMap::from([(7000, 10)]),
         generation: "g1".into(),
     };
-    assert!(matches!(
-        plan_startup_room_check(&rooms, &states, Some(&record), "g1"),
-        StartupRoomCheckPlan::UpToDate { .. }
-    ), "control: matching generation and unchanged sessions need no update");
+    assert!(
+        matches!(
+            plan_startup_room_check(&rooms, &states, Some(&record), "g1"),
+            StartupRoomCheckPlan::UpToDate { .. }
+        ),
+        "control: matching generation and unchanged sessions need no update"
+    );
     for (saved, current) in [("g1", "g2"), ("", "g1"), ("g1", ""), ("", "")] {
         record.generation = saved.into();
         assert_eq!(
@@ -525,10 +541,9 @@ fn room_startup_audit_regression_current_generation_is_checked_before_up_to_date
     }
 }
 
-
 #[test]
 fn room_startup_audit_regression_missing_watermark_vetoes_an_incremental_plan() {
-    use crate::data_interface::room_recompute::{plan_startup_room_check, StartupRoomCheckPlan};
+    use crate::data_interface::room_recompute::{StartupRoomCheckPlan, plan_startup_room_check};
     use crate::fast_model::room_resident::RoomUpdateRecord;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -544,10 +559,13 @@ fn room_startup_audit_regression_missing_watermark_vetoes_an_incremental_plan() 
         initialized: true,
         ..Default::default()
     }];
-    assert!(matches!(
-        plan_startup_room_check(&BTreeSet::from([7000]), &states, Some(&record), "g1"),
-        StartupRoomCheckPlan::NeedsIncrementalCheck { .. }
-    ), "control: a newer session in the same generation keeps window-based incremental checking");
+    assert!(
+        matches!(
+            plan_startup_room_check(&BTreeSet::from([7000]), &states, Some(&record), "g1"),
+            StartupRoomCheckPlan::NeedsIncrementalCheck { .. }
+        ),
+        "control: a newer session in the same generation keeps window-based incremental checking"
+    );
     assert_eq!(
         plan_startup_room_check(&BTreeSet::from([7000, 7001]), &states, Some(&record), "g1"),
         StartupRoomCheckPlan::NeedsFullInit,
@@ -559,13 +577,21 @@ fn room_startup_audit_regression_missing_watermark_vetoes_an_incremental_plan() 
 fn room_startup_audit_regression_runner_passes_installed_generation_to_planner() {
     // Wiring contract only; generation truth table is tested above by behavior.
     let source = include_str!("../data_interface/room_recompute.rs");
-    let runner = source.split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
-        .expect("runner exists").1;
-    let call = runner.split_once("match plan_startup_room_check(")
-        .expect("planner dispatch exists").1
-        .split_once(") {").expect("planner call ends").0;
-    assert!(call.contains("&outcome.model.input_version()"),
-        "the runner must supply the installed model generation, not the saved record generation");
+    let runner = source
+        .split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
+        .expect("runner exists")
+        .1;
+    let call = runner
+        .split_once("match plan_startup_room_check(")
+        .expect("planner dispatch exists")
+        .1
+        .split_once(") {")
+        .expect("planner call ends")
+        .0;
+    assert!(
+        call.contains("&outcome.model.input_version()"),
+        "the runner must supply the installed model generation, not the saved record generation"
+    );
 }
 
 #[test]
@@ -575,18 +601,29 @@ fn room_startup_audit_regression_foreign_hits_are_handed_off_before_panel_writes
     let source = include_str!("../data_interface/room_recompute.rs");
     let body = source
         .split_once("async fn apply_targeted_room_update_for_dbnum(")
-        .expect("startup targeted updater exists").1
+        .expect("startup targeted updater exists")
+        .1
         .split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
-        .expect("updater ends before runner").0;
-    let write = body.find("match recompute_dbnum_room_edges(")
+        .expect("updater ends before runner")
+        .0;
+    let write = body
+        .find("match recompute_dbnum_room_edges(")
         .expect("targeted persistence boundary exists");
-    let foreign = body.find("affected.foreign.keys()").expect("foreign library keys are consumed");
-    let barrier = body.find("return startup_room_update_after_foreign(")
+    let foreign = body
+        .find("affected.foreign.keys()")
+        .expect("foreign library keys are consumed");
+    let barrier = body
+        .find("return startup_room_update_after_foreign(")
         .expect("the dependency barrier result must be returned, including failures");
-    assert!(foreign < barrier && barrier < write,
-        "foreign dependencies must gate local persistence, not be discarded");
-    assert!(body.contains("startup_room_fallback_targets(") && body.contains("&outcome.expected_dbnums()"),
-        "without reverse lookup, fallback must cover MDB targets rather than only the source library");
+    assert!(
+        foreign < barrier && barrier < write,
+        "foreign dependencies must gate local persistence, not be discarded"
+    );
+    assert!(
+        body.contains("startup_room_fallback_targets(")
+            && body.contains("&outcome.expected_dbnums()"),
+        "without reverse lookup, fallback must cover MDB targets rather than only the source library"
+    );
 }
 
 #[tokio::test]
@@ -603,10 +640,14 @@ async fn room_startup_audit_regression_foreign_updates_finish_before_local_panel
             calls.borrow_mut().push(7000);
             std::future::ready(true)
         },
-    ).await;
+    )
+    .await;
     assert!(ok);
-    assert_eq!(*calls.borrow(), vec![7010, 7011, 7000],
-        "deduplicated foreign libraries must finish before the local panel writer runs");
+    assert_eq!(
+        *calls.borrow(),
+        vec![7010, 7011, 7000],
+        "deduplicated foreign libraries must finish before the local panel writer runs"
+    );
 }
 
 #[tokio::test]
@@ -623,10 +664,17 @@ async fn room_startup_audit_regression_a_failed_foreign_update_blocks_local_pane
             calls.borrow_mut().push(7000);
             std::future::ready(true)
         },
-    ).await;
-    assert!(!ok, "foreign failure must veto the startup completion record");
-    assert_eq!(*calls.borrow(), vec![7010, 7011],
-        "other foreign libraries may recover, but the local panel writer must never run");
+    )
+    .await;
+    assert!(
+        !ok,
+        "foreign failure must veto the startup completion record"
+    );
+    assert_eq!(
+        *calls.borrow(),
+        vec![7010, 7011],
+        "other foreign libraries may recover, but the local panel writer must never run"
+    );
 }
 
 #[tokio::test]
@@ -645,7 +693,8 @@ async fn room_startup_audit_regression_local_failure_is_not_hidden_by_foreign_su
                 calls.borrow_mut().push(7000);
                 std::future::ready(false)
             },
-        ).await;
+        )
+        .await;
         assert!(!ok);
         let expected: Vec<_> = foreign.into_iter().chain([7000]).collect();
         assert_eq!(*calls.borrow(), expected);
@@ -661,40 +710,60 @@ fn room_startup_audit_regression_unavailable_reverse_lookup_covers_all_mdb_targe
         BTreeSet::from([7000, 7010, 7011, 7012]),
         "missing reverse lookup cannot fall back to the defining library alone"
     );
-    assert_eq!(startup_room_fallback_targets(7000, &[], &BTreeSet::new()), BTreeSet::from([7000]));
+    assert_eq!(
+        startup_room_fallback_targets(7000, &[], &BTreeSet::new()),
+        BTreeSet::from([7000])
+    );
 }
 
 async fn assert_room_clear_atomic_with_fault(fault_schema: &str) {
     use crate::fast_model::room_resident::{
-        read_room_update_record_on, write_room_update_record_on, RoomUpdateRecord,
+        RoomUpdateRecord, read_room_update_record_on, write_room_update_record_on,
     };
     use std::collections::BTreeMap;
 
-    let db = surrealdb::engine::any::connect("mem://").await.expect("isolated mem database");
-    db.use_ns("room_startup_audit").use_db("partial_clear").await.expect("fixture ns/db");
+    let db = surrealdb::engine::any::connect("mem://")
+        .await
+        .expect("isolated mem database");
+    db.use_ns("room_startup_audit")
+        .use_db("partial_clear")
+        .await
+        .expect("fixture ns/db");
     db.query(
         "CREATE pe:room; CREATE pe:panel; CREATE pe:member; \
          RELATE pe:panel->room_relate:edge->pe:member; \
          RELATE pe:room->room_panel_relate:edge->pe:panel; \
          CREATE dbnum_watermark:7000 SET applied_sesno=10, model_sesno=10, \
-           model_room_generation='g1', model_room_stray_generations=[];"
-    ).await.expect("fixture transport").check().expect("fixture statements");
+           model_room_generation='g1', model_room_stray_generations=[];",
+    )
+    .await
+    .expect("fixture transport")
+    .check()
+    .expect("fixture statements");
     let record = RoomUpdateRecord {
         room_updated_at: "2026-10-16T10:00:00+08:00".into(),
         room_dbnum_sesnos: BTreeMap::from([(7000, 10)]),
         generation: "g1".into(),
     };
-    write_room_update_record_on(&db, &record).await.expect("initial success proof");
+    write_room_update_record_on(&db, &record)
+        .await
+        .expect("initial success proof");
     // Schema faults are local to this fresh mem:// connection, never production.
     // The final-record-only case also proves that an earlier watermark update rolls back.
     if !fault_schema.is_empty() {
-        db.query(fault_schema).await.expect("fault schema transport")
-            .check().expect("fault schema valid");
+        db.query(fault_schema)
+            .await
+            .expect("fault schema transport")
+            .check()
+            .expect("fault schema valid");
     }
     assert_eq!(count(&db, "room_relate").await, 1);
     assert_eq!(count(&db, "room_panel_relate").await, 1);
     assert_eq!(alignment(&db).await.as_deref(), Some("g1"));
-    assert_eq!(read_room_update_record_on(&db).await.unwrap(), Some(record.clone()));
+    assert_eq!(
+        read_room_update_record_on(&db).await.unwrap(),
+        Some(record.clone())
+    );
 
     let result = super::clear_room_rebuild_edges_on(&db).await;
     if fault_schema.is_empty() {
@@ -705,11 +774,16 @@ async fn assert_room_clear_atomic_with_fault(fault_schema: &str) {
         assert_eq!(read_room_update_record_on(&db).await.unwrap(), None);
         return;
     }
-    assert!(result.is_err(), "control: required fields reject NONE invalidation");
+    assert!(
+        result.is_err(),
+        "control: required fields reject NONE invalidation"
+    );
     let members = count(&db, "room_relate").await;
     let panels = count(&db, "room_panel_relate").await;
     let generation = alignment(&db).await;
-    let persisted = read_room_update_record_on(&db).await.expect("read proof after fault");
+    let persisted = read_room_update_record_on(&db)
+        .await
+        .expect("read proof after fault");
     let damaged = members != 1 || panels != 1;
     let old_proof = generation.as_deref() == Some("g1") && persisted == Some(record.clone());
     assert!(
@@ -718,27 +792,36 @@ async fn assert_room_clear_atomic_with_fault(fault_schema: &str) {
     );
     assert_eq!(members, 1, "failed transaction must retain member edges");
     assert_eq!(panels, 1, "failed transaction must retain topology edges");
-    assert_eq!(generation.as_deref(), Some("g1"), "failed transaction must retain watermark");
-    assert_eq!(persisted, Some(record), "failed transaction must retain the old record");
+    assert_eq!(
+        generation.as_deref(),
+        Some("g1"),
+        "failed transaction must retain watermark"
+    );
+    assert_eq!(
+        persisted,
+        Some(record),
+        "failed transaction must retain the old record"
+    );
 }
 
 #[tokio::test]
 async fn room_startup_audit_regression_partial_clear_cannot_leave_old_success_proof() {
     assert_room_clear_atomic_with_fault(
         "DEFINE FIELD model_room_generation ON TABLE dbnum_watermark TYPE string; \
-         DEFINE FIELD room_update_record ON TABLE room_build TYPE object;"
-    ).await;
+         DEFINE FIELD room_update_record ON TABLE room_build TYPE object;",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn room_startup_audit_regression_final_record_failure_rolls_back_the_clear() {
     assert_room_clear_atomic_with_fault(
-        "DEFINE FIELD room_update_record ON TABLE room_build TYPE object;"
-    ).await;
+        "DEFINE FIELD room_update_record ON TABLE room_build TYPE object;",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn room_startup_audit_regression_successful_clear_invalidates_both_credentials() {
     assert_room_clear_atomic_with_fault("").await;
 }
-

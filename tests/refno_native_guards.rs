@@ -60,14 +60,24 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
     let watcher = include_str!("../src/data_interface/increment_manager.rs");
     let sweep = function_body(watcher, "async fn sweep_watch_dirs(");
-    for forbidden in ["mdb_memory_store::", "scan_elements(", "refresh_cached(",
-        "reconcile_model_coverage_at_startup("] {
-        assert!(!sweep.contains(forbidden), "watcher reintroduced {forbidden}");
+    for forbidden in [
+        "mdb_memory_store::",
+        "scan_elements(",
+        "refresh_cached(",
+        "reconcile_model_coverage_at_startup(",
+    ] {
+        assert!(
+            !sweep.contains(forbidden),
+            "watcher reintroduced {forbidden}"
+        );
     }
     let handlers = include_str!("../src/web_service/handlers.rs");
     let health = function_body(handlers, "pub async fn health(");
     for forbidden in ["mdb_memory_store::", "skeleton_elements", ".get().await"] {
-        assert!(!health.contains(forbidden), "health reintroduced {forbidden}");
+        assert!(
+            !health.contains(forbidden),
+            "health reintroduced {forbidden}"
+        );
     }
     assert!(health.contains("mdb_route_directory::active("));
     // 缓存统计从共享读视图模块的观测口取，不经任何 provider 的 `.get().await`（那会开服务）。
@@ -75,11 +85,16 @@ fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
     let web = include_str!("../src/web_service/mod.rs");
     let serve = function_body(web, "async fn serve_with_ready(");
     assert!(!serve.contains(".get().await"));
-    assert!(serve.find("bind_with_handoff(addr).await?").unwrap()
-        < serve.find("ready.send(())").unwrap());
+    assert!(
+        serve.find("bind_with_handoff(addr).await?").unwrap()
+            < serve.find("ready.send(())").unwrap()
+    );
     let core = function_body(LIB, "async fn run_read_through_core(");
-    assert!(core.find("start_configured(manager.clone()).await?").unwrap()
-        < core.find("startup_route_directory(&db_option)").unwrap());
+    assert!(
+        core.find("start_configured(manager.clone()).await?")
+            .unwrap()
+            < core.find("startup_route_directory(&db_option)").unwrap()
+    );
     // 新鲜度只经共享读视图比 Arc 身份：两个服务的 `is_current` 都不读文件头、不开库、不问骨架。
     for source in [ELEMENT_ATTRIBUTES, DIRECT_TREE] {
         let code = production(source);
@@ -91,8 +106,15 @@ fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
         let current = function_body(&code, signature);
         assert!(current.contains("self.reader.view()"));
         assert!(current.contains("Arc::ptr_eq("));
-        for forbidden in ["DbFileHeader::read(", "ReadOnlyEngine::open(", "mdb_memory_store::"] {
-            assert!(!current.contains(forbidden), "is_current reintroduced {forbidden}");
+        for forbidden in [
+            "DbFileHeader::read(",
+            "ReadOnlyEngine::open(",
+            "mdb_memory_store::",
+        ] {
+            assert!(
+                !current.contains(forbidden),
+                "is_current reintroduced {forbidden}"
+            );
         }
     }
 }
@@ -113,7 +135,12 @@ fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
     let attributes = production(ELEMENT_ATTRIBUTES);
     let current = function_body(&attributes, "fn is_current(");
     assert!(current.contains("self.reader.view()"));
-    for forbidden in ["catalog", "DICT", "dictionary_paths(", "DbFileHeader::read("] {
+    for forbidden in [
+        "catalog",
+        "DICT",
+        "dictionary_paths(",
+        "DbFileHeader::read(",
+    ] {
         assert!(
             !current.contains(forbidden),
             "is_current must not fingerprint the dictionary: {forbidden}"
@@ -125,7 +152,10 @@ fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
     );
     let store = production(MDB_READ_STORE);
     let view = function_body(&store, "pub fn view(&self)");
-    assert!(view.contains("opened_sources()"), "freshness comes from already-open sources only");
+    assert!(
+        view.contains("opened_sources()"),
+        "freshness comes from already-open sources only"
+    );
     assert!(!store.contains("DICT_STYP") && !store.contains("dictionary_paths("));
     // 字典一次读取只取一次：渲染器合一（d-179）之后这一取在 `render` 里，`read` 与
     // `read_pinned` 都经它——逐个属性去问字典那条老路仍然不许回来。
@@ -426,7 +456,13 @@ fn the_two_second_loop_refreshes_by_dbnum() {
 
     let directory = production(ROUTE_DIRECTORY);
     let poll = function_body(&directory, "pub fn poll_generations(&self)");
-    for needle in ["FileIdentity::of(", "DbView::open(", ".walk_sessions()", ".observe_session(", "base_sesno"] {
+    for needle in [
+        "FileIdentity::of(",
+        "DbView::open(",
+        ".walk_sessions()",
+        ".observe_session(",
+        "base_sesno",
+    ] {
         assert!(poll.contains(needle), "poll_generations 要含 `{needle}`");
     }
     for needle in ["scan_elements(", "find_element(", "search_index("] {

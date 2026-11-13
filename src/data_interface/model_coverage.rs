@@ -204,7 +204,8 @@ async fn library_credential_on(
         #[serde(default)]
         model_sesno: Option<i32>,
         #[serde(default)]
-        model_catalogue_sessions: Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
+        model_catalogue_sessions:
+            Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
     }
     if std::ptr::eq(db, &*SUL_DB) {
         return Ok(crate::data_interface::dbnum_state::DbnumState::read(dbnum)
@@ -280,16 +281,36 @@ fn a_root_is_current_when_the_library_promise_or_its_own_ledger_entry_covers_the
     assert!(root_credential_covers(Some(&library), None, 26, latest));
     assert!(!root_credential_covers(Some(&library), None, 27, latest));
     // 库级不够，按需生成到了 27：根级那一半命中。
-    assert!(root_credential_covers(Some(&library), Some(&generated(27)), 27, latest));
-    assert!(!root_credential_covers(Some(&library), Some(&generated(26)), 27, latest));
+    assert!(root_credential_covers(
+        Some(&library),
+        Some(&generated(27)),
+        27,
+        latest
+    ));
+    assert!(!root_credential_covers(
+        Some(&library),
+        Some(&generated(26)),
+        27,
+        latest
+    ));
     // 账本里悬着失败：库级承诺也救不了。
-    assert!(!root_credential_covers(Some(&library), Some(&failed), 26, latest));
+    assert!(!root_credential_covers(
+        Some(&library),
+        Some(&failed),
+        26,
+        latest
+    ));
     // 目录落款早于目录文件最新：库级那一半失效，只剩根级。
     let stale_catalogue = LibraryCredential {
         model_sesno: 26,
         catalogue: vec![stamp(7000, 11)],
     };
-    assert!(!root_credential_covers(Some(&stale_catalogue), None, 26, latest));
+    assert!(!root_credential_covers(
+        Some(&stale_catalogue),
+        None,
+        26,
+        latest
+    ));
     assert!(root_credential_covers(
         Some(&stale_catalogue),
         Some(&generated(26)),
@@ -303,7 +324,12 @@ fn a_root_is_current_when_the_library_promise_or_its_own_ledger_entry_covers_the
         catalogue: Vec::new(),
     };
     assert!(!root_credential_covers(Some(&never), None, 1, latest));
-    assert!(root_credential_covers(Some(&never), Some(&generated(1)), 1, latest));
+    assert!(root_credential_covers(
+        Some(&never),
+        Some(&generated(1)),
+        1,
+        latest
+    ));
 }
 
 /// H1 (c)：凭证判据的目录那一半。设计会话够新、目录落款却早于目录文件最新 → 未命中；
@@ -392,7 +418,8 @@ pub(crate) async fn library_catalogue_stamps_on(
     struct Row {
         dbnum: u32,
         #[serde(default)]
-        model_catalogue_sessions: Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
+        model_catalogue_sessions:
+            Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
     }
     let started = Instant::now();
     let mut response = db
@@ -658,9 +685,14 @@ struct StaleCatalogueWindow {
 /// 只在某个 DESI 批次的闭包碰到那个目录库时才跑（ADR-064 D5 的 D7）：目录改了、设计没改，属性面板看到的
 /// 目录属性就一直是旧的。两半各自对文件、互不依赖：模型面没跑成（读不到落款 / 一个根都没发布）数据面照做。
 pub(crate) async fn reconcile_catalogue_versions() -> CatalogueReconcile {
-    let _serial = CATALOGUE_RECONCILE_SERIAL.lock().await;
-    let mut reconcile = reconcile_published_root_stamps().await;
+    // 目录核对的排工串行（防两次核对把同一批根排两遍）；数据面依赖刷新与模型面
+    // 互不依赖、且自带远端窗口读取——它走自己的串行闸，不占 CATALOGUE_RECONCILE_SERIAL。
+    let mut reconcile = {
+        let _serial = CATALOGUE_RECONCILE_SERIAL.lock().await;
+        reconcile_published_root_stamps().await
+    };
     let project = aios_core::get_db_option().project_name.clone();
+    let _dep_serial = DEPENDENCY_REFRESH_SERIAL.lock().await;
     reconcile.dependency_refresh =
         crate::data_interface::cata_dependency::refresh_dependency_rows_of_moved_catalogues(
             &project,
@@ -868,6 +900,138 @@ async fn reconcile_catalogue_group(
 /// 白算一轮；串行之后至多剩「第一次排完、第二次紧跟着又排」这一种，靠任务入队的并集
 /// 同 `(action, target)` 一行收口，不会多出第二行。
 static CATALOGUE_RECONCILE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 数据面依赖刷新自己的串行闸：它与模型面排工互不依赖，但两个刷新彼此不能并跑
+/// （同一窗口两次 Replace/推进 `cata_dependency_state` 是浪费）。从
+/// [`CATALOGUE_RECONCILE_SERIAL`] 里拆出——它带的远端窗口读取不该压住排工闸。
+static DEPENDENCY_REFRESH_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 合并后的下一轮核对请求：保留最近触发上下文与前移库号并集，避免只用布尔位丢失
+/// `trigger` / `advanced` 元信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReconcileRequest {
+    origin: String,
+    trigger: &'static str,
+    advanced: Vec<u32>,
+}
+
+impl ReconcileRequest {
+    fn merge(&mut self, incoming: ReconcileRequest) {
+        let mut merged: BTreeSet<u32> = self.advanced.iter().copied().collect();
+        merged.extend(incoming.advanced);
+        self.advanced = merged.into_iter().collect();
+        // 真实目录文件前移比周期复核更具体：两轮合并时优先保留前移触发的嗓音与点名，
+        // 避免 periodic 把新前移静音掉。
+        if self.trigger == "periodic" || incoming.trigger == "catalogue_file_advanced" {
+            self.origin = incoming.origin;
+            self.trigger = incoming.trigger;
+        }
+    }
+}
+
+/// 另起任务的目录核对单飞状态（以同步互斥保护，避免双原子位在「清 running 与复检
+/// pending」之间的窗口丢唤醒或并发起两轮任务）。
+#[derive(Default)]
+struct ReconcileCoordinator {
+    running: bool,
+    pending: Option<ReconcileRequest>,
+}
+
+static RECONCILE_COORDINATOR: Mutex<ReconcileCoordinator> = Mutex::new(ReconcileCoordinator {
+    running: false,
+    pending: None,
+});
+
+struct ReconcileRunningGuard<'a> {
+    coordinator: &'a Mutex<ReconcileCoordinator>,
+    active: bool,
+}
+
+impl Drop for ReconcileRunningGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let mut state = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.running = false;
+        }
+    }
+}
+
+/// sweep / 事件快道的核对触发：至多一轮在飞，在飞期间的触发合并成「下一轮一起核」。
+/// 返回 true = 本轮由调用方这边新起了一轮（调用方记日志用），false = 已合并进
+/// 在飞轮的 pending。
+fn request_reconcile_run(origin: &str, trigger: &'static str, advanced: &[u32]) -> bool {
+    request_reconcile_run_with(
+        &RECONCILE_COORDINATOR,
+        origin,
+        trigger,
+        advanced,
+        |origin, trigger, advanced| async move {
+            reconcile_catalogue_versions_now_with(&origin, trigger, &advanced).await;
+        },
+    )
+}
+
+fn request_reconcile_run_with<F, Fut>(
+    coordinator: &'static Mutex<ReconcileCoordinator>,
+    origin: &str,
+    trigger: &'static str,
+    advanced: &[u32],
+    runner: F,
+) -> bool
+where
+    F: Fn(String, &'static str, Vec<u32>) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let req = ReconcileRequest {
+        origin: origin.to_string(),
+        trigger,
+        advanced: advanced.to_vec(),
+    };
+    let mut current = {
+        let mut state = coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.running {
+            match &mut state.pending {
+                Some(pending) => pending.merge(req),
+                None => state.pending = Some(req),
+            }
+            return false;
+        }
+        state.running = true;
+        req
+    };
+    tokio::spawn(async move {
+        let mut guard = ReconcileRunningGuard {
+            coordinator,
+            active: true,
+        };
+        loop {
+            runner(current.origin, current.trigger, current.advanced).await;
+            let next = {
+                let mut state = coordinator
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match state.pending.take() {
+                    Some(next) => Some(next),
+                    None => {
+                        state.running = false;
+                        guard.active = false;
+                        None
+                    }
+                }
+            };
+            match next {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+    });
+    true
+}
 
 /// 运行期目录版本核对的一次回执（H1，2026-09-08）：摄入形态的 sweep 与 `/update/execute`
 /// 触发的那几次；启动那一次在 `StartupReconcile`（`/health.initialization.startup.reconcile`）。
@@ -1130,10 +1294,58 @@ pub fn reconcile_catalogue_versions_after_sweep(
         (verdict, advanced)
     };
     if let CatalogueSweepVerdict::Run { trigger } = verdict {
-        let origin = origin.to_string();
-        tokio::spawn(async move {
-            reconcile_catalogue_versions_now_with(&origin, trigger, &advanced).await;
-        });
+        request_reconcile_run(origin, trigger, &advanced);
+    }
+    verdict
+}
+
+fn observe_catalogue_files_in(
+    state: &mut CatalogueReconcileState,
+    observed: &ObservedCatalogueFiles,
+) -> (CatalogueSweepVerdict, Vec<u32>) {
+    let previous = state.observed.clone();
+    let merged = state.observed.get_or_insert_with(BTreeMap::new);
+    for (key, sesno) in observed {
+        merged.insert(key.clone(), *sesno);
+    }
+    let Some(previous) = previous else {
+        return (CatalogueSweepVerdict::Seeded, Vec::new());
+    };
+    // 只对「这轮快道看到的键」判前移：没扫到的库上一轮是什么还是什么。
+    let advanced_keys = catalogue_files_advanced(Some(&previous), observed);
+    let verdict = if !advanced_keys.is_empty() {
+        CatalogueSweepVerdict::Run {
+            trigger: "catalogue_file_advanced",
+        }
+    } else {
+        CatalogueSweepVerdict::Unchanged
+    };
+    let advanced = advanced_keys
+        .iter()
+        .map(|(dbnum, _)| *dbnum)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (verdict, advanced)
+}
+
+/// 事件快道的目录观察（[`sweep_changed_files` 的快道路径]）：只并入变了的那几份
+/// 目录文件——按 (库号,文件) 键覆盖对应观察，没扫到的库的观察原样保留（与整面
+/// 重扫的「整体覆写」相对：子集没看其余目录，没资格替它们表态）。
+///
+/// 前移判定与整扫同一谓词：并入后新值高于旧值、或键是新出现的 → 触发一次目录
+/// 版本核对（经 [`request_reconcile_run`] 与 sweep 共用同一条合并通道）。第一轮
+/// 观察表还没有时只播种不触发（启动那次核对另有人负责）。
+pub fn observe_catalogue_files_partial(
+    origin: &str,
+    observed: &ObservedCatalogueFiles,
+) -> CatalogueSweepVerdict {
+    let (verdict, advanced) = {
+        let mut state = catalogue_reconcile_state();
+        observe_catalogue_files_in(&mut state, observed)
+    };
+    if let CatalogueSweepVerdict::Run { trigger } = verdict {
+        request_reconcile_run(origin, trigger, &advanced);
     }
     verdict
 }
@@ -1669,12 +1881,12 @@ async fn enqueue_catalogue_cascade(
         let version = latest_design_version(&mut versions, dbnum)
             .await
             .with_context(|| format!("dbnum {dbnum} 取不到文件最新会话，退化库的根排不了"))?;
-        let roots = crate::data_interface::window_root_plan::enumerate_target_roots(
-            dbnum,
-            version.sesno,
-        )
-        .await
-        .with_context(|| format!("dbnum {dbnum} 枚举不出 DbSet@{} 的生成根", version.sesno))?;
+        let roots =
+            crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, version.sesno)
+                .await
+                .with_context(|| {
+                    format!("dbnum {dbnum} 枚举不出 DbSet@{} 的生成根", version.sesno)
+                })?;
         let bucket = &mut planned
             .entry(dbnum)
             .or_insert_with(|| (version, BTreeMap::new()))
@@ -2217,5 +2429,296 @@ mod tests {
                 "覆盖取数不许再读逐根凭证行: {forbidden}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn request_reconcile_run_coalesces_inflight_triggers_and_never_runs_two_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        static COORD: Mutex<ReconcileCoordinator> = Mutex::new(ReconcileCoordinator {
+            running: false,
+            pending: None,
+        });
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(Mutex::new(Vec::<(String, &'static str, Vec<u32>)>::new()));
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let finished_all = Arc::new(Notify::new());
+
+        let make_runner = || {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let calls = calls.clone();
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            let finished_all = finished_all.clone();
+            move |origin: String, trigger: &'static str, advanced: Vec<u32>| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                let calls = calls.clone();
+                let first_entered = first_entered.clone();
+                let release_first = release_first.clone();
+                let finished_all = finished_all.clone();
+                async move {
+                    let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(cur, Ordering::SeqCst);
+                    let idx = {
+                        let mut log = calls.lock().unwrap();
+                        log.push((origin, trigger, advanced));
+                        log.len()
+                    };
+                    if idx == 1 {
+                        first_entered.notify_one();
+                        release_first.notified().await;
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if idx == 2 {
+                        finished_all.notify_one();
+                    }
+                }
+            }
+        };
+
+        assert!(request_reconcile_run_with(
+            &COORD,
+            "watch",
+            "catalogue_file_advanced",
+            &[7000],
+            make_runner(),
+        ));
+        first_entered.notified().await;
+
+        // 在飞期间先后合并三条触发（含 periodic 与另一组 advanced dbnum）：
+        // 返回 false、只并成一轮重跑、且保留前移嗓音与 [7001, 7002] 并集。
+        assert!(!request_reconcile_run_with(
+            &COORD,
+            "watch",
+            "catalogue_file_advanced",
+            &[7001],
+            make_runner(),
+        ));
+        assert!(!request_reconcile_run_with(
+            &COORD,
+            "reconcile",
+            "periodic",
+            &[],
+            make_runner(),
+        ));
+        assert!(!request_reconcile_run_with(
+            &COORD,
+            "watch",
+            "catalogue_file_advanced",
+            &[7002, 7001],
+            make_runner(),
+        ));
+
+        release_first.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), finished_all.notified())
+            .await
+            .expect("coalesced second run finishes");
+        tokio::task::yield_now().await;
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        let log = calls.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            vec![
+                ("watch".to_string(), "catalogue_file_advanced", vec![7000]),
+                (
+                    "watch".to_string(),
+                    "catalogue_file_advanced",
+                    vec![7001, 7002]
+                ),
+            ]
+        );
+        assert!(!COORD.lock().unwrap().running);
+        assert!(COORD.lock().unwrap().pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_reconcile_run_never_loses_wakeups_or_overlaps_under_concurrent_triggers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static COORD: Mutex<ReconcileCoordinator> = Mutex::new(ReconcileCoordinator {
+            running: false,
+            pending: None,
+        });
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let last_seen = Arc::new(AtomicUsize::new(0));
+        let latest_submitted = Arc::new(AtomicUsize::new(0));
+
+        // 并发制造大量触发，交叉在每一轮即将结束的窗口里，验证：
+        // 1. 任何时刻并发在飞 <= 1；
+        // 2. 最后一次提交的编号一定被最后一轮观测到（不丢唤醒）。
+        let mut handles = Vec::new();
+        for i in 1..=40usize {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let last_seen = last_seen.clone();
+            let latest_submitted = latest_submitted.clone();
+            handles.push(tokio::spawn(async move {
+                latest_submitted.fetch_max(i, Ordering::SeqCst);
+                let runner = {
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    let last_seen = last_seen.clone();
+                    let latest_submitted = latest_submitted.clone();
+                    move |_origin: String, _trigger: &'static str, _advanced: Vec<u32>| {
+                        let active = active.clone();
+                        let max_active = max_active.clone();
+                        let last_seen = last_seen.clone();
+                        let latest_submitted = latest_submitted.clone();
+                        async move {
+                            let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_active.fetch_max(cur, Ordering::SeqCst);
+                            let observed = latest_submitted.load(Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                            last_seen.fetch_max(observed, Ordering::SeqCst);
+                            active.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                };
+                request_reconcile_run_with(&COORD, "watch", "catalogue_file_advanced", &[i as u32], runner);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !COORD.lock().unwrap().running && COORD.lock().unwrap().pending.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("coordinator drains cleanly");
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(last_seen.load(Ordering::SeqCst), 40);
+    }
+
+    #[tokio::test]
+    async fn request_reconcile_run_recovers_running_flag_after_panic() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        static COORD: Mutex<ReconcileCoordinator> = Mutex::new(ReconcileCoordinator {
+            running: false,
+            pending: None,
+        });
+
+        let should_panic = Arc::new(AtomicBool::new(true));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let second_done = Arc::new(Notify::new());
+
+        let make_runner = || {
+            let should_panic = should_panic.clone();
+            let ran = ran.clone();
+            let second_done = second_done.clone();
+            move |_origin: String, _trigger: &'static str, _advanced: Vec<u32>| {
+                let should_panic = should_panic.clone();
+                let ran = ran.clone();
+                let second_done = second_done.clone();
+                async move {
+                    if should_panic.swap(false, Ordering::SeqCst) {
+                        panic!("simulated reconcile failure");
+                    }
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    second_done.notify_one();
+                }
+            }
+        };
+
+        assert!(request_reconcile_run_with(
+            &COORD,
+            "watch",
+            "catalogue_file_advanced",
+            &[7000],
+            make_runner(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !COORD.lock().unwrap().running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic guard clears running flag");
+
+        assert!(request_reconcile_run_with(
+            &COORD,
+            "watch",
+            "catalogue_file_advanced",
+            &[7001],
+            make_runner(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), second_done.notified())
+            .await
+            .expect("subsequent run executes after panic");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn partial_catalogue_observation_merges_without_erasing_unscanned_keys() {
+        let mut state = CatalogueReconcileState {
+            latest: None,
+            observed: None,
+        };
+        let f7000 = PathBuf::from("ams7000_0001");
+        let f7001 = PathBuf::from("ams7001_0001");
+        let f7002 = PathBuf::from("ams7002_0001");
+
+        // 第一轮只播种，不触发。
+        let first = BTreeMap::from([((7000, f7000.clone()), 10), ((7001, f7001.clone()), 20)]);
+        assert_eq!(
+            observe_catalogue_files_in(&mut state, &first),
+            (CatalogueSweepVerdict::Seeded, Vec::new())
+        );
+
+        // 快道只扫到 7000 前移到 11：触发 7000，且 7001 的观察 20 原样保留。
+        let partial_adv = BTreeMap::from([((7000, f7000.clone()), 11)]);
+        assert_eq!(
+            observe_catalogue_files_in(&mut state, &partial_adv),
+            (
+                CatalogueSweepVerdict::Run {
+                    trigger: "catalogue_file_advanced"
+                },
+                vec![7000]
+            )
+        );
+        assert_eq!(
+            state.observed.as_ref().unwrap().get(&(7001, f7001.clone())),
+            Some(&20)
+        );
+
+        // 再扫到 7001 仍是 20：没前移也不触发。
+        let partial_same = BTreeMap::from([((7001, f7001.clone()), 20)]);
+        assert_eq!(
+            observe_catalogue_files_in(&mut state, &partial_same),
+            (CatalogueSweepVerdict::Unchanged, Vec::new())
+        );
+
+        // 新出现 7002：触发 7002，且 7000=11 / 7001=20 均保留。
+        let partial_new = BTreeMap::from([((7002, f7002.clone()), 1)]);
+        assert_eq!(
+            observe_catalogue_files_in(&mut state, &partial_new),
+            (
+                CatalogueSweepVerdict::Run {
+                    trigger: "catalogue_file_advanced"
+                },
+                vec![7002]
+            )
+        );
+        assert_eq!(state.observed.as_ref().unwrap().len(), 3);
     }
 }

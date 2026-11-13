@@ -2996,7 +2996,10 @@ mod initializing_watermark_tests {
         let normal: Vec<serde_json::Value> = result.take(1).unwrap();
         assert!(held[0]["applied_sesno"].is_null());
         assert_eq!(normal[0]["applied_sesno"], 12);
-        assert_eq!(resolve_initializing_applied(true, Some((None, Some(105)))), None);
+        assert_eq!(
+            resolve_initializing_applied(true, Some((None, Some(105)))),
+            None
+        );
         assert_eq!(resolve_initializing_applied(true, None), None);
         assert_eq!(
             resolve_initializing_applied(true, Some((Some(112), Some(105)))),

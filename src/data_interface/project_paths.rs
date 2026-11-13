@@ -618,7 +618,10 @@ mod tests {
             resolve_project_root(&option, "included").as_deref(),
             Some(fixture.root.join("Included").as_path())
         );
-        assert_eq!(identities(&plan_watch_dirs(&option).dirs()), identities(&[included]));
+        assert_eq!(
+            identities(&plan_watch_dirs(&option).dirs()),
+            identities(&[included])
+        );
     }
 
     /// 主项目目录下有多个 `*000` 时全部收下。
@@ -866,7 +869,11 @@ mod tests {
         let late = fixture.dir("Late/lat000");
 
         let replanned = plan_watch_dirs(&option);
-        assert!(replanned.problems().is_empty(), "{:?}", replanned.problems());
+        assert!(
+            replanned.problems().is_empty(),
+            "{:?}",
+            replanned.problems()
+        );
         let missing = mounted.missing(replanned.dirs());
         assert_eq!(
             identities(&missing),

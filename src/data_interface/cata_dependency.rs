@@ -1433,7 +1433,8 @@ mod tests {
         let baseline = include_str!("../versioned_db/baseline_ingest.rs");
         assert!(
             baseline.contains("cata_dependency::resolve_dependency_rows_on(")
-                && baseline.contains("cata_dependency::render_dependency_transactions_unpersisted(")
+                && baseline
+                    .contains("cata_dependency::render_dependency_transactions_unpersisted(")
                 && baseline.contains(".send_async(WriteJob::new(")
                 && baseline.contains("sql.clone(),"),
             "基线必须经同一条属性 lane 入库 CATA 依赖（单写者不变，ADR-077 D2）"
@@ -1532,8 +1533,10 @@ mod tests {
             let mut att = NamedAttrMap::default();
             att.map
                 .insert("REFNO".into(), NamedAttrValue::RefU64Type(refno));
-            att.map
-                .insert("OWNER".into(), NamedAttrValue::RefU64Type(refu(dbnum as u64, 10)));
+            att.map.insert(
+                "OWNER".into(),
+                NamedAttrValue::RefU64Type(refu(dbnum as u64, 10)),
+            );
             att.map
                 .insert("TYPE".into(), NamedAttrValue::StringType("SCOM".into()));
             att.map.insert(
@@ -1577,14 +1580,18 @@ mod tests {
         let uda_keys = UdaKeyMap::empty();
         let rows = catalogue_rows(5052, 184, 2);
 
-        let first = land_dependency_rows_on(&db, &rows, &uda_keys).await.unwrap();
+        let first = land_dependency_rows_on(&db, &rows, &uda_keys)
+            .await
+            .unwrap();
         assert_eq!(first.elements, 2);
         assert_eq!(first.skipped_persisted, 0, "第一次谁都不认识");
         assert_eq!(first.transactions, 1);
         assert!(first.sql_bytes > 0);
         assert_eq!(dependency_facts(&db, 5052).await, (2, 2));
 
-        let second = land_dependency_rows_on(&db, &rows, &uda_keys).await.unwrap();
+        let second = land_dependency_rows_on(&db, &rows, &uda_keys)
+            .await
+            .unwrap();
         assert_eq!(second.elements, 2, "闭包账不摘：这一批仍然依赖这 2 行");
         assert_eq!(second.skipped_persisted, 2);
         assert_eq!(second.transactions, 0, "一笔事务都不发");
@@ -1597,7 +1604,9 @@ mod tests {
 
         // 目录文件前移 = 新 sesno：memo 认不出，整库照常重发。
         let moved = catalogue_rows(5052, 185, 2);
-        let third = land_dependency_rows_on(&db, &moved, &uda_keys).await.unwrap();
+        let third = land_dependency_rows_on(&db, &moved, &uda_keys)
+            .await
+            .unwrap();
         assert_eq!(third.skipped_persisted, 0, "换了 sesno 就不是同一版");
         assert_eq!(third.transactions, 1);
     }
@@ -1627,7 +1636,9 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
-        let retried = land_dependency_rows_on(&db, &rows, &uda_keys).await.unwrap();
+        let retried = land_dependency_rows_on(&db, &rows, &uda_keys)
+            .await
+            .unwrap();
         assert_eq!(
             retried.skipped_persisted, 0,
             "上一次是失败的，这两行一个都不许被记成已落库"
@@ -1640,7 +1651,9 @@ mod tests {
             .split_once("async fn land_dependency_rows_on(")
             .expect("落库那一段还在")
             .1;
-        let executed = body.find("pe_batch::execute_on(db, sql)").expect("执行那一句");
+        let executed = body
+            .find("pe_batch::execute_on(db, sql)")
+            .expect("执行那一句");
         let remembered = body
             .find("remember_persisted_rows(*dbnum, batch)")
             .expect("记忆那一句");
@@ -1684,7 +1697,10 @@ mod tests {
         .unwrap();
         assert_eq!(left.skipped, 2);
         assert_eq!(
-            left.by_dbnum.iter().map(|(dbnum, _)| *dbnum).collect::<Vec<_>>(),
+            left.by_dbnum
+                .iter()
+                .map(|(dbnum, _)| *dbnum)
+                .collect::<Vec<_>>(),
             vec![7002],
             "摘光的库整个不出现：不渲事务，也不发状态行"
         );
@@ -1964,7 +1980,8 @@ mod tests {
             // 是 `};`。现在这两行仍然相邻（startup_reconcile.rs:648-649），但后面还有
             // `generator_stale_dbnums`，所以带 `};` 的整段对不上。判据改成两者都在、且
             // dependency_refresh 在 cascade 之后：要钉的是两个出口都带上这份账，不是它是不是最后一格。
-            if probe == "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };" {
+            if probe == "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };"
+            {
                 let cascade = both
                     .find("        catalogue_cascade,\n")
                     .expect("运行期出口要带上目录级联那一格");
