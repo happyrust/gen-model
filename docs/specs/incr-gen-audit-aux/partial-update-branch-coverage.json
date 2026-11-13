@@ -1,0 +1,26 @@
+{
+  "source": "Core3D.dll.i64 + core.dll.i64 / IDA bridge client idalib-73568",
+  "rule": "Method coverage is insufficient; every material conditional path has a named case.",
+  "branches": {
+    "IsPending.invalid_state_short_circuit": ["P66-pending-invalid-state"],
+    "GranularityExpansion.primitive_members_present": ["P67-granularity-primitive-members"],
+    "GranularityExpansion.primitive_members_absent": ["P68-granularity-primitive-empty-members"],
+    "GranularityExpansion.state3_direct": ["P69-granularity-delete-direct"],
+    "GranularityExpansion.absent_primitives": ["P70-granularity-absent-cleanup"],
+    "GetDesiCPS.no_current_picture": ["P71-cps-no-picture"],
+    "GetDesiCPS.empty_desi_segment": ["P72-cps-empty-segment"],
+    "ExistsCPS.current_segment_only": ["P73-cps-current-only"],
+    "ExistsCPS.iterate_all_segments": ["P74-cps-all-segments"],
+    "Update.precondition_noop": ["P75-update-precondition-noop"],
+    "Finish.state3_attachment_cleanup": ["P76-finish-delete-attachment"],
+    "NewModelToUpdate.idlist_owner_dedupe": ["P77-new-idlist-owner-dedupe"],
+    "Members.search_modes_0_1_2": ["P78-members-search-modes"],
+    "elementCreated.ancestor_created_dedupe": ["P79-created-ancestor-dedupe"],
+    "elementDeleted.ancestor_created_no_production_delete": ["P80-created-ancestor-delete"],
+    "attributeModified.ancestor_created_ref_only": ["P81-created-ancestor-attribute"],
+    "elementsChangedBetween.primary_list_add_member_no_reorder": ["P82-primary-list-add-member"],
+    "elementsChangedBetween.primary_list_remove_member_no_reorder": ["P83-primary-list-remove-member"],
+    "attributeModified.qualifier_count_one_to_zero": ["P84-qualifier-cleared"],
+    "combine.same_element_qualifier_merge": ["P85-combine-qualifier-merge"]
+  }
+}

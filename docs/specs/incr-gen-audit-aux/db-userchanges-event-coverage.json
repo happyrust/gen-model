@@ -1,0 +1,31 @@
+{
+  "source": "Core3D.dll DB_UserChanges reverse engineering",
+  "evidence": {
+    "created": "elementCreated records element and owner; NewModelToUpdate uses state 1",
+    "deleted": "elementDeleted walks logical-tree includes and emits deleted/owner records",
+    "included": "elementIncluded distinguishes created owner/child from existing reparent",
+    "reordered": "elementReordered records owner and member unless member was created",
+    "attribute_plain": "attributeModified(element, attribute) creates an empty qualifier",
+    "attribute_qualified": "attributeModified(element, attribute, qualifier) stores qualifier map and dependencies",
+    "moved": "ElementsMoved copies the moved-element set",
+    "member_changed": "ElementsMemberChanged copies the member-change set",
+    "modified": "ElementsModified walks the modified reference tree",
+    "combine": "combine merges five change trees and qualifier maps",
+    "session_range": "elementsChangedSince delegates to elementsChangedBetween; OWNER becomes include and primary-list changes become reorder plus ATT_MEMB",
+    "qualifier_replay": "AttributesQualsModified replays all stored qualifiers for an element"
+  },
+  "cases": {
+    "created": ["P04-new-then-change", "P05-new-then-delete", "P06-recreate-same-name", "P46-new-after-delete", "P79-created-ancestor-dedupe"],
+    "deleted": ["P05-new-then-delete", "P06-recreate-same-name", "P16-ancestor-delete", "P47-delete-after-change", "P50-repeated-delete-state4", "P55-created-delete-with-includes", "P56-existing-delete-multiple-includes", "P57-leaf-delete-no-includes", "P80-created-ancestor-delete"],
+    "included": ["P07-created-owner-include", "P08-existing-reparent", "P21-cross-db-same-window", "P58-include-same-session", "P59-include-cross-session", "P60-include-created-child"],
+    "reordered": ["P09-existing-reorder", "P23-changed-since-between", "P61-reorder-created-member"],
+    "attribute_plain": ["P10-attribute-plain", "P18-multi-event-combine", "P54-attribute-member-special", "P62-attribute-created-element", "P63-attribute-reentrant-guard", "P81-created-ancestor-attribute"],
+    "attribute_qualified": ["P11-attribute-qualified", "P24-dependent-attribute-cascade", "P64-attribute-dependency-fanout", "P65-attribute-multi-qualifier", "P84-qualifier-cleared"],
+    "moved": ["P03-repeat-change-dedupe", "P18-multi-event-combine"],
+    "member_changed": ["P13-negative-member-change", "P18-multi-event-combine", "P82-primary-list-add-member", "P83-primary-list-remove-member"],
+    "modified": ["P18-multi-event-combine", "P23-changed-since-between"],
+    "combine": ["P18-multi-event-combine", "P21-cross-db-same-window", "P85-combine-qualifier-merge"],
+    "session_range": ["P23-changed-since-between", "P24-dependent-attribute-cascade", "P51-session-range-noop", "P52-session-range-delete-only", "P53-session-range-insert-only"],
+    "qualifier_replay": ["P25-qualifier-map-replay"]
+  }
+}
