@@ -30,6 +30,7 @@ GROUP_TITLES = {
     "H": "失败与自愈",
     "I": "性能预算",
     "J": "服务面契约",
+    "U": "原地宏对（run-owned 对象，E3D 真机）",
 }
 STATUS_LABEL = {"has": "有", "partial": "部分", "todo": "补", "corpus": "语料"}
 
@@ -46,6 +47,10 @@ def render_tests(tests: list[str]) -> str:
     return "<br>".join(f"`{t}`" for t in tests) if tests else "—"
 
 
+def render_change_types(codes: list[str]) -> str:
+    return " ".join(codes) if codes else "—"
+
+
 def render(registry: dict) -> str:
     groups: "OrderedDict[str, list[dict]]" = OrderedDict()
     for case in registry["cases"]:
@@ -59,21 +64,26 @@ def render(registry: dict) -> str:
     for group in sorted(groups):
         lines.append(f"## {group} · {GROUP_TITLES.get(group, '')}".rstrip(" ·"))
         lines.append("")
-        lines.append("| ID | 层 | 案例 | 判据 | 状态 | 承载 | 关联 |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| ID | 层 | 案例 | 判据 | 变更类型 | 状态 | 承载 | 资产 | 关联 |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for case in groups[group]:
             status = STATUS_LABEL.get(case["status"], case["status"])
             if case.get("stage"):
                 status = f"{status}（{case['stage']}）"
             links = " ".join(case.get("issues", []) + case.get("adrs", []))
             lines.append(
-                "| {id} | {layer} | {title} | {oracle} | {status} | {tests} | {links} |".format(
+                (
+                    "| {id} | {layer} | {title} | {oracle} | {change_types} | {status} "
+                    "| {tests} | {assets} | {links} |"
+                ).format(
                     id=case["id"],
                     layer=case["layer"],
                     title=cell(case["title"]),
                     oracle=" ".join(case["oracle"]),
+                    change_types=render_change_types(case.get("change_types", [])),
                     status=status,
                     tests=cell(render_tests(case.get("tests", []))),
+                    assets=cell(render_tests(case.get("assets", []))),
                     links=cell(links) or "—",
                 )
             )

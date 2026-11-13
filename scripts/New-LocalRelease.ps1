@@ -16,6 +16,9 @@
           schema\e3d210|e3d31\         e3d_version 选择的 attlib / *vir.dat（未配置默认 e3d210）
           DbOption.toml                不带本机路径的出厂配置
           .first-run-pending           首跑哨兵，向导「完成」时删除
+          tools\gen_ams.exe            RVM 比对页：生成我们的 RVM
+          tools\rvm_compare.exe        RVM 比对页：和 E3D 导出的 RVM 对拍
+          scripts\e3d\                 run_ams_c_entrymacro.bat、launch_detached.ps1（des.exe -tty）
           Start-AMS.ps1 / .cmd         通过 -Workspace / AMS_WORKSPACE 指向外部运行环境
           Start-Surreal.ps1            用包根 bin\surreal.exe 起一台本地 rocksdb 库
           Rollback.ps1
@@ -575,6 +578,59 @@ if ((Get-Sha256Compat $SurrealExe) -ne
     throw "surreal.exe 复制后校验失败：$packagedSurrealExe"
 }
 Write-Step "SurrealDB 二进制已就绪：$packagedSurrealExe / $surrealVersion"
+
+# RVM 比对页要的两只工具和 E3D 启动脚本。SkipBuild 从源包 tools\ 拷，拷不到只警告；
+# 正常构建则编 e3d-model 的 gen_ams / rvm_compare（它不在 gen-model 的 workspace 里）。
+$toolStage = Join-Path $stage 'tools'
+New-Item -ItemType Directory -Force $toolStage | Out-Null
+$e3dScriptStage = Join-Path $stage 'scripts\e3d'
+New-Item -ItemType Directory -Force $e3dScriptStage | Out-Null
+foreach ($scriptName in 'run_ams_c_entrymacro.bat', 'launch_detached.ps1') {
+    $scriptSource = Join-Path $RepoRoot "scripts\e3d\$scriptName"
+    if (-not (Test-Path -LiteralPath $scriptSource -PathType Leaf)) {
+        throw "缺 E3D 启动脚本：$scriptSource"
+    }
+    Copy-Item -LiteralPath $scriptSource -Destination (Join-Path $e3dScriptStage $scriptName) -Force
+}
+function Copy-RvmTool([string]$FileName, [string]$BuiltPath) {
+    $dest = Join-Path $toolStage $FileName
+    if (-not (Test-Path -LiteralPath $BuiltPath -PathType Leaf)) { return $false }
+    Copy-Item -LiteralPath $BuiltPath -Destination $dest -Force
+    return $true
+}
+if ($SkipBuild) {
+    foreach ($fileName in 'gen_ams.exe', 'rvm_compare.exe') {
+        $fromPackage = Join-Path $SourcePackage "tools\$fileName"
+        if (Copy-RvmTool $fileName $fromPackage) {
+            Write-Step "沿用源包工具：$fromPackage"
+        } else {
+            Write-Warn2 "源包没有 tools\$fileName，这次离线包的 RVM 比对页找不到它"
+        }
+    }
+} else {
+    $e3dModelManifest = Join-Path (Split-Path -Parent $RepoRoot) 'vendor\e3d-model\Cargo.toml'
+    if (-not (Test-Path -LiteralPath $e3dModelManifest -PathType Leaf)) {
+        throw "找不到 e3d-model：$e3dModelManifest"
+    }
+    Write-Step "构建 gen_ams / rvm_compare（$e3dModelManifest）"
+    Push-Location (Split-Path -Parent $e3dModelManifest)
+    try {
+        if ($BackendTargetDir) { $env:CARGO_TARGET_DIR = $BackendTargetDir }
+        cargo build --release --bin gen_ams --bin rvm_compare --manifest-path $e3dModelManifest
+        if ($LASTEXITCODE) { throw "gen_ams / rvm_compare 构建失败（exit $LASTEXITCODE）" }
+    } finally {
+        Pop-Location
+    }
+    $toolTarget = if ($BackendTargetDir) { $BackendTargetDir } elseif ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Split-Path -Parent $e3dModelManifest) 'target' }
+    foreach ($fileName in 'gen_ams.exe', 'rvm_compare.exe') {
+        $built = Join-Path $toolTarget "release\$fileName"
+        $fallback = Join-Path 'D:\Rust\target\release' $fileName
+        if (-not (Copy-RvmTool $fileName $built) -and -not (Copy-RvmTool $fileName $fallback)) {
+            throw "构建后找不到 $built"
+        }
+    }
+    Write-Step "RVM 比对工具已放进 tools\"
+}
 
 # VC++ 2015-2022 运行时随包（GitHub #115）：目标机可能没装新版 Redist——Win2012R2 自带的
 # MSVCP140 14.0.24215 会在模型生成阶段 0xC0000005（实测 fault offset 0x18c34）。exe 同目录

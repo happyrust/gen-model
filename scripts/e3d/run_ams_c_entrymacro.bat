@@ -7,6 +7,7 @@ rem
 rem Optional environment:
 rem   L3_E3D_PROJECTS_DIR  parent directory of the selected E3D project
 rem   L3_E3D_PROJECT       project code (default: AMS)
+rem   L3_E3D_PROJECT_NAME  project directory/evars stem (default: AvevaMarineSample)
 rem   L3_E3D_LOGIN         USER/PASSWORD (default: SYSTEM/XXXXXX)
 rem   L3_E3D_MDB           MDB name (default: /ALL)
 rem   L3_E3D_INSTALL_DIR   E3D install (default: D:\work\plant-code\old\e3d31-runtime)
@@ -47,18 +48,50 @@ exit /b 2
 if not defined L3_E3D_INSTALL_DIR set "L3_E3D_INSTALL_DIR=D:\work\plant-code\old\e3d31-runtime"
 if not defined L3_E3D_PROJECTS_DIR set "L3_E3D_PROJECTS_DIR=D:\AVEVA\Projects\E3D3.1"
 if not defined L3_E3D_PROJECT set "L3_E3D_PROJECT=AMS"
+if not defined L3_E3D_PROJECT_NAME set "L3_E3D_PROJECT_NAME=AvevaMarineSample"
 if not defined L3_E3D_LOGIN set "L3_E3D_LOGIN=SYSTEM/XXXXXX"
 if not defined L3_E3D_MDB set "L3_E3D_MDB=/ALL"
 if not defined L3_E3D_TIMEOUT_SECONDS set "L3_E3D_TIMEOUT_SECONDS=1200"
 
 set "E3DC=%L3_E3D_INSTALL_DIR%"
 set "projects_dir=%L3_E3D_PROJECTS_DIR%"
-if not "%projects_dir:~-1%"=="\" set "projects_dir=%projects_dir%\"
-if not defined L3_E3D_PROJECT_EVAR set "L3_E3D_PROJECT_EVAR=%projects_dir%AvevaMarineSample\evarsAvevaMarineSample.bat"
+rem Normalize the caller-provided parent once.  Project evars concatenate
+rem %projects_dir% directly (for example %projects_dir%AvevaMarineSample),
+rem so accepting a value with two trailing slashes can otherwise select a
+rem different path in some E3D/MDS startup components.
+:normalize_projects_dir
+if "%projects_dir:~-1%"=="\" (
+  set "projects_dir=%projects_dir:~0,-1%"
+  goto normalize_projects_dir
+)
+set "projects_dir=%projects_dir%\"
+if not defined L3_E3D_PROJECT_EVAR set "L3_E3D_PROJECT_EVAR=%projects_dir%%L3_E3D_PROJECT_NAME%\evars%L3_E3D_PROJECT_NAME%.bat"
+for %%I in ("%L3_E3D_PROJECT_EVAR%") do set "L3_E3D_PROJECT_EVAR=%%~fI"
 if exist "%L3_E3D_PROJECT_EVAR%" goto project_evar_ok
 echo E3D project evars do not exist: %L3_E3D_PROJECT_EVAR% 1>&2
 exit /b 3
 :project_evar_ok
+set "CODE000=%L3_E3D_PROJECT%000"
+set "AMS_PROJECT_DIR=%projects_dir%%L3_E3D_PROJECT_NAME%"
+rem AMS keeps the historical amscom/amssys check. Other project codes only
+rem require their <CODE>000 directory; Windows matches it case-insensitively.
+if /I "%L3_E3D_PROJECT%"=="AMS" (
+  if not exist "%AMS_PROJECT_DIR%\ams000\amscom" (
+    echo E3D AMS project is incomplete: missing %AMS_PROJECT_DIR%\ams000\amscom 1>&2
+    exit /b 5
+  )
+  if not exist "%AMS_PROJECT_DIR%\ams000\amssys" (
+    echo E3D AMS project is incomplete: missing %AMS_PROJECT_DIR%\ams000\amssys 1>&2
+    exit /b 5
+  )
+) else (
+  if not exist "%AMS_PROJECT_DIR%\%CODE000%\" (
+    echo E3D project is incomplete: missing %AMS_PROJECT_DIR%\%CODE000% 1>&2
+    exit /b 5
+  )
+)
+echo E3D project root: %AMS_PROJECT_DIR%
+echo E3D project evars: %L3_E3D_PROJECT_EVAR%
 if exist "%E3DC%\des.exe" goto des_ok
 echo E3D des.exe does not exist: %E3DC%\des.exe 1>&2
 exit /b 4
@@ -72,12 +105,37 @@ set "pmllib=%E3DC%\PMLLIB\"
 set "PMLUI=%E3DC%\PMLUI\"
 set "building_design=%E3DC%\PMLLIB\Building_Design\"
 set "common_tools=%E3DC%\PMLLIB\Common_Tools\"
-call evars.bat "%E3DC%\"
+rem Use an absolute path: NoDefaultCurrentDirectoryInExePath may disable current-directory lookup.
+call "%E3DC%\evars.bat" "%E3DC%\"
 if errorlevel 1 exit /b %ERRORLEVEL%
 rem Rebind the selected project after stock evars/custom_evars so the session and
 rem the model service always point at the same L3 work copy.
 call "%L3_E3D_PROJECT_EVAR%"
 if errorlevel 1 exit /b %ERRORLEVEL%
+if /I "%L3_E3D_PROJECT%"=="AMS" (
+  if not defined AMS000 (
+    echo E3D AMS project evars did not define AMS000: %L3_E3D_PROJECT_EVAR% 1>&2
+    exit /b 6
+  )
+  if not exist "%AMS000%\amscom" (
+    echo E3D AMS project evars resolved AMS000 to an incomplete path: %AMS000% 1>&2
+    exit /b 6
+  )
+  if not exist "%AMS000%\amssys" (
+    echo E3D AMS project evars resolved AMS000 to an incomplete path: %AMS000% 1>&2
+    exit /b 6
+  )
+) else (
+  call set "CODE_DIR=%%%CODE000%%%"
+  if not defined CODE_DIR (
+    echo E3D project evars did not define %CODE000%: %L3_E3D_PROJECT_EVAR% 1>&2
+    exit /b 6
+  )
+  if not exist "%CODE_DIR%\" (
+    echo E3D project evars resolved %CODE000% to a missing path: %CODE_DIR% 1>&2
+    exit /b 6
+  )
+)
 set AVEVA_PRODUCT=3D
 set AVEVA_DESIGN_INSTALLED_DIR=%E3DC%\
 call set_aveva_design.bat

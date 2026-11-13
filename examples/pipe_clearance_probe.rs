@@ -168,12 +168,12 @@ fn check_candidates() -> anyhow::Result<()> {
             RootReceipt,
         },
         spatial_branches::assemble,
-        spatial_tube_index::TubeIndexState,
         spatial_query::{
             Candidate, Center, CenterSource, ElementAttributes, RawSpatialQuery, Scan,
             SpatialQueryParams,
         },
         spatial_state::SpatialTreeState,
+        spatial_tube_index::TubeIndexState,
     };
     use e3d_model::elmodl::GeometryId;
     use parry3d::bounding_volume::Aabb;

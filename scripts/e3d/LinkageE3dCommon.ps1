@@ -64,11 +64,14 @@ function Get-ReplaySource($Spec, [string]$Repo, [string]$WorkDir) {
 # 宏里只写 ASCII：它由 E3D 读，不赌它的编码。
 # -QueryRef：在 Q CE 后多查一行 Q REF，让调用方能从日志回读元素 refno（按名字导出、refno 不固定的场合，
 # 如 increment_suite 的 /AIOS-SUITE-8000）；不给时宏文本与以前逐字相同。
-function New-RvmExportMacro([string]$Path, [string]$Element, [string]$RvmFile, [string]$LogFile, [string]$Note, [switch]$QueryRef) {
+function New-RvmExportMacro([string]$Path, [string]$Element, [string]$RvmFile, [string]$LogFile, [string]$Note, [switch]$QueryRef, [switch]$NoPosQuery) {
     $rvm = $RvmFile -replace '\\', '/'
     $log = $LogFile -replace '\\', '/'
     $refLine = ''
     if ($QueryRef) { $refLine = "Q REF`n" }
+    # BRAN 等无 POS 属性的元素上查 Q POS 会让 des.exe 直接段错误（0xC0000005）；调用方确认根元素无 POS 时跳过。
+    $posLine = ''
+    if (-not $NoPosQuery) { $posLine = "Q POS WRT /*`n" }
     $text = @"
 `$(
 ------------------------------------------------------------------------
@@ -86,7 +89,7 @@ Q CE
 ${refLine}Q NAME
 Q TYPE
 Q OWNE
-Q POS WRT /*
+${posLine}
 
 repre insu off
 repre obst off
@@ -122,6 +125,7 @@ function Invoke-TtyMacro {
         [string]$ProjectsDir,
         [string]$MainProject,
         [string]$InstallDir,
+        [string]$ProjectEvar = '',
         [string]$Evidence,
         [string]$LogFile,
         [string]$DoneMarker,
@@ -133,8 +137,10 @@ function Invoke-TtyMacro {
     New-Item -ItemType Directory -Force -Path $Evidence | Out-Null
     $savedInstall = $env:L3_E3D_INSTALL_DIR
     $savedProjects = $env:L3_E3D_PROJECTS_DIR
+    $savedProjectEvar = $env:L3_E3D_PROJECT_EVAR
     $env:L3_E3D_INSTALL_DIR = $InstallDir
     $env:L3_E3D_PROJECTS_DIR = $ProjectsDir
+    if ($ProjectEvar) { $env:L3_E3D_PROJECT_EVAR = $ProjectEvar }
     # l3_suite 以当前目录为仓根找 scripts/e3d/run_ams_c_entrymacro.bat（L3_E3D_DRIVER 的缺省值）
     Push-Location -LiteralPath $Repo
     try {
@@ -145,6 +151,8 @@ function Invoke-TtyMacro {
         Pop-Location
         $env:L3_E3D_INSTALL_DIR = $savedInstall
         $env:L3_E3D_PROJECTS_DIR = $savedProjects
+        if ($null -eq $savedProjectEvar) { Remove-Item Env:L3_E3D_PROJECT_EVAR -ErrorAction SilentlyContinue }
+        else { $env:L3_E3D_PROJECT_EVAR = $savedProjectEvar }
     }
     if ($code -ne 0) { throw "TTY 宏失败（exit $code）：$Macro，证据 $Evidence" }
     if (-not (Test-Path -LiteralPath $LogFile) -or -not (Select-String -LiteralPath $LogFile -SimpleMatch $DoneMarker -Quiet)) {
