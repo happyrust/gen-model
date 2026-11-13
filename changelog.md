@@ -67,6 +67,13 @@
 - **验证**：`config::…::an_explicit_projects_dir_is_compared_literally_with_the_configured_project_path`（不一致告警、同一目录的不同写法不告警、没给不比、留痕的形状）、`batch::…::a_batch_run_with_mismatched_project_dirs_leaves_a_trace_in_every_product`、`store::…::a_run_row_carries_the_project_dir_mismatch_only_when_there_is_one`、`rvm_check::…::a_projects_dir_other_than_the_configured_one_rides_the_spec_into_the_stored_run`。没有真跑一次不一致的批量。
 - **没动**：让 `--projects-dir` 真正进到根枚举（要扩 `MdbReadProvider` 与闭包缓存的键，或另加指定配置文件的参数），票面列为要维护者先定的事；`--project-name` / `--mdb` 那一族同类的不一致（票面第 8 条）。
 
+### 发布包范围生成中段 `0xC0000409` 同偏移连崩的根因查清：整机可提交内存用尽时的分配失败；崩溃笔记多记整机余量（GitHub #78）
+
+- **根因**：2026-10-16 / 10-19 发布包的八次 `0xC0000409`（两个构建各一个偏移）不是某一段生成代码的缺陷，也不是栈溢出。留着 stderr 的七轮，结尾都是 `memory allocation of N bytes failed`（N 在 1.6–3.8 MB）；每一次崩溃前后 3 分钟内，Windows 都诊断出整机「虚拟内存不足」（提交量 87.3–87.5 GB / 上限 87.6 GB）。占着内存的主要是同一台机器上并行的编译器、浏览器和 IDE 代理进程：后端自己最多 5.8 GB，只在一次崩溃时排第一，有两次崩的是几乎空闲的进程；同一时段数据库服务以同样的方式退出。「每次同一个偏移」是分配失败这一种 abort 在一个构建里的固定位置，不指向出事时在跑的代码。证据、演示与「下次再崩怎么查」在 `docs/analysis/2026-11-12-issue78-crash-root-cause.md`。
+- **改**：`process_diagnostics` 的崩溃笔记多三格 `sys_commit_free_mb` / `sys_commit_limit_mb` / `sys_phys_free_mb`（整机还能提交多少、提交上限、空闲物理内存；一次 `GlobalMemoryStatusEx`，不分配内存）。有了它，一条笔记自己分得清三种情形：整机见底而本进程不大（被别的进程牵连）、整机见底且本进程占得最多（自己的占用）、整机还宽裕（一次离谱的申请）。笔记写满 640 字节时照样收行，截断不落在一个汉字中间——原先写满了没有换行，下一条会接在后面。`SIGABRT` 那条笔记的说明改准：C 运行库的 `abort()` 除了本机 C/C++ 代码，Rust 展开途中再 panic 也走到这里。新脚本 `scripts/Get-CrashEvidence.ps1`（只读）把系统事件日志里的应用崩溃、同一时刻的「虚拟内存不足」诊断（当时整机提交量与占用最多的进程）、`crash-notes.log`、崩溃那一轮 stderr 的结尾按时间对到一起。
+- **验证**：`process_diagnostics::tests::a_crash_note_says_how_much_memory_the_machine_had_left`、`…::an_overlong_crash_note_still_ends_its_line_on_a_character_boundary` 随整套跑。`…::each_way_of_aborting_looks_the_same_from_outside` 是手动演示（真的弄死四个子进程，不随整套跑），本机跑过：两处不同的分配失败、直接 `abort()`、展开途中再 panic，退出码都是 `0xC0000409`；事件日志里前两个偏移相同，第三个是另一个偏移，第四个落在 ucrtbase.dll；崩溃笔记前两个是 `alloc_failed`、第四个是 `abort`、第三个没有。对照的 `…::a_stack_overflow_does_not_look_like_an_abort`（同样手动）：栈溢出的退出码是 `0xC00000FD`，偏移落在把栈用完的函数里，笔记是 `stack_overflow`——带上整机余量之后，这条在溢出线程剩下的那点栈上照样写得出来。脚本在本机对 60 天的事件日志跑过：22 次后端与单测程序的崩溃里 15 次与整机内存不足同时。
+- **没做**：那两个构建的二进制与符号文件已不在，当时的偏移解不到函数名和行号（解出来也只是标准库里 abort 的那条指令）。没有在正式进程上复现——那要把整机内存耗尽。分配失败时的调用栈没有进笔记；显式 `process::abort()` 仍然不留笔记。范围生成的持久断点（票面第 3 问）没有动。从 IDE / 代理的终端起的进程崩了系统不记事件、不留转储（继承来的错误模式），取证时发现，没有改。
+
 ## 2026-11-11
 
 ### 清几何不再删别的范围还挂着的共用几何行（GitHub #142，查 #76 时查出）

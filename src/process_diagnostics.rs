@@ -139,11 +139,24 @@ impl Drop for Operation {
 }
 
 // ---- Crash forensics (GitHub #78) ----
-// Windows reports every Rust abort (allocation failure, panic while aborting, explicit abort) and the CRT's
-// `abort()` as 0xC0000409 from one `__fastfail` site, so neither the exit code nor the fault offset tells them
-// apart. The hooks below run on the failing thread just before the process dies and leave one line naming the
-// thread, the generation root it was working on, the last journal stage and the process memory. They do not
-// allocate: the allocation-failure hook runs with the allocator already refusing.
+// Windows reports every abort as 0xC0000409 (`__fastfail`), so the exit code says no more than "aborted". The
+// fault offset says which kind of abort and nothing else: within one build every allocation failure dies at the
+// same instruction whatever was being allocated, an explicit `process::abort()` at another one, and the C
+// runtime's `abort()` (native C/C++ code, or a Rust panic raised while another one is unwinding) inside
+// ucrtbase.dll. None of them points at the code that was running; the test
+// `each_way_of_aborting_looks_the_same_from_outside` below shows all four, and
+// `a_stack_overflow_does_not_look_like_an_abort` the death that does have an exit code of its own (0xC00000FD).
+//
+// The hooks below run on the failing thread just before the process dies and leave one line naming the thread, the
+// generation root it was working on, the last journal stage and the process memory. They do not allocate: the
+// allocation-failure hook runs with the allocator already refusing. An explicit `process::abort()` reaches no hook
+// and leaves no line.
+//
+// The line also carries how much commit the whole machine had left. Every 0xC0000409 of a release build that could
+// be traced back (2026-10-16 / 10-19, see docs/analysis/2026-11-12-issue78-crash-root-cause.md) was an allocation of
+// a megabyte or two failing while Windows itself was reporting the machine out of virtual memory, with other
+// programs holding most of it. `commit_mb` against `sys_commit_free_mb` tells that case (the process is a
+// bystander) from a process that ate the memory itself.
 
 static LAST_STAGE: Mutex<([u8; 160], usize)> = Mutex::new(([0; 160], 0));
 static CRASH_NOTES: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
@@ -194,9 +207,27 @@ impl Default for NoteLine {
         }
     }
 }
+impl NoteLine {
+    /// Close the line. `write_str` keeps this one byte free, so an overlong note still ends where it should
+    /// instead of running into the next one.
+    fn end(&mut self) {
+        if self.len < self.buf.len() {
+            self.buf[self.len] = b'\n';
+            self.len += 1;
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
 impl std::fmt::Write for NoteLine {
     fn write_str(&mut self, text: &str) -> std::fmt::Result {
-        let take = text.len().min(self.buf.len() - self.len);
+        // What does not fit is dropped; the cut falls on a character boundary.
+        let mut take = text.len().min(self.buf.len().saturating_sub(self.len + 1));
+        while !text.is_char_boundary(take) {
+            take -= 1;
+        }
         self.buf[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
         self.len += take;
         Ok(())
@@ -227,31 +258,60 @@ fn process_memory() -> (usize, usize) {
     (0, 0)
 }
 
-fn crash_note(kind: &str, extra: std::fmt::Arguments<'_>) {
+/// `(commit limit, commit still available, physical memory still available)` of the whole machine, in bytes;
+/// zeros where the platform query is not wired. One call into a struct on the stack, so it is safe with the
+/// allocator refusing.
+fn system_memory() -> (u64, u64, u64) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+            return (
+                status.ullTotalPageFile,
+                status.ullAvailPageFile,
+                status.ullAvailPhys,
+            );
+        }
+    }
+    (0, 0, 0)
+}
+
+/// One crash note into a caller-owned buffer (the stack-overflow path has no room for a second copy).
+fn render_crash_note(line: &mut NoteLine, kind: &str, extra: std::fmt::Arguments<'_>) {
     use std::fmt::Write as _;
-    let mut line = NoteLine::default();
     let (word0, word1) = CURRENT_ROOT.try_with(|root| root.get()).unwrap_or((0, 0));
     let (working_set, commit) = process_memory();
+    let (sys_commit_limit, sys_commit_free, sys_phys_free) = system_memory();
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis());
     let _ = write!(
         line,
-        "[crash] unix_ms={unix_ms} kind={kind} pid={} build={} thread={} root={word0}/{word1} working_set_mb={} commit_mb={} ",
+        "[crash] unix_ms={unix_ms} kind={kind} pid={} build={} thread={} root={word0}/{word1} working_set_mb={} commit_mb={} sys_commit_free_mb={} sys_commit_limit_mb={} sys_phys_free_mb={} ",
         std::process::id(),
         crate::build_info::BUILD_ID,
         std::thread::current().name().unwrap_or("?"),
         working_set >> 20,
-        commit >> 20
+        commit >> 20,
+        sys_commit_free >> 20,
+        sys_commit_limit >> 20,
+        sys_phys_free >> 20
     );
     if let Ok(last) = LAST_STAGE.try_lock() {
         let _ = write!(line, "last_stage=\"{}\" ", utf8_prefix(&last.0[..last.1]));
     }
     let _ = line.write_fmt(extra);
-    let _ = line.write_str("\n");
-    let _ = std::io::stderr().write_all(&line.buf[..line.len]);
+    line.end();
+}
+
+fn crash_note(kind: &str, extra: std::fmt::Arguments<'_>) {
+    let mut line = NoteLine::default();
+    render_crash_note(&mut line, kind, extra);
+    let _ = std::io::stderr().write_all(line.bytes());
     if let Some(mut file) = CRASH_NOTES.get() {
-        let _ = file.write_all(&line.buf[..line.len]);
+        let _ = file.write_all(line.bytes());
     }
 }
 
@@ -302,7 +362,9 @@ unsafe extern "C" {
 extern "C" fn native_abort_note(_signum: i32) {
     crash_note(
         "abort",
-        format_args!("SIGABRT from native code (C/C++ abort, e.g. manifold or rocksdb)"),
+        format_args!(
+            "SIGABRT: C runtime abort() (native C/C++ code such as manifold or rocksdb, or a Rust panic raised while another was unwinding)"
+        ),
     );
 }
 
@@ -385,5 +447,270 @@ mod tests {
         assert_eq!(console_label("increment.detected"), "发现库变化");
         assert_eq!(console_label("increment.poll.failed"), "增量检测失败");
         assert_eq!(console_label("custom"), "custom");
+    }
+
+    /// GitHub #78：发布包那几次「同偏移连续崩」，事后查实每一次都是整机可提交内存用尽时一两兆的分配失败。
+    /// 笔记里要有整机还剩多少，才分得清进程是被牵连的，还是自己把内存吃光的。
+    #[test]
+    fn a_crash_note_says_how_much_memory_the_machine_had_left() {
+        let mut line = NoteLine::default();
+        render_crash_note(
+            &mut line,
+            "alloc_failed",
+            format_args!("memory allocation of {} bytes failed", 1_671_856),
+        );
+        let text = std::str::from_utf8(line.bytes()).unwrap();
+        assert!(text.starts_with("[crash] unix_ms="), "{text}");
+        assert!(
+            text.ends_with("memory allocation of 1671856 bytes failed\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches('\n').count(), 1, "{text}");
+        let field = |name: &str| -> u64 {
+            text.split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("{name} missing in {text}"))
+        };
+        // 进程自己的两个数还在，整机的三个数是新加的。
+        field("working_set_mb=");
+        field("commit_mb=");
+        let free = field("sys_commit_free_mb=");
+        let limit = field("sys_commit_limit_mb=");
+        let physical = field("sys_phys_free_mb=");
+        if cfg!(windows) {
+            assert!(limit > 0 && free > 0 && physical > 0, "{text}");
+            assert!(free <= limit, "{text}");
+        }
+    }
+
+    /// 写满了也要收行：否则下一条笔记会接在这一条后面；截断不落在一个汉字中间。
+    #[test]
+    fn an_overlong_crash_note_still_ends_its_line_on_a_character_boundary() {
+        use std::fmt::Write as _;
+        let mut line = NoteLine::default();
+        let _ = line.write_str("a");
+        for _ in 0..400 {
+            let _ = line.write_str("根");
+        }
+        line.end();
+        let text = std::str::from_utf8(line.bytes()).expect("the cut falls between characters");
+        assert!(text.ends_with("根\n"));
+        assert_eq!(text.matches('\n').count(), 1);
+        assert!(line.len < line.buf.len());
+        // 收过行之后再写、再收，写到头为止，不越界。
+        for _ in 0..4 {
+            let _ = line.write_str("tail");
+            line.end();
+        }
+        assert_eq!(line.len, line.buf.len());
+    }
+
+    /// 起子进程用的环境变量：值是要它怎么死。
+    #[cfg(windows)]
+    const DEATH_DEMO: &str = "AIOS_DEATH_DEMO";
+    /// 两处分配要的大小：远超任何机器的提交上限，系统一口回绝，不真的占内存。
+    #[cfg(windows)]
+    const DEMO_VEC_BYTES: usize = 1 << 46;
+    #[cfg(windows)]
+    const DEMO_RAW_BYTES: usize = 3 << 44;
+
+    /// 手动演示（GitHub #78）：进程在 Windows 上自己 abort——分配失败、直接 `abort()`、展开途中再 panic——
+    /// 从外面看退出码都是 `0xC0000409`，光凭它分不出是哪一种。分得出的是两样：崩溃笔记（分配失败一条
+    /// `alloc_failed`，展开途中再 panic 经 C 运行库的 `abort()` 一条 `abort`，直接 `abort()` 没有），和系统事件
+    /// 日志里的出错偏移（两处不同的分配失败同一个偏移，直接 `abort()` 另一个，C 运行库的落在 ucrtbase.dll 里）。
+    /// 每种方式真的弄死一个子进程，所以不随整套跑：
+    /// `cargo test --lib -- --ignored --exact process_diagnostics::tests::each_way_of_aborting_looks_the_same_from_outside --nocapture`
+    /// 在普通控制台里跑，事件日志里各留一条应用崩溃（`scripts/Get-CrashEvidence.ps1 -Days 1 -Process '^aios_database-'`
+    /// 看偏移）；从 IDE / 代理的终端里跑什么都不留——那里起的进程继承了「崩了不上报」的错误模式，后端要是
+    /// 这么起的，崩了事件日志里同样没有，只有崩溃笔记和 stderr。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "手动演示：真的弄死四个子进程"]
+    fn each_way_of_aborting_looks_the_same_from_outside() {
+        for way in ["alloc-vec", "alloc-raw", "abort", "panic-while-unwinding"] {
+            let death = die_in_a_child(way);
+            assert_eq!(
+                death.exit_code,
+                Some(0xC000_0409),
+                "{way}\n{}",
+                death.stderr
+            );
+            match way {
+                "alloc-vec" | "alloc-raw" => {
+                    let bytes = if way == "alloc-vec" {
+                        DEMO_VEC_BYTES
+                    } else {
+                        DEMO_RAW_BYTES
+                    };
+                    death.assert_one_note(way, "alloc_failed");
+                    let failed = format!("memory allocation of {bytes} bytes failed\n");
+                    assert!(death.notes.ends_with(&failed), "{way}\n{}", death.notes);
+                }
+                // 展开途中再 panic，由 C++ 运行库 terminate 到 C 运行库的 `abort()`，走 SIGABRT。
+                "panic-while-unwinding" => death.assert_one_note(way, "abort"),
+                // `process::abort()` 是一条 `__fastfail`，不过任何进程内的处理函数。
+                _ => assert!(death.notes.is_empty(), "{way}\n{}", death.notes),
+            }
+            // 第一次 panic 由 panic 钩子记进了进程日志；别的死法进程日志里什么都没有。
+            assert_eq!(
+                death.panic_lines > 0,
+                way == "panic-while-unwinding",
+                "{way}\n{}",
+                death.stderr
+            );
+        }
+    }
+
+    /// 对照（GitHub #78 起初怀疑过栈溢出）：栈溢出从外面看不是 abort——退出码是它自己的 `0xC00000FD`，崩溃笔记是
+    /// `stack_overflow`。这条笔记是在溢出的那个线程剩下的一点栈上写的，演示也顺带看着它写得出来。跑法同上，换个测试名。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "手动演示：真的弄死一个子进程"]
+    fn a_stack_overflow_does_not_look_like_an_abort() {
+        let way = "stack-overflow";
+        let death = die_in_a_child(way);
+        assert_eq!(death.exit_code, Some(0xC000_00FD), "{}", death.stderr);
+        death.assert_one_note(way, "stack_overflow");
+        assert!(
+            death
+                .notes
+                .ends_with("first-chance exception code=0xC00000FD\n"),
+            "{}",
+            death.notes
+        );
+        assert_eq!(death.panic_lines, 0, "{}", death.stderr);
+    }
+
+    /// 一个子进程按指定的方式死掉之后，从外面看得到的东西。
+    #[cfg(windows)]
+    struct Death {
+        exit_code: Option<u32>,
+        stderr: String,
+        /// `logs/crash-notes.log` 的全文。
+        notes: String,
+        /// 进程日志里 panic 钩子记下的行数。
+        panic_lines: usize,
+    }
+
+    #[cfg(windows)]
+    impl Death {
+        /// 恰好一条笔记：收了行，是 `kind` 这一类，带整机内存余量，stderr 里也有一份。
+        fn assert_one_note(&self, way: &str, kind: &str) {
+            let notes = &self.notes;
+            assert_eq!(notes.lines().count(), 1, "{way}\n{notes}");
+            assert!(notes.ends_with('\n'), "{way}\n{notes}");
+            assert!(notes.contains(&format!(" kind={kind} ")), "{way}\n{notes}");
+            assert!(notes.contains(" sys_commit_free_mb="), "{way}\n{notes}");
+            assert!(
+                self.stderr.contains(notes.trim_end()),
+                "{way}\n{}",
+                self.stderr
+            );
+        }
+    }
+
+    /// 把本测试程序再起一份，让它按 `way` 把自己弄死（`die_the_way_the_parent_asks`），收回它留下的东西。
+    #[cfg(windows)]
+    fn die_in_a_child(way: &str) -> Death {
+        let dir = tempfile::tempdir().unwrap();
+        let stderr_path = dir.path().join("stderr.txt");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "process_diagnostics::tests::die_the_way_the_parent_asks",
+                "--nocapture",
+            ])
+            .env(DEATH_DEMO, way)
+            .current_dir(dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .unwrap();
+        // 机器上要是配了崩溃弹框，子进程会停在那儿等人点：两分钟不退就杀掉，不让演示挂住。
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed().as_secs() > 120 {
+                let _ = child.kill();
+                panic!("{way}: the child did not exit within two minutes");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let death = Death {
+            exit_code: status.code().map(|code| code as u32),
+            stderr: String::from_utf8_lossy(&std::fs::read(&stderr_path).unwrap()).into_owned(),
+            notes: std::fs::read_to_string(dir.path().join("logs/crash-notes.log"))
+                .unwrap_or_default(),
+            panic_lines: std::fs::read_to_string(dir.path().join("logs/process-events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains(r#""stage":"panic""#))
+                .count(),
+        };
+        eprintln!(
+            "{way}: exit={:X?} seconds={:.1} crash_notes={} panic_lines={}",
+            death.exit_code,
+            started.elapsed().as_secs_f32(),
+            death.notes.lines().count(),
+            death.panic_lines
+        );
+        for line in death.notes.lines() {
+            eprintln!("    {line}");
+        }
+        death
+    }
+
+    /// 上面两条演示起的子进程：按环境变量指定的方式把自己弄死；没有那个变量就什么都不做。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "只由上面两条手动演示当子进程起"]
+    fn die_the_way_the_parent_asks() {
+        let Ok(way) = std::env::var(DEATH_DEMO) else {
+            return;
+        };
+        install_panic_hook();
+        install_crash_handlers();
+        match way.as_str() {
+            "alloc-vec" => drop(std::hint::black_box(Vec::<u8>::with_capacity(
+                DEMO_VEC_BYTES,
+            ))),
+            "alloc-raw" => unsafe {
+                let layout = std::alloc::Layout::from_size_align(DEMO_RAW_BYTES, 8).unwrap();
+                let block = std::alloc::alloc(layout);
+                if block.is_null() {
+                    std::alloc::handle_alloc_error(layout);
+                }
+                std::alloc::dealloc(block, layout);
+            },
+            "abort" => std::process::abort(),
+            "stack-overflow" => {
+                // 每一层都留一块真的用到的局部数组，递归压不平，栈一定用完。
+                fn dig(depth: u64) -> u64 {
+                    let pad = std::hint::black_box([depth; 64]);
+                    if depth == u64::MAX {
+                        0
+                    } else {
+                        dig(depth + 1).wrapping_add(pad[63])
+                    }
+                }
+                std::hint::black_box(dig(0));
+            }
+            "panic-while-unwinding" => {
+                struct PanicsWhenDropped;
+                impl Drop for PanicsWhenDropped {
+                    fn drop(&mut self) {
+                        panic!("second panic, while unwinding from the first");
+                    }
+                }
+                let _guard = PanicsWhenDropped;
+                panic!("first panic");
+            }
+            other => panic!("unknown {DEATH_DEMO}={other}"),
+        }
+        unreachable!("{way} should have ended the process");
     }
 }
