@@ -146,7 +146,7 @@ pub mod reason {
     /// 基准成员只有中心线（E3D 画线、我们不画），不进判据，只记账。
     pub const CENTRELINE_ONLY: &str = "centreline_only";
     /// [`CENTRELINE_ONLY`] 那一类的说明：差异行与构件行写同一句。
-    pub const CENTRELINE_ONLY_TEXT: &str = "E3D 只画了中心线、没画实体，不进判据（我们不画线）";
+    pub const CENTRELINE_ONLY_TEXT: &str = "E3D 画了线、我们没有同名的线组，不进判据";
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]

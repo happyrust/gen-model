@@ -477,6 +477,7 @@ pub fn gen_ledger_summary(report_json: &Path) -> Option<Value> {
         "skipped",
         "failed",
         "catalogue_chain_broken",
+        "catalogue_unresolved",
         "negatives_skipped",
         "joint_cuts_explained",
     ] {

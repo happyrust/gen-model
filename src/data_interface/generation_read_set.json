@@ -66,6 +66,8 @@
 "ITLE",
 "JFRE",
 "JLIN",
+"JLNE",
+"JLNS",
 "JOIE",
 "JOIS",
 "JUSL",
@@ -298,6 +300,7 @@
 "DIST",
 "IPAR",
 "IPARAM",
+"LOHE",
 "NAMN",
 "ODES",
 "ODESP",
@@ -308,7 +311,6 @@
 "RPRO",
 "SINF",
 "SUM",
-"TABITEM",
 "TANF",
 "TLEN"
 ]
@@ -376,6 +378,8 @@
 "ITLE",
 "JFRE",
 "JLIN",
+"JLNE",
+"JLNS",
 "JOIE",
 "JOIS",
 "JUSL",

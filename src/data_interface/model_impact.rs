@@ -2821,7 +2821,11 @@ mod tests {
         // 2026-11-11：e3d-model `fix/pjoi-drawn-43`（PJOI 画不画照 Core3D 交给目录图元的显示过滤，e3d-model #43）
         // 去掉 11-06 那道 `RREF` 门（`category::referenced_by_host_section` 整只删掉），生成器不再读 `RREF`（203）。
         // `RREF` 不在字典里，上面那一列不变。
-        assert_eq!(generation_read_set().len(), 203, "读取集合条数漂移");
+        // 2026-11-12：e3d-model `fix/gensec-beam-42`（`GJTORG` 的梁是 GENSEC 那一支，e3d-model #42）起 datum 读连接梁
+        // GENSEC 的 `JLNS` / `JLNE`（起端 / 末端的连接线，关节原点落到那条线上）（205）；这两个都不在上面那一列里，
+        // 那一列的断言照旧过。同一批并入的 e3d-io `ATTRIB LOHE`（e3d-model #50）与 `TABITEM` → `TABITE` 的订正
+        // 不改这个并集的条数。
+        assert_eq!(generation_read_set().len(), 205, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
