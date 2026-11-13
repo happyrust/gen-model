@@ -2818,7 +2818,10 @@ mod tests {
         // `COMPRE` 是字典 DCHC=0，上面那一列从 18 个变成 19 个。
         // 2026-11-11：e3d-model `fix/slyk-ptpos-of-cref`（目录 P 点 `PTPOS` 里取连接支管头 / 尾的那一种，
         // e3d-model #39）起 catalogue_point 读 P 点的位置表达式 `PTCPOS`（204）；字典 DCHC=4，上面那一列不变。
-        assert_eq!(generation_read_set().len(), 204, "读取集合条数漂移");
+        // 2026-11-11：e3d-model `fix/pjoi-drawn-43`（PJOI 画不画照 Core3D 交给目录图元的显示过滤，e3d-model #43）
+        // 去掉 11-06 那道 `RREF` 门（`category::referenced_by_host_section` 整只删掉），生成器不再读 `RREF`（203）。
+        // `RREF` 不在字典里，上面那一列不变。
+        assert_eq!(generation_read_set().len(), 203, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
