@@ -1497,7 +1497,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | **`cause`** | string | `data_batch` / `model_only` / `whole_library_retry_limit`（见上） |
 | `unblock` | array | 这种原因的三条解除路 |
 | `end_sesno` | number | 失败那批的窗口右端；不前进 = 没人往这个库里存新会话 |
-| `reason` | string | 最近一次失败的一句话（`warnings.last()` 口径，`batch_failure_log.rs:16-24`；全文看 §4.8.2 的 `batch_failure` 记录）。到上限停的库，这一句写明「整库模型重排已连续失败 N 次，到上限」、最近一次败在哪、怎么解除 |
+| `reason` | string | 最近一次失败的一句话。只跑模型的任务（`cause` 是 `model_only` / `whole_library_retry_limit` 的那两种）里有没生成成的根时，是它们的摘要：「N 根没生成成：根（noun）：错误原话；…；另有 K 根」——点名前三根，错误原话压成一行、截 200 字，与上一根同一句的写「同上」（2026-11-12 起，GitHub #154；此前根还在按退避重试的失败，这里是告警里不相干的最后一条或兜底话）。其余——带数据窗口的任务、没有失败的根——是 `warnings.last()`（`batch_failure_log.rs:16-24`）。全文看 §4.8.2 的 `batch_failure` 记录。到上限停的库，这一句写明「整库模型重排已连续失败 N 次，到上限」、最近一次败在哪（就是上面那句摘要）、怎么解除 |
 | `first_at` / `last_at` | string | 本轮连败首次 / 最近一次失败时刻；右端前进时 `first_at` 重置（`:465-492`；时间格式未核） |
 
 ```json
@@ -1561,7 +1561,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `save_time` | string \| null | 窗口右端那次保存在 E3D 里的时刻（回答「这批对应我哪次 SAVEWORK」） |
 | `file_path` | string \| null | |
 | `died_at` | string \| null | 死在哪一步（`TaskEntry::current_stage`） |
-| `reason` / `reason_from` | string | 权威失败原因及其来源 |
+| `reason` / `reason_from` | string | 权威失败原因及其来源。来源依次是：`result.batch.message`（数据批次自己的原话）；`result.units（没生成成的根）`（没有数据批次的消息、单元清单里有失败的根时：根摘要，形状同 §4.8.1 的 `reason`；2026-11-12 起，GitHub #154）；`warnings.last()（…）`；三样都没有才是 `无` |
 | `warnings` | array | **不截断** |
 | `streak` | number \| null | 同右端连败第几次；数据窗口已收口、失败只在模型侧时为 `null` |
 | `max_attempts` | number | `DATA_BATCH_PARK_AFTER`（= 1） |
@@ -1585,7 +1585,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `cause` | string | 为什么停的：`data_batch` / `model_only` / `whole_library_retry_limit`（§4.8.1） |
 | `end_sesno` | number | 它不前进，就说明没人往这个库里存新会话 |
 | `file_path` | string \| null | |
-| `last_reason` | string | `warnings.last()` 口径；权威那句在同 dbnum 的 `batch_failure` 记录里 |
+| `last_reason` | string | 失败账上的那一句（同 §4.8.1 的 `reason`：只跑模型的任务有失败的根时是根摘要，其余是 `warnings.last()`）；权威那句在同 dbnum 的 `batch_failure` 记录里 |
 | `first_at` / `last_at` | string | |
 | `auto_retry` | bool | 恒 `false` |
 | `unblock` | array | 三条解法，按 `cause` 给。`data_batch`：「文件长出新会话（右端 sesno 前进）」/「POST /api/v1/update/execute（显式重试，立即清零）」/「重启进程（账本在进程内）」；`model_only` 与 `whole_library_retry_limit`：人工那一条是「修好原因后 POST /api/v1/update/execute（显式重试：清账、清失败根的退避，模型补算立即重排，从头再数；不成仍会停下。要把全库从头重算一遍用 POST /api/v1/dbnums/{dbnum}/model/rebuild）」（2026-11-12 起；此前的记录里这一条是整库重排） |
