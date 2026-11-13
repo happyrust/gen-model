@@ -99,6 +99,7 @@ pub async fn preflight(
         password: req.password,
         e3d_mdb: req.e3d_mdb,
         refno: String::new(),
+        baseline_dir: None,
     })
     .map_err(ApiError::bad_request)?;
     let try_login = req.try_login;
@@ -124,6 +125,7 @@ pub async fn start_run(
         password: req.password,
         e3d_mdb: req.e3d_mdb.clone(),
         refno: req.refno.clone(),
+        baseline_dir: None,
     })
     .map_err(ApiError::bad_request)?;
     if rvm_check_busy(state.tasks) {

@@ -22,6 +22,7 @@ use crate::e3d_query::{
     E3dDriver, E3dDriverSpec, E3dProcessEvidence, running_e3d_sessions, validate_refno,
 };
 
+pub mod baseline;
 pub mod batch;
 mod config;
 pub mod element;
@@ -29,7 +30,9 @@ pub mod element;
 mod export_macro;
 pub mod report;
 pub mod store;
+pub mod volume;
 
+pub use baseline::{BaselineProvenance, BaselineVersionCheck, BaselineVersionMismatch};
 pub use config::{
     ProjectDefaults, ProjectDirMismatch, ResolvedTools, project_defaults, resolve_tools,
 };
@@ -66,6 +69,8 @@ pub struct RunInput {
     pub password: String,
     pub e3d_mdb: String,
     pub refno: String,
+    /// 基准目录（`--baseline-dir`）：给了就看它有没有 E3D 版本标记（GitHub #126）。
+    pub baseline_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -84,6 +89,9 @@ pub struct RunSpec {
     /// 显式给的项目父目录与配置的 `project_path` 不是同一个目录时的那一笔（GitHub #145）；一致或没给为 `None`。
     /// [`prepare`] 里算好，批量与页面各自拿它告警、留痕。
     pub project_dir_mismatch: Option<ProjectDirMismatch>,
+    /// 基准目录（`--baseline-dir`）：给了就看它有没有 E3D 版本标记，没给就看产物目录根
+    /// （`--stage compare` 复用旧产物时，上一轮导出留下的标记在那里）。GitHub #126。
+    pub baseline_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -143,6 +151,7 @@ pub(crate) fn prepare_connection(input: &RunInput, need_e3d: bool) -> Result<Run
         password: String::new(),
         e3d_mdb: input.e3d_mdb.clone(),
         refno: String::new(),
+        baseline_dir: input.baseline_dir.clone(),
     };
     if local.install_dir.trim().is_empty() {
         // 不碰 E3D 的阶段用不到安装目录；填一个绝对路径只为过校验。
@@ -205,6 +214,7 @@ fn prepare(input: &RunInput, require_refno: bool) -> Result<RunSpec, String> {
         refno,
         tools: resolve_tools(),
         project_dir_mismatch,
+        baseline_dir: input.baseline_dir.clone(),
     })
 }
 
@@ -1132,13 +1142,71 @@ pub(crate) fn compare_rvms_with_elements(
     spec: &RunSpec,
     node: &ResolvedNode,
 ) -> Result<(Judgement, Vec<element::ElementCheck>), String> {
-    let report = compare_rvm_report(task_dir, scope)?;
+    let mut report = compare_rvm_report(task_dir, scope)?;
     let sources = element::read_sources(task_dir).unwrap_or_else(|message| {
         eprintln!("警告：={}：{message}（生成侧的构件记成没解出 refno）", spec.refno);
         Vec::new()
     });
+    // 配对成功、包围盒也通过的构件再比一次体积（GitHub #127）：构件摆错但包围盒不变时，
+    // 只比 AABB 会判成一致（48 根竖杆端部切口摆反 180° 就是这样漏掉的）。
+    // 只在这一条路上做：`compare_rvms_scoped` 的调用方要的是纯 AABB 口径。
+    apply_volume_check(task_dir, &mut report);
+    // 基准与项目数据的 E3D 版本不一致时说出来（GitHub #126）：版本错配的差异会冒充模型差异。
+    // 这里只出声、不改判档——版本对不对是人的判断，工具不该替人判模型。
+    note_baseline_version(task_dir, spec);
     let checks = element_checks_of(&report, &sources, spec, node);
     Ok((judge_report_full(&report), checks))
+}
+
+/// 基准版本校验（GitHub #126）：不一致就打一条警告，没有标记也打一条提示。
+///
+/// 只出声、不动判档：版本错配时该不该采信这一批结论，是人的决定。工具能做的是**不让人在不知情时采信**。
+fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
+    let project_version = baseline::project_e3d_version();
+    let check = baseline::check(task_dir, spec.baseline_dir.as_deref(), &project_version);
+    if let Some(mismatch) = check.mismatch() {
+        eprintln!(
+            "警告：={}：基准是 {} 的导出，项目数据是 {}——这一次的差异里可能混进版本错配的假差异（标记：{}）",
+            spec.refno,
+            mismatch.baseline_version,
+            mismatch.project_version,
+            mismatch.marker
+        );
+        return;
+    }
+    if let Some(note) = check.unmarked_note() {
+        eprintln!("提示：={}：{note}", spec.refno);
+    }
+}
+
+/// 对配对成功且判档不是 `off` 的构件再比体积（GitHub #127）。超门限的改成 `off`，
+/// 并在 `only_*` 之外单列一条——判色读的是 `verdict`，改它才进得了判据。
+///
+/// 任一侧算不出体积时**不动判档**：那是「比不了」，不是「不一致」。
+fn apply_volume_check(task_dir: &Path, report: &mut e3d_model::rvm_compare::CompareReport) {
+    let baseline_path = task_dir.join("e3d.rvm");
+    let generated_path = task_dir.join("ours").join("generated.rvm");
+    let (Ok(baseline), Ok(generated)) = (
+        volume::read_volumes(&baseline_path),
+        volume::read_volumes(&generated_path),
+    ) else {
+        // 读不动就整条跳过：体积是加严判据，读不到不该让整次核对失败。
+        return;
+    };
+    let mut flipped = 0usize;
+    for pair in report.pairs.iter_mut() {
+        if pair.verdict == "off" || pair.aabb_source == "lines" {
+            continue;
+        }
+        let verdict = volume::compare_pair(&baseline, &generated, &pair.refno, &pair.noun);
+        if verdict.differs {
+            pair.verdict = "off";
+            flipped += 1;
+        }
+    }
+    if flipped > 0 {
+        eprintln!("体积复核：{flipped} 件包围盒通过但体积超门限，判档改成 off");
+    }
 }
 
 /// 按文件比对两份 RVM，落 `compare.json`，交回整份报告。
@@ -1386,6 +1454,7 @@ mod tests {
             password: "secret-value".to_string(),
             e3d_mdb: "ALL".to_string(),
             refno: "24381/145018".to_string(),
+            baseline_dir: None,
         }
     }
 

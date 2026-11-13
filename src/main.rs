@@ -468,6 +468,7 @@ fn run_rvm_check(args: RvmCheckArgs) -> anyhow::Result<()> {
         password,
         e3d_mdb: args.mdb.clone().unwrap_or_default(),
         refno: String::new(),
+        baseline_dir: args.baseline_dir.clone(),
     };
     let out = args.out.clone().unwrap_or_else(|| {
         PathBuf::from("output")
