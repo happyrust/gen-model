@@ -1205,6 +1205,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 的库。不读 stderr 就能看见「是哪几间库欠着整库房间重算」；`null` = 这一面不作数
         // （开关关着 / 非落盘 / 常驻没装上），别拿它当零欠账。
         "alignment_debt": crate::data_interface::room_recompute::alignment_debt_health().await,
+        // 欠账清扫器（issue #153）最近一次 tick：`{in_flight, last_tick_at, last_swept, skipped}`。
+        // 清扫器把「没新会话就不更新」的那批库按 tick 补掉，这格是它的验收读数面——
+        // 看 `last_swept[].scope` 能区分「整库补的」与「有任务在飞、交给它自己」。
+        "debt_sweep": crate::data_interface::room_recompute::debt_sweep_health(),
     });
     let read_through = match within_health_budget(state.element_attributes.health()).await {
         Some(health) => health,

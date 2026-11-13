@@ -555,6 +555,10 @@ async fn serve_with_ready(
     ));
     // 周边管道查询的直管段索引：就绪后在后台读一遍库，之后定时重读（`spatial_tube_index`）。
     crate::fast_model::spatial_tube_index::ensure_started();
+    // 房间欠账清扫器（issue #153）：就绪后按 tick 补「没新会话就一直不更新」的那批库。
+    // 放在这里而不是 `main`：它要用常驻参照（`frozen_room_calculator`）与任务锁，
+    // 两者都在 `AppState` 就绪之后才有意义。非落盘形态下它自己会跳（`owed_dbnums_in_scope` 回 `None`）。
+    crate::data_interface::room_recompute::ensure_debt_sweep_started();
 
     // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
     // 而它到底从哪儿来，只有这里和响应头 `x-ops-panel-source` 讲得出。
