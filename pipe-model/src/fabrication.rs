@@ -27,7 +27,10 @@ pub const DATACON_BLOCKING_RANGES: &[(u32, u32)] = &[
 
 /// 单个错误码是否挡制造（pipeValidDataCheck 谓词翻译）。
 pub fn datacon_blocking(code: u32) -> bool {
-    code != 57 && DATACON_BLOCKING_RANGES.iter().any(|(lo, hi)| code >= *lo && code <= *hi)
+    code != 57
+        && DATACON_BLOCKING_RANGES
+            .iter()
+            .any(|(lo, hi)| code >= *lo && code <= *hi)
 }
 
 /// 管段重生成比较档（PSPOOLLIST，§18.14）。
@@ -75,9 +78,17 @@ pub enum SpoolBreakMode {
 #[derive(Debug)]
 enum BreakBoundary {
     /// 同支管成员对：`first` 的 leave 侧 ↔ `second` 的 arrive 侧。
-    Adjacent { first: RefU64, second: RefU64, branch: RefU64 },
+    Adjacent {
+        first: RefU64,
+        second: RefU64,
+        branch: RefU64,
+    },
     /// 同支管但隔管片：标志只打 part1 面向 part2 的一侧（§18.16 existTube 分支）。
-    WithTube { part: RefU64, leave_side: bool, branch: RefU64 },
+    WithTube {
+        part: RefU64,
+        leave_side: bool,
+        branch: RefU64,
+    },
     /// 跨支管 TEE/OLET cref 连接：tee.csfbreak + 对方 BRAN.tsfbreak。
     TeeCref { tee: RefU64, other_branch: RefU64 },
 }
@@ -128,12 +139,16 @@ fn break_boundary<C: PipeCatalog>(
             members.iter().position(|r| *r == part2),
         );
         match (i1, i2) {
-            (Some(a), Some(b)) if a + 1 == b => {
-                Ok(BreakBoundary::Adjacent { first: part1, second: part2, branch })
-            }
-            (Some(a), Some(b)) if b + 1 == a => {
-                Ok(BreakBoundary::Adjacent { first: part2, second: part1, branch })
-            }
+            (Some(a), Some(b)) if a + 1 == b => Ok(BreakBoundary::Adjacent {
+                first: part1,
+                second: part2,
+                branch,
+            }),
+            (Some(a), Some(b)) if b + 1 == a => Ok(BreakBoundary::Adjacent {
+                first: part2,
+                second: part1,
+                branch,
+            }),
             (Some(a), Some(b)) => Ok(BreakBoundary::WithTube {
                 part: part1,
                 leave_side: a < b,
@@ -147,7 +162,10 @@ fn break_boundary<C: PipeCatalog>(
         // 跨支管：part1 必须是 TEE/OLET（cref 侧断点），标志成对打到对方 BRAN。
         let n1 = cat.noun_of(part1).unwrap_or_default();
         if matches!(n1.as_str(), "TEE" | "OLET") && own2.is_some() {
-            Ok(BreakBoundary::TeeCref { tee: part1, other_branch: own2.unwrap() })
+            Ok(BreakBoundary::TeeCref {
+                tee: part1,
+                other_branch: own2.unwrap(),
+            })
         } else {
             Err(PipeError::Blocking {
                 message: format!("跨支管断点要求首件为 TEE/OLET（cref 侧），实得 {n1}"),
@@ -215,14 +233,20 @@ fn field_weld_at<C: PipeCatalog>(cat: &C, boundary: &BreakBoundary) -> Option<Re
             && cat.attr(r, "SHOP") != Some(NamedAttrValue::BoolType(true))
     };
     match boundary {
-        BreakBoundary::Adjacent { first, second, branch } => {
+        BreakBoundary::Adjacent {
+            first,
+            second,
+            branch,
+        } => {
             let members = cat.members_of(*branch);
             let (i1, i2) = (
                 members.iter().position(|r| r == first),
                 members.iter().position(|r| r == second),
             );
             match (i1, i2) {
-                (Some(a), Some(b)) if b > a => members[a + 1..b].iter().copied().find(|r| shop_false(*r)),
+                (Some(a), Some(b)) if b > a => {
+                    members[a + 1..b].iter().copied().find(|r| shop_false(*r))
+                }
                 _ => None,
             }
         }
@@ -350,8 +374,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
                         text: format!("{noun} 缺 SPREF（规格元件未选定）"),
                     });
                 }
-                if self.catalog.attr(m, "APOS").is_none()
-                    && self.catalog.attr(m, "LPOS").is_none()
+                if self.catalog.attr(m, "APOS").is_none() && self.catalog.attr(m, "LPOS").is_none()
                 {
                     messages.push(FabMessage {
                         status: FabStatus::ValidWithWarning,
@@ -393,60 +416,83 @@ impl<C: PipeCatalog> PipeModelService<C> {
             BreakBoundary::Adjacent { first, second, .. } => {
                 vec![(*first, "LSFBR"), (*second, "ASFBR")]
             }
-            BreakBoundary::WithTube { part, leave_side, .. } => {
+            BreakBoundary::WithTube {
+                part, leave_side, ..
+            } => {
                 vec![(*part, if *leave_side { "LSFBR" } else { "ASFBR" })]
             }
             BreakBoundary::TeeCref { tee, other_branch } => {
                 vec![(*tee, "CSFBR"), (*other_branch, "TSFBR")]
             }
         };
-        let flags_set = flags.iter().all(|(e, k)| {
-            self.catalog.attr(*e, k) == Some(NamedAttrValue::BoolType(true))
-        });
+        let flags_set = flags
+            .iter()
+            .all(|(e, k)| self.catalog.attr(*e, k) == Some(NamedAttrValue::BoolType(true)));
         let weld = field_weld_at(&self.catalog, &boundary);
 
         match mode {
             SpoolBreakMode::NoWeld => {
                 if flags_set {
                     // 已设同形断点 → 确认后清除（E3D exists→OK to remove）。
-                    batch.requires_confirm.push(crate::batch::Confirm { prompt: "OK to remove spool limit?".into(), on_yes: Vec::new() });
-                    batch.ops.extend(flags.iter().map(|(e, k)| MutationOp::SetAttrs {
-                        element: *e,
-                        attrs: NamedAttrMap {
-                            map: [((*k).to_string(), NamedAttrValue::BoolType(false))]
-                                .into_iter()
-                                .collect(),
-                        },
+                    batch.requires_confirm.push(crate::batch::Confirm {
+                        prompt: "OK to remove spool limit?".into(),
+                        on_yes: Vec::new(),
+                    });
+                    batch.ops.extend(flags.iter().map(|(e, k)| {
+                        MutationOp::SetAttrs {
+                            element: *e,
+                            attrs: NamedAttrMap {
+                                map: [((*k).to_string(), NamedAttrValue::BoolType(false))]
+                                    .into_iter()
+                                    .collect(),
+                            },
+                        }
                     }));
                 } else {
                     if let Some(w) = weld {
                         // Story 53 替换语义：现场焊 → confirm → 删焊再打标志。
-                        batch.requires_confirm.push(crate::batch::Confirm { prompt: "Spool limit exists as a weld. Replace with 'No weld'?".into(), on_yes: Vec::new() });
+                        batch.requires_confirm.push(crate::batch::Confirm {
+                            prompt: "Spool limit exists as a weld. Replace with 'No weld'?".into(),
+                            on_yes: Vec::new(),
+                        });
                         batch.ops.push(MutationOp::Delete { element: w });
                     }
                     batch.ops.extend(flag_attrs(
-                        &flags.iter().map(|(e, k)| (*e, *k, true)).collect::<Vec<_>>(),
+                        &flags
+                            .iter()
+                            .map(|(e, k)| (*e, *k, true))
+                            .collect::<Vec<_>>(),
                     ));
                 }
             }
             SpoolBreakMode::Weld => {
                 if weld.is_some() {
-                    batch.requires_confirm.push(crate::batch::Confirm { prompt: "OK to remove spool-limit weld?".into(), on_yes: Vec::new() });
-                    batch.ops.push(MutationOp::Delete { element: weld.unwrap() });
+                    batch.requires_confirm.push(crate::batch::Confirm {
+                        prompt: "OK to remove spool-limit weld?".into(),
+                        on_yes: Vec::new(),
+                    });
+                    batch.ops.push(MutationOp::Delete {
+                        element: weld.unwrap(),
+                    });
                     return Ok(batch);
                 }
                 if flags_set {
-                    batch.requires_confirm.push(crate::batch::Confirm { prompt: "Spool limit exists as 'No weld'. Replace with a weld?".into(), on_yes: Vec::new() });
+                    batch.requires_confirm.push(crate::batch::Confirm {
+                        prompt: "Spool limit exists as 'No weld'. Replace with a weld?".into(),
+                        on_yes: Vec::new(),
+                    });
                     batch.ops.extend(flag_attrs(
-                        &flags.iter().map(|(e, k)| (*e, *k, false)).collect::<Vec<_>>(),
+                        &flags
+                            .iter()
+                            .map(|(e, k)| (*e, *k, false))
+                            .collect::<Vec<_>>(),
                     ));
                 }
                 // 邻接 SHOP 件侧不打现场断点（candidate[3]=!prev.shop 语义：
                 // SHOP 件边界自带 shop 焊界，断点等价已存在）。
                 if let BreakBoundary::Adjacent { first, second, .. } = &boundary {
                     for side in [first, second] {
-                        if self.catalog.attr(*side, "SHOP")
-                            == Some(NamedAttrValue::BoolType(true))
+                        if self.catalog.attr(*side, "SHOP") == Some(NamedAttrValue::BoolType(true))
                         {
                             batch.warnings.push(PipeWarning {
                                 message: "邻接 SHOP 元件侧：断点已由 shop 焊界等价存在".into(),
@@ -461,10 +507,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 let weld_ref = self.catalog.alloc_refno(boundary.branch());
                 let mut attrs = NamedAttrMap::default();
                 attrs.insert("SHOP".into(), NamedAttrValue::BoolType(false));
-                attrs.insert(
-                    "DESP".into(),
-                    NamedAttrValue::F32VecType(vec![0.001]),
-                );
+                attrs.insert("DESP".into(), NamedAttrValue::F32VecType(vec![0.001]));
                 match self.resolve_weldgap() {
                     Some(spco) => {
                         attrs.insert("SPREF".into(), NamedAttrValue::RefU64Type(spco));
@@ -519,12 +562,17 @@ impl<C: PipeCatalog> PipeModelService<C> {
     ) -> Result<MutationBatch, PipeError> {
         let mut batch = MutationBatch::named("remove_spool_break");
         let boundary = break_boundary(&self.catalog, part1, part2)?;
-        batch.requires_confirm.push(crate::batch::Confirm { prompt: "OK to remove spool limit?".into(), on_yes: Vec::new() });
+        batch.requires_confirm.push(crate::batch::Confirm {
+            prompt: "OK to remove spool limit?".into(),
+            on_yes: Vec::new(),
+        });
         let flags: Vec<(RefU64, &'static str)> = match &boundary {
             BreakBoundary::Adjacent { first, second, .. } => {
                 vec![(*first, "LSFBR"), (*second, "ASFBR")]
             }
-            BreakBoundary::WithTube { part, leave_side, .. } => {
+            BreakBoundary::WithTube {
+                part, leave_side, ..
+            } => {
                 vec![(*part, if *leave_side { "LSFBR" } else { "ASFBR" })]
             }
             BreakBoundary::TeeCref { tee, other_branch } => {
@@ -532,7 +580,10 @@ impl<C: PipeCatalog> PipeModelService<C> {
             }
         };
         batch.ops.extend(flag_attrs(
-            &flags.iter().map(|(e, k)| (*e, *k, false)).collect::<Vec<_>>(),
+            &flags
+                .iter()
+                .map(|(e, k)| (*e, *k, false))
+                .collect::<Vec<_>>(),
         ));
         if let Some(w) = field_weld_at(&self.catalog, &boundary) {
             batch.ops.push(MutationOp::Delete { element: w });
@@ -614,13 +665,18 @@ impl<C: PipeCatalog> PipeModelService<C> {
             let cut_len = spec.tube_od / (90.0_f64 - spec.angle_deg).to_radians().tan();
             if cut_len >= spec.tube_len {
                 return Err(PipeError::Blocking {
-                    message: "Cannot make slanted end. The angle exceeds original tube length".into(),
+                    message: "Cannot make slanted end. The angle exceeds original tube length"
+                        .into(),
                 });
             }
         }
         // SPREF 名址解析 + LIMBOSPEC 门禁。
         let mut batch = MutationBatch::named("create_pipe_end");
-        let spec_name = if spec.is_slanted { "/SLANTEDPIPEEND" } else { "/THREADPIPEEND" };
+        let spec_name = if spec.is_slanted {
+            "/SLANTEDPIPEEND"
+        } else {
+            "/THREADPIPEEND"
+        };
         if let Some(spref) = self.catalog.refno_by_name(spec_name) {
             let mut limbo = false;
             let mut cur = spref;
@@ -641,7 +697,9 @@ impl<C: PipeCatalog> PipeModelService<C> {
             }
             if limbo {
                 return Err(PipeError::Blocking {
-                    message: "Function unavailable. Reinstate the specification from the Limbo spec.".into(),
+                    message:
+                        "Function unavailable. Reinstate the specification from the Limbo spec."
+                            .into(),
                 });
             }
         } else {
@@ -671,11 +729,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
         attrs.insert("MTOC".into(), NamedAttrValue::BoolType(false));
         attrs.insert(
             "DESP".into(),
-            NamedAttrValue::F32VecType(vec![
-                spec.angle_deg as f32,
-                spec.tube_od as f32,
-                flow,
-            ]),
+            NamedAttrValue::F32VecType(vec![spec.angle_deg as f32, spec.tube_od as f32, flow]),
         );
         if let Some(l) = lstu {
             attrs.insert("LSTU".into(), l);
@@ -704,7 +758,11 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 .position(|r| *r == tube)
                 .map(|i| i + 1)
         };
-        batch.ops.push(MutationOp::Include { element: ftub, into: branch, order: pos });
+        batch.ops.push(MutationOp::Include {
+            element: ftub,
+            into: branch,
+            order: pos,
+        });
         batch.warnings.push(PipeWarning {
             message: format!(
                 "FTUB 内核面待接：pos/ori 推导（LINE(aPos,lPos)→ORIENTATION）、\
@@ -740,7 +798,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     #[test]
     fn datacon_ranges() {
@@ -766,7 +824,11 @@ mod tests {
     #[test]
     fn generate_spools_per_branch_and_tubi() {
         let mut cat = rig();
-        for (r, n) in [(RefU64(21), "TUBI"), (RefU64(22), "ELBO"), (RefU64(23), "TUBI")] {
+        for (r, n) in [
+            (RefU64(21), "TUBI"),
+            (RefU64(22), "ELBO"),
+            (RefU64(23), "TUBI"),
+        ] {
             cat.nouns.insert(r, n.into());
             cat.members.entry(RefU64(11)).or_default().push(r);
         }
@@ -784,12 +846,19 @@ mod tests {
             .collect();
         assert_eq!(spools.len(), 1);
         assert_eq!(pieces.len(), 2, "每 TUBI 一管片");
-        let MutationOp::Create { refno: spool, .. } = spools[0] else { panic!() };
+        let MutationOp::Create { refno: spool, .. } = spools[0] else {
+            panic!()
+        };
         assert!(pieces.iter().all(|p| matches!(p,
             MutationOp::Create { under, .. } if under == spool)));
         // 弯管机默认 + PSTYP。
-        let MutationOp::Create { attrs, .. } = pieces[0] else { panic!() };
-        assert_eq!(attrs.get("BENDMC"), Some(&NamedAttrValue::RefU64Type(RefU64(90))));
+        let MutationOp::Create { attrs, .. } = pieces[0] else {
+            panic!()
+        };
+        assert_eq!(
+            attrs.get("BENDMC"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(90)))
+        );
     }
 
     #[test]
@@ -805,8 +874,11 @@ mod tests {
         let svc = PipeModelService::new(cat);
         let (status, messages) = svc.validate_fabrication(&ctx(), RefU64(10)).unwrap();
         assert_eq!(status, FabStatus::Failed);
-        assert!(messages.iter().any(|m| m.element == Some(RefU64(22))
-            && m.status == FabStatus::Failed));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.element == Some(RefU64(22)) && m.status == FabStatus::Failed)
+        );
     }
 
     #[test]
@@ -827,14 +899,19 @@ mod tests {
     /// 支管（11）：ELBO(21) - TUBI(22,itlength=50) - ELBO(23)。
     fn break_rig() -> MockCatalog {
         let mut cat = rig();
-        for (r, n) in [(RefU64(21), "ELBO"), (RefU64(22), "TUBI"), (RefU64(23), "ELBO")] {
+        for (r, n) in [
+            (RefU64(21), "ELBO"),
+            (RefU64(22), "TUBI"),
+            (RefU64(23), "ELBO"),
+        ] {
             cat.nouns.insert(r, n.into());
             cat.owners.insert(r, RefU64(11));
             cat.members.entry(RefU64(11)).or_default().push(r);
         }
-        cat.attrs.insert(RefU64(22), std::collections::BTreeMap::from([
-            ("ITLENGTH".into(), NamedAttrValue::F32Type(50.0)),
-        ]));
+        cat.attrs.insert(
+            RefU64(22),
+            std::collections::BTreeMap::from([("ITLENGTH".into(), NamedAttrValue::F32Type(50.0))]),
+        );
         cat
     }
 
@@ -856,20 +933,36 @@ mod tests {
                 MutationOp::SetAttrs { element, attrs } => Some((
                     *element,
                     attrs.map.keys().next()?.as_str(),
-                    matches!(attrs.map.values().next(), Some(NamedAttrValue::BoolType(true))),
+                    matches!(
+                        attrs.map.values().next(),
+                        Some(NamedAttrValue::BoolType(true))
+                    ),
                 )),
                 _ => None,
             })
             .collect();
         // 邻接对：first.lsfbreak + second.asfbreak。
-        assert_eq!(pairs, vec![(RefU64(21), "LSFBR", true), (RefU64(22), "ASFBR", true)]);
+        assert_eq!(
+            pairs,
+            vec![(RefU64(21), "LSFBR", true), (RefU64(22), "ASFBR", true)]
+        );
     }
 
     #[test]
     fn no_weld_toggle_confirms_and_clears() {
         let mut cat = break_rig();
-        set_attr(&mut cat, RefU64(21), "LSFBR", NamedAttrValue::BoolType(true));
-        set_attr(&mut cat, RefU64(22), "ASFBR", NamedAttrValue::BoolType(true));
+        set_attr(
+            &mut cat,
+            RefU64(21),
+            "LSFBR",
+            NamedAttrValue::BoolType(true),
+        );
+        set_attr(
+            &mut cat,
+            RefU64(22),
+            "ASFBR",
+            NamedAttrValue::BoolType(true),
+        );
         let svc = PipeModelService::new(cat);
         let batch = svc
             .set_spool_break(&ctx(), RefU64(21), RefU64(22), SpoolBreakMode::NoWeld)
@@ -886,12 +979,29 @@ mod tests {
         let batch = svc
             .set_spool_break(&ctx(), RefU64(21), RefU64(22), SpoolBreakMode::Weld)
             .unwrap();
-        let weld = batch.ops.iter().find(|op| matches!(op,
-            MutationOp::Create { noun, .. } if noun == "WELD")).expect("WELD Create");
-        let MutationOp::Create { refno, attrs, under, .. } = weld else { panic!() };
+        let weld = batch
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op,
+            MutationOp::Create { noun, .. } if noun == "WELD")
+            })
+            .expect("WELD Create");
+        let MutationOp::Create {
+            refno,
+            attrs,
+            under,
+            ..
+        } = weld
+        else {
+            panic!()
+        };
         assert_eq!(*under, RefU64(11));
         assert_eq!(attrs.get("SHOP"), Some(&NamedAttrValue::BoolType(false)));
-        assert_eq!(attrs.get("DESP"), Some(&NamedAttrValue::F32VecType(vec![0.001])));
+        assert_eq!(
+            attrs.get("DESP"),
+            Some(&NamedAttrValue::F32VecType(vec![0.001]))
+        );
         // 序位：插在 first(21) 之后。
         assert!(batch.ops.iter().any(|op| matches!(op,
             MutationOp::Include { element, into, order }
@@ -902,13 +1012,28 @@ mod tests {
     #[test]
     fn weld_break_replaces_flags() {
         let mut cat = break_rig();
-        set_attr(&mut cat, RefU64(21), "LSFBR", NamedAttrValue::BoolType(true));
-        set_attr(&mut cat, RefU64(22), "ASFBR", NamedAttrValue::BoolType(true));
+        set_attr(
+            &mut cat,
+            RefU64(21),
+            "LSFBR",
+            NamedAttrValue::BoolType(true),
+        );
+        set_attr(
+            &mut cat,
+            RefU64(22),
+            "ASFBR",
+            NamedAttrValue::BoolType(true),
+        );
         let svc = PipeModelService::new(cat);
         let batch = svc
             .set_spool_break(&ctx(), RefU64(21), RefU64(22), SpoolBreakMode::Weld)
             .unwrap();
-        assert!(batch.requires_confirm.iter().any(|c| c.prompt.contains("Replace")));
+        assert!(
+            batch
+                .requires_confirm
+                .iter()
+                .any(|c| c.prompt.contains("Replace"))
+        );
         assert!(batch.ops.iter().any(|op| matches!(op,
             MutationOp::SetAttrs { attrs, .. }
                 if matches!(attrs.map.values().next(), Some(NamedAttrValue::BoolType(false))))));
@@ -940,10 +1065,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(keys, vec![
-            (RefU64(30), "CSFBR".to_string()),
-            (RefU64(13), "TSFBR".to_string()),
-        ]);
+        assert_eq!(
+            keys,
+            vec![
+                (RefU64(30), "CSFBR".to_string()),
+                (RefU64(13), "TSFBR".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -967,10 +1095,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(writes, vec![
-            (RefU64(21), "LEXCES", 5.0),
-            (RefU64(23), "AEXCES", 8.0),
-        ]);
+        assert_eq!(
+            writes,
+            vec![(RefU64(21), "LEXCES", 5.0), (RefU64(23), "AEXCES", 8.0),]
+        );
     }
 
     #[test]
@@ -991,9 +1119,13 @@ mod tests {
     fn pipe_end_desps_and_head_order() {
         let mut cat = break_rig();
         cat.names.insert(RefU64(500), "/THREADPIPEEND".into());
-        cat.attrs.insert(RefU64(11), std::collections::BTreeMap::from([
-            ("HSTU".into(), NamedAttrValue::RefU64Type(RefU64(700))),
-        ]));
+        cat.attrs.insert(
+            RefU64(11),
+            std::collections::BTreeMap::from([(
+                "HSTU".into(),
+                NamedAttrValue::RefU64Type(RefU64(700)),
+            )]),
+        );
         let svc = PipeModelService::new(cat);
         let spec = PipeEndSpec {
             is_head: true,
@@ -1004,15 +1136,34 @@ mod tests {
             tube_len: 200.0,
             note: None,
         };
-        let batch = svc.create_pipe_end(&ctx(), RefU64(11), RefU64(22), &spec).unwrap();
-        let ftub = batch.ops.iter().find(|op| matches!(op,
-            MutationOp::Create { noun, .. } if noun == "FTUB")).expect("FTUB");
-        let MutationOp::Create { refno, attrs, .. } = ftub else { panic!() };
-        assert_eq!(attrs.get("DESP"), Some(&NamedAttrValue::F32VecType(vec![0.0, 114.3, 1.0])));
+        let batch = svc
+            .create_pipe_end(&ctx(), RefU64(11), RefU64(22), &spec)
+            .unwrap();
+        let ftub = batch
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op,
+            MutationOp::Create { noun, .. } if noun == "FTUB")
+            })
+            .expect("FTUB");
+        let MutationOp::Create { refno, attrs, .. } = ftub else {
+            panic!()
+        };
+        assert_eq!(
+            attrs.get("DESP"),
+            Some(&NamedAttrValue::F32VecType(vec![0.0, 114.3, 1.0]))
+        );
         assert_eq!(attrs.get("SHOP"), Some(&NamedAttrValue::BoolType(true)));
         assert_eq!(attrs.get("MTOC"), Some(&NamedAttrValue::BoolType(false)));
-        assert_eq!(attrs.get("LSTU"), Some(&NamedAttrValue::RefU64Type(RefU64(700))));
-        assert_eq!(attrs.get("SPREF"), Some(&NamedAttrValue::RefU64Type(RefU64(500))));
+        assert_eq!(
+            attrs.get("LSTU"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(700)))
+        );
+        assert_eq!(
+            attrs.get("SPREF"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(500)))
+        );
         assert!(batch.ops.iter().any(|op| matches!(op,
             MutationOp::Include { element, order, .. }
                 if element == refno && *order == Some(0))));
@@ -1023,11 +1174,25 @@ mod tests {
         let svc = PipeModelService::new(break_rig());
         // OD/tan(90-30) = 114.3/tan(60°) ≈ 66 < 200 → 通过；角度 89.9 → cutLen 巨大 → 拒。
         let bad = PipeEndSpec {
-            is_head: false, is_slanted: true, angle_deg: 89.99,
-            thread_type: None, tube_od: 114.3, tube_len: 200.0, note: None,
+            is_head: false,
+            is_slanted: true,
+            angle_deg: 89.99,
+            thread_type: None,
+            tube_od: 114.3,
+            tube_len: 200.0,
+            note: None,
         };
-        assert!(svc.create_pipe_end(&ctx(), RefU64(11), RefU64(22), &bad).is_err());
-        let ok = PipeEndSpec { angle_deg: 30.0, ..bad };
-        assert!(svc.create_pipe_end(&ctx(), RefU64(11), RefU64(22), &ok).is_ok());
+        assert!(
+            svc.create_pipe_end(&ctx(), RefU64(11), RefU64(22), &bad)
+                .is_err()
+        );
+        let ok = PipeEndSpec {
+            angle_deg: 30.0,
+            ..bad
+        };
+        assert!(
+            svc.create_pipe_end(&ctx(), RefU64(11), RefU64(22), &ok)
+                .is_ok()
+        );
     }
 }

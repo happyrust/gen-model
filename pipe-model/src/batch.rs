@@ -25,12 +25,23 @@ pub enum MutationOp {
     Delete { element: RefU64 },
     /// 改名；`cascade=true` 时级联重命名所有名字前缀匹配的子元素
     /// （pipecreation changeName 语义）。
-    Rename { element: RefU64, name: String, cascade: bool },
+    Rename {
+        element: RefU64,
+        name: String,
+        cascade: bool,
+    },
     /// 属性行写入（等价 ATTRIB 直赋 / `$!<attr> <value>`）。
-    SetAttrs { element: RefU64, attrs: NamedAttrMap },
+    SetAttrs {
+        element: RefU64,
+        attrs: NamedAttrMap,
+    },
     /// 成员关系调整：`INCLUDE` 进 `into` 的成员表；`order` 为目标序位
     /// （分段/合并的成员迁移走这里，`None` = 追加）。
-    Include { element: RefU64, into: RefU64, order: Option<usize> },
+    Include {
+        element: RefU64,
+        into: RefU64,
+        order: Option<usize>,
+    },
     /// 从属主成员表移除。
     Remove { element: RefU64 },
 }
@@ -129,6 +140,8 @@ mod tests {
     fn undo_group_empty_is_named_boundary() {
         let group = MutationBatch::undo_group("noop", vec![]);
         assert_eq!(group.name, "noop");
-        assert!(group.ops.is_empty() && group.requires_confirm.is_empty() && group.warnings.is_empty());
+        assert!(
+            group.ops.is_empty() && group.requires_confirm.is_empty() && group.warnings.is_empty()
+        );
     }
 }

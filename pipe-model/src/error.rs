@@ -10,17 +10,28 @@ use std::fmt;
 /// - `Raised`：可冒泡到调用方批处理（PML `error <expr>`）
 #[derive(Debug)]
 pub enum PipeError {
-    NeedsConfirmation { message: String },
-    RequiresChoice { message: String },
-    Blocking { message: String },
+    NeedsConfirmation {
+        message: String,
+    },
+    RequiresChoice {
+        message: String,
+    },
+    Blocking {
+        message: String,
+    },
     /// `code` 对应 E3D 错误码段（如 (42,94) 几何兜底触发码、(61,721) 路由失败）。
-    Raised { message: String, code: Option<(u32, u32)> },
+    Raised {
+        message: String,
+        code: Option<(u32, u32)>,
+    },
 }
 
 impl PipeError {
     /// 骨架阶段尚未实现的统一出口。
     pub fn unimplemented(op: &str) -> Self {
-        Self::Blocking { message: format!("{op}: not implemented (Phase A 骨架)") }
+        Self::Blocking {
+            message: format!("{op}: not implemented (Phase A 骨架)"),
+        }
     }
 }
 

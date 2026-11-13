@@ -263,9 +263,7 @@ pub fn render_batch(batch: &MutationBatch, cat: &dyn PipeCatalog) -> RenderedBat
                     }
                     None => {
                         st.warnings.push(PipeWarning {
-                            message: format!(
-                                "Remove {element}：属主反查失败，仅发删除成员提示行"
-                            ),
+                            message: format!("Remove {element}：属主反查失败，仅发删除成员提示行"),
                             side_effect: None,
                         });
                     }
@@ -283,7 +281,7 @@ mod tests {
     use crate::batch::MutationOp;
     use crate::context::BranchEnd;
     use crate::pipeline::{EndEdit, PipeSpec};
-    use crate::testkit::{ctx, MockCatalog, MockSpec};
+    use crate::testkit::{MockCatalog, MockSpec, ctx};
     use crate::{PipeModel, PipeModelService};
 
     #[test]
@@ -414,8 +412,10 @@ mod tests {
         let EditOp::Modify(m) = &out.ops[0] else {
             panic!("应 Modify")
         };
-        assert!(m.added_explicit_attrs.contains_key("NAME")
-            || m.modified_explicit_attrs.contains_key("NAME"));
+        assert!(
+            m.added_explicit_attrs.contains_key("NAME")
+                || m.modified_explicit_attrs.contains_key("NAME")
+        );
         assert_eq!(m.current.name, "/P2");
         assert!(m.added_attrs.is_empty() && m.modified_attrs.is_empty());
     }

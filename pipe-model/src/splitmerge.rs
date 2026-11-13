@@ -29,7 +29,11 @@ pub enum SplitAt {
     /// 特征模式：以既有元件为切点（切点在元件**到侧**——切点元件本身
     /// 迁入新支管作首成员，`splitpipe.pmlfnc` 的 `newBranchMem` 含 findComp）。
     /// `insert_assembly` 时先在切点插装配；`move_to` 指定新支管去向。
-    Feature { at: RefU64, insert_assembly: bool, move_to: MoveTo },
+    Feature {
+        at: RefU64,
+        insert_assembly: bool,
+        move_to: MoveTo,
+    },
     /// 平面模式：三点定面与支管求交。几何求交属内核。
     Plane { points: [[f64; 3]; 3] },
 }
@@ -68,7 +72,12 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 message: "split_branch 目标必须 BRAN".into(),
             });
         }
-        let SplitAt::Feature { at: cut, insert_assembly, move_to } = at else {
+        let SplitAt::Feature {
+            at: cut,
+            insert_assembly,
+            move_to,
+        } = at
+        else {
             return Err(PipeError::Blocking {
                 message: "SEGMENT/PLANE 分段需几何求交内核，当前不支持（不伪造切点）".into(),
             });
@@ -89,9 +98,12 @@ impl<C: PipeCatalog> PipeModelService<C> {
             });
         }
 
-        let pipe = self.catalog.owner_of(branch).ok_or_else(|| PipeError::Blocking {
-            message: "BRAN 无属主管".into(),
-        })?;
+        let pipe = self
+            .catalog
+            .owner_of(branch)
+            .ok_or_else(|| PipeError::Blocking {
+                message: "BRAN 无属主管".into(),
+            })?;
         let pipe_name = self.catalog.name_of(pipe).unwrap_or_default();
 
         let mut batch = MutationBatch::named("split_branch");
@@ -109,13 +121,17 @@ impl<C: PipeCatalog> PipeModelService<C> {
                     }
                 }
                 let new_pipe_name =
-                    naming::split_name(&pipe_name, 1, |n| self.catalog.name_exists(n))
-                        .ok_or_else(|| PipeError::Blocking {
+                    naming::split_name(&pipe_name, 1, |n| self.catalog.name_exists(n)).ok_or_else(
+                        || PipeError::Blocking {
                             message: "派生管名耗尽".into(),
+                        },
+                    )?;
+                let pipe_owner =
+                    self.catalog
+                        .owner_of(pipe)
+                        .ok_or_else(|| PipeError::Blocking {
+                            message: "管无属主".into(),
                         })?;
-                let pipe_owner = self.catalog.owner_of(pipe).ok_or_else(|| {
-                    PipeError::Blocking { message: "管无属主".into() }
-                })?;
                 batch.ops.push(MutationOp::Create {
                     refno: new_pipe,
                     noun: "PIPE".into(),
@@ -186,11 +202,18 @@ impl<C: PipeCatalog> PipeModelService<C> {
         //    → HREF=切点元件；原支管 `CONN PT TO PH OF newBranch`
         //    → TREF=新支管。随后 `tconn $!hconn`/`hconn $!tconn` 交叉互换
         //    两侧连接型——xCON 值由 CONN 内核推导，批内显式 warning 不伪造。
-        batch.ops.push(set_attr(branch, "TREF", NamedAttrValue::RefU64Type(new_bran)));
-        batch.ops.push(set_attr(new_bran, "HREF", NamedAttrValue::RefU64Type(cut)));
+        batch.ops.push(set_attr(
+            branch,
+            "TREF",
+            NamedAttrValue::RefU64Type(new_bran),
+        ));
+        batch
+            .ops
+            .push(set_attr(new_bran, "HREF", NamedAttrValue::RefU64Type(cut)));
         batch.warnings.push(PipeWarning {
-            message: "分段互连的 HCON/TCON 交叉互换与法兰 return-ref 修正待连接内核（Story 28 尾段）"
-                .into(),
+            message:
+                "分段互连的 HCON/TCON 交叉互换与法兰 return-ref 修正待连接内核（Story 28 尾段）"
+                    .into(),
             side_effect: Some("已写 TREF→新支管、HREF→切点元件；切点 HPOS/TPOS 待几何内核".into()),
         });
         Ok(batch)
@@ -211,12 +234,18 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 });
             }
         }
-        let src_pipe = self.catalog.owner_of(source).ok_or_else(|| PipeError::Blocking {
-            message: "source 无属主管".into(),
-        })?;
-        let tgt_pipe = self.catalog.owner_of(target).ok_or_else(|| PipeError::Blocking {
-            message: "target 无属主管".into(),
-        })?;
+        let src_pipe = self
+            .catalog
+            .owner_of(source)
+            .ok_or_else(|| PipeError::Blocking {
+                message: "source 无属主管".into(),
+            })?;
+        let tgt_pipe = self
+            .catalog
+            .owner_of(target)
+            .ok_or_else(|| PipeError::Blocking {
+                message: "target 无属主管".into(),
+            })?;
 
         let mut batch = MutationBatch::named("merge_branches");
         if src_pipe != tgt_pipe {
@@ -267,7 +296,7 @@ mod tests {
     use super::*;
     use crate::context::BranchEnd;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     /// 支管挂三个元件，切点选中段。
     fn rig() -> (PipeModelService<MockCatalog>, RefU64) {
@@ -276,7 +305,11 @@ mod tests {
             .pipe(RefU64(10), "/P1", RefU64(77), 100.0)
             .branch(RefU64(11), "/P1/B1", RefU64(10), RefU64(77));
         cat.owners.insert(RefU64(10), RefU64(9));
-        for (r, n) in [(RefU64(21), "TUBI"), (RefU64(22), "ELBO"), (RefU64(23), "TUBI")] {
+        for (r, n) in [
+            (RefU64(21), "TUBI"),
+            (RefU64(22), "ELBO"),
+            (RefU64(23), "TUBI"),
+        ] {
             cat.nouns.insert(r, n.into());
             cat.owners.insert(r, RefU64(11));
             cat.members.entry(RefU64(11)).or_default().push(r);
@@ -288,7 +321,9 @@ mod tests {
             ("HBOR".into(), NamedAttrValue::F32Type(100.0)),
             ("TBOR".into(), NamedAttrValue::F32Type(100.0)),
         ]);
-        cat.attrs.get_mut(&RefU64(10)).unwrap()
+        cat.attrs
+            .get_mut(&RefU64(10))
+            .unwrap()
             .insert("ISPEC".into(), NamedAttrValue::ElementType("/INS".into()));
         (PipeModelService::new(cat), RefU64(11))
     }
@@ -298,19 +333,43 @@ mod tests {
         let (svc, bran) = rig();
         // 非直属成员
         assert!(matches!(
-            svc.split_branch(&ctx(), bran, SplitAt::Feature { at: RefU64(99), insert_assembly: false, move_to: MoveTo::NewPipe })
-                .unwrap_err(),
+            svc.split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Feature {
+                    at: RefU64(99),
+                    insert_assembly: false,
+                    move_to: MoveTo::NewPipe
+                }
+            )
+            .unwrap_err(),
             PipeError::Blocking { .. }
         ));
         // 首件（切点在元件到侧，首件切点使旧支管空——PML sequence eq 1 AND atle eq 0）
         assert!(matches!(
-            svc.split_branch(&ctx(), bran, SplitAt::Feature { at: RefU64(21), insert_assembly: false, move_to: MoveTo::NewPipe })
-                .unwrap_err(),
+            svc.split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Feature {
+                    at: RefU64(21),
+                    insert_assembly: false,
+                    move_to: MoveTo::NewPipe
+                }
+            )
+            .unwrap_err(),
             PipeError::Blocking { .. }
         ));
         // 末件：PML 函数级放行（REVISIT 缺口）——产出单成员新支管
         let last = svc
-            .split_branch(&ctx(), bran, SplitAt::Feature { at: RefU64(23), insert_assembly: false, move_to: MoveTo::NewPipe })
+            .split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Feature {
+                    at: RefU64(23),
+                    insert_assembly: false,
+                    move_to: MoveTo::NewPipe,
+                },
+            )
             .unwrap();
         let migrated: Vec<RefU64> = last
             .ops
@@ -323,8 +382,15 @@ mod tests {
         assert_eq!(migrated, vec![RefU64(23)]);
         // SEGMENT/PLANE 无内核 → Blocking 不伪造
         assert!(matches!(
-            svc.split_branch(&ctx(), bran, SplitAt::Segment { from: [0.; 3], to: [1.; 3] })
-                .unwrap_err(),
+            svc.split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Segment {
+                    from: [0.; 3],
+                    to: [1.; 3]
+                }
+            )
+            .unwrap_err(),
             PipeError::Blocking { .. }
         ));
     }
@@ -333,7 +399,15 @@ mod tests {
     fn split_feature_full_batch() {
         let (svc, bran) = rig();
         let batch = svc
-            .split_branch(&ctx(), bran, SplitAt::Feature { at: RefU64(22), insert_assembly: false, move_to: MoveTo::NewPipe })
+            .split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Feature {
+                    at: RefU64(22),
+                    insert_assembly: false,
+                    move_to: MoveTo::NewPipe,
+                },
+            )
             .unwrap();
 
         // op 序：新 PIPE Create → 新 BRAN Create → 成员 Include → 互写 REF。
@@ -343,18 +417,42 @@ mod tests {
             .filter(|o| matches!(o, MutationOp::Create { .. }))
             .collect();
         assert_eq!(creates.len(), 2);
-        let MutationOp::Create { refno: new_pipe, noun, name, attrs, .. } = creates[0] else { panic!() };
+        let MutationOp::Create {
+            refno: new_pipe,
+            noun,
+            name,
+            attrs,
+            ..
+        } = creates[0]
+        else {
+            panic!()
+        };
         assert_eq!(noun, "PIPE");
         assert_eq!(name.as_deref(), Some("/P1-Split(1)"));
-        assert_eq!(attrs.get("ISPEC"), Some(&NamedAttrValue::ElementType("/INS".into())));
-        let MutationOp::Create { refno: new_bran, noun, under, name, attrs, .. } = creates[1]
-        else { panic!() };
+        assert_eq!(
+            attrs.get("ISPEC"),
+            Some(&NamedAttrValue::ElementType("/INS".into()))
+        );
+        let MutationOp::Create {
+            refno: new_bran,
+            noun,
+            under,
+            name,
+            attrs,
+            ..
+        } = creates[1]
+        else {
+            panic!()
+        };
         assert_eq!(noun, "BRAN");
         assert_eq!(*under, *new_pipe, "新支管挂在复制管下");
         assert_eq!(name.as_deref(), Some("/P1-Split(1)/B1"));
         // 新支管拿 TAIL 侧。
         assert_eq!(attrs.get("TPOS"), Some(&NamedAttrValue::F32Type(900.0)));
-        assert_eq!(attrs.get("TCON"), Some(&NamedAttrValue::WordType("TEE".into())));
+        assert_eq!(
+            attrs.get("TCON"),
+            Some(&NamedAttrValue::WordType("TEE".into()))
+        );
 
         // 下游成员**含切点元件**（ELBO 22 起）迁入新支管，原序位。
         let includes: Vec<&MutationOp> = batch
@@ -363,20 +461,31 @@ mod tests {
             .filter(|o| matches!(o, MutationOp::Include { .. }))
             .collect();
         assert_eq!(includes.len(), 2);
-        let MutationOp::Include { element, into, order } = includes[0] else { panic!() };
+        let MutationOp::Include {
+            element,
+            into,
+            order,
+        } = includes[0]
+        else {
+            panic!()
+        };
         assert_eq!(*element, RefU64(22), "切点元件成新支管首成员");
         assert_eq!(*into, *new_bran);
         assert_eq!(*order, Some(0));
-        let MutationOp::Include { element, order, .. } = includes[1] else { panic!() };
+        let MutationOp::Include { element, order, .. } = includes[1] else {
+            panic!()
+        };
         assert_eq!(*element, RefU64(23));
         assert_eq!(*order, Some(1));
 
         // 互写：原支管 TREF→新支管（CONN PT TO PH OF），新支管 HREF→切点元件
         // （CONN PH TO FIRST MEM）。
         let set_on = |el: RefU64, attr: &str| {
-            batch.ops.iter().any(|op| matches!(op,
+            batch.ops.iter().any(|op| {
+                matches!(op,
                 MutationOp::SetAttrs { element, attrs }
-                    if *element == el && attrs.contains_key(attr)))
+                    if *element == el && attrs.contains_key(attr))
+            })
         };
         assert!(set_on(bran, "TREF"));
         assert!(batch.ops.iter().any(|op| matches!(op,
@@ -390,16 +499,29 @@ mod tests {
     fn split_same_pipe_mode() {
         let (svc, bran) = rig();
         let batch = svc
-            .split_branch(&ctx(), bran, SplitAt::Feature { at: RefU64(22), insert_assembly: false, move_to: MoveTo::SamePipe })
+            .split_branch(
+                &ctx(),
+                bran,
+                SplitAt::Feature {
+                    at: RefU64(22),
+                    insert_assembly: false,
+                    move_to: MoveTo::SamePipe,
+                },
+            )
             .unwrap();
         // moveTo=BRANCH：不建 PIPE，新支管直挂原管，名 = 管名/B<mCount+1>。
         assert!(!batch.ops.iter().any(|op| matches!(op,
             MutationOp::Create { noun, .. } if noun == "PIPE")));
-        let MutationOp::Create { noun, under, name, .. } = batch
+        let MutationOp::Create {
+            noun, under, name, ..
+        } = batch
             .ops
             .iter()
             .find(|op| matches!(op, MutationOp::Create { .. }))
-            .unwrap() else { panic!() };
+            .unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(noun, "BRAN");
         assert_eq!(*under, RefU64(10));
         assert_eq!(name.as_deref(), Some("/P1/B2"));
@@ -424,10 +546,18 @@ mod tests {
             .branch(RefU64(12), "/P1/B2", RefU64(10), RefU64(77));
         // 同管两条支管：source=B2（单成员），target=B1（两成员）。
         cat.nouns.insert(RefU64(21), "TUBI".into());
-        cat.members.entry(RefU64(11)).or_default().extend([RefU64(21)]);
+        cat.members
+            .entry(RefU64(11))
+            .or_default()
+            .extend([RefU64(21)]);
         cat.nouns.insert(RefU64(22), "ELBO".into());
-        cat.members.entry(RefU64(12)).or_default().extend([RefU64(22)]);
-        cat.attrs.get_mut(&RefU64(12)).unwrap()
+        cat.members
+            .entry(RefU64(12))
+            .or_default()
+            .extend([RefU64(22)]);
+        cat.attrs
+            .get_mut(&RefU64(12))
+            .unwrap()
             .insert("TPOS".into(), NamedAttrValue::F32Type(500.0));
         // 另挂一条支管防级联删先单独测——本用例 B2 删后 PIPE 仍有 B1，不级联。
         let svc = PipeModelService::new(cat);

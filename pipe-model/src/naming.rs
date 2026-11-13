@@ -58,7 +58,11 @@ pub fn normalise_new_name(
         return Ok(None);
     }
     if n == "*" {
-        return Ok(Some(if star_name.is_empty() { ce_name.to_string() } else { star_name.to_string() }));
+        return Ok(Some(if star_name.is_empty() {
+            ce_name.to_string()
+        } else {
+            star_name.to_string()
+        }));
     }
     if n.starts_with('~') && !n.starts_with('/') {
         n = ce_name.to_string();
@@ -83,7 +87,9 @@ mod tests {
     #[test]
     fn branch_name_first_free() {
         // B1、B2 已占 → 取 B3（E3D 从 1 起按成员数探测）。
-        let name = branch_name("/PIPE1", 5, "/", "B{i}", |n| n == "/PIPE1/B1" || n == "/PIPE1/B2");
+        let name = branch_name("/PIPE1", 5, "/", "B{i}", |n| {
+            n == "/PIPE1/B1" || n == "/PIPE1/B2"
+        });
         assert_eq!(name.as_deref(), Some("/PIPE1/B3"));
     }
 
@@ -95,10 +101,22 @@ mod tests {
 
     #[test]
     fn normalise_star_caret_tilde() {
-        assert_eq!(normalise_new_name("*", "/CE", "/PAR", "/STAR").unwrap(), Some("/STAR".into()));
-        assert_eq!(normalise_new_name("*", "/CE", "/PAR", "").unwrap(), Some("/CE".into()));
-        assert_eq!(normalise_new_name("~", "/CE", "/PAR", "").unwrap(), Some("/CE".into()));
-        assert_eq!(normalise_new_name("^", "/CE", "/PAR", "").unwrap(), Some("/PAR".into()));
+        assert_eq!(
+            normalise_new_name("*", "/CE", "/PAR", "/STAR").unwrap(),
+            Some("/STAR".into())
+        );
+        assert_eq!(
+            normalise_new_name("*", "/CE", "/PAR", "").unwrap(),
+            Some("/CE".into())
+        );
+        assert_eq!(
+            normalise_new_name("~", "/CE", "/PAR", "").unwrap(),
+            Some("/CE".into())
+        );
+        assert_eq!(
+            normalise_new_name("^", "/CE", "/PAR", "").unwrap(),
+            Some("/PAR".into())
+        );
     }
 
     #[test]
@@ -106,6 +124,9 @@ mod tests {
         assert!(normalise_new_name("/BAD$@X", "", "", "").is_err());
         assert_eq!(normalise_new_name("", "", "", "").unwrap(), None);
         assert_eq!(normalise_new_name("123", "", "", "").unwrap(), None);
-        assert_eq!(normalise_new_name("pipe 1", "", "", "").unwrap(), Some("/pipe1".into()));
+        assert_eq!(
+            normalise_new_name("pipe 1", "", "", "").unwrap(),
+            Some("/pipe1".into())
+        );
     }
 }

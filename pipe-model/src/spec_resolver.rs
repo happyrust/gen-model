@@ -4,9 +4,9 @@
 //! 查表与 SELE 遍历要碰规格库（只读），由调用方注入 [`SpecCatalog`]；
 //! 本 crate 编排回落顺序与 PBOR 槽位语义。
 
-use aios_core::RefU64;
 use crate::choice::QuestionAnswers;
 use crate::outcome::ComponentOutcome;
+use aios_core::RefU64;
 
 /// 规格库只读门面。实现方负责把 SPCO 表/SELE 树从数据面读出来。
 pub trait SpecCatalog {
@@ -64,7 +64,10 @@ pub fn resolve(
     while let Some(sele) = node {
         match cat.sele_descend(sele, &qa) {
             Some(next) if cat.is_spco(next) => {
-                return ComponentOutcome::SelectorFallback { spco: next, via: via.join(" → ") };
+                return ComponentOutcome::SelectorFallback {
+                    spco: next,
+                    via: via.join(" → "),
+                };
             }
             Some(next) => {
                 via.push(format!("SELE:{:?}", next));

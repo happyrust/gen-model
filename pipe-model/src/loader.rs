@@ -104,14 +104,23 @@ fn value_to_attr(
 ) -> (NamedAttrValue, Option<String>) {
     let raw = raw.trim();
     match cat.attr(element, name) {
-        Some(NamedAttrValue::F32Type(_)) => {
-            (raw.parse::<f32>().map(NamedAttrValue::F32Type).unwrap_or(NamedAttrValue::InvalidType), None)
-        }
-        Some(NamedAttrValue::IntegerType(_)) => {
-            (raw.parse::<i32>().map(NamedAttrValue::IntegerType).unwrap_or(NamedAttrValue::InvalidType), None)
-        }
+        Some(NamedAttrValue::F32Type(_)) => (
+            raw.parse::<f32>()
+                .map(NamedAttrValue::F32Type)
+                .unwrap_or(NamedAttrValue::InvalidType),
+            None,
+        ),
+        Some(NamedAttrValue::IntegerType(_)) => (
+            raw.parse::<i32>()
+                .map(NamedAttrValue::IntegerType)
+                .unwrap_or(NamedAttrValue::InvalidType),
+            None,
+        ),
         Some(NamedAttrValue::BoolType(_)) => {
-            let b = matches!(raw.to_ascii_uppercase().as_str(), "T" | "TRUE" | "1" | "YES");
+            let b = matches!(
+                raw.to_ascii_uppercase().as_str(),
+                "T" | "TRUE" | "1" | "YES"
+            );
             (NamedAttrValue::BoolType(b), None)
         }
         Some(NamedAttrValue::RefU64Type(_)) | None => {
@@ -170,7 +179,11 @@ impl<C: PipeCatalog> PipeModelService<C> {
             let owner = match cell(row, "OWNER").map(str::trim).filter(|s| !s.is_empty()) {
                 None => ctx.element,
                 Some(o) => {
-                    let on = if o.starts_with('/') { o.to_string() } else { format!("/{o}") };
+                    let on = if o.starts_with('/') {
+                        o.to_string()
+                    } else {
+                        format!("/{o}")
+                    };
                     match self.catalog.refno_by_name(&on) {
                         Some(r) => r,
                         None => {
@@ -280,11 +293,17 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     fn table(rows: Vec<ImportRow>) -> ImportTable {
         ImportTable {
-            headings: vec!["NAME".into(), "TYPE".into(), "OWNER".into(), "BORE".into(), "LOCK".into()],
+            headings: vec![
+                "NAME".into(),
+                "TYPE".into(),
+                "OWNER".into(),
+                "BORE".into(),
+                "LOCK".into(),
+            ],
             rows,
             create_new: true,
             update_existing: true,
@@ -294,7 +313,10 @@ mod tests {
     fn row(line: u32, cells: &[(&str, &str)]) -> ImportRow {
         ImportRow {
             line,
-            cells: cells.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            cells: cells
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
     }
 
@@ -322,32 +344,59 @@ mod tests {
         let svc = PipeModelService::new(cat);
         let mut c = ctx();
         c.element = RefU64(9); // OWNER 空 → CE
-        let t = table(vec![row(2, &[
-            ("NAME", "PIPE-X"), ("TYPE", "PIPE"), ("BORE", "100"),
-            ("LOCK", "ignored"), ("OWNER", ""),
-        ])]);
+        let t = table(vec![row(
+            2,
+            &[
+                ("NAME", "PIPE-X"),
+                ("TYPE", "PIPE"),
+                ("BORE", "100"),
+                ("LOCK", "ignored"),
+                ("OWNER", ""),
+            ],
+        )]);
         let (batch, report) = svc.import_rows(&c, &t).unwrap();
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].status, RowStatus::Success);
         // Create + BORE SetAttrs；LOCK 列被跳。
-        assert!(batch.ops.iter().any(|op| matches!(op, MutationOp::Create { noun, name, under, .. }
-            if noun == "PIPE" && name.as_deref() == Some("/PIPE-X") && *under == RefU64(9))));
-        assert!(batch.ops.iter().any(|op| matches!(op, MutationOp::SetAttrs { element, attrs }
-            if attrs.contains_key("BORE") && *element != RefU64(9))));
-        assert!(!batch.ops.iter().any(|op| matches!(op, MutationOp::SetAttrs { attrs, .. }
-            if attrs.contains_key("LOCK"))));
+        assert!(batch.ops.iter().any(
+            |op| matches!(op, MutationOp::Create { noun, name, under, .. }
+            if noun == "PIPE" && name.as_deref() == Some("/PIPE-X") && *under == RefU64(9))
+        ));
+        assert!(
+            batch
+                .ops
+                .iter()
+                .any(|op| matches!(op, MutationOp::SetAttrs { element, attrs }
+            if attrs.contains_key("BORE") && *element != RefU64(9)))
+        );
+        assert!(
+            !batch
+                .ops
+                .iter()
+                .any(|op| matches!(op, MutationOp::SetAttrs { attrs, .. }
+            if attrs.contains_key("LOCK")))
+        );
     }
 
     #[test]
     fn existing_row_updates() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         let svc = PipeModelService::new(cat);
-        let t = table(vec![row(2, &[("NAME", "/P1"), ("TYPE", "PIPE"), ("BORE", "150")])]);
+        let t = table(vec![row(
+            2,
+            &[("NAME", "/P1"), ("TYPE", "PIPE"), ("BORE", "150")],
+        )]);
         let (batch, report) = svc.import_rows(&ctx(), &t).unwrap();
         assert_eq!(report.results[0].status, RowStatus::Success);
         // EXISTS → 无 Create，直接 SetAttrs 到既有 refno。
-        assert!(!batch.ops.iter().any(|op| matches!(op, MutationOp::Create { .. })));
+        assert!(
+            !batch
+                .ops
+                .iter()
+                .any(|op| matches!(op, MutationOp::Create { .. }))
+        );
         assert!(batch.ops.iter().any(|op| matches!(op,
             MutationOp::SetAttrs { element, attrs }
                 if *element == RefU64(10)
@@ -357,7 +406,8 @@ mod tests {
     #[test]
     fn unchecked_sides_skip_rows() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         let svc = PipeModelService::new(cat);
         let mut t = table(vec![
             row(2, &[("NAME", "/NEW-P"), ("TYPE", "PIPE")]),
@@ -367,18 +417,20 @@ mod tests {
         t.update_existing = false;
         let (batch, report) = svc.import_rows(&ctx(), &t).unwrap();
         assert!(batch.ops.is_empty());
-        assert_eq!(report.results[0].status, RowStatus::Valid);   // 可建但未勾选
-        assert_eq!(report.results[1].status, RowStatus::Exists);  // 可改但未勾选
+        assert_eq!(report.results[0].status, RowStatus::Valid); // 可建但未勾选
+        assert_eq!(report.results[1].status, RowStatus::Exists); // 可改但未勾选
     }
 
     #[test]
     fn unset_and_empty_cells_skipped() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         let svc = PipeModelService::new(cat);
-        let t = table(vec![row(2, &[
-            ("NAME", "/P1"), ("TYPE", "PIPE"), ("BORE", "unset"),
-        ])]);
+        let t = table(vec![row(
+            2,
+            &[("NAME", "/P1"), ("TYPE", "PIPE"), ("BORE", "unset")],
+        )]);
         let (batch, _) = svc.import_rows(&ctx(), &t).unwrap();
         assert!(!batch.ops.iter().any(|op| matches!(op,
             MutationOp::SetAttrs { attrs, .. } if attrs.contains_key("BORE"))));
@@ -388,9 +440,10 @@ mod tests {
     fn owner_missing_errors_row() {
         let cat = MockCatalog::new();
         let svc = PipeModelService::new(cat);
-        let t = table(vec![row(2, &[
-            ("NAME", "/X"), ("TYPE", "PIPE"), ("OWNER", "/NOPE"),
-        ])]);
+        let t = table(vec![row(
+            2,
+            &[("NAME", "/X"), ("TYPE", "PIPE"), ("OWNER", "/NOPE")],
+        )]);
         let (_batch, report) = svc.import_rows(&ctx(), &t).unwrap();
         assert_eq!(report.results[0].status, RowStatus::Error);
     }

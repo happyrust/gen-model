@@ -81,7 +81,11 @@ impl<C: PipeCatalog> PipeModelService<C> {
                     let mut attrs = NamedAttrMap::default();
                     attrs.insert("DIR".into(), NamedAttrValue::Vec3Type(new_dir));
                     batch.ops.push(MutationOp::SetAttrs { element: m, attrs });
-                    results.push(LegResult { element: m, applied: true, reason: None });
+                    results.push(LegResult {
+                        element: m,
+                        applied: true,
+                        reason: None,
+                    });
                     applied_any = true;
                 }
                 None => results.push(LegResult {
@@ -111,7 +115,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     fn rig() -> PipeModelService<MockCatalog> {
         let mut cat = MockCatalog::new();
@@ -128,9 +132,10 @@ mod tests {
             cat.owners.insert(r, RefU64(11));
             cat.members.entry(RefU64(11)).or_default().push(r);
             if let Some(d) = dir {
-                cat.attrs.insert(r, std::collections::BTreeMap::from([
-                    ("DIR".into(), NamedAttrValue::Vec3Type(d)),
-                ]));
+                cat.attrs.insert(
+                    r,
+                    std::collections::BTreeMap::from([("DIR".into(), NamedAttrValue::Vec3Type(d))]),
+                );
             }
         }
         PipeModelService::new(cat)
@@ -146,9 +151,13 @@ mod tests {
         assert!(!results[2].applied, "无 DIR 不可斜");
 
         // X 向 leg 转 3°：新 dir 应有 Z 分量（朝 -Z 或 +Z 看轴号）。
-        let MutationOp::SetAttrs { element, attrs } = &batch.ops[0] else { panic!() };
+        let MutationOp::SetAttrs { element, attrs } = &batch.ops[0] else {
+            panic!()
+        };
         assert_eq!(*element, RefU64(21));
-        let Some(NamedAttrValue::Vec3Type(v)) = attrs.get("DIR") else { panic!() };
+        let Some(NamedAttrValue::Vec3Type(v)) = attrs.get("DIR") else {
+            panic!()
+        };
         assert!((v.length() - 1.0).abs() < 1e-4, "旋转保持单位向量");
         assert!(v.z.abs() > 0.04, "3° 应产生可测 Z 分量");
     }

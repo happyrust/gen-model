@@ -106,10 +106,13 @@ mod tests {
         // `SPEC /A1B PBOR 0100 STYP EQUAL` → PBOR0=100（首字符 0 是孔位号）。
         let (spec, qa) = parse_choice("SPEC /A1B PBOR 0100 STYP EQUAL").unwrap();
         assert_eq!(spec, "A1B");
-        assert_eq!(qa, vec![
-            ("PBOR0".to_string(), "100".to_string()),
-            ("STYP".to_string(), "EQUAL".to_string()),
-        ]);
+        assert_eq!(
+            qa,
+            vec![
+                ("PBOR0".to_string(), "100".to_string()),
+                ("STYP".to_string(), "EQUAL".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -121,7 +124,10 @@ mod tests {
 
     #[test]
     fn roundtrip_reselect_form() {
-        let qa = vec![("PBOR0".to_string(), "100".to_string()), ("STYP".to_string(), "EQUAL".to_string())];
+        let qa = vec![
+            ("PBOR0".to_string(), "100".to_string()),
+            ("STYP".to_string(), "EQUAL".to_string()),
+        ];
         let s = render_choice("A1B", &qa);
         assert_eq!(s, "SPEC /A1B PBOR0 100 STYP EQUAL");
     }

@@ -39,7 +39,12 @@ pub struct WeldPolicy {
 impl Default for WeldPolicy {
     /// E3D 默认：SHOP TRUE（预制视角），自动编号从 1。
     fn default() -> Self {
-        Self { shop: true, styp: None, weld_spec: None, first_number: 1 }
+        Self {
+            shop: true,
+            styp: None,
+            weld_spec: None,
+            first_number: 1,
+        }
     }
 }
 
@@ -119,10 +124,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 joints += 1;
                 // 无规格降级：实测 gap = APOS/LPOS 距（读不到按 0 + warning）。
                 let gap = if policy.weld_spec.is_none() {
-                    match (
-                        self.catalog.attr(a, "APOS"),
-                        self.catalog.attr(b, "LPOS"),
-                    ) {
+                    match (self.catalog.attr(a, "APOS"), self.catalog.attr(b, "LPOS")) {
                         (Some(NamedAttrValue::F32Type(ap)), Some(NamedAttrValue::F32Type(lp))) => {
                             Some((lp - ap).abs())
                         }
@@ -160,9 +162,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
         // 需逐缝 SPREF↔PSPE 比，本批只记策略面）。
         if policy.weld_spec.is_some() {
             batch.warnings.push(PipeWarning {
-                message: format!(
-                    "共 {joints} 缝带 CHOOSE SPEC；超规格（spref≠pspec）复核在校验面"
-                ),
+                message: format!("共 {joints} 缝带 CHOOSE SPEC；超规格（spref≠pspec）复核在校验面"),
                 side_effect: None,
             });
         }
@@ -219,10 +219,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
             let mut attrs = NamedAttrMap::default();
             if let Some(t) = &edit.weld_type {
                 attrs.insert("WELDTY".into(), NamedAttrValue::WordType(t.clone()));
-                attrs.insert(
-                    "SHOP".into(),
-                    NamedAttrValue::BoolType(weld_type_shop(t)),
-                );
+                attrs.insert("SHOP".into(), NamedAttrValue::BoolType(weld_type_shop(t)));
             }
             if attrs.map.is_empty() {
                 continue;
@@ -245,7 +242,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     fn rig() -> PipeModelService<MockCatalog> {
         let mut cat = MockCatalog::new();
@@ -253,17 +250,23 @@ mod tests {
             .pipe(RefU64(10), "/P1", RefU64(77), 100.0)
             .branch(RefU64(11), "/P1/B1", RefU64(10), RefU64(77));
         // TUBI(21) - ELBO(22) - TUBI(23)：两接合缝；TUBI-TUBI 单独测跳过。
-        for (r, n) in [(RefU64(21), "TUBI"), (RefU64(22), "ELBO"), (RefU64(23), "TUBI")] {
+        for (r, n) in [
+            (RefU64(21), "TUBI"),
+            (RefU64(22), "ELBO"),
+            (RefU64(23), "TUBI"),
+        ] {
             cat.nouns.insert(r, n.into());
             cat.owners.insert(r, RefU64(11));
             cat.members.entry(RefU64(11)).or_default().push(r);
         }
-        cat.attrs.insert(RefU64(22), std::collections::BTreeMap::from([
-            ("APOS".into(), NamedAttrValue::F32Type(100.0)),
-        ]));
-        cat.attrs.insert(RefU64(23), std::collections::BTreeMap::from([
-            ("LPOS".into(), NamedAttrValue::F32Type(160.0)),
-        ]));
+        cat.attrs.insert(
+            RefU64(22),
+            std::collections::BTreeMap::from([("APOS".into(), NamedAttrValue::F32Type(100.0))]),
+        );
+        cat.attrs.insert(
+            RefU64(23),
+            std::collections::BTreeMap::from([("LPOS".into(), NamedAttrValue::F32Type(160.0))]),
+        );
         PipeModelService::new(cat)
     }
 
@@ -283,17 +286,28 @@ mod tests {
             .filter(|o| matches!(o, MutationOp::Create { noun, .. } if noun == "WELD"))
             .collect();
         assert_eq!(welds.len(), 2, "TUBI-ELBO、ELBO-TUBI 两缝");
-        let MutationOp::Create { attrs, .. } = welds[0] else { panic!() };
+        let MutationOp::Create { attrs, .. } = welds[0] else {
+            panic!()
+        };
         assert_eq!(attrs.get("SHOP"), Some(&NamedAttrValue::BoolType(true)));
-        assert_eq!(attrs.get("STYP"), Some(&NamedAttrValue::WordType("BW".into())));
-        assert_eq!(attrs.get("SPREF"), Some(&NamedAttrValue::RefU64Type(RefU64(900))));
+        assert_eq!(
+            attrs.get("STYP"),
+            Some(&NamedAttrValue::WordType("BW".into()))
+        );
+        assert_eq!(
+            attrs.get("SPREF"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(900)))
+        );
         assert_eq!(attrs.get("WLDNUM"), Some(&NamedAttrValue::IntegerType(1)));
     }
 
     #[test]
     fn no_spec_falls_back_to_gap_measurement() {
         let svc = rig();
-        let policy = WeldPolicy { weld_spec: None, ..Default::default() };
+        let policy = WeldPolicy {
+            weld_spec: None,
+            ..Default::default()
+        };
         let batch = svc.create_welds(&ctx(), RefU64(10), &policy).unwrap();
         // 降级：DESP[1]=实测 gap。第一缝 APOS 缺→0+warning；第二缝 22→23 = |160-100|=60。
         let desps: Vec<f32> = batch
@@ -314,7 +328,10 @@ mod tests {
     #[test]
     fn manual_weld_marks_wldnum_zero() {
         let svc = rig();
-        let policy = WeldPolicy { first_number: 0, ..Default::default() };
+        let policy = WeldPolicy {
+            first_number: 0,
+            ..Default::default()
+        };
         let batch = svc.create_welds(&ctx(), RefU64(10), &policy).unwrap();
         let nums: Vec<i32> = batch
             .ops
@@ -336,7 +353,11 @@ mod tests {
         cat.zone(RefU64(9), "/Z1")
             .pipe(RefU64(10), "/P1", RefU64(77), 100.0)
             .branch(RefU64(11), "/P1/B1", RefU64(10), RefU64(77));
-        for (r, n) in [(RefU64(31), "WELD"), (RefU64(32), "TUBI"), (RefU64(33), "WELD")] {
+        for (r, n) in [
+            (RefU64(31), "WELD"),
+            (RefU64(32), "TUBI"),
+            (RefU64(33), "WELD"),
+        ] {
             cat.nouns.insert(r, n.into());
             cat.members.entry(RefU64(11)).or_default().push(r);
         }
@@ -362,17 +383,29 @@ mod tests {
         cat.zone(RefU64(9), "/Z1")
             .pipe(RefU64(10), "/P1", RefU64(77), 100.0)
             .branch(RefU64(11), "/P1/B1", RefU64(10), RefU64(77));
-        for (r, n) in [(RefU64(31), "WELD"), (RefU64(32), "TUBI"), (RefU64(33), "WELD")] {
+        for (r, n) in [
+            (RefU64(31), "WELD"),
+            (RefU64(32), "TUBI"),
+            (RefU64(33), "WELD"),
+        ] {
             cat.nouns.insert(r, n.into());
         }
         let svc = PipeModelService::new(cat);
-        let edit = WeldAttrEdit { weld_type: Some("FIELD".into()), mach_type: Some("MACH".into()) };
+        let edit = WeldAttrEdit {
+            weld_type: Some("FIELD".into()),
+            mach_type: Some("MACH".into()),
+        };
         let batch = svc
             .modify_welds(&ctx(), &[RefU64(31), RefU64(32), RefU64(33)], &edit)
             .unwrap();
         // 非 WELD(32) 跳过 + machType 无落库列 warning。
         assert!(batch.warnings.iter().any(|w| w.message.contains("非 WELD")));
-        assert!(batch.warnings.iter().any(|w| w.message.contains("无落库列")));
+        assert!(
+            batch
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("无落库列"))
+        );
         let writes: Vec<&NamedAttrMap> = batch
             .ops
             .iter()
@@ -383,7 +416,10 @@ mod tests {
             .collect();
         assert_eq!(writes.len(), 2);
         for m in writes {
-            assert_eq!(m.get("WELDTY"), Some(&NamedAttrValue::WordType("FIELD".into())));
+            assert_eq!(
+                m.get("WELDTY"),
+                Some(&NamedAttrValue::WordType("FIELD".into()))
+            );
             assert_eq!(m.get("SHOP"), Some(&NamedAttrValue::BoolType(false)));
         }
     }

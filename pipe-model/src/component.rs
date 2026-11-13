@@ -66,16 +66,14 @@ impl<C: PipeCatalog> PipeModelService<C> {
             });
         }
         if !self.catalog.writable(branch) {
-            return Err(PipeError::Blocking { message: "BRAN 无写权限".into() });
+            return Err(PipeError::Blocking {
+                message: "BRAN 无写权限".into(),
+            });
         }
-        let Some(spref) = self
-            .catalog
-            .attr(branch, "PSPE")
-            .and_then(|v| match v {
-                NamedAttrValue::RefU64Type(r) => Some(r),
-                _ => None,
-            })
-        else {
+        let Some(spref) = self.catalog.attr(branch, "PSPE").and_then(|v| match v {
+            NamedAttrValue::RefU64Type(r) => Some(r),
+            _ => None,
+        }) else {
             return Err(PipeError::Blocking {
                 message: "BRAN 无 PSPE，无法解析元件规格".into(),
             });
@@ -169,20 +167,22 @@ impl<C: PipeCatalog> PipeModelService<C> {
         component: RefU64,
         qa: &QuestionAnswers,
     ) -> Result<(MutationBatch, ComponentOutcome), PipeError> {
-        let noun = self.catalog.noun_of(component).ok_or_else(|| PipeError::Blocking {
-            message: format!("{component:?} 不在数据面"),
-        })?;
-        let owner = self.catalog.owner_of(component).ok_or_else(|| PipeError::Blocking {
-            message: "元件无属主".into(),
-        })?;
-        let Some(spref) = self
+        let noun = self
             .catalog
-            .attr(owner, "PSPE")
-            .and_then(|v| match v {
-                NamedAttrValue::RefU64Type(r) => Some(r),
-                _ => None,
-            })
-        else {
+            .noun_of(component)
+            .ok_or_else(|| PipeError::Blocking {
+                message: format!("{component:?} 不在数据面"),
+            })?;
+        let owner = self
+            .catalog
+            .owner_of(component)
+            .ok_or_else(|| PipeError::Blocking {
+                message: "元件无属主".into(),
+            })?;
+        let Some(spref) = self.catalog.attr(owner, "PSPE").and_then(|v| match v {
+            NamedAttrValue::RefU64Type(r) => Some(r),
+            _ => None,
+        }) else {
             return Err(PipeError::Blocking {
                 message: "属主无 PSPE，无法解析重选规格".into(),
             });
@@ -192,16 +192,9 @@ impl<C: PipeCatalog> PipeModelService<C> {
         })?;
 
         let mut batch = MutationBatch::named("reselect_component");
-        let outcome = spec_resolver::resolve(
-            spec,
-            spref,
-            spec.root_selector(spref),
-            &noun,
-            qa,
-        );
+        let outcome = spec_resolver::resolve(spec, spref, spec.root_selector(spref), &noun, qa);
         match outcome {
-            ComponentOutcome::Direct { spco }
-            | ComponentOutcome::SelectorFallback { spco, .. } => {
+            ComponentOutcome::Direct { spco } | ComponentOutcome::SelectorFallback { spco, .. } => {
                 batch.ops.push(set_attr(
                     component,
                     "SPREF",
@@ -247,7 +240,8 @@ impl<C: PipeCatalog> PipeModelService<C> {
                 batch.ops.push(set_attr(component, "LEAVE", a));
             }
             _ => batch.warnings.push(PipeWarning {
-                message: "ARIVE/LEAVE 缺值：P 点对调跳过（多 LSTU 规格须手动重选，Story 18）".into(),
+                message: "ARIVE/LEAVE 缺值：P 点对调跳过（多 LSTU 规格须手动重选，Story 18）"
+                    .into(),
                 side_effect: None,
             }),
         }
@@ -255,7 +249,9 @@ impl<C: PipeCatalog> PipeModelService<C> {
             Some(NamedAttrValue::F32Type(d)) => (d + 180.0) % 360.0,
             _ => 180.0,
         };
-        batch.ops.push(set_attr(component, "ANGL", NamedAttrValue::F32Type(angl)));
+        batch
+            .ops
+            .push(set_attr(component, "ANGL", NamedAttrValue::F32Type(angl)));
         Ok(batch)
     }
 }
@@ -264,7 +260,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog, MockSpec};
+    use crate::testkit::{MockCatalog, MockSpec, ctx};
     use std::collections::BTreeMap;
 
     fn setup() -> (MockCatalog, MockSpec, PipeModelService<MockCatalog>) {
@@ -279,7 +275,10 @@ mod tests {
     fn sel(comp_type: &str) -> ComponentSelect {
         ComponentSelect {
             comp_type: comp_type.into(),
-            qa: vec![("PBOR0".into(), "100".into()), ("STYP".into(), "EQUAL".into())],
+            qa: vec![
+                ("PBOR0".into(), "100".into()),
+                ("STYP".into(), "EQUAL".into()),
+            ],
             position: ComponentPosition::AtPosition { offset_mm: 500.0 },
             against_flow: false,
         }
@@ -294,11 +293,23 @@ mod tests {
             .create_component(&ctx(), RefU64(11), &sel("ELBO"))
             .unwrap();
         assert!(matches!(outcome, ComponentOutcome::Direct { spco } if spco == RefU64(700)));
-        let MutationOp::Create { noun, under, attrs, refno, .. } = &batch.ops[0] else { panic!() };
+        let MutationOp::Create {
+            noun,
+            under,
+            attrs,
+            refno,
+            ..
+        } = &batch.ops[0]
+        else {
+            panic!()
+        };
         assert!(refno.0 >= 1_000_000, "新元件 refno 落在编辑段");
         assert_eq!(noun, "ELBO");
         assert_eq!(*under, RefU64(11));
-        assert_eq!(attrs.get("SPREF"), Some(&NamedAttrValue::RefU64Type(RefU64(700))));
+        assert_eq!(
+            attrs.get("SPREF"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(700)))
+        );
         assert_eq!(attrs.get("APOS"), Some(&NamedAttrValue::F32Type(500.0)));
     }
 
@@ -310,7 +321,9 @@ mod tests {
         spec.sele_next.insert(RefU64(80), RefU64(701));
         spec.spco_set.insert(RefU64(701));
         let svc = PipeModelService::new(cat).with_spec(spec);
-        let (batch, outcome) = svc.create_component(&ctx(), RefU64(11), &sel("TEE")).unwrap();
+        let (batch, outcome) = svc
+            .create_component(&ctx(), RefU64(11), &sel("TEE"))
+            .unwrap();
         assert!(matches!(
             outcome,
             ComponentOutcome::SelectorFallback { spco, .. } if spco == RefU64(701)
@@ -324,7 +337,9 @@ mod tests {
     fn create_component_needs_selection() {
         let (cat, spec, _) = setup();
         let svc = PipeModelService::new(cat).with_spec(spec);
-        let (batch, outcome) = svc.create_component(&ctx(), RefU64(11), &sel("TEE")).unwrap();
+        let (batch, outcome) = svc
+            .create_component(&ctx(), RefU64(11), &sel("TEE"))
+            .unwrap();
         assert!(matches!(outcome, ComponentOutcome::NeedsSelection));
         assert!(batch.ops.is_empty(), "落空不建件");
     }
@@ -334,7 +349,8 @@ mod tests {
         let (cat, _spec, _) = setup();
         let svc = PipeModelService::new(cat); // 不接 with_spec
         assert!(matches!(
-            svc.create_component(&ctx(), RefU64(11), &sel("ELBO")).unwrap_err(),
+            svc.create_component(&ctx(), RefU64(11), &sel("ELBO"))
+                .unwrap_err(),
             PipeError::Blocking { .. }
         ));
     }
@@ -350,9 +366,14 @@ mod tests {
             .reselect_component(&ctx(), RefU64(20), &vec![("PBOR0".into(), "100".into())])
             .unwrap();
         assert!(matches!(outcome, ComponentOutcome::Direct { .. }));
-        let MutationOp::SetAttrs { element, attrs } = &batch.ops[0] else { panic!() };
+        let MutationOp::SetAttrs { element, attrs } = &batch.ops[0] else {
+            panic!()
+        };
         assert_eq!(*element, RefU64(20));
-        assert_eq!(attrs.get("SPREF"), Some(&NamedAttrValue::RefU64Type(RefU64(702))));
+        assert_eq!(
+            attrs.get("SPREF"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(702)))
+        );
     }
 
     #[test]
@@ -360,11 +381,14 @@ mod tests {
         let (mut cat, _spec, _) = setup();
         cat.nouns.insert(RefU64(20), "TEE".into());
         cat.owners.insert(RefU64(20), RefU64(11));
-        cat.attrs.insert(RefU64(20), BTreeMap::from([
-            ("ARIVE".into(), NamedAttrValue::IntegerType(1)),
-            ("LEAVE".into(), NamedAttrValue::IntegerType(2)),
-            ("ANGL".into(), NamedAttrValue::F32Type(30.0)),
-        ]));
+        cat.attrs.insert(
+            RefU64(20),
+            BTreeMap::from([
+                ("ARIVE".into(), NamedAttrValue::IntegerType(1)),
+                ("LEAVE".into(), NamedAttrValue::IntegerType(2)),
+                ("ANGL".into(), NamedAttrValue::F32Type(30.0)),
+            ]),
+        );
         let svc = PipeModelService::new(cat);
         let batch = svc.flip_component(&ctx(), RefU64(20)).unwrap();
         let get = |name: &str| {

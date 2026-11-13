@@ -25,7 +25,10 @@ pub struct MockCatalog {
 
 impl MockCatalog {
     pub fn new() -> Self {
-        Self { counter: AtomicU64::new(100), ..Default::default() }
+        Self {
+            counter: AtomicU64::new(100),
+            ..Default::default()
+        }
     }
 
     pub fn zone(&mut self, refno: RefU64, name: &str) -> &mut Self {
@@ -77,13 +80,18 @@ impl PipeCatalog for MockCatalog {
         self.attrs.get(&r).and_then(|m| m.get(n)).cloned()
     }
     fn attmap_of(&self, r: RefU64) -> Option<aios_core::NamedAttrMap> {
-        self.attrs.get(&r).map(|m| aios_core::NamedAttrMap { map: m.clone() })
+        self.attrs
+            .get(&r)
+            .map(|m| aios_core::NamedAttrMap { map: m.clone() })
     }
     fn name_exists(&self, n: &str) -> bool {
         self.names.values().any(|v| v == n)
     }
     fn refno_by_name(&self, n: &str) -> Option<RefU64> {
-        self.names.iter().find(|(_, v)| v.as_str() == n).map(|(k, _)| *k)
+        self.names
+            .iter()
+            .find(|(_, v)| v.as_str() == n)
+            .map(|(k, _)| *k)
     }
     fn writable(&self, r: RefU64) -> bool {
         *self.writable.get(&r).unwrap_or(&false)
@@ -111,7 +119,12 @@ impl SpecCatalog for MockSpec {
     fn root_selector(&self, spref: RefU64) -> Option<RefU64> {
         self.roots.get(&spref).copied()
     }
-    fn table_lookup(&self, spref: RefU64, comp_type: &str, _qa: &QuestionAnswers) -> Option<RefU64> {
+    fn table_lookup(
+        &self,
+        spref: RefU64,
+        comp_type: &str,
+        _qa: &QuestionAnswers,
+    ) -> Option<RefU64> {
         self.table.get(&(spref, comp_type.to_string())).copied()
     }
     fn sele_descend(&self, selector: RefU64, _qa: &QuestionAnswers) -> Option<RefU64> {

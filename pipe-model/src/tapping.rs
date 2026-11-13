@@ -49,17 +49,26 @@ impl<C: PipeCatalog> PipeModelService<C> {
             });
         }
         if !self.catalog.writable(host_branch) {
-            return Err(PipeError::Blocking { message: "宿主支管无写权限".into() });
+            return Err(PipeError::Blocking {
+                message: "宿主支管无写权限".into(),
+            });
         }
         // 挂接点必须是宿主直属成员。
-        if !self.catalog.members_of(host_branch).contains(&tap.host_tube) {
+        if !self
+            .catalog
+            .members_of(host_branch)
+            .contains(&tap.host_tube)
+        {
             return Err(PipeError::Blocking {
                 message: "host_tube 不是宿主支管直属成员".into(),
             });
         }
-        let pipe = self.catalog.owner_of(host_branch).ok_or_else(|| PipeError::Blocking {
-            message: "宿主支管无属主管".into(),
-        })?;
+        let pipe = self
+            .catalog
+            .owner_of(host_branch)
+            .ok_or_else(|| PipeError::Blocking {
+                message: "宿主支管无属主管".into(),
+            })?;
         let pipe_name = self.catalog.name_of(pipe).unwrap_or_default();
 
         let mut batch = MutationBatch::named("create_tapping");
@@ -95,7 +104,10 @@ impl<C: PipeCatalog> PipeModelService<C> {
             self.catalog.name_exists(n)
         });
         let mut bran_attrs = NamedAttrMap::default();
-        bran_attrs.insert("PSPE".into(), NamedAttrValue::RefU64Type(tap.new_branch_spec));
+        bran_attrs.insert(
+            "PSPE".into(),
+            NamedAttrValue::RefU64Type(tap.new_branch_spec),
+        );
         let bore = NamedAttrValue::F32Type(tap.bore_mm as f32);
         bran_attrs.insert("HBOR".into(), bore.clone());
         bran_attrs.insert("TBOR".into(), bore);
@@ -116,7 +128,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
 
     fn rig() -> PipeModelService<MockCatalog> {
         let mut cat = MockCatalog::new();
@@ -144,18 +156,41 @@ mod tests {
         let batch = svc.create_tapping(&ctx(), RefU64(11), &tap).unwrap();
         assert_eq!(batch.ops.len(), 2);
 
-        let MutationOp::Create { refno: tap_el, noun, under, attrs, .. } = &batch.ops[0]
-        else { panic!() };
+        let MutationOp::Create {
+            refno: tap_el,
+            noun,
+            under,
+            attrs,
+            ..
+        } = &batch.ops[0]
+        else {
+            panic!()
+        };
         assert_eq!(noun, "OLET");
         assert_eq!(*under, RefU64(11));
         assert_eq!(attrs.get("APOS"), Some(&NamedAttrValue::F32Type(500.0)));
 
-        let MutationOp::Create { noun, under, name, attrs, .. } = &batch.ops[1] else { panic!() };
+        let MutationOp::Create {
+            noun,
+            under,
+            name,
+            attrs,
+            ..
+        } = &batch.ops[1]
+        else {
+            panic!()
+        };
         assert_eq!(noun, "BRAN");
         assert_eq!(*under, RefU64(10), "新支管挂宿主所在管");
         assert_eq!(name.as_deref(), Some("/P1/B2"));
-        assert_eq!(attrs.get("HREF"), Some(&NamedAttrValue::RefU64Type(*tap_el)));
-        assert_eq!(attrs.get("HCON"), Some(&NamedAttrValue::WordType("TAP".into())));
+        assert_eq!(
+            attrs.get("HREF"),
+            Some(&NamedAttrValue::RefU64Type(*tap_el))
+        );
+        assert_eq!(
+            attrs.get("HCON"),
+            Some(&NamedAttrValue::WordType("TAP".into()))
+        );
         assert_eq!(attrs.get("HBOR"), Some(&NamedAttrValue::F32Type(50.0)));
     }
 

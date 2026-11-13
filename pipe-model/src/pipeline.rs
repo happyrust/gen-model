@@ -91,9 +91,12 @@ fn auto_pipe_name(cat: &impl PipeCatalog) -> Option<String> {
 impl<C: PipeCatalog> PipeModelService<C> {
     /// 建管属主校验（Story 3：先拒绝，不留半成品）。
     fn check_pipe_owner(&self, owner: RefU64) -> Result<(), PipeError> {
-        let noun = self.catalog.noun_of(owner).ok_or_else(|| PipeError::Blocking {
-            message: format!("PIPE 属主 {:?} 不在数据面", owner),
-        })?;
+        let noun = self
+            .catalog
+            .noun_of(owner)
+            .ok_or_else(|| PipeError::Blocking {
+                message: format!("PIPE 属主 {:?} 不在数据面", owner),
+            })?;
         if !matches!(noun.as_str(), "ZONE" | "EQUI") {
             return Err(PipeError::Blocking {
                 message: format!("PIPE 属主必须 ZONE/EQUI，实得 {noun}"),
@@ -108,7 +111,11 @@ impl<C: PipeCatalog> PipeModelService<C> {
     }
 
     /// 递归收集 name 以 `old_prefix/` 为前缀的全部后代（改名级联 §4.3）。
-    fn collect_prefixed_descendants(&self, root: RefU64, old_prefix: &str) -> Vec<(RefU64, String)> {
+    fn collect_prefixed_descendants(
+        &self,
+        root: RefU64,
+        old_prefix: &str,
+    ) -> Vec<(RefU64, String)> {
         let mut out = Vec::new();
         let mut stack = self.catalog.members_of(root);
         let prefix = format!("{old_prefix}/");
@@ -265,27 +272,34 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
 
     /// 既有 PIPE 追加支管（Story 2 同一组语义，单用接口）。
     fn create_branch(&self, _ctx: &Context, pipe: RefU64) -> Result<MutationBatch, PipeError> {
-        let noun = self.catalog.noun_of(pipe).ok_or_else(|| PipeError::Blocking {
-            message: format!("{:?} 不在数据面", pipe),
-        })?;
+        let noun = self
+            .catalog
+            .noun_of(pipe)
+            .ok_or_else(|| PipeError::Blocking {
+                message: format!("{:?} 不在数据面", pipe),
+            })?;
         if noun != "PIPE" {
             return Err(PipeError::Blocking {
                 message: format!("create_branch 目标是 {noun}，必须 PIPE"),
             });
         }
         if !self.catalog.writable(pipe) {
-            return Err(PipeError::Blocking { message: "PIPE 无写权限".into() });
+            return Err(PipeError::Blocking {
+                message: "PIPE 无写权限".into(),
+            });
         }
         let pipe_name = self.catalog.name_of(pipe).unwrap_or_default();
         let (spec, bore) = match (
             self.catalog.attr(pipe, "PSPE"),
             self.catalog.attr(pipe, "BORE"),
         ) {
-            (Some(NamedAttrValue::RefU64Type(s)), Some(NamedAttrValue::F32Type(b))) => (s, b as f64),
+            (Some(NamedAttrValue::RefU64Type(s)), Some(NamedAttrValue::F32Type(b))) => {
+                (s, b as f64)
+            }
             _ => {
                 return Err(PipeError::Blocking {
                     message: "PIPE 缺 PSPE/BORE，无法派生支管".into(),
-                })
+                });
             }
         };
 
@@ -301,9 +315,12 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         element: RefU64,
         name: &str,
     ) -> Result<MutationBatch, PipeError> {
-        let old_name = self.catalog.name_of(element).ok_or_else(|| PipeError::Blocking {
-            message: format!("{:?} 无 NAME，不可改名级联", element),
-        })?;
+        let old_name = self
+            .catalog
+            .name_of(element)
+            .ok_or_else(|| PipeError::Blocking {
+                message: format!("{:?} 无 NAME，不可改名级联", element),
+            })?;
         let mut batch = MutationBatch::named("rename_cascade");
         batch.ops.push(MutationOp::Rename {
             element,
@@ -330,19 +347,35 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         patch: &ProcessPatch,
     ) -> Result<MutationBatch, PipeError> {
         if self.catalog.noun_of(pipe).as_deref() != Some("PIPE") {
-            return Err(PipeError::Blocking { message: "update_process_data 目标必须 PIPE".into() });
+            return Err(PipeError::Blocking {
+                message: "update_process_data 目标必须 PIPE".into(),
+            });
         }
         let mut batch = MutationBatch::named("update_process_data");
         // (patch 值, 属性名)；字符串字段统一走 ElementType（ISPEC/TSPEC 是规格名）。
         let fields: [(&str, Option<NamedAttrValue>); 4] = [
-            ("ISPEC", patch.insulation.clone().map(|v| {
-                v.map(NamedAttrValue::ElementType).unwrap_or(NamedAttrValue::InvalidType)
-            })),
-            ("TSPEC", patch.tracing.clone().map(|v| {
-                v.map(NamedAttrValue::ElementType).unwrap_or(NamedAttrValue::InvalidType)
-            })),
-            ("TEMP", patch.temperature.map(|v| NamedAttrValue::F32Type(v as f32))),
-            ("PRES", patch.pressure.map(|v| NamedAttrValue::F32Type(v as f32))),
+            (
+                "ISPEC",
+                patch.insulation.clone().map(|v| {
+                    v.map(NamedAttrValue::ElementType)
+                        .unwrap_or(NamedAttrValue::InvalidType)
+                }),
+            ),
+            (
+                "TSPEC",
+                patch.tracing.clone().map(|v| {
+                    v.map(NamedAttrValue::ElementType)
+                        .unwrap_or(NamedAttrValue::InvalidType)
+                }),
+            ),
+            (
+                "TEMP",
+                patch.temperature.map(|v| NamedAttrValue::F32Type(v as f32)),
+            ),
+            (
+                "PRES",
+                patch.pressure.map(|v| NamedAttrValue::F32Type(v as f32)),
+            ),
         ];
         // 全子树（含各支管与元件）一次收齐，逐字段过滤"现值==旧值"的级联目标。
         let mut descendants = Vec::new();
@@ -383,11 +416,17 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         edit: &EndEdit,
     ) -> Result<MutationBatch, PipeError> {
         if self.catalog.noun_of(branch).as_deref() != Some("BRAN") {
-            return Err(PipeError::Blocking { message: "edit_branch_end 目标必须 BRAN".into() });
+            return Err(PipeError::Blocking {
+                message: "edit_branch_end 目标必须 BRAN".into(),
+            });
         }
         let mut batch = MutationBatch::named("edit_branch_end");
         if let Some(b) = edit.bore_mm {
-            batch.ops.push(set_attr(branch, &end_attr(end, "BOR"), NamedAttrValue::F32Type(b as f32)));
+            batch.ops.push(set_attr(
+                branch,
+                &end_attr(end, "BOR"),
+                NamedAttrValue::F32Type(b as f32),
+            ));
         }
         if let Some(p) = edit.position {
             batch.ops.push(set_attr(
@@ -406,7 +445,11 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         if let Some(target) = edit.connection {
             // E3D `CONN PH/PT TO <elem>` 写 xREF；xCON 连接词由连接内核推导——
             // 见 connect_end 的 outcome 语义，这里只记目标。
-            batch.ops.push(set_attr(branch, &end_attr(end, "REF"), NamedAttrValue::RefU64Type(target)));
+            batch.ops.push(set_attr(
+                branch,
+                &end_attr(end, "REF"),
+                NamedAttrValue::RefU64Type(target),
+            ));
         } else if edit.free {
             batch.ops.push(set_attr(
                 branch,
@@ -419,7 +462,9 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
             BranchEnd::Head => "LHEAD",
             BranchEnd::Tail => "LTAIL",
         };
-        batch.ops.push(set_attr(branch, lock, NamedAttrValue::BoolType(true)));
+        batch
+            .ops
+            .push(set_attr(branch, lock, NamedAttrValue::BoolType(true)));
         Ok(batch)
     }
 
@@ -436,7 +481,9 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         target: RefU64,
     ) -> Result<(MutationBatch, ConnectOutcome), PipeError> {
         if self.catalog.noun_of(branch).as_deref() != Some("BRAN") {
-            return Err(PipeError::Blocking { message: "connect_end 目标必须 BRAN".into() });
+            return Err(PipeError::Blocking {
+                message: "connect_end 目标必须 BRAN".into(),
+            });
         }
         let mut batch = MutationBatch::named("connect_end");
         let Some(peer_noun) = self.catalog.noun_of(target) else {
@@ -451,7 +498,12 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
                 message: "连接目标不在数据面：FCONN 强接 + minTube 占位，端留游离态".into(),
                 side_effect: Some(format!("占位长度 {min_tube}mm")),
             });
-            return Ok((batch, ConnectOutcome::Unassigned { placeholder_length_mm: min_tube }));
+            return Ok((
+                batch,
+                ConnectOutcome::Unassigned {
+                    placeholder_length_mm: min_tube,
+                },
+            ));
         };
         batch.ops.push(set_attr(
             branch,
@@ -459,12 +511,16 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
             NamedAttrValue::RefU64Type(target),
         ));
         batch.warnings.push(PipeWarning {
-            message: "xCON 连接词/GASK+FLAN 自动补件待连接内核接入（Phase C），本批只写 xREF".into(),
+            message: "xCON 连接词/GASK+FLAN 自动补件待连接内核接入（Phase C），本批只写 xREF"
+                .into(),
             side_effect: None,
         });
         Ok((
             batch,
-            ConnectOutcome::Connected { con_type: peer_noun, peer: target },
+            ConnectOutcome::Connected {
+                con_type: peer_noun,
+                peer: target,
+            },
         ))
     }
 
@@ -476,7 +532,9 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         end: BranchEnd,
     ) -> Result<MutationBatch, PipeError> {
         if self.catalog.noun_of(branch).as_deref() != Some("BRAN") {
-            return Err(PipeError::Blocking { message: "disconnect_end 目标必须 BRAN".into() });
+            return Err(PipeError::Blocking {
+                message: "disconnect_end 目标必须 BRAN".into(),
+            });
         }
         let mut batch = MutationBatch::named("disconnect_end");
         batch.ops.push(set_attr(
@@ -505,11 +563,7 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         self.reselect_component_impl(ctx, component, qa)
     }
 
-    fn flip_component(
-        &self,
-        ctx: &Context,
-        component: RefU64,
-    ) -> Result<MutationBatch, PipeError> {
+    fn flip_component(&self, ctx: &Context, component: RefU64) -> Result<MutationBatch, PipeError> {
         self.flip_component_impl(ctx, component)
     }
 
@@ -618,7 +672,13 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
         arrive_excess: f32,
         leave_excess: f32,
     ) -> Result<MutationBatch, PipeError> {
-        self.set_end_excess_impl(ctx, arrive_boundary, leave_boundary, arrive_excess, leave_excess)
+        self.set_end_excess_impl(
+            ctx,
+            arrive_boundary,
+            leave_boundary,
+            arrive_excess,
+            leave_excess,
+        )
     }
 
     fn set_feed_excess(
@@ -665,7 +725,7 @@ impl<C: PipeCatalog> PipeModel for PipeModelService<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{ctx, MockCatalog};
+    use crate::testkit::{MockCatalog, ctx};
     use std::collections::BTreeMap;
 
     #[test]
@@ -731,19 +791,38 @@ mod tests {
         let batch = svc.create_pipe(&ctx(), &spec).unwrap();
         assert_eq!(batch.ops.len(), 2);
 
-        let MutationOp::Create { refno: pipe_refno, noun, under, name, attrs } = &batch.ops[0]
+        let MutationOp::Create {
+            refno: pipe_refno,
+            noun,
+            under,
+            name,
+            attrs,
+        } = &batch.ops[0]
         else {
             panic!("op0 必须 PIPE Create")
         };
         assert_eq!(noun, "PIPE");
         assert_eq!(*under, RefU64(9));
         assert_eq!(name.as_deref(), Some("/P1"));
-        assert_eq!(attrs.get("PSPE"), Some(&NamedAttrValue::RefU64Type(RefU64(77))));
+        assert_eq!(
+            attrs.get("PSPE"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(77)))
+        );
         assert_eq!(attrs.get("BORE"), Some(&NamedAttrValue::F32Type(100.0)));
-        assert_eq!(attrs.get("ISPEC"), Some(&NamedAttrValue::StringType("/INS".into())));
+        assert_eq!(
+            attrs.get("ISPEC"),
+            Some(&NamedAttrValue::StringType("/INS".into()))
+        );
         assert_eq!(attrs.get("TEMP"), Some(&NamedAttrValue::F32Type(80.0)));
 
-        let MutationOp::Create { noun, under, name, attrs, .. } = &batch.ops[1] else {
+        let MutationOp::Create {
+            noun,
+            under,
+            name,
+            attrs,
+            ..
+        } = &batch.ops[1]
+        else {
             panic!("op1 必须 BRAN Create")
         };
         assert_eq!(noun, "BRAN");
@@ -765,21 +844,25 @@ mod tests {
         cat.members.insert(RefU64(10), vec![RefU64(11)]);
         let svc = PipeModelService::new(cat);
         let batch = svc.create_branch(&ctx(), RefU64(10)).unwrap();
-        let MutationOp::Create { name, .. } = &batch.ops[0] else { panic!() };
+        let MutationOp::Create { name, .. } = &batch.ops[0] else {
+            panic!()
+        };
         assert_eq!(name.as_deref(), Some("/P1/B2"), "B1 占名时探测窗取 B2");
     }
 
     #[test]
     fn rename_cascade_rewrites_prefixed_children() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         cat.nouns.insert(RefU64(11), "BRAN".into());
         cat.names.insert(RefU64(11), "/P1/B1".into());
         cat.nouns.insert(RefU64(12), "BRAN".into());
         cat.names.insert(RefU64(12), "/P1/B2".into());
         cat.nouns.insert(RefU64(13), "BRAN".into());
         cat.names.insert(RefU64(13), "/OTHER".into()); // 前缀不匹配，不动
-        cat.members.insert(RefU64(10), vec![RefU64(11), RefU64(12), RefU64(13)]);
+        cat.members
+            .insert(RefU64(10), vec![RefU64(11), RefU64(12), RefU64(13)]);
         let svc = PipeModelService::new(cat);
         let batch = svc.rename_cascade(&ctx(), RefU64(10), "/PX").unwrap();
         let renames: Vec<(RefU64, String)> = batch
@@ -800,18 +883,29 @@ mod tests {
     #[test]
     fn process_data_cascades_only_equal_old_value() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
-        cat.attrs.get_mut(&RefU64(10)).unwrap()
-            .insert("ISPEC".into(), NamedAttrValue::ElementType("/OLD-INS".into()));
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.attrs.get_mut(&RefU64(10)).unwrap().insert(
+            "ISPEC".into(),
+            NamedAttrValue::ElementType("/OLD-INS".into()),
+        );
         // B1 现值与 PIPE 旧值相同 → 级联；B2 被单独改过 → 不动。
         cat.nouns.insert(RefU64(11), "BRAN".into());
-        cat.attrs.insert(RefU64(11), BTreeMap::from([
-            ("ISPEC".into(), NamedAttrValue::ElementType("/OLD-INS".into())),
-        ]));
+        cat.attrs.insert(
+            RefU64(11),
+            BTreeMap::from([(
+                "ISPEC".into(),
+                NamedAttrValue::ElementType("/OLD-INS".into()),
+            )]),
+        );
         cat.nouns.insert(RefU64(12), "BRAN".into());
-        cat.attrs.insert(RefU64(12), BTreeMap::from([
-            ("ISPEC".into(), NamedAttrValue::ElementType("/CUSTOM".into())),
-        ]));
+        cat.attrs.insert(
+            RefU64(12),
+            BTreeMap::from([(
+                "ISPEC".into(),
+                NamedAttrValue::ElementType("/CUSTOM".into()),
+            )]),
+        );
         cat.members.insert(RefU64(10), vec![RefU64(11), RefU64(12)]);
         let svc = PipeModelService::new(cat);
         let patch = ProcessPatch {
@@ -835,7 +929,8 @@ mod tests {
     #[test]
     fn edit_end_write_order() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         cat.nouns.insert(RefU64(11), "BRAN".into());
         cat.members.insert(RefU64(10), vec![RefU64(11)]);
         let svc = PipeModelService::new(cat);
@@ -846,7 +941,9 @@ mod tests {
             connection: None,
             free: true,
         };
-        let batch = svc.edit_branch_end(&ctx(), RefU64(11), BranchEnd::Head, &edit).unwrap();
+        let batch = svc
+            .edit_branch_end(&ctx(), RefU64(11), BranchEnd::Head, &edit)
+            .unwrap();
         // §6 写序：HBOR → HPOS → HDIR → HCON('OPEN') → LHEAD。
         let names: Vec<String> = batch
             .ops
@@ -862,7 +959,8 @@ mod tests {
     #[test]
     fn connect_missing_target_goes_unassigned() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         cat.nouns.insert(RefU64(11), "BRAN".into());
         let svc = PipeModelService::new(cat);
         let (batch, outcome) = svc
@@ -879,11 +977,16 @@ mod tests {
     #[test]
     fn disconnect_nulls_ref() {
         let mut cat = MockCatalog::new();
-        cat.zone(RefU64(9), "/Z1").pipe(RefU64(10), "/P1", RefU64(77), 100.0);
+        cat.zone(RefU64(9), "/Z1")
+            .pipe(RefU64(10), "/P1", RefU64(77), 100.0);
         cat.nouns.insert(RefU64(11), "BRAN".into());
         let svc = PipeModelService::new(cat);
-        let batch = svc.disconnect_end(&ctx(), RefU64(11), BranchEnd::Tail).unwrap();
-        let MutationOp::SetAttrs { attrs, .. } = &batch.ops[0] else { panic!() };
+        let batch = svc
+            .disconnect_end(&ctx(), RefU64(11), BranchEnd::Tail)
+            .unwrap();
+        let MutationOp::SetAttrs { attrs, .. } = &batch.ops[0] else {
+            panic!()
+        };
         assert_eq!(
             attrs.get("TREF"),
             Some(&NamedAttrValue::RefU64Type(RefU64(0)))
@@ -943,10 +1046,12 @@ mod tests {
             panic!("ops[1] 应为 BRAN 建");
         };
         assert!(!attrs.map.contains_key("HSTU"));
-        assert!(batch
-            .warnings
-            .iter()
-            .any(|w| w.message.contains("规格读面未接")));
+        assert!(
+            batch
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("规格读面未接"))
+        );
     }
 
     /// 表直查落空且 SELE 链也走不通：BRAN 仍建，HSTU 缺席 + 落选 warning。
@@ -964,9 +1069,11 @@ mod tests {
             panic!("ops[1] 应为 BRAN 建");
         };
         assert!(!attrs.map.contains_key("HSTU"));
-        assert!(batch
-            .warnings
-            .iter()
-            .any(|w| w.message.contains("HSTU 落空") || w.message.contains("HSTU 未")));
+        assert!(
+            batch
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("HSTU 落空") || w.message.contains("HSTU 未"))
+        );
     }
 }

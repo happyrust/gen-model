@@ -45,9 +45,12 @@ impl<C: PipeCatalog> PipeModelService<C> {
         element: RefU64,
         new_spec: RefU64,
     ) -> Result<(MutationBatch, Vec<SpecChangeResult>), PipeError> {
-        let noun = self.catalog.noun_of(element).ok_or_else(|| PipeError::Blocking {
-            message: format!("{element:?} 不在数据面"),
-        })?;
+        let noun = self
+            .catalog
+            .noun_of(element)
+            .ok_or_else(|| PipeError::Blocking {
+                message: format!("{element:?} 不在数据面"),
+            })?;
         if self.spec.is_none() {
             return Err(PipeError::Blocking {
                 message: "规格库读面未接入（with_spec）".into(),
@@ -86,12 +89,16 @@ impl<C: PipeCatalog> PipeModelService<C> {
         bran: RefU64,
         new_spec: RefU64,
     ) {
-        batch.ops.push(set_attr(bran, "PSPE", NamedAttrValue::RefU64Type(new_spec)));
+        batch
+            .ops
+            .push(set_attr(bran, "PSPE", NamedAttrValue::RefU64Type(new_spec)));
         match self.catalog.attr(bran, "HBOR") {
             Some(NamedAttrValue::F32Type(hbor)) => {
                 let (hstu, warning) = self.select_hstu(new_spec, hbor as f64);
                 if let Some(spco) = hstu {
-                    batch.ops.push(set_attr(bran, "HSTU", NamedAttrValue::RefU64Type(spco)));
+                    batch
+                        .ops
+                        .push(set_attr(bran, "HSTU", NamedAttrValue::RefU64Type(spco)));
                 }
                 if let Some(w) = warning {
                     batch.warnings.push(w);
@@ -127,7 +134,9 @@ impl<C: PipeCatalog> PipeModelService<C> {
         // Story 21：ATTA 变更期钉住防漂移。
         let pinned = noun == "ATTA";
         if pinned {
-            batch.ops.push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(true)));
+            batch
+                .ops
+                .push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(true)));
         }
 
         // 答卷来源：现行 SPREF→SPCO 的 SELE 祖先链反推（§18.8）。
@@ -141,7 +150,9 @@ impl<C: PipeCatalog> PipeModelService<C> {
             .and_then(|spco| spec.derive_answers(spco));
         let Some(qa) = qa else {
             if pinned {
-                batch.ops.push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(false)));
+                batch
+                    .ops
+                    .push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(false)));
             }
             return SpecChangeResult {
                 element: el,
@@ -150,17 +161,13 @@ impl<C: PipeCatalog> PipeModelService<C> {
             };
         };
 
-        let outcome = spec_resolver::resolve(
-            spec,
-            new_spec,
-            spec.root_selector(new_spec),
-            noun,
-            &qa,
-        );
+        let outcome =
+            spec_resolver::resolve(spec, new_spec, spec.root_selector(new_spec), noun, &qa);
         match &outcome {
-            ComponentOutcome::Direct { spco }
-            | ComponentOutcome::SelectorFallback { spco, .. } => {
-                batch.ops.push(set_attr(el, "SPREF", NamedAttrValue::RefU64Type(*spco)));
+            ComponentOutcome::Direct { spco } | ComponentOutcome::SelectorFallback { spco, .. } => {
+                batch
+                    .ops
+                    .push(set_attr(el, "SPREF", NamedAttrValue::RefU64Type(*spco)));
             }
             ComponentOutcome::NeedsSelection => {}
         }
@@ -200,9 +207,15 @@ impl<C: PipeCatalog> PipeModelService<C> {
         }
 
         if pinned {
-            batch.ops.push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(false)));
+            batch
+                .ops
+                .push(set_attr(el, "SPKBRK", NamedAttrValue::BoolType(false)));
         }
-        SpecChangeResult { element: el, noun: noun.into(), outcome }
+        SpecChangeResult {
+            element: el,
+            noun: noun.into(),
+            outcome,
+        }
     }
 }
 
@@ -210,7 +223,7 @@ impl<C: PipeCatalog> PipeModelService<C> {
 mod tests {
     use super::*;
     use crate::service::PipeModel;
-    use crate::testkit::{ctx, MockCatalog, MockSpec};
+    use crate::testkit::{MockCatalog, MockSpec, ctx};
 
     fn rig() -> (MockCatalog, MockSpec) {
         let mut cat = MockCatalog::new();
@@ -229,22 +242,36 @@ mod tests {
             cat.owners.insert(r, RefU64(11));
             cat.members.entry(RefU64(11)).or_default().push(r);
         }
-        cat.attrs.insert(RefU64(22), std::collections::BTreeMap::from([
-            ("SPREF".into(), NamedAttrValue::RefU64Type(RefU64(700))),
-        ]));
-        cat.attrs.insert(RefU64(23), std::collections::BTreeMap::from([
-            ("SPREF".into(), NamedAttrValue::RefU64Type(RefU64(700))),
-        ]));
-        cat.attrs.insert(RefU64(24), std::collections::BTreeMap::from([
-            ("SPREF".into(), NamedAttrValue::RefU64Type(RefU64(700))),
-            ("ARIVE".into(), NamedAttrValue::IntegerType(1)),
-            ("LEAVE".into(), NamedAttrValue::IntegerType(2)),
-        ]));
+        cat.attrs.insert(
+            RefU64(22),
+            std::collections::BTreeMap::from([(
+                "SPREF".into(),
+                NamedAttrValue::RefU64Type(RefU64(700)),
+            )]),
+        );
+        cat.attrs.insert(
+            RefU64(23),
+            std::collections::BTreeMap::from([(
+                "SPREF".into(),
+                NamedAttrValue::RefU64Type(RefU64(700)),
+            )]),
+        );
+        cat.attrs.insert(
+            RefU64(24),
+            std::collections::BTreeMap::from([
+                ("SPREF".into(), NamedAttrValue::RefU64Type(RefU64(700))),
+                ("ARIVE".into(), NamedAttrValue::IntegerType(1)),
+                ("LEAVE".into(), NamedAttrValue::IntegerType(2)),
+            ]),
+        );
         let mut spec = MockSpec::default();
         // 现行 SPCO 700 的答卷反推。
         spec.answers_map.insert(
             RefU64(700),
-            vec![("PBOR0".into(), "100".into()), ("STYP".into(), "EQUAL".into())],
+            vec![
+                ("PBOR0".into(), "100".into()),
+                ("STYP".into(), "EQUAL".into()),
+            ],
         );
         (cat, spec)
     }
@@ -263,9 +290,7 @@ mod tests {
             .ops
             .iter()
             .filter_map(|op| match op {
-                MutationOp::SetAttrs { element, attrs }
-                    if attrs.contains_key("PSPE") =>
-                {
+                MutationOp::SetAttrs { element, attrs } if attrs.contains_key("PSPE") => {
                     Some(*element)
                 }
                 _ => None,
@@ -276,9 +301,18 @@ mod tests {
         // 逐件结果：TUBI 跳过；ELBO/ATTA Direct；TEE NeedsSelection。
         assert_eq!(results.len(), 3);
         let get = |el: RefU64| results.iter().find(|r| r.element == el).unwrap();
-        assert!(matches!(get(RefU64(22)).outcome, ComponentOutcome::Direct { .. }));
-        assert!(matches!(get(RefU64(23)).outcome, ComponentOutcome::Direct { .. }));
-        assert!(matches!(get(RefU64(24)).outcome, ComponentOutcome::NeedsSelection));
+        assert!(matches!(
+            get(RefU64(22)).outcome,
+            ComponentOutcome::Direct { .. }
+        ));
+        assert!(matches!(
+            get(RefU64(23)).outcome,
+            ComponentOutcome::Direct { .. }
+        ));
+        assert!(matches!(
+            get(RefU64(24)).outcome,
+            ComponentOutcome::NeedsSelection
+        ));
 
         // ATTA：SPKBRK TRUE 在其 SPREF 写前、FALSE 在后。
         let seq: Vec<(RefU64, String)> = batch
@@ -309,7 +343,9 @@ mod tests {
         let svc = PipeModelService::new(cat).with_spec(spec);
         let (_batch, results) = svc.change_spec(&ctx(), RefU64(22), RefU64(88)).unwrap();
         assert_eq!(results.len(), 1);
-        assert!(matches!(results[0].outcome, ComponentOutcome::Direct { spco } if spco == RefU64(801)));
+        assert!(
+            matches!(results[0].outcome, ComponentOutcome::Direct { spco } if spco == RefU64(801))
+        );
     }
 
     #[test]
@@ -366,9 +402,6 @@ mod tests {
         let (cat, spec) = rig(); // rig 的 BRAN 只带 PSPE，无 HBOR
         let svc = PipeModelService::new(cat).with_spec(spec);
         let (batch, _results) = svc.change_spec(&ctx(), RefU64(11), RefU64(88)).unwrap();
-        assert!(batch
-            .warnings
-            .iter()
-            .any(|w| w.message.contains("无 HBOR")));
+        assert!(batch.warnings.iter().any(|w| w.message.contains("无 HBOR")));
     }
 }
