@@ -736,15 +736,28 @@ rebuild、不推进应用/模型水位。
   但不收这一格（它删的是数据面行，网格由重解析自己收拾）：带了 `purge_meshes=true` 回 `400 bad_request`，不静默忽略。
 - `watch_scope` 之外 `400`，与 §4.5.1A 同一判据。
 - 闸门（任一不满足则 `409 conflict`、一行不删）：队列快照里该库有行；该库有在飞整库重建（§4.5.1A）或整库即时生成（§4.5.1B）；该库生成锁拿不到（有按需生成在飞）。
-- 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、交付台账、目录 memo。
+- 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans` / `pe_ptset`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、交付台账、目录 memo。
+  - **复合键的两张边表另删（2026-11-12，GitHub #147）**：上面那条区间是字符串 id 的区间 `<表>:<ref0>_0..<ref0>_9999999999`，
+    而管身边 `tubi_relate` 的 id 是 `[pe:⟨分支⟩, 槽位]`、几何边 `geo_relate` 的 id 是 `[inst_info:⟨键⟩, inst_geo:⟨网格⟩]`，都不在里面。
+    此前在已初始化的库上（`database = "model_face"`）这条接口回 `deleted`，库里这个库的管身行一行没少（清完的核对用同一段区间去数，
+    也数不到），而且清完到重建之间读路径照样读得到它们——模型水位归零后读路由是 `memory` / `model_lagging`，这一档允许按根回读库
+    （§4.5 的回读）。现在两档（`model_face` / `residue`）都另按两种圈法删管身行：按 `dbnum` 列，和按本库 Ref0 的复合键区间
+    `tubi_relate:[pe:<ref0>_0, NONE]..=[pe:<ref0>_9999999999, ..]`；几何边按 `geo_relate:[inst_info:<ref0>_0, NONE]..=[inst_info:<ref0>_9999999999, ..]` 删
+    （登记成图边的几何边本来会随 `inst_info` 顶点被带走，历史上普通 `INSERT` 写的不会）。
+  - **管身行连同它指着的盒与变换一起删**：隐式管身没有 refno，它的 `aabb` / `trans` 行按身份（分支、起止构件、序号）的 SHA-256 做键，
+    不在任何 Ref0 区间里，只有顺着管身行上的指针才找得到；而模型行的插入一律 `INSERT IGNORE`。只删行的话，重建出来的同一段管身
+    沿用旧盒、旧变换。所以每种圈法是三句：先顺着指针删盒、删变换，再删行（与按根重算时的分支重置同一条纪律）。
+  - **清完的核对**逐处数：每张表在每个 Ref0 上的字符串区间、两张复合键边表的区间、`tubi_relate WHERE dbnum = N`、房间两边；
+    哪一处不为零就 `500`，报错点名是哪张表的哪一段（`model face wipe incomplete: `<表与范围>` still has N rows`），水位那半句已经发出去了
+    不回滚——再清一遍是幂等的。
 - 水位：只把模型半边归零（`model_sesno = 0` 及 `model_sesno_time` / `model_settled_at` / `model_lazy_roots` / `model_dead_roots` / `model_roots_observed_at = NONE`），与回退重建那一句的模型半边逐字相同；`state_revision` 加一。数据水位不动。
 - 路由（回执 `database` 一格说库上那一侧做了什么）：
   - `model_face`：`route_for(dbnum)` 是 `Database`，照上面两条清库上的模型面；
   - `residue`（2026-11-11，GitHub #146）：读路由是 `Memory`、理由是基线没落（`data_watermark_unestablished`），而且持久层是
     外部那台库。这种库没有已收尾的快照，库里的模型行只可能是残留——按需生成经写后台落的（§4.5）、初始化中途留下的——
     而且本库 `pe` 圈不到它们。此前这一档回 `status = deleted`、`ref0s = []`，库上一行没删。现在范围另从残留行自己的 id
-    圈（`inst_relate` 取 id、`tubi_relate` 取 `in`）、逐个按位解码核对确实属于本库，与 `pe` 圈到的合在一起清，管身边另按
-    `dbnum` 列删（它的 id 是 `[分支, 槽位]`，Ref0 区间够不着），模型水位那半句照发。解到别的库的 Ref0 上就拒绝、
+    圈（`inst_relate` 取 id、`tubi_relate` 取 `in`）、逐个按位解码核对确实属于本库，与 `pe` 圈到的合在一起清，管身边照上面
+    「复合键的两张边表另删」那一条删（2026-11-12 起两档共用，连同盒与变换），模型水位那半句照发。解到别的库的 Ref0 上就拒绝、
     一行不删（这些行的 `dbnum` 列与 id 对不上，先人工核对）。清之前同样先摘写后台、攥着生成锁；
   - `untouched`：其余——读透，或 `Memory` 路由的另外几档（任务在飞被闸门挡在前面；模型落后 / 水位缺席或倒挂时库里那份
     是已收尾任务落过的旧快照，不归这条清理管）。不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里
@@ -762,20 +775,21 @@ rebuild、不推进应用/模型水位。
 - 成功 `200`：
 
 ```json
-{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
+{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":18,"elapsed_ms":40,"model_source_after":"memory"}
 ```
 
-基线没落的库（`database = "residue"`）：`ref0s` 是 `pe` 圈到的与残留行自己圈出来的合在一起；只作废了投影的那一档是
-`"database":"untouched","ref0s":[],"range_statements":0`。
+`range_statements` 是这一趟发出去的删除语句数：一个 Ref0 时 18 句 = 管身三句组两组（按列、按区间）6 + 几何边区间 1 + 九张表的字符串区间 9
++ 房间两句 2；每多一个 Ref0 多 13 句。基线没落的库（`database = "residue"`）：`ref0s` 是 `pe` 圈到的与残留行自己圈出来的合在一起；
+只作废了投影的那一档是 `"database":"untouched","ref0s":[],"range_statements":0`。
 
 ```json
-{"dbnum":7997,"scope":"model_face","status":"deleted","database":"residue","ref0s":["16189","24381"],"range_statements":21,"elapsed_ms":310,"model_source_after":"memory"}
+{"dbnum":7997,"scope":"model_face","status":"deleted","database":"residue","ref0s":["16189","24381"],"range_statements":31,"elapsed_ms":310,"model_source_after":"memory"}
 ```
 
 勾了 `purge_meshes` 时同一次回执多四格（数字是这一趟的账，与 `elapsed_ms` 同口径）：
 
 ```json
-{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory",
+{"dbnum":8000,"scope":"model_face","status":"deleted","database":"model_face","ref0s":["24381"],"range_statements":18,"elapsed_ms":40,"model_source_after":"memory",
  "mesh_files_removed":389,"mesh_files_absent":0,"mesh_files_failed":0,"inst_geo_removed":389}
 ```
 
@@ -1604,6 +1618,12 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   ——按需生成对基线没落的库落的（§4.5）、初始化中途留下的——它够不着，此前回成功、那些行原样留着。现在 `pe` 删光之后
   补一刀：范围从残留行自己的 id 圈、逐个按位解码核对确实属于本库（解到别的库就报错、不删），这一格是清掉的行数
   （`inst_relate` + `tubi_relate`，按 `dbnum` 列数）；没有残留为 `0`，不多发一句写库。
+  **2026-11-12 起整库清库在删任何东西之前先清复合键的两张边表**（整库快删、回退重建、人工重新解析、升级清库同一条路，
+  `fast_delete::wipe_dbnum_rows_on`）：本库的管身行按 `dbnum` 列与按 Ref0 的复合键区间两种圈法删，每种三句——先顺着管身行上的
+  指针删它的盒与变换，再删行；几何边按复合键区间删（语句与 §4.5.1D 那一栏相同）。原因：隐式管身的 `aabb` / `trans` 行按身份的
+  SHA-256 做键，不在任何 Ref0 区间里；此前清库删 `pe` 顶点时管身边跟着顶点没了，盒与变换留在库里，随后的初始化一律
+  `INSERT IGNORE`，新盒写不进去——回退重建之后，身份没变、几何变了的管身停在回退之前的位置，直到那根分支下一次被重算。
+  所以这一格 `model_residue_rows` 里从此不会再有管身行（它们在前面就删了），只剩 `pe` 圈不到的 `inst_relate`。
 - **`DELETE /dbnums/{dbnum}/data/above/{watermark}`（按水位删残留）随「恢复即整库
   重初始化」退役**（2026-09-10，决策 d-747）：削库一律改走
   `POST /dbnums/{dbnum}/data/reinitialize`——它排一条整库重建批次，清库在 worker

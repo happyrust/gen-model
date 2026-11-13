@@ -26,6 +26,21 @@
 - **取舍**：① 清账后整库重排的次数从头数（至多再自动重排 `model_whole_library_retry_limit` 次），与「保存新会话」「重启」两条路同一口径，没有另造「只放一次」的计数；② 已放弃的根不复活——账上停着的库它们还落在补算窗口里，下一条任务照样重算；没停的库不因为人点一次执行就翻回「还在赶」；③ 只重排放行的库，别的库照旧等周期对账，没有把「人工执行」扩成「全范围模型补算」；④ 不在监听范围 / 不在当前 MDB 的库稳态补偿本来就不管，账照清，回执如实说「这次没有排模型补算」并点名整库重排。
 - **验证**：新增单测 `batch_worker::…::releasing_a_library_clears_both_columns_and_says_what_was_there`、`model_root_ledger::…::clearing_the_backoff_lets_failed_roots_run_now_without_forgetting_their_streaks`、`manual_update::…::a_manual_execute_on_an_up_to_date_library_releases_its_model_side_retry`、`…::the_release_notice_says_what_was_cleared_and_whether_the_catch_up_was_requeued`，`startup_reconcile` 的入队真值表补「不排时是哪一格挡的」；源码钉 `handlers::…::explicit_execute_requeues_the_model_catch_up_it_released`（先扫描入队再重排；放行在「已是最新」的早退里）。原先钉着「模型侧的解除办法里不许出现 `update/execute`」的两条断言改成「必须同时点名人工执行与整库重排」。没有上真机。
 
+### 整库模型清理清得掉管身行了：复合键的两张边表另按 id 区间删，管身的盒与变换跟着行一起删（GitHub #147）
+
+- **为什么**：`DELETE /api/v1/dbnums/{dbnum}/model` 在已初始化的库上按本库 Ref0 逐表做字符串 id 的区间删（`<表>:<ref0>_0..<ref0>_9999999999`）。管身边 `tubi_relate` 的 id 是复合键 `[pe:⟨分支⟩, 槽位]`，不在这条区间里；它的 `in` 是 `pe`，模型清理又不删 `pe`，边不会跟着顶点走。清完的核对用同一段区间去数，也数不到。结果是接口回 `deleted`，库里这个库的管身行一行没少。清完到重建之间读路径照样读得到它们：模型水位归零后读路由是内存、理由「模型落后」，这一档允许按根回读库，而管身的盒与变换按身份哈希做键、不在任何 Ref0 区间里，指针解得开——按根回读、房间层级树的管身冷读、管身空间索引三条路都读得到。几何边 `geo_relate` 的 id 同样是复合键（`[inst_info:⟨键⟩, inst_geo:⟨网格⟩]`）：登记成图边的会随 `inst_info` 顶点被带走，历史上普通 `INSERT` 写的不会，核对同样数不到。
+- **先证了再修**：把单测 `wiping_the_model_face_on_mem_zeroes_eight_tables_and_keeps_pe` 的夹具换成生产的写法（`INSERT RELATION`、复合键、盒与变换按 64 位十六进制做键，另放普通 `INSERT` 写的非边行与老的字符串 id 行）。修之前它是红的：8000 的 4 条管身行只删掉老 id 那一条、盒与变换 4 条全在、非边的几何边留下；新加的 `after_the_model_face_wipe_no_read_path_still_finds_the_tubes` 也是红的——清理回成功之后管身冷读仍读到 8000 的两段。此前那条单测造的是 `CREATE tubi_relate:24381_20 …`（与 `pe` 同形的字符串 id），所以一直过。
+- **改**（`src/data_interface/fast_delete.rs`）：两个入口（已初始化的库、基线没落的库）共用的那一半多一栏 `composite_deletes`，排在字符串区间之前执行——管身行按两种圈法删：按 `dbnum` 列，和按本库 Ref0 的复合键区间（`tube_range_of`，写法同 `owner_range_of`）；几何边按 `geo_edge_range_of` 的区间删。**每种圈法三句：先顺着管身行上的指针删盒、删变换，再删行**——管身的 `aabb` / `trans` 按身份做键，插入一律 `INSERT IGNORE`，只删行的话重建出来的同一段管身沿用旧盒、旧变换（`model_db_adapter::render_tube_branch_resets` 文档里的同一条纪律）。#146 给基线没落那一档单加的 `DELETE tubi_relate WHERE dbnum = N`（只删行）并进这一栏，那一档也因此带上了删盒与变换。核对拆成 `verify_model_face_gone_on`：逐处数（字符串区间、两张复合键边表的区间、`tubi_relate WHERE dbnum = N`、房间两边），哪一处不为零就报错并点名是哪张表的哪一段。整库清库（回退重建 / 删库）的三段语句不取这一栏，逐字不变。
+- **验证**：上面两条测试转绿；新增 `the_verify_step_names_a_tube_row_or_a_geometry_edge_left_behind`（故意各留一行管身行 / 几何边，核对报「不干净」并点名；别的库的行不算）、`the_model_face_wipe_renders_the_composite_keyed_edges_and_the_tubes_boxes`（渲染出的语句与顺序）、`a_tube_republished_after_the_model_face_wipe_gets_its_new_box`（用生产的写入渲染器发布一段管身 → 整库模型清理 → 再发布同一段、世界盒变了，读回来是新盒）；基线没落那一档的两条既有测试补上「管身的盒与变换跟着走、别的库的不动」。回执的 `range_statements` 跟着变多（一个 Ref0 时 18 句）。规格 `docs/specs/web-service-api.md` §4.5.1D 同步。没有在真库副本上做。
+- **没动**：整库重建的清库（回退重建 / 人工重新解析 / 升级）同样会把管身的盒与变换留在库里——管身边跟着 `pe` 顶点走了，没人顺着指针删——随后的初始化是 `INSERT IGNORE`。这是修这张票时查出来的另一处，单独一笔。此前已经被旧清理留在库里、分支又已不存在的管身行不会自己消失：对那个库再做一次整库模型清理（按 `dbnum` 列删）才清得掉。
+
+### 整库重建的清库也带走管身的盒与变换：回退重建之后，身份没变的管身不再沿用旧盒（修 #147 时查出）
+
+- **为什么**：隐式管身没有 refno，它的 `aabb` / `trans` 行按身份（分支、起止构件、序号）的 SHA-256 做键，不在任何 Ref0 区间里，只有顺着管身行上的指针才找得到。整库清库（回退重建 / 人工重新解析 / 升级清库 / 整库删除，都走 `fast_delete::wipe_dbnum_rows_on`）按本库 Ref0 的字符串区间逐表删；删 `pe` 顶点时登记成图边的管身行跟着顶点没了，没有人在它们消失之前顺着指针删盒与变换。随后的初始化一律 `INSERT IGNORE`，同一个键已经有行，新盒、新变换写不进去。回退重建之后，身份没变、几何变了的管身——两版之间改过走向的管线——停在回退之前的位置，直到那根分支下一次被重算。文件没变的重建前后几何相同，看不出来。
+- **先证了再修**：`the_whole_library_wipe_takes_the_tubes_boxes_before_the_vertices_go`（清库之后：4 条管身行剩普通 `INSERT` 写的那条非边行，盒与变换 4 条全在，非边的几何边也在）与 `a_tube_republished_after_a_whole_library_wipe_gets_its_new_box`（用生产的写入渲染器发布一段管身、世界盒 x 上界 100 → 整库重建的清库 → 再发布同一段、x 上界 777，读回来是 100）修之前都是红的。
+- **改**：`wipe_dbnum_rows_on` 在删任何东西之前先发一段——整库模型清理的同一栏 `composite_deletes`（管身行按 `dbnum` 列与按 Ref0 的复合键区间两种圈法，各三句：删盒、删变换、删行；几何边按复合键区间）。必须排在 `pe` 顶点被删之前。`RestartInitializationData`（重启初始化数据，不清模型面）不发这一段；`render_delete_phases` 渲出的三段语句逐字不变。
+- **顺带**：整库删除自己就删得到 `pe` 圈不到的管身行了，#146 在它后面补的那一刀（`model_residue_rows`）只会再数到 `inst_relate`。既有测试 `the_fast_delete_follow_up_clears_model_rows_the_pe_ranges_never_reached` 的两个数跟着改（残留 2 → 1）。规格 `docs/specs/web-service-api.md` 整库快删一节同步。没有在真库上做过一次真的回退重建。
+
 ## 2026-11-11
 
 ### 清几何不再删别的范围还挂着的共用几何行（GitHub #142，查 #76 时查出）

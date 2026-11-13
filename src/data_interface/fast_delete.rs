@@ -58,6 +58,7 @@ pub struct FastDeleteDbnumResult {
     pub elapsed_ms: u64,
     /// `pe` 删光之后模型面还剩、另行清掉的行数（`inst_relate` + `tubi_relate`，按 `dbnum` 列数）：`pe` 从来没圈到过
     /// 的那些——按需生成对基线没落的库落的行、初始化中途留下的行（[`wipe_model_residue_after_delete_on`]）。
+    /// 管身行整库清库自己先按 `dbnum` 列删了（[`wipe_dbnum_rows_on`]，2026-11-12），这里实际只会数到 `inst_relate`。
     /// 只有整库删除（[`delete_dbnum_fast`]）填它；回退重建 / 升级清库的残留由随后的初始化入口清，恒为 0。
     pub model_residue_rows: usize,
 }
@@ -134,6 +135,50 @@ fn range_of(table: &str, ref0: &str) -> String {
 /// `SELECT`（[`preview_prune_above_watermark`]）。
 fn owner_range_of(ref0: &str) -> String {
     format!("pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_{RANGE_END}, ..]")
+}
+
+/// 本 Ref0 下全部分支的隐式管身行，按 `tubi_relate` 的复合 record id 一段区间圈住（GitHub #147）。
+///
+/// 管身边的 id 是 `[分支 PE, 槽位]`（`model_db_adapter::RowBatch::render` 与 `cata_model::render_tubi_branch_replace`
+/// 两个写口同形），不是 `<ref0>_<ref1>` 的字符串：[`range_of`] 那条字符串区间对它是空扫——删不到、数也数不到。
+/// 写法与 [`owner_range_of`] 相同，边是不是登记成了图边都圈得住。
+fn tube_range_of(ref0: &str) -> String {
+    format!("tubi_relate:[pe:{ref0}_0, NONE]..=[pe:{ref0}_{RANGE_END}, ..]")
+}
+
+/// 本 Ref0 下全部构件的几何边，按 `geo_relate` 的复合 record id `[inst_info:⟨键⟩, inst_geo:⟨网格⟩]` 圈住。
+///
+/// 同样不在字符串区间里。登记成图边的行会随 `inst_info` 顶点一起被带走（`inst_info` 那段区间在删），所以它们
+/// 实际清得掉；但历史上普通 `INSERT` 写的行 `in` 只是字段、不跟着顶点走，清完的核对也数不到这张表——按 id 区间
+/// 删、按 id 区间数，两样都不再靠「顶点带走边」。
+fn geo_edge_range_of(ref0: &str) -> String {
+    format!("geo_relate:[inst_info:{ref0}_0, NONE]..=[inst_info:{ref0}_{RANGE_END}, ..]")
+}
+
+/// 一个库的隐式管身行，连同它们指着的盒与变换（GitHub #147）。
+///
+/// **行与它的盒 / 变换要一起删**（`model_db_adapter::render_tube_branch_resets` 同一条纪律）：管身的 `aabb` / `trans`
+/// 按**身份**做键（`e3d_mesh_store::geometry_record_id`：`GeometryId::ImpliedTube` 的 SHA-256，64 位十六进制），
+/// 不在任何 Ref0 区间里，只有顺着管身行上的指针才找得到；而插入一律 `INSERT IGNORE`。只删行的话，重建出来的同一段
+/// 管身仍指着那条没被覆盖的旧盒、旧变换——身份没变、几何变了的管身从此停在清理之前的样子。所以每种圈法三句：
+/// 先顺着指针删盒、删变换，再删行。
+///
+/// 两种圈法都要：按 `dbnum` 列（`idx_tubi_relate_dbnum`；`pe` 圈不到的残留、老的字符串 id 行也点得到）与按
+/// 本库 Ref0 的复合键区间（[`tube_range_of`]；没带 `dbnum` 列的旧行也圈得住）。
+fn render_tube_wipe(dbnum: u32, ref0s: &[String]) -> Vec<String> {
+    let mut scopes = vec![(format!("tubi_relate WHERE dbnum = {dbnum}"), "AND")];
+    scopes.extend(ref0s.iter().map(|ref0| (tube_range_of(ref0), "WHERE")));
+    let mut statements = Vec::with_capacity(scopes.len() * 3);
+    for (scope, glue) in scopes {
+        // 指针为 NONE 的历史行要先滤掉：`DELETE` 见到 NONE 整句失败。
+        for pointer in ["aabb", "world_trans"] {
+            statements.push(format!(
+                "DELETE (SELECT VALUE {pointer} FROM {scope} {glue} {pointer} != NONE);"
+            ));
+        }
+        statements.push(format!("DELETE {scope};"));
+    }
+    statements
 }
 
 fn collect_ref0s(prefix_rows: Vec<Ref0Row>) -> anyhow::Result<(usize, Vec<String>)> {
@@ -607,12 +652,23 @@ fn is_model_face_range_table(table: &str) -> bool {
 /// 够不着「id 前缀不在本库 Ref0 集合里」的边。元数据是 spatial epoch 与模型水位半边，
 /// 并让 `state_revision` 前进一步。
 pub(crate) struct ModelFaceRender {
+    /// 复合键的两张边表（GitHub #147）：管身边连同它们指着的盒与变换（[`render_tube_wipe`]）、几何边
+    /// （[`geo_edge_range_of`]）。**排在 `range_deletes` 之前执行**：管身的盒与变换只有顺着还在的管身行才找得到。
+    /// 整库清库的三段语句（[`render_delete_phases`]）不取这一栏；它的执行入口（[`wipe_dbnum_rows_on`]）在删任何
+    /// 东西之前单独发这一栏——那条路还要赶在 `pe` 顶点被删之前。
+    pub composite_deletes: Vec<String>,
     pub range_deletes: Vec<String>,
     pub room_predicates: Vec<String>,
     pub metadata: Vec<String>,
 }
 
 pub(crate) fn render_model_face_wipe(dbnum: u32, ref0s: &[String]) -> ModelFaceRender {
+    let mut composite_deletes = render_tube_wipe(dbnum, ref0s);
+    composite_deletes.extend(
+        ref0s
+            .iter()
+            .map(|ref0| format!("DELETE {};", geo_edge_range_of(ref0))),
+    );
     let mut range_deletes = Vec::new();
     for ref0 in ref0s {
         for table in RANGE_TABLES
@@ -635,6 +691,7 @@ pub(crate) fn render_model_face_wipe(dbnum: u32, ref0s: &[String]) -> ModelFaceR
         ),
     ];
     ModelFaceRender {
+        composite_deletes,
         range_deletes,
         room_predicates,
         metadata,
@@ -1302,7 +1359,7 @@ pub(crate) async fn wipe_dbnum_model_face_on(
         bail!("dbnum must be greater than zero");
     }
     let (_pe_rows, ref0s, _noun_tables) = collect_dbnum_ref0s_on(db, dbnum).await?;
-    wipe_model_face_ranges_on(db, dbnum, ref0s, &[]).await
+    wipe_model_face_ranges_on(db, dbnum, ref0s).await
 }
 
 /// 初始化入口清模型面残留用（`dbnum_initialize::clear_model_face_before_initial_on`）：Ref0 由调用方给。
@@ -1311,8 +1368,9 @@ pub(crate) async fn wipe_dbnum_model_face_on(
 /// （按需生成对还没初始化的库照样落库；初始化中途库进程死掉也会留下）它圈不到任何区间。这里换成调用方
 /// 从残留行自己的 id 圈出来、并逐个核对过归属的 Ref0，渲染仍是同一份。
 ///
-/// 另按 `dbnum` 列补删管身边：`tubi_relate` 的 id 是复合键 `[pe:⟨分支⟩, 槽位]`，落不进
-/// `RANGE_TABLES` 那条字符串区间；整库清理时它随 `pe` 顶点一起被带走，这里没有 `pe` 可删。
+/// 管身边（`tubi_relate` 的 id 是复合键 `[pe:⟨分支⟩, 槽位]`，落不进 `RANGE_TABLES` 那条字符串区间）在两个入口
+/// 共用的那一半里删（[`ModelFaceRender::composite_deletes`]）：#146 给这一档单加的那句按 `dbnum` 列删，
+/// #147 之后已初始化的那一档也要，就挪了过去，并补上顺着指针删盒与变换。
 pub(crate) async fn wipe_model_face_residue_on(
     db: &Surreal<Any>,
     dbnum: u32,
@@ -1327,54 +1385,26 @@ pub(crate) async fn wipe_model_face_residue_on(
     {
         bail!("invalid Ref0 for dbnum {dbnum} model face wipe: {invalid}");
     }
-    wipe_model_face_ranges_on(
-        db,
-        dbnum,
-        ref0s,
-        &[format!("DELETE tubi_relate WHERE dbnum = {dbnum};")],
-    )
-    .await
+    wipe_model_face_ranges_on(db, dbnum, ref0s).await
 }
 
 /// 两个入口共用的那一半：按给定 Ref0 渲染、删、复位模型水位、核对。
+///
+/// 删的先后：复合键的两张边表在前（管身的盒与变换要顺着还在的管身行找），字符串区间与房间两句在后。
 async fn wipe_model_face_ranges_on(
     db: &Surreal<Any>,
     dbnum: u32,
     ref0s: Vec<String>,
-    extra_deletes: &[String],
 ) -> anyhow::Result<ModelFaceWipeResult> {
     let started = Instant::now();
     let rendered = render_model_face_wipe(dbnum, &ref0s);
-    let mut statements = rendered.range_deletes;
+    let mut statements = rendered.composite_deletes;
+    statements.extend(rendered.range_deletes);
     statements.extend(rendered.room_predicates);
-    statements.extend(extra_deletes.iter().cloned());
     execute_phase(db, "delete model face", &statements).await?;
     execute_transactional_phase(db, "reset model watermark", &rendered.metadata).await?;
 
-    let mut verify = db
-        .query(render_model_face_verify(dbnum, &ref0s))
-        .await
-        .context("verify model face wipe")?
-        .check()
-        .context("verify model face wipe statement")?;
-    let range_tables = RANGE_TABLES
-        .iter()
-        .filter(|table| is_model_face_range_table(table))
-        .count();
-    let queries = range_tables * ref0s.len() + 2;
-    for index in 0..queries {
-        let remaining = verify
-            .take::<Vec<CountRow>>(index)
-            .with_context(|| format!("decode model face residue {index}"))?
-            .first()
-            .map(|row| row.count)
-            .unwrap_or_default();
-        if remaining != 0 {
-            bail!(
-                "dbnum {dbnum} model face wipe incomplete: query {index} still has {remaining} rows"
-            );
-        }
-    }
+    verify_model_face_gone_on(db, dbnum, &ref0s).await?;
     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
     Ok(ModelFaceWipeResult {
         dbnum,
@@ -1387,25 +1417,64 @@ async fn wipe_model_face_ranges_on(
     })
 }
 
-fn render_model_face_verify(dbnum: u32, ref0s: &[String]) -> String {
-    let mut sql = String::new();
+/// 清完的核对那一步：模型面逐处数一遍，哪一处不为零就报错、点名是哪张表的哪一段。
+///
+/// 单拎出来是为了能对着一个故意留了行的库直接问它——「清理说干净了」要靠这一步兜底，它自己数不到的地方
+/// 就是 #147 那样「回成功、一行没少」的地方。
+pub(crate) async fn verify_model_face_gone_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    ref0s: &[String],
+) -> anyhow::Result<()> {
+    let checks = render_model_face_verify(dbnum, ref0s);
+    let sql = checks
+        .iter()
+        .map(|scope| format!("SELECT count() AS count FROM {scope} GROUP ALL;"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut verify = db
+        .query(sql)
+        .await
+        .context("verify model face wipe")?
+        .check()
+        .context("verify model face wipe statement")?;
+    for (index, scope) in checks.iter().enumerate() {
+        let remaining = verify
+            .take::<Vec<CountRow>>(index)
+            .with_context(|| format!("decode model face residue of {scope}"))?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+        if remaining != 0 {
+            bail!("dbnum {dbnum} model face wipe incomplete: `{scope}` still has {remaining} rows");
+        }
+    }
+    Ok(())
+}
+
+/// 核对要数的地方，每一项是一句 `SELECT count() … FROM <这一项>` 的 `FROM` 后半句（也是报错时点的名）：
+/// 每张模型面表在每个 Ref0 上的字符串区间；复合键的两张边表在每个 Ref0 上的区间；管身行按 `dbnum` 列；房间两边。
+///
+/// 管身的盒与变换数不了：它们按身份哈希做键，行一删就没有东西指得到它们——删的那一步顺着指针删，这里不重复。
+fn render_model_face_verify(dbnum: u32, ref0s: &[String]) -> Vec<String> {
+    let mut checks = Vec::new();
     for table in RANGE_TABLES
         .iter()
         .copied()
         .filter(|table| is_model_face_range_table(table))
     {
         for ref0 in ref0s {
-            sql.push_str(&format!(
-                "SELECT count() AS count FROM {} GROUP ALL;\n",
-                range_of(table, ref0)
-            ));
+            checks.push(range_of(table, ref0));
         }
     }
-    sql.push_str(&format!(
-        "SELECT count() AS count FROM room_relate WHERE in.dbnum = {dbnum} GROUP ALL;\n\
-         SELECT count() AS count FROM room_panel_relate WHERE in.dbnum = {dbnum} GROUP ALL;"
-    ));
-    sql
+    for ref0 in ref0s {
+        checks.push(tube_range_of(ref0));
+        checks.push(geo_edge_range_of(ref0));
+    }
+    checks.push(format!("tubi_relate WHERE dbnum = {dbnum}"));
+    checks.push(format!("room_relate WHERE in.dbnum = {dbnum}"));
+    checks.push(format!("room_panel_relate WHERE in.dbnum = {dbnum}"));
+    checks
 }
 
 async fn wipe_dbnum_rows(
@@ -1687,6 +1756,19 @@ pub(crate) async fn wipe_dbnum_rows_on(
 
     let (relations, ranges, metadata) =
         render_delete_phases(dbnum, &ref0s, &noun_tables, watermark);
+    // 复合键的两张边表先清——管身边连同它指着的盒与变换、几何边，整库模型清理的同一栏
+    // （[`ModelFaceRender::composite_deletes`]）。**必须赶在 `pe` 顶点被删之前**：登记成图边的管身行会跟着顶点
+    // 一起没了，而管身的盒与变换按身份哈希做键、不在任何 Ref0 区间里，只有顺着还在的管身行才找得到。把它们留在
+    // 库里，随后的初始化（`INSERT IGNORE`）写不进新盒、新变换：回退重建之后，身份没变、几何变了的管身停在回退
+    // 之前的位置，直到那根分支下一次被重算（修 GitHub #147 时查出，钉在
+    // `a_tube_republished_after_a_whole_library_wipe_gets_its_new_box`）。
+    // `RestartInitializationData` 不清模型面（几何行归还活着的初始化管），这一段也不发。
+    let composite = if watermark == WatermarkDisposal::RestartInitializationData {
+        Vec::new()
+    } else {
+        render_model_face_wipe(dbnum, &ref0s).composite_deletes
+    };
+    execute_phase(db, "delete composite-keyed model edges", &composite).await?;
     execute_phase(db, "delete owner relations", &relations).await?;
     execute_phase(db, "delete Ref0 ranges", &ranges).await?;
     execute_transactional_phase(db, "delete dbnum metadata", &metadata).await?;
@@ -2461,6 +2543,7 @@ mod tests {
         );
         assert!(rendered.metadata[1].contains("state_revision = (state_revision ?? 0) + 1"));
         let sql = [
+            rendered.composite_deletes.clone(),
             rendered.range_deletes.clone(),
             rendered.room_predicates.clone(),
             rendered.metadata.clone(),
@@ -2533,21 +2616,32 @@ mod tests {
         assert!(quiesce < collect, "{body}");
     }
 
-    /// 写两根几何和房间边，清掉模型面：八张表该库为零，`pe` / noun / 别的库不动，
-    /// 模型水位归零且 `state_revision` 加一，数据水位留着。
-    #[tokio::test]
-    async fn wiping_the_model_face_on_mem_zeroes_eight_tables_and_keeps_pe() {
+    /// 管身行的盒与变换的键：隐式管身没有 refno，记录号是身份的 SHA-256（`e3d_mesh_store::geometry_record_id`）——
+    /// 64 位十六进制、不含下划线，落不进任何 `<ref0>_0..<ref0>_9999999999` 区间。`A` / `B` 是 8000 的两段，`Z` 是 8001 的。
+    const TUBE_KEY_A: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+    const TUBE_KEY_B: &str = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
+    const TUBE_KEY_Z: &str = "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9";
+
+    /// 一只 `mem://` 库：8000（Ref0 24381）已初始化——有 `pe`、有水位——模型面是**生产的写法**
+    /// （`model_db_adapter::RowBatch::render`）：
+    /// - 构件行 `inst_relate` / `inst_info` / `aabb` / `trans` 的 id 是 `<ref0>_<ref1>`；
+    /// - 管身边 `tubi_relate` 是 `INSERT RELATION`、复合键 `[pe:⟨分支⟩, 槽位]`，盒与变换按身份哈希做键；
+    /// - 几何边 `geo_relate` 是 `INSERT RELATION`、复合键 `[inst_info:⟨键⟩, inst_geo:⟨网格⟩]`。
+    ///
+    /// 另有三种历史行：普通 `INSERT` 写的管身行与几何边（`in` 只是字段，不是图边，顶点删了它们不跟着走），
+    /// 老的字符串 id。旁边是 8001（Ref0 31909）自己的一套，谁也不该碰。
+    async fn initialized_model_face(name: &str) -> Surreal<Any> {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("model_face").use_db("test").await.unwrap();
-        db.query(
-            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 4, noun = 'BRAN';\
+        db.use_ns("initialized_model_face")
+            .use_db(name)
+            .await
+            .unwrap();
+        let seed = "CREATE pe:24381_1 SET dbnum = 8000, sesno = 4, noun = 'BRAN';\
              CREATE pe:24381_10 SET dbnum = 8000, noun = 'BRAN';\
              CREATE pe:24381_20 SET dbnum = 8000, noun = 'BRAN';\
              CREATE inst_relate:24381_10 SET in = pe:24381_10, dbnum = 8000;\
              CREATE inst_relate:24381_20 SET in = pe:24381_20, dbnum = 8000;\
              CREATE inst_info:24381_10 SET dbnum = 8000;\
-             CREATE tubi_relate:24381_20 SET in = pe:24381_20, dbnum = 8000;\
-             CREATE geo_relate:24381_10 SET dbnum = 8000;\
              CREATE aabb:24381_10 SET dbnum = 8000;\
              CREATE trans:24381_10 SET dbnum = 8000;\
              CREATE ref_rev:24381_1 SET dbnum = 8000;\
@@ -2555,19 +2649,95 @@ mod tests {
              CREATE room_relate SET in = pe:24381_1, out = pe:24381_10;\
              CREATE room_panel_relate SET in = pe:24381_1, out = pe:24381_20;\
              CREATE aabb:deadbeef SET mesh = true;\
-             CREATE pe:31909_1 SET dbnum = 8001, noun = 'EQUI';\
+             CREATE aabb:⟨<A>⟩ SET d = {mins:[0,0,0],maxs:[100,10,10]};\
+             CREATE trans:⟨<A>⟩ SET d = {translation:[50,5,5],rotation:[0,0,0,1],scale:[5,5,100]};\
+             CREATE aabb:⟨<B>⟩ SET d = {mins:[100,0,0],maxs:[300,10,10]};\
+             CREATE trans:⟨<B>⟩ SET d = {translation:[200,5,5],rotation:[0,0,0,1],scale:[5,5,200]};\
+             CREATE aabb:⟨<Z>⟩ SET d = {mins:[0,0,0],maxs:[10,10,900]};\
+             CREATE trans:⟨<Z>⟩ SET d = {translation:[5,5,450],rotation:[0,0,0,1],scale:[5,5,900]};\
+             INSERT RELATION INTO tubi_relate [\
+                {id: tubi_relate:[pe:⟨24381_20⟩, 0], in: pe:⟨24381_20⟩, out: inst_geo:tube, \
+                 leave: pe:⟨24381_21⟩, arrive: pe:⟨24381_22⟩, aabb: aabb:⟨<A>⟩, world_trans: trans:⟨<A>⟩, \
+                 anc: [1], dbnum: 8000, model_sesno: 4},\
+                {id: tubi_relate:[pe:⟨24381_20⟩, 1], in: pe:⟨24381_20⟩, out: inst_geo:tube, \
+                 leave: pe:⟨24381_22⟩, arrive: pe:⟨24381_23⟩, aabb: aabb:⟨<B>⟩, world_trans: trans:⟨<B>⟩, \
+                 anc: [1], dbnum: 8000, model_sesno: 4},\
+                {id: tubi_relate:[pe:⟨31909_1⟩, 0], in: pe:⟨31909_1⟩, out: inst_geo:tube, \
+                 leave: pe:⟨31909_2⟩, arrive: pe:⟨31909_3⟩, aabb: aabb:⟨<Z>⟩, world_trans: trans:⟨<Z>⟩, \
+                 anc: [2], dbnum: 8001, model_sesno: 9}];\
+             INSERT INTO tubi_relate [\
+                {id: tubi_relate:[pe:⟨24381_10⟩, 0], in: pe:⟨24381_10⟩, out: inst_geo:tube, dbnum: 8000}];\
+             CREATE tubi_relate:24381_20 SET in = pe:24381_20, dbnum = 8000;\
+             INSERT RELATION INTO geo_relate [\
+                {id: geo_relate:[inst_info:⟨24381_10⟩, inst_geo:⟨mesh1⟩], in: inst_info:⟨24381_10⟩, out: inst_geo:⟨mesh1⟩},\
+                {id: geo_relate:[inst_info:⟨31909_1⟩, inst_geo:⟨mesh1⟩], in: inst_info:⟨31909_1⟩, out: inst_geo:⟨mesh1⟩}];\
+             INSERT INTO geo_relate [\
+                {id: geo_relate:[inst_info:⟨24381_10⟩, inst_geo:⟨mesh2⟩], in: inst_info:⟨24381_10⟩, out: inst_geo:⟨mesh2⟩}];\
+             CREATE geo_relate:24381_10 SET dbnum = 8000;\
+             CREATE pe:31909_1 SET dbnum = 8001, noun = 'BRAN';\
              CREATE inst_relate:31909_1 SET in = pe:31909_1, dbnum = 8001;\
+             CREATE inst_info:31909_1 SET dbnum = 8001;\
              CREATE dbnum_watermark:8000 SET applied_sesno = 4, sesno = 4, model_sesno = 4, \
-                 state_revision = 2;",
+                 state_revision = 2;"
+            .replace("<A>", TUBE_KEY_A)
+            .replace("<B>", TUBE_KEY_B)
+            .replace("<Z>", TUBE_KEY_Z);
+        db.query(seed).await.unwrap().check().unwrap();
+        db
+    }
+
+    /// [`initialized_model_face`] 里管身行与两种边还剩多少：
+    /// `(8000 的管身行, 8000 的管身盒与变换, 库里全部几何边, 8001 的管身行, 8001 的管身盒与变换)`。
+    /// 清干净是 `(0, 0, 1, 1, 2)`——几何边只剩 8001 的那一条。
+    async fn tubes_and_edges_left(db: &Surreal<Any>) -> (usize, usize, usize, usize, usize) {
+        let own_boxes = format!(
+            "SELECT count() AS count FROM aabb:⟨{TUBE_KEY_A}⟩, trans:⟨{TUBE_KEY_A}⟩, \
+             aabb:⟨{TUBE_KEY_B}⟩, trans:⟨{TUBE_KEY_B}⟩ GROUP ALL;"
+        );
+        let other_boxes = format!(
+            "SELECT count() AS count FROM aabb:⟨{TUBE_KEY_Z}⟩, trans:⟨{TUBE_KEY_Z}⟩ GROUP ALL;"
+        );
+        (
+            count_of(
+                db,
+                "SELECT count() AS count FROM tubi_relate WHERE dbnum = 8000 GROUP ALL;",
+            )
+            .await,
+            count_of(db, &own_boxes).await,
+            count_of(db, "SELECT count() AS count FROM geo_relate GROUP ALL;").await,
+            count_of(
+                db,
+                "SELECT count() AS count FROM tubi_relate WHERE dbnum = 8001 GROUP ALL;",
+            )
+            .await,
+            count_of(db, &other_boxes).await,
         )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+    }
+
+    /// 写两根几何和房间边，清掉模型面：八张表该库为零，`pe` / noun / 别的库不动，
+    /// 模型水位归零且 `state_revision` 加一，数据水位留着。
+    ///
+    /// GitHub #147：夹具里的管身行与几何边是生产的写法（复合键），不是与 `pe` 同形的字符串 id。此前这条测试造的是
+    /// `CREATE tubi_relate:24381_20 …`，按字符串区间删得掉，所以「清干净」一直过；生产的管身行不在那条区间里，
+    /// 清理回成功、一行没少。管身的盒与变换要跟着行一起删（`model_db_adapter::render_tube_branch_resets` 同一条
+    /// 纪律）：它们按身份做键、插入一律 `INSERT IGNORE`，只删行的话重建出来的管身沿用旧盒、旧变换。
+    #[tokio::test]
+    async fn wiping_the_model_face_on_mem_zeroes_eight_tables_and_keeps_pe() {
+        let db = initialized_model_face("wipe").await;
+        assert_eq!(
+            tubes_and_edges_left(&db).await,
+            (4, 4, 4, 1, 2),
+            "夹具：8000 四条管身行（两条生产写法、一条非边、一条老 id）、四条几何边里三条是它的"
+        );
 
         let result = wipe_dbnum_model_face_on(&db, 8000).await.unwrap();
         assert_eq!(result.dbnum, 8000);
         assert_eq!(result.ref0s, vec!["24381".to_string()]);
+        assert_eq!(
+            tubes_and_edges_left(&db).await,
+            (0, 0, 1, 1, 2),
+            "8000 的管身行、它们的盒与变换、几何边都清掉；8001 的一样不少"
+        );
 
         #[derive(Debug, serde::Deserialize)]
         struct Mark {
@@ -2607,6 +2777,369 @@ mod tests {
                 .map(|row| row.count)
                 .unwrap_or_default();
             assert!(count >= 1, "{label} 不该被整库模型清理删掉，剩下 {count}");
+        }
+    }
+
+    /// GitHub #147 的读那一半：清完到重建之间，这个库的管身不该再被任何读路径读到。
+    ///
+    /// 清完模型水位是 0、落后于数据水位：读路由是内存、理由「模型落后」，这一档允许按根回读库
+    /// （`model_read_route::allows_durable_fallback`），而进程内投影刚被清理作废——分支根回读到的就是库上的行。
+    /// 管身的盒与变换按身份做键、不在任何 Ref0 区间里，管身行只要还在，指针就解得开：按根回读、房间层级树的
+    /// 管身冷读、管身空间索引（周边查询「附近有哪根管」）三条路都还读得到它。
+    #[tokio::test]
+    async fn after_the_model_face_wipe_no_read_path_still_finds_the_tubes() {
+        use crate::fast_model::model_record_reader::durable_tube_rows_of_branches;
+        use crate::fast_model::spatial_tube_index;
+        let db = initialized_model_face("read_paths").await;
+        let branch = aios_core::RefU64::from_two_nums(24381, 20);
+        let other = aios_core::RefU64::from_two_nums(31909, 1);
+
+        let before = durable_tube_rows_of_branches(&db, &[branch, other])
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 3, "清之前：8000 两段、8001 一段");
+        let index = spatial_tube_index::read_from(&db).await.unwrap();
+        assert!(index.contains_key(&branch) && index.contains_key(&other));
+
+        wipe_dbnum_model_face_on(&db, 8000).await.unwrap();
+
+        // 清完这个库落在允许按根回读库的那一档上。
+        let route = crate::data_interface::model_read_route::route(
+            8000,
+            crate::options::DataFace::Ingest,
+            4,
+            0,
+            false,
+        );
+        assert!(!route.is_database() && route.allows_durable_fallback());
+
+        let after = durable_tube_rows_of_branches(&db, &[branch, other])
+            .await
+            .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .map(|row| row.container.as_str())
+                .collect::<Vec<_>>(),
+            ["31909_1"],
+            "8000 的管身行读不到了，8001 的照旧"
+        );
+        let index = spatial_tube_index::read_from(&db).await.unwrap();
+        assert!(
+            !index.contains_key(&branch) && index.contains_key(&other),
+            "管身空间索引里不再有 8000 的分支"
+        );
+    }
+
+    /// 生产的写入渲染器写出来的一段管身（`model_db_adapter::render_records`，`WriteMode::Initial`——初始化直写与
+    /// 带回执的按根发布用的都是它，一律 `INSERT IGNORE`）：8000 的分支 24381/20 上从 24381/21 到 24381/22 的第 0 段，
+    /// 世界盒的 x 上界由调用方给。记录号是生产的算法（身份的 SHA-256），所以同一段管身两次发布的盒是同一个键。
+    fn tube_publication(max_x: f32) -> String {
+        use crate::fast_model::model_memory_store::{
+            ProjectedGeometry, ProjectedShape, ProjectedTube,
+        };
+        use e3d_io::refno::RefNo;
+        use e3d_model::elmodl::GeometryId;
+        let branch = RefNo::new(24381, 20);
+        let geometry_id = GeometryId::ImpliedTube {
+            container_refno: "24381/20".into(),
+            route_ordinal: 0,
+            from_refno: "24381/21".into(),
+            to_refno: "24381/22".into(),
+        };
+        let record = ProjectedGeometry {
+            record_id: crate::fast_model::e3d_mesh_store::geometry_record_id(&geometry_id, branch),
+            geometry_id,
+            source_refno: branch,
+            dbnum: 8000,
+            source_sesno: 4,
+            noun: "TUBI".into(),
+            mesh_id: "e3d_baked_v2_deadbeef".into(),
+            world_transform: glam::DMat4::IDENTITY,
+            world_bounds: [[0.0, 0.0, 0.0], [max_x, 10.0, 10.0]],
+            ancestors: vec![1],
+            shape: ProjectedShape::Baked,
+            tube: Some(ProjectedTube {
+                route_ordinal: 0,
+                from: RefNo::new(24381, 21),
+                to: RefNo::new(24381, 22),
+                invalid: false,
+            }),
+        };
+        crate::fast_model::model_db_adapter::render_records(
+            &[record],
+            crate::fast_model::model_db_adapter::WriteMode::Initial,
+        )
+        .expect("render tube publication")
+    }
+
+    /// 分支 24381/20 名下管身行读回来的世界盒 x 上界（顺着行上的 `aabb` 指针读，与读路径同一种读法）。
+    async fn tube_box_max_x(db: &Surreal<Any>) -> Vec<f64> {
+        db.query("SELECT VALUE aabb.d.maxs[0] FROM tubi_relate WHERE in = pe:⟨24381_20⟩;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take::<Vec<serde_json::Value>>(0)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_f64().expect("世界盒读得出来"))
+            .collect()
+    }
+
+    /// 只有 8000 的 `pe` 与水位行的一只 `mem://` 库（已初始化，模型面是空的）。
+    async fn initialized_without_model(name: &str) -> Surreal<Any> {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("initialized_without_model")
+            .use_db(name)
+            .await
+            .unwrap();
+        db.query(
+            "CREATE pe:24381_20 SET dbnum = 8000, sesno = 4, noun = 'BRAN';\
+             CREATE pe:24381_21 SET dbnum = 8000, noun = 'ELBO';\
+             CREATE pe:24381_22 SET dbnum = 8000, noun = 'ELBO';\
+             CREATE BRAN:24381_20 SET dbnum = 8000;\
+             CREATE dbnum_watermark:8000 SET applied_sesno = 4, sesno = 4, model_sesno = 4, \
+                 state_revision = 2;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db
+    }
+
+    /// GitHub #147 修法里「管身行连同盒与变换一起删」那一半，用生产的写入渲染器走一遍：发布一段管身 → 整库模型清理
+    /// → 再发布同一段（身份没变、世界盒变了）。读回来的必须是新盒。管身的盒按身份做键、写入一律 `INSERT IGNORE`：
+    /// 清理只删管身行、把盒留在库里的话，第二次发布的新盒输给旧盒，管身停在清理之前的样子。
+    #[tokio::test]
+    async fn a_tube_republished_after_the_model_face_wipe_gets_its_new_box() {
+        let db = initialized_without_model("republish").await;
+        db.query(tube_publication(100.0))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(tube_box_max_x(&db).await, [100.0]);
+
+        wipe_dbnum_model_face_on(&db, 8000).await.unwrap();
+        assert!(tube_box_max_x(&db).await.is_empty(), "清完没有管身行");
+
+        db.query(tube_publication(777.0))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            tube_box_max_x(&db).await,
+            [777.0],
+            "重建出来的是新盒，不是清理之前留在库里的那一条"
+        );
+    }
+
+    /// 整库清库（回退重建 / 人工重新解析 / 升级 / 整库删除）也要把管身的盒与变换带走（修 GitHub #147 时查出）。
+    ///
+    /// 清库删 `pe` 顶点，登记成图边的管身行跟着顶点没了；管身的盒与变换按身份做键、不在任何 Ref0 区间里，只有顺着
+    /// 还在的管身行才找得到——所以要赶在顶点被删之前顺着指针删。此前这一趟清完，管身行剩下普通 `INSERT` 写的那条
+    /// 非边行、盒与变换 4 条全在、非边的几何边也在。「重启初始化数据」那一档不清模型面，盒与变换原样留着。
+    #[tokio::test]
+    async fn the_whole_library_wipe_takes_the_tubes_boxes_before_the_vertices_go() {
+        for (name, disposal) in [
+            ("reinit", WatermarkDisposal::ResetForReinit),
+            ("drop", WatermarkDisposal::DropRow),
+        ] {
+            let db = initialized_model_face(name).await;
+            wipe_dbnum_rows_on(&db, 8000, disposal).await.unwrap();
+            assert_eq!(
+                tubes_and_edges_left(&db).await,
+                (0, 0, 1, 1, 2),
+                "{disposal:?}：8000 的管身行、盒与变换、几何边都不该留下；8001 的一样不少"
+            );
+        }
+
+        let db = initialized_model_face("restart").await;
+        wipe_dbnum_rows_on(&db, 8000, WatermarkDisposal::RestartInitializationData)
+            .await
+            .unwrap();
+        assert_eq!(
+            tubes_and_edges_left(&db).await.1,
+            4,
+            "重启初始化数据不清模型面：管身的盒与变换归还活着的初始化管"
+        );
+    }
+
+    /// 上一条的后果，用生产的写入渲染器走一遍：发布一段管身 → 整库重建的清库 → 再发布同一段（身份没变、世界盒变了，
+    /// 回退重建时两版之间改过走向的管线就是这样）。读回来的必须是新盒。此前读回来的是旧盒：盒留在库里，随后的
+    /// 初始化是 `INSERT IGNORE`，新盒写不进去。
+    #[tokio::test]
+    async fn a_tube_republished_after_a_whole_library_wipe_gets_its_new_box() {
+        let db = initialized_without_model("reinit_republish").await;
+        db.query(tube_publication(100.0))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(tube_box_max_x(&db).await, [100.0]);
+
+        wipe_dbnum_rows_on(&db, 8000, WatermarkDisposal::ResetForReinit)
+            .await
+            .unwrap();
+        assert!(tube_box_max_x(&db).await.is_empty(), "清完没有管身行");
+
+        db.query(tube_publication(777.0))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            tube_box_max_x(&db).await,
+            [777.0],
+            "重建出来的是新盒，不是清库之前留在库里的那一条"
+        );
+    }
+
+    /// GitHub #147 验收第 2 条：清完的核对数得到管身行与几何边。故意各留一行，核对报「不干净」并点名是哪一处；
+    /// 别的库的行不算。此前核对只数字符串区间与房间两句，复合键的行在不在它都说干净。
+    #[tokio::test]
+    async fn the_verify_step_names_a_tube_row_or_a_geometry_edge_left_behind() {
+        let db = initialized_model_face("verify").await;
+        let ref0s = vec!["24381".to_string()];
+        wipe_dbnum_model_face_on(&db, 8000).await.unwrap();
+        verify_model_face_gone_on(&db, 8000, &ref0s)
+            .await
+            .expect("清完是干净的；8001 的管身行与几何边不算在 8000 头上");
+
+        let complaint = |sql: &'static str| {
+            let db = db.clone();
+            let ref0s = ref0s.clone();
+            async move {
+                db.query(sql).await.unwrap().check().unwrap();
+                format!(
+                    "{:#}",
+                    verify_model_face_gone_on(&db, 8000, &ref0s)
+                        .await
+                        .expect_err("留了行就不该说干净")
+                )
+            }
+        };
+
+        // 一条生产写法的管身行：落在本库 Ref0 的复合键区间里。
+        let tube = complaint(
+            "INSERT RELATION INTO tubi_relate [{id: tubi_relate:[pe:⟨24381_20⟩, 0], \
+             in: pe:⟨24381_20⟩, out: inst_geo:tube}];",
+        )
+        .await;
+        assert!(
+            tube.contains("dbnum 8000 model face wipe incomplete")
+                && tube.contains("`tubi_relate:[pe:24381_0, NONE]..=[pe:24381_9999999999, ..]`")
+                && tube.contains("still has 1 rows"),
+            "{tube}"
+        );
+        db.query("DELETE tubi_relate:[pe:⟨24381_20⟩, 0];")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        // `dbnum` 列写着本库、id 却不在本库 Ref0 下的管身行（`pe` 圈不到的残留）：按列数得到。
+        let stray = complaint(
+            "INSERT RELATION INTO tubi_relate [{id: tubi_relate:[pe:⟨16189_7⟩, 0], \
+             in: pe:⟨16189_7⟩, out: inst_geo:tube, dbnum: 8000}];",
+        )
+        .await;
+        assert!(
+            stray.contains("`tubi_relate WHERE dbnum = 8000` still has 1 rows"),
+            "{stray}"
+        );
+        db.query("DELETE tubi_relate WHERE dbnum = 8000;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        // 一条不是图边的几何边（普通 `INSERT`）。
+        let edge = complaint(
+            "INSERT INTO geo_relate [{id: geo_relate:[inst_info:⟨24381_10⟩, inst_geo:⟨mesh9⟩], \
+             in: inst_info:⟨24381_10⟩, out: inst_geo:⟨mesh9⟩}];",
+        )
+        .await;
+        assert!(
+            edge.contains(
+                "`geo_relate:[inst_info:24381_0, NONE]..=[inst_info:24381_9999999999, ..]` still has 1 rows"
+            ),
+            "{edge}"
+        );
+    }
+
+    /// GitHub #147：清理渲出来的复合键那一栏——每种圈法先顺着管身行上的指针删盒、删变换，再删行；几何边按
+    /// `[inst_info, inst_geo]` 的区间删；核对逐处都数。整库清库（回退重建 / 删库）的三段语句不取这一栏，
+    /// 与抽出之前逐字相同。
+    #[test]
+    fn the_model_face_wipe_renders_the_composite_keyed_edges_and_the_tubes_boxes() {
+        let ref0s = ["24381".to_string(), "16189".to_string()];
+        let rendered = render_model_face_wipe(7997, &ref0s);
+        let tube_range =
+            |ref0: &str| format!("tubi_relate:[pe:{ref0}_0, NONE]..=[pe:{ref0}_9999999999, ..]");
+        let geo_range = |ref0: &str| {
+            format!("geo_relate:[inst_info:{ref0}_0, NONE]..=[inst_info:{ref0}_9999999999, ..]")
+        };
+        let mut expected = vec![
+            "DELETE (SELECT VALUE aabb FROM tubi_relate WHERE dbnum = 7997 AND aabb != NONE);"
+                .to_string(),
+            "DELETE (SELECT VALUE world_trans FROM tubi_relate WHERE dbnum = 7997 AND world_trans != NONE);"
+                .to_string(),
+            "DELETE tubi_relate WHERE dbnum = 7997;".to_string(),
+        ];
+        for ref0 in &ref0s {
+            let range = tube_range(ref0);
+            expected.push(format!(
+                "DELETE (SELECT VALUE aabb FROM {range} WHERE aabb != NONE);"
+            ));
+            expected.push(format!(
+                "DELETE (SELECT VALUE world_trans FROM {range} WHERE world_trans != NONE);"
+            ));
+            expected.push(format!("DELETE {range};"));
+        }
+        for ref0 in &ref0s {
+            expected.push(format!("DELETE {};", geo_range(ref0)));
+        }
+        assert_eq!(rendered.composite_deletes, expected);
+
+        let checks = render_model_face_verify(7997, &ref0s);
+        for scope in [
+            tube_range("24381"),
+            tube_range("16189"),
+            geo_range("24381"),
+            geo_range("16189"),
+            "tubi_relate WHERE dbnum = 7997".to_string(),
+            "room_relate WHERE in.dbnum = 7997".to_string(),
+            "room_panel_relate WHERE in.dbnum = 7997".to_string(),
+            "tubi_relate:24381_0..24381_9999999999".to_string(),
+            "pe_ptset:16189_0..16189_9999999999".to_string(),
+        ] {
+            assert!(checks.contains(&scope), "核对要数 {scope}: {checks:?}");
+        }
+        assert_eq!(
+            checks.len(),
+            9 * 2 + 2 * 2 + 3,
+            "九张模型面表 × 两个 Ref0、两张复合键边表 × 两个 Ref0、管身按列、房间两句"
+        );
+
+        for disposal in [
+            WatermarkDisposal::DropRow,
+            WatermarkDisposal::ResetForReinit,
+            WatermarkDisposal::RestartInitializationData,
+        ] {
+            let (relations, ranges, metadata) =
+                render_delete_phases(7997, &ref0s, &["BRAN".into()], disposal);
+            for statement in relations.iter().chain(&ranges).chain(&metadata) {
+                assert!(
+                    !statement.contains("tubi_relate WHERE dbnum")
+                        && !statement.contains("tubi_relate:[")
+                        && !statement.contains("geo_relate:["),
+                    "整库清库的三段语句不取复合键那一栏: {statement}"
+                );
+            }
         }
     }
 
@@ -2661,32 +3194,48 @@ mod tests {
 
     /// 一只 `mem://` 库：7997 的 `pe` 一行都没有，模型面却有一整套行（按需生成对基线没落的库落的那种）——
     /// 两个 extent（24381 / 16189，`refno_route` 按位解码都是 7997）下各有构件行、一条复合键管身边、几何伴生行；
-    /// 旁边是 8000（Ref0 24384）自己的行，谁也不该碰。
+    /// 旁边是 8000（Ref0 24384）自己的行，谁也不该碰。两个库的管身边各带着按身份哈希做键的盒与变换
+    /// （7997 的是 [`TUBE_KEY_A`]，8000 的是 [`TUBE_KEY_Z`]）。
     async fn unbaselined_model_face(name: &str) -> Surreal<Any> {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
         db.use_ns("unbaselined_model_face")
             .use_db(name)
             .await
             .unwrap();
-        db.query(
+        let seed =
             "INSERT INTO inst_relate [\
                 {id: inst_relate:⟨24381_100⟩, in: pe:⟨24381_100⟩, dbnum: 7997, model_sesno: 447},\
                 {id: inst_relate:⟨16189_5⟩, in: pe:⟨16189_5⟩, dbnum: 7997, model_sesno: 447},\
                 {id: inst_relate:⟨24384_1⟩, in: pe:⟨24384_1⟩, dbnum: 8000, model_sesno: 1139}];\
              INSERT RELATION INTO tubi_relate [\
-                {id: tubi_relate:[pe:⟨24381_200⟩, 0], in: pe:⟨24381_200⟩, out: inst_geo:tube, dbnum: 7997},\
-                {id: tubi_relate:[pe:⟨24384_2⟩, 0], in: pe:⟨24384_2⟩, out: inst_geo:tube, dbnum: 8000}];\
+                {id: tubi_relate:[pe:⟨24381_200⟩, 0], in: pe:⟨24381_200⟩, out: inst_geo:tube, dbnum: 7997, \
+                 aabb: aabb:⟨<A>⟩, world_trans: trans:⟨<A>⟩},\
+                {id: tubi_relate:[pe:⟨24384_2⟩, 0], in: pe:⟨24384_2⟩, out: inst_geo:tube, dbnum: 8000, \
+                 aabb: aabb:⟨<Z>⟩, world_trans: trans:⟨<Z>⟩}];\
+             CREATE aabb:⟨<A>⟩ SET d = [0, 0, 0, 1, 1, 9];\
+             CREATE trans:⟨<A>⟩ SET d = [1];\
+             CREATE aabb:⟨<Z>⟩ SET d = [0, 0, 0, 1, 1, 9];\
+             CREATE trans:⟨<Z>⟩ SET d = [1];\
              CREATE aabb:⟨24381_100⟩ SET d = [0, 0, 0, 1, 1, 1];\
              CREATE trans:⟨24381_100⟩ SET d = [1];\
              CREATE inst_info:⟨24381_100⟩ SET dbnum = 7997;\
              CREATE pe_ptset:⟨16189_5⟩ SET points = [];\
-             CREATE aabb:⟨24384_1⟩ SET d = [0, 0, 0, 1, 1, 1];",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+             CREATE aabb:⟨24384_1⟩ SET d = [0, 0, 0, 1, 1, 1];"
+                .replace("<A>", TUBE_KEY_A)
+                .replace("<Z>", TUBE_KEY_Z);
+        db.query(seed).await.unwrap().check().unwrap();
         db
+    }
+
+    /// [`unbaselined_model_face`] 里两条管身边指着的盒与变换还在几条：`(7997 的, 8000 的)`，各自齐全是 2。
+    async fn unbaselined_tube_boxes_left(db: &Surreal<Any>) -> (usize, usize) {
+        let own = format!(
+            "SELECT count() AS count FROM aabb:⟨{TUBE_KEY_A}⟩, trans:⟨{TUBE_KEY_A}⟩ GROUP ALL;"
+        );
+        let other = format!(
+            "SELECT count() AS count FROM aabb:⟨{TUBE_KEY_Z}⟩, trans:⟨{TUBE_KEY_Z}⟩ GROUP ALL;"
+        );
+        (count_of(db, &own).await, count_of(db, &other).await)
     }
 
     async fn count_of(db: &Surreal<Any>, sql: &str) -> usize {
@@ -2759,10 +3308,18 @@ mod tests {
         .check()
         .unwrap();
 
-        // 只认 `pe` 的那一份（`Database` 路由用的）在这种库上一行也删不掉——这就是此前「回成功、没删」的样子。
+        // 只认 `pe` 的那一份（`Database` 路由用的）在这种库上圈不到任何 Ref0：构件行一行也删不掉——这就是此前
+        // 「回成功、没删」的样子。管身行不靠 Ref0：#147 之后两个入口都按 `dbnum` 列删它（连同盒与变换），
+        // 所以这一份现在删得到那一条，剩下的是两行 `inst_relate`。
+        assert_eq!(unbaselined_tube_boxes_left(&db).await, (2, 2));
         let by_pe_only = wipe_dbnum_model_face_on(&db, 7997).await.unwrap();
         assert!(by_pe_only.ref0s.is_empty());
-        assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 3);
+        assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 2);
+        assert_eq!(
+            unbaselined_tube_boxes_left(&db).await,
+            (0, 2),
+            "管身行带着它的盒与变换一起走；8000 的不动"
+        );
 
         let result = wipe_unbaselined_model_face_on(&db, 7997).await.unwrap();
         assert_eq!(result.ref0s, vec!["16189".to_string(), "24381".to_string()]);
@@ -2840,9 +3397,11 @@ mod tests {
         assert_eq!(deleted.model_residue_rows, 0, "这一格由整库删除的入口填");
         assert_eq!(
             model_face_residue_rows_on(&db, 7997).await.unwrap(),
-            2,
-            "pe 圈到的那个 extent 清了；16189 下的构件行、24381 下的复合键管身边还在"
+            1,
+            "pe 圈到的那个 extent 清了，24381 下的复合键管身边也清了（整库清库先按 dbnum 列删管身行，连同盒与变换）；\
+             16189 下的构件行还在"
         );
+        assert_eq!(unbaselined_tube_boxes_left(&db).await, (0, 2));
         assert_eq!(
             count_of(
                 &db,
@@ -2855,9 +3414,14 @@ mod tests {
 
         assert_eq!(
             wipe_model_residue_after_delete_on(&db, 7997).await.unwrap(),
-            2
+            1
         );
         assert_eq!(model_face_residue_rows_on(&db, 7997).await.unwrap(), 0);
+        assert_eq!(
+            unbaselined_tube_boxes_left(&db).await,
+            (0, 2),
+            "8000 的管身边与它的盒、变换自始至终不动"
+        );
         assert_eq!(
             count_of(
                 &db,
