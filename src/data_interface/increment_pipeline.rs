@@ -157,12 +157,14 @@ pub struct IncrResult {
 /// 在进程里）。详见
 /// `docs/specs/incr-gen-audit-aux/t-a-7-steady-state-model-gap.md` 第三节。
 ///
-/// `None` / 负数 / 不小于数据左端时一律沿用数据窗左端——旧口径逐位不变，这也是「模型
-/// 已追平」与「非 DESI 库」的正常路径。
+/// `None` / `<= 0` / 不小于数据左端时一律沿用数据窗左端：`0` 是「模型从没盖过章」哨兵，
+/// dabacon 库文件没有会话 0（会话从 1 起），传 `0` 会让 `DbSet@0` 打开失败并把数据批次
+/// 停跑；回 `data_floor` 同时让收尾连续性闸（ADR-092 D2）按 `data_floor > 0` 拒盖
+/// `model_sesno`，整库重排仍归 `ModelOnly`（#170）。
 pub(crate) fn model_plan_base_sesno(requested_start: i32, model_floor: Option<i32>) -> u32 {
     let data_floor = requested_start.saturating_sub(1) as u32;
     match model_floor {
-        Some(floor) if floor >= 0 && (floor as u32) < data_floor => floor as u32,
+        Some(floor) if floor > 0 && (floor as u32) < data_floor => floor as u32,
         _ => data_floor,
     }
 }
@@ -2199,11 +2201,14 @@ mod cache_tests {
         assert_eq!(model_plan_base_sesno(1, Some(0)), 0);
     }
 
-    /// 从没追平过的库（`model_sesno = 0`）按整库重排起算——与启动核对
-    /// `startup_reconcile::startup_model_recovery_plan` 的 `model_never_stamped` 同一处置。
+    /// 从没盖过模型水位的库（`model_sesno = 0`）只是哨兵，dabacon 文件里没有会话 0（#170）：
+    /// 数据批次的模型窗口必须沿用数据左端 `requested_start - 1`，整库重排留给收尾连续性闸
+    /// 拒盖后的 `ModelOnly`。
     #[test]
-    fn a_never_stamped_library_starts_the_model_plan_at_zero() {
-        assert_eq!(model_plan_base_sesno(120, Some(0)), 0);
+    fn a_never_stamped_library_keeps_the_data_window_left_edge_not_session_zero() {
+        assert_eq!(model_plan_base_sesno(2, Some(0)), 1);
+        assert_eq!(model_plan_base_sesno(120, Some(0)), 119);
+        assert_eq!(model_plan_base_sesno(726, Some(0)), 725);
     }
 
     /// 失效集必须在「元素 + 属主」之外并入计划层算出的生成根（ADR-010 残余）：
