@@ -21,7 +21,7 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | 步 | 做法 | 来源 |
 |---|---|---|
 | 枚举根 | 该库 WORLD 的直接成员里 noun 为 `SITE` / `APPLDW` 的元素（`--site-only` 只取 SITE）。两类根件集合互不重叠，合起来才是整库 | `DirectTreeService::children(world)` |
-| 导基准 | **每库一次** `des.exe -tty` 会话，宏里逐根 `export`（`onerror continue`，每根一个哨兵）；哪个根没落出文件再单独按 refno / 名称补导一次 | `rvm_check::export_macro::export_batch_body` |
+| 导基准 | **每库一次** `des.exe -tty` 会话，宏里逐根 `export`（`onerror continue`，每根一个哨兵）；哪个根没落出文件再单独按 refno / 名称补导一次。按名称补导之后读回 `Q REF` 核对（GitHub #162）：名字解到别的库的同名元素、或者读不回 refno，都判导出失败、不留文件 | `rvm_check::export_macro::export_batch_body` |
 | 生成 | 缺省每个根起一个 `aios-database rvm-check --child` 子进程，父进程每 0.5 s 采一次样（可提交内存余量、耗时、子进程内存峰值），越线就杀：`commit-guard` / `timeout` 只记在那个根上。0.5 s 只是采样的节拍：子进程一退出，父进程立即接着处理，不等下一个采样点 | `rvm_check::generate_ours`（`e3d_model::rvm_export`） |
 | 比对 | 进程内 `compare_rvm_files`（只读映射 + 并行，几百 MB 以内）；判色与页面同一函数 | `rvm_check::compare_rvms` / `judge_report` |
 

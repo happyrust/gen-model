@@ -418,7 +418,10 @@ fn page_element_facts(
 
 /// [`page_element_facts`] 的判法。`lineage` 是节点自身 → 属主 → … 的 `(refno, 大写名词)`。
 /// 返回 `(单元 refno, 单元种类, 上级根, 是否只核对了单元里的一块)`。
-fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Option<String>, bool) {
+fn locate_unit(
+    refno: &str,
+    lineage: &[(String, String)],
+) -> (String, String, Option<String>, bool) {
     // 属主链的头是 WORLD：它下面那一个就是上级根。
     let Some(world_at) = lineage.iter().position(|(_, noun)| noun == "WORL") else {
         return (refno.to_string(), "node".to_string(), None, false);
@@ -440,7 +443,12 @@ fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Op
             unit != refno,
         ),
         // 节点自己就在容器层上（根，或根与 ZONE 之间）：单元记根。
-        None => (root.clone(), "root".to_string(), Some(root.clone()), root != refno),
+        None => (
+            root.clone(),
+            "root".to_string(),
+            Some(root.clone()),
+            root != refno,
+        ),
     }
 }
 
@@ -811,7 +819,11 @@ fn element_checks_of(
     if let Err(message) = element::resolve_baseline_side(&mut checks, |names| {
         baseline_member_sources(spec, node, names)
     }) {
-        eprintln!("警告：={}：{}", spec.refno, redact(&message, &spec.password));
+        eprintln!(
+            "警告：={}：{}",
+            spec.refno,
+            redact(&message, &spec.password)
+        );
     }
     checks
 }
@@ -1086,6 +1098,9 @@ pub(crate) fn export_e3d(spec: &RunSpec, task_dir: &Path) -> Result<String, Stri
     append_log(task_dir, &redact(&second_log, &spec.password));
     append_log(task_dir, &session_note(&second));
     if export_ok(&second_log, &rvm) {
+        if let Err(problem) = accept_named_export(&rvm, &second_log, &spec.refno, &name) {
+            return Err(export_failure(&problem, &second, &second_log));
+        }
         return Ok("name".to_string());
     }
     Err(export_failure(
@@ -1144,7 +1159,10 @@ pub(crate) fn compare_rvms_with_elements(
 ) -> Result<(Judgement, Vec<element::ElementCheck>), String> {
     let mut report = compare_rvm_report(task_dir, scope)?;
     let sources = element::read_sources(task_dir).unwrap_or_else(|message| {
-        eprintln!("警告：={}：{message}（生成侧的构件记成没解出 refno）", spec.refno);
+        eprintln!(
+            "警告：={}：{message}（生成侧的构件记成没解出 refno）",
+            spec.refno
+        );
         Vec::new()
     });
     // 配对成功、包围盒也通过的构件再比一次体积（GitHub #127 / #171）：构件摆错但包围盒不变时，
@@ -1167,10 +1185,7 @@ fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
     if let Some(mismatch) = check.mismatch() {
         eprintln!(
             "警告：={}：基准是 {} 的导出，项目数据是 {}——这一次的差异里可能混进版本错配的假差异（标记：{}）",
-            spec.refno,
-            mismatch.baseline_version,
-            mismatch.project_version,
-            mismatch.marker
+            spec.refno, mismatch.baseline_version, mismatch.project_version, mismatch.marker
         );
         return;
     }
@@ -1183,6 +1198,23 @@ fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
 #[allow(dead_code)]
 fn apply_volume_check(task_dir: &Path, report: &mut e3d_model::rvm_compare::CompareReport) {
     volume::apply_to_report(task_dir, report, &[]);
+}
+
+/// 按名称补导落出文件之后核对是不是要导的那一只（GitHub #162）。
+///
+/// 名字在 MDB 里不唯一时，E3D 按名字导航会落到别的库的同名元素上，文件照样落下。解到的 refno
+/// 不是要导的那个，或者日志里读不回 refno：删掉刚落下的文件，调用方按导出失败收工。
+pub(crate) fn accept_named_export(
+    rvm: &Path,
+    log: &str,
+    refno: &str,
+    name: &str,
+) -> Result<(), String> {
+    if let Err(problem) = export_macro::check_named_export(log, refno, name) {
+        let _ = std::fs::remove_file(rvm);
+        return Err(problem);
+    }
+    Ok(())
 }
 
 /// 按文件比对两份 RVM，落 `compare.json`，交回整份报告。
@@ -1419,6 +1451,33 @@ impl RefnoParse for RefU64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub #162：日志里的 refno 对不上、或读不回来，判失败并且不留文件；对上了文件留着。
+    #[test]
+    fn a_mismatched_named_export_fails_and_drops_the_file() {
+        let dir = std::env::temp_dir().join(format!("rvm-check-162-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rvm = dir.join("e3d.rvm");
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        let problem =
+            accept_named_export(&rvm, "Q REF\nRef =23713/2\n", "23727/2", "/Z").unwrap_err();
+        assert!(
+            problem.contains("=23713/2") && problem.contains("=23727/2"),
+            "{problem}"
+        );
+        assert!(!rvm.exists(), "名字解到别的 refno 必须删档");
+
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        let missing = accept_named_export(&rvm, "Q NAME\nName /Z\n", "23727/2", "/Z").unwrap_err();
+        assert!(missing.contains("读不回 refno"), "{missing}");
+        assert!(!rvm.exists(), "读不回 refno 也必须删档");
+
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        accept_named_export(&rvm, "Q REF\nRef =23727/2\n", "=23727/2", "/Z").unwrap();
+        assert!(rvm.is_file(), "核对通过留着文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn input() -> RunInput {
         RunInput {
@@ -1718,10 +1777,26 @@ mod tests {
                 scoped,
             )
         };
-        assert_eq!(located(0), unit("1/10", "zone", "1/2", true), "ZONE 之下的构件");
-        assert_eq!(located(2), unit("1/10", "zone", "1/2", true), "ZONE 之下的 PIPE");
-        assert_eq!(located(3), unit("1/10", "zone", "1/2", false), "就是那个 ZONE");
-        assert_eq!(located(4), unit("1/2", "root", "1/2", false), "就是那个 SITE");
+        assert_eq!(
+            located(0),
+            unit("1/10", "zone", "1/2", true),
+            "ZONE 之下的构件"
+        );
+        assert_eq!(
+            located(2),
+            unit("1/10", "zone", "1/2", true),
+            "ZONE 之下的 PIPE"
+        );
+        assert_eq!(
+            located(3),
+            unit("1/10", "zone", "1/2", false),
+            "就是那个 ZONE"
+        );
+        assert_eq!(
+            located(4),
+            unit("1/2", "root", "1/2", false),
+            "就是那个 SITE"
+        );
 
         // APPLDW 下经 APPLDA、APPDAR 两层才到 ZONE；夹在中间的容器层记在根名下、只算一块。
         let appl = chain(&[
@@ -1737,8 +1812,16 @@ mod tests {
             unit("2/2", "root", "2/2", true)
         );
         // 根下不在任何 ZONE 里的子节点是兜底单元。
-        let loose = chain(&[("3/9", "BOX"), ("3/3", "STRU"), ("3/2", "SITE"), ("3/1", "WORL")]);
-        assert_eq!(locate_unit("3/9", &loose), unit("3/3", "fallback", "3/2", true));
+        let loose = chain(&[
+            ("3/9", "BOX"),
+            ("3/3", "STRU"),
+            ("3/2", "SITE"),
+            ("3/1", "WORL"),
+        ]);
+        assert_eq!(
+            locate_unit("3/9", &loose),
+            unit("3/3", "fallback", "3/2", true)
+        );
         // 属主链到不了 WORLD：单元记节点自己。
         assert_eq!(
             locate_unit("9/9", &chain(&[("9/9", "EQUI")])),
