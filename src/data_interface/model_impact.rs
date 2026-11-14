@@ -2825,7 +2825,9 @@ mod tests {
         // GENSEC 的 `JLNS` / `JLNE`（起端 / 末端的连接线，关节原点落到那条线上）（205）；这两个都不在上面那一列里，
         // 那一列的断言照旧过。同一批并入的 e3d-io `ATTRIB LOHE`（e3d-model #50）与 `TABITEM` → `TABITE` 的订正
         // 不改这个并集的条数。
-        assert_eq!(generation_read_set().len(), 205, "读取集合条数漂移");
+        // 2026-11-14：e3d-model `1cf69f9`（变截面 SREC 读 DX/DY/DXL/DYL 放样，#65）起 section 读 `DXL` / `DYL`
+        // （207）。二者字典 DCHC=4，与已在集合里的 `DX` / `DY` 相同，上面那一列不变。
+        assert_eq!(generation_read_set().len(), 207, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
