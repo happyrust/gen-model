@@ -349,6 +349,12 @@ impl ExecuteOutcome {
             root_refno: None,
             root_noun: None,
             root_name: None,
+            // 与构件行同一份范围（GitHub #158）：比的是单元之下的节点时，运行行也标成局部，
+            // 不把一次局部比对写成整单元结论。整单元、以及比对没跑完（没有构件结果）时没有这一格。
+            scope: self
+                .elements
+                .as_ref()
+                .and_then(|elements| elements.scope.clone()),
             verdict: report.verdict.clone(),
             status: report.verdict.clone(),
             stage: report.stage.clone(),
@@ -418,7 +424,10 @@ fn page_element_facts(
 
 /// [`page_element_facts`] 的判法。`lineage` 是节点自身 → 属主 → … 的 `(refno, 大写名词)`。
 /// 返回 `(单元 refno, 单元种类, 上级根, 是否只核对了单元里的一块)`。
-fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Option<String>, bool) {
+fn locate_unit(
+    refno: &str,
+    lineage: &[(String, String)],
+) -> (String, String, Option<String>, bool) {
     // 属主链的头是 WORLD：它下面那一个就是上级根。
     let Some(world_at) = lineage.iter().position(|(_, noun)| noun == "WORL") else {
         return (refno.to_string(), "node".to_string(), None, false);
@@ -440,7 +449,12 @@ fn locate_unit(refno: &str, lineage: &[(String, String)]) -> (String, String, Op
             unit != refno,
         ),
         // 节点自己就在容器层上（根，或根与 ZONE 之间）：单元记根。
-        None => (root.clone(), "root".to_string(), Some(root.clone()), root != refno),
+        None => (
+            root.clone(),
+            "root".to_string(),
+            Some(root.clone()),
+            root != refno,
+        ),
     }
 }
 
@@ -811,7 +825,11 @@ fn element_checks_of(
     if let Err(message) = element::resolve_baseline_side(&mut checks, |names| {
         baseline_member_sources(spec, node, names)
     }) {
-        eprintln!("警告：={}：{}", spec.refno, redact(&message, &spec.password));
+        eprintln!(
+            "警告：={}：{}",
+            spec.refno,
+            redact(&message, &spec.password)
+        );
     }
     checks
 }
@@ -1086,6 +1104,9 @@ pub(crate) fn export_e3d(spec: &RunSpec, task_dir: &Path) -> Result<String, Stri
     append_log(task_dir, &redact(&second_log, &spec.password));
     append_log(task_dir, &session_note(&second));
     if export_ok(&second_log, &rvm) {
+        if let Err(problem) = accept_named_export(&rvm, &second_log, &spec.refno, &name) {
+            return Err(export_failure(&problem, &second, &second_log));
+        }
         return Ok("name".to_string());
     }
     Err(export_failure(
@@ -1144,7 +1165,10 @@ pub(crate) fn compare_rvms_with_elements(
 ) -> Result<(Judgement, Vec<element::ElementCheck>), String> {
     let mut report = compare_rvm_report(task_dir, scope)?;
     let sources = element::read_sources(task_dir).unwrap_or_else(|message| {
-        eprintln!("警告：={}：{message}（生成侧的构件记成没解出 refno）", spec.refno);
+        eprintln!(
+            "警告：={}：{message}（生成侧的构件记成没解出 refno）",
+            spec.refno
+        );
         Vec::new()
     });
     // 配对成功、包围盒也通过的构件再比一次体积（GitHub #127 / #171）：构件摆错但包围盒不变时，
@@ -1167,10 +1191,7 @@ fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
     if let Some(mismatch) = check.mismatch() {
         eprintln!(
             "警告：={}：基准是 {} 的导出，项目数据是 {}——这一次的差异里可能混进版本错配的假差异（标记：{}）",
-            spec.refno,
-            mismatch.baseline_version,
-            mismatch.project_version,
-            mismatch.marker
+            spec.refno, mismatch.baseline_version, mismatch.project_version, mismatch.marker
         );
         return;
     }
@@ -1183,6 +1204,52 @@ fn note_baseline_version(task_dir: &Path, spec: &RunSpec) {
 #[allow(dead_code)]
 fn apply_volume_check(task_dir: &Path, report: &mut e3d_model::rvm_compare::CompareReport) {
     volume::apply_to_report(task_dir, report, &[]);
+}
+
+/// 按名称补导落出文件之后核对是不是要导的那一只（GitHub #162）。
+///
+/// 名字在 MDB 里不唯一时，E3D 按名字导航会落到别的库的同名元素上，文件照样落下。解到的 refno
+/// 不是要导的那个，或者日志里读不回 refno：删掉刚落下的文件，调用方按导出失败收工。
+pub(crate) fn accept_named_export(
+    rvm: &Path,
+    log: &str,
+    refno: &str,
+    name: &str,
+) -> Result<(), String> {
+    if let Err(problem) = export_macro::check_named_export(log, refno, name) {
+        let _ = std::fs::remove_file(rvm);
+        return Err(problem);
+    }
+    Ok(())
+}
+
+/// 基准是不是这个单元的导出（GitHub #163）。E3D 导出一个单元时把它的上级根（SITE / APPLDW）当最外一层组一起写
+/// （ZONE 的基准外面套着 SITE 组），所以基准的顶层组名就是上级根的显示名。名字在 MDB 里不唯一时，按名字补导会认到
+/// 别的库的同名单元（e3d-model#54：aps7343 的 ZONE 导成了 aps7324 `/MDS/TEMPLATES` 下的同名 ZONE），顶层就对不上。
+///
+/// 对不上时回一句以「比对没有跑完」开头的话：调用方按比对失败收工，不往差异表里写成片的假差异。上级根无名
+/// （显示名不以 `/` 开头）不核：无名 SITE 的序号生成侧与 E3D 可能数得不一样。读不了基准的组结构也不核，交给比对去报。
+pub(crate) fn baseline_is_not_this_unit(baseline: &Path, expected_root: &str) -> Option<String> {
+    let expected_root = expected_root.trim();
+    if !expected_root.starts_with('/') {
+        return None;
+    }
+    let bytes = e3d_model::rvm_read::RvmBytes::open(baseline).ok()?;
+    let scan = e3d_model::rvm_read::RvmScan::scan(&bytes).ok()?;
+    let tops: Vec<&str> = scan
+        .members
+        .iter()
+        .filter(|member| member.parent.is_none())
+        .map(|member| member.name.trim())
+        .collect();
+    if tops.is_empty() || tops.contains(&expected_root) {
+        return None;
+    }
+    Some(format!(
+        "{}：基准不是这个单元——基准的最外一层是 {}，这个单元的上级根是 {expected_root}（多半是按名字补导认到了别的库的同名单元）",
+        batch::COMPARE_DID_NOT_FINISH,
+        tops.iter().take(3).copied().collect::<Vec<_>>().join("、")
+    ))
 }
 
 /// 按文件比对两份 RVM，落 `compare.json`，交回整份报告。
@@ -1419,6 +1486,416 @@ impl RefnoParse for RefU64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub #163：基准的最外一层是上级根；对不上就说「基准不是这个单元」，无名上级根不核。
+    /// 夹具是一根支管的 E3D 导出，最外一层是它的 SITE `/1RCV-PIPEBJ`。
+    #[test]
+    fn a_baseline_under_another_site_is_not_this_unit() {
+        let rvm = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/rvm/1RCV0101-B1.rvm");
+        assert_eq!(baseline_is_not_this_unit(&rvm, "/1RCV-PIPEBJ"), None);
+        let problem = baseline_is_not_this_unit(&rvm, "/1RCV-PIPEBJ-OGL").expect("顶层对不上");
+        assert!(
+            problem.starts_with(batch::COMPARE_DID_NOT_FINISH),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("最外一层是 /1RCV-PIPEBJ，") && problem.contains("/1RCV-PIPEBJ-OGL"),
+            "{problem}"
+        );
+        assert_eq!(
+            baseline_is_not_this_unit(&rvm, "SITE 3 of WORLD"),
+            None,
+            "无名上级根不核"
+        );
+        assert_eq!(
+            baseline_is_not_this_unit(Path::new("no-such.rvm"), "/1RCV-PIPEBJ-OGL"),
+            None,
+            "读不了基准就交给比对去报"
+        );
+    }
+
+    /// GitHub #162：日志里的 refno 对不上、或读不回来，判失败并且不留文件；对上了文件留着。
+    #[test]
+    fn a_mismatched_named_export_fails_and_drops_the_file() {
+        let dir = std::env::temp_dir().join(format!("rvm-check-162-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rvm = dir.join("e3d.rvm");
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        let problem =
+            accept_named_export(&rvm, "Q REF\nRef =23713/2\n", "23727/2", "/Z").unwrap_err();
+        assert!(
+            problem.contains("=23713/2") && problem.contains("=23727/2"),
+            "{problem}"
+        );
+        assert!(!rvm.exists(), "名字解到别的 refno 必须删档");
+
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        let missing = accept_named_export(&rvm, "Q NAME\nName /Z\n", "23727/2", "/Z").unwrap_err();
+        assert!(missing.contains("读不回 refno"), "{missing}");
+        assert!(!rvm.exists(), "读不回 refno 也必须删档");
+
+        std::fs::write(&rvm, vec![0u8; 64]).unwrap();
+        accept_named_export(&rvm, "Q REF\nRef =23727/2\n", "=23727/2", "/Z").unwrap();
+        assert!(rvm.is_file(), "核对通过留着文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GitHub #158：页面运行行带上构件行已经算出的那份范围；整单元则两格都没有。
+    #[test]
+    fn a_page_run_carries_the_same_scope_as_its_element_rows() {
+        let spec = prepare_connection(&input(), false).unwrap();
+        let partial = ExecuteOutcome {
+            report: report::failed_report("compare", "1/40", "ok", report::RvmTimingsMs::default()),
+            mismatches: Vec::new(),
+            task_dir: PathBuf::from("task"),
+            elements: Some(store::ElementFacts {
+                checks: Vec::new(),
+                unit_refno: "1/10".to_string(),
+                unit_kind: "zone".to_string(),
+                root_refno: Some("1/2".to_string()),
+                scope: Some(store::ElementScope {
+                    kind: "subtree".to_string(),
+                    refno: "1/40".to_string(),
+                }),
+            }),
+        };
+        let facts = partial.run_facts("task-1", "AvevaMarineSample", &spec, None);
+        assert_eq!(
+            facts.scope.as_ref().map(|scope| scope.kind.as_str()),
+            Some("subtree")
+        );
+        assert_eq!(
+            facts.scope.as_ref().map(|scope| scope.refno.as_str()),
+            Some("1/40")
+        );
+        assert_eq!(
+            facts
+                .elements
+                .as_ref()
+                .and_then(|elements| elements.scope.clone()),
+            facts.scope
+        );
+
+        let whole = ExecuteOutcome {
+            report: report::failed_report("compare", "1/10", "ok", report::RvmTimingsMs::default()),
+            mismatches: Vec::new(),
+            task_dir: PathBuf::from("task"),
+            elements: Some(store::ElementFacts {
+                checks: Vec::new(),
+                unit_refno: "1/10".to_string(),
+                unit_kind: "zone".to_string(),
+                root_refno: Some("1/2".to_string()),
+                scope: None,
+            }),
+        };
+        let facts = whole.run_facts("task-2", "AvevaMarineSample", &spec, None);
+        assert_eq!(facts.scope, None, "比的就是整个单元，运行行不标局部");
+    }
+
+    /// `_flat` 普查（GitHub #163）：每个基准文件名是 `<项目码><库号>_<ref0>_<ref1>.rvm`，
+    /// 到本机项目库里找出这个元素的上级根（SITE / APPLDW，与批量 `root_name` 同一口径），
+    /// 再交给 [`baseline_is_not_this_unit`]。一个库下面有很多不同的 SITE，不能拿文件名分组后的众数顶替。
+    ///
+    /// 依赖 `D:\AVEVA\Projects\E3D3.1` 与 `baselines\_flat`，普通 `cargo test --lib` 不跑。
+    #[test]
+    #[ignore = "需要本机 E3D 项目库与 baselines/_flat"]
+    fn flat_baselines_match_the_real_parent_root() {
+        use std::collections::HashMap;
+        use std::str::FromStr;
+        let root = std::env::var("RVM_CHECK_FLAT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(r"D:\work\plant-code\baselines\_flat"));
+        let log_path = std::env::var("RVM_CHECK_CENSUS_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(r"D:\work\plant-code\old\agent-logs\wt-p4\flat-census.txt")
+            });
+        let mut files = Vec::new();
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rvm") {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, path));
+                }
+            }
+        }
+        walk(&root, &root, &mut files);
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(root.is_dir(), "没有基准目录 {}", root.display());
+
+        fn index_roots(tree: &DirectTreeService) -> HashMap<RefU64, String> {
+            let mut roots = HashMap::new();
+            let Ok(metadata) = tree.metadata() else {
+                return roots;
+            };
+            for database in metadata.databases() {
+                let Some(world) = metadata.world_of(database.dbnum) else {
+                    continue;
+                };
+                let Ok(children) = tree.children(world) else {
+                    continue;
+                };
+                for node in children {
+                    let noun = node.noun.trim().to_ascii_uppercase();
+                    if noun == "SITE" || noun == "APPLDW" {
+                        roots.insert(node.refno.refno(), node.name.trim().to_string());
+                    }
+                }
+            }
+            roots
+        }
+
+        struct ProjectRoots {
+            name: &'static str,
+            tree: DirectTreeService,
+            roots: HashMap<RefU64, String>,
+        }
+        let mut projects = Vec::new();
+        for name in ["AvevaMarineSample", "AvevaPlantSample"] {
+            match DirectTreeService::open(name, "ALL") {
+                Ok(tree) => {
+                    let roots = index_roots(&tree);
+                    eprintln!("{name}：{} 个上级根", roots.len());
+                    projects.push(ProjectRoots { name, tree, roots });
+                }
+                Err(error) => eprintln!("{name} /ALL 打不开：{error:#}"),
+            }
+        }
+        assert!(
+            !projects.is_empty(),
+            "AvevaMarineSample 与 AvevaPlantSample 都打不开"
+        );
+
+        let template = crate::data_interface::direct_store::DirectSchema::template_dir_from_env()
+            .expect("schema 模板目录");
+        let attlib = e3d_attlib::AttlibData::parse_file(template.join("attlib.dat"))
+            .expect("解析 attlib.dat");
+        let direct =
+            std::sync::Arc::new(e3d_io::db_element::DbSet::new(std::sync::Arc::new(attlib)));
+        let mut opened_files: HashMap<String, Result<u32, String>> = HashMap::new();
+
+        /// MDB 没挂上的库（沙箱额外挂的 `aps7343` 一类）按文件名直接开 `<码>000/<tag>_0001`。
+        fn root_name_in_db_file(
+            set: &std::sync::Arc<e3d_io::db_element::DbSet>,
+            opened: &mut HashMap<String, Result<u32, String>>,
+            template: &Path,
+            tag: &str,
+            ref_text: &str,
+        ) -> Result<Option<String>, String> {
+            if !opened.contains_key(tag) {
+                let outcome = (|| -> Result<u32, String> {
+                    let dir = if tag.starts_with("aps") {
+                        PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000")
+                    } else if tag.starts_with("ams") {
+                        PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000")
+                    } else {
+                        return Err(format!("不认识的项目码 {tag}"));
+                    };
+                    let file = dir.join(format!("{tag}_0001"));
+                    if !file.is_file() {
+                        return Err(format!("没有库文件 {}", file.display()));
+                    }
+                    let template_file = e3d_io::db_element::template_file_for(template, "DESI")
+                        .map_err(|error| error.to_string())?;
+                    set.add_db(e3d_io::db_element::DbFilePin {
+                        file,
+                        template: template_file,
+                        db_type: Some("DESI".into()),
+                        sesno: None,
+                    })
+                    .map_err(|error| error.to_string())
+                })();
+                opened.insert(tag.to_string(), outcome);
+            }
+            let file_dbno = opened.get(tag).expect("刚写入").clone()?;
+            let refno =
+                e3d_model::rvm_export::parse_refno(ref_text).map_err(|error| error.to_string())?;
+            let mut current = refno;
+            let mut previous: Option<e3d_io::RefNo> = None;
+            for _ in 0..64 {
+                let element = set.element(current);
+                if !element.exists().map_err(|error| error.to_string())? {
+                    return Err(format!(
+                        "{ref_text} 不在 {tag}_0001（文件库号 {file_dbno}，refno 库号 {}）",
+                        refno.dbno()
+                    ));
+                }
+                let noun = element
+                    .element_type()
+                    .map_err(|error| error.to_string())?
+                    .trim()
+                    .to_ascii_uppercase();
+                if noun == "WORL" || noun == "WORLD" {
+                    let Some(root) = previous else {
+                        return Ok(None);
+                    };
+                    let name = set
+                        .element(root)
+                        .stored_name()
+                        .map_err(|error| error.to_string())?;
+                    return Ok(name
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty()));
+                }
+                previous = Some(current);
+                match element.owner().map_err(|error| error.to_string())? {
+                    Some(owner) if owner.refno() != current => current = owner.refno(),
+                    _ => {
+                        if noun == "SITE" || noun == "APPLDW" {
+                            let name = element.stored_name().map_err(|error| error.to_string())?;
+                            return Ok(name
+                                .map(|name| name.trim().to_string())
+                                .filter(|name| !name.is_empty()));
+                        }
+                        return Err(format!("属主链没有 WORL，停在 {noun}"));
+                    }
+                }
+            }
+            Err("属主链超过 64 层".to_string())
+        }
+
+        /// 文件名 `<tag>_<ref0>_<ref1>` → 元素。上级根名字走元素自己的属主链，
+        /// 链上第一个 SITE / APPLDW 就是批量 `root_name`（根作业是它自己，单元作业是它的上级根）。
+        fn expected_root(projects: &[ProjectRoots], tag: &str, refno: RefU64) -> Option<String> {
+            let prefer_plant = tag.starts_with("aps");
+            let mut order: Vec<usize> = (0..projects.len()).collect();
+            order.sort_by_key(|index| {
+                let plant = projects[*index].name.contains("Plant");
+                prefer_plant != plant
+            });
+            for index in order {
+                let project = &projects[index];
+                let Ok(chain) = project.tree.ancestors(refno) else {
+                    continue;
+                };
+                for node in &chain {
+                    if let Some(name) = project.roots.get(&node.refno()) {
+                        return Some(name.clone());
+                    }
+                }
+            }
+            None
+        }
+
+        let known_bad = [
+            "aps-sandbox-mounted-20261112/aps7343_23727_2.rvm",
+            "aps-sandbox-mounted-20261112/aps7343_23727_21.rvm",
+            "aps-sandbox-mounted-20261112/aps7343_23727_76.rvm",
+            "aps-sandbox-mounted-20261112/aps7343_23727_92.rvm",
+        ];
+        let mut lines = Vec::new();
+        let mut missed = Vec::new();
+        let mut unexpected = Vec::new();
+        let mut unresolved = Vec::new();
+        let (mut flagged_n, mut ok_n, mut unnamed_n) = (0usize, 0usize, 0usize);
+        for (rel, path) in &files {
+            let stem = Path::new(rel)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(rel);
+            let parsed = stem.rsplit_once('_').and_then(|(head, ref1)| {
+                let (tag, ref0) = head.rsplit_once('_')?;
+                let ref_text = format!("{ref0}/{ref1}");
+                let refno = RefU64::from_str(&ref_text).ok()?;
+                Some((tag.to_string(), ref_text, refno))
+            });
+            let Some((tag, ref_text, refno)) = parsed else {
+                unresolved.push(rel.clone());
+                lines.push(format!("{rel}\tunresolved\t文件名对不上 refno"));
+                continue;
+            };
+            let from_tree = expected_root(&projects, &tag, refno);
+            let expected = if let Some(name) = from_tree {
+                Ok(Some(name))
+            } else {
+                root_name_in_db_file(&direct, &mut opened_files, template, &tag, &ref_text)
+            };
+            let expected = match expected {
+                Ok(Some(name)) => name,
+                Ok(None) => {
+                    unnamed_n += 1;
+                    lines.push(format!("{rel}\tunnamed\t无名上级根，#163 不核"));
+                    continue;
+                }
+                Err(error) => {
+                    unresolved.push(rel.clone());
+                    lines.push(format!("{rel}\tunresolved\t{error}"));
+                    continue;
+                }
+            };
+            if !expected.starts_with('/') {
+                unnamed_n += 1;
+                lines.push(format!(
+                    "{rel}\tunnamed\texpected={expected}\t无名上级根，#163 不核"
+                ));
+                continue;
+            }
+            match baseline_is_not_this_unit(path, &expected) {
+                Some(problem) => {
+                    flagged_n += 1;
+                    let bad = known_bad.contains(&rel.as_str());
+                    if !bad {
+                        unexpected.push(format!("{rel}\texpected={expected}\t{problem}"));
+                    }
+                    lines.push(format!(
+                        "{rel}\tflag\tknown_bad={bad}\texpected={expected}\t{problem}"
+                    ));
+                }
+                None => {
+                    ok_n += 1;
+                    if known_bad.contains(&rel.as_str()) {
+                        missed.push(format!("{rel}\texpected={expected}"));
+                    }
+                    lines.push(format!("{rel}\tok\texpected={expected}"));
+                }
+            }
+        }
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut text = format!(
+            "files={} ok={ok_n} flagged={flagged_n} unnamed={unnamed_n} unresolved={} missed={} unexpected={}\n",
+            files.len(),
+            unresolved.len(),
+            missed.len(),
+            unexpected.len()
+        );
+        text.push_str(&lines.join("\n"));
+        text.push('\n');
+        if !missed.is_empty() {
+            text.push_str(&format!("\n--- missed ---\n{}\n", missed.join("\n")));
+        }
+        if !unexpected.is_empty() {
+            text.push_str(&format!(
+                "\n--- unexpected ---\n{}\n",
+                unexpected.join("\n")
+            ));
+        }
+        if !unresolved.is_empty() {
+            text.push_str(&format!(
+                "\n--- unresolved ---\n{}\n",
+                unresolved.join("\n")
+            ));
+        }
+        std::fs::write(&log_path, &text).unwrap();
+        assert!(
+            missed.is_empty() && unexpected.is_empty() && unresolved.is_empty(),
+            "missed={missed:?}\nunexpected={unexpected:?}\nunresolved={unresolved:?}\nlog={}",
+            log_path.display()
+        );
+    }
 
     fn input() -> RunInput {
         RunInput {
@@ -1718,10 +2195,26 @@ mod tests {
                 scoped,
             )
         };
-        assert_eq!(located(0), unit("1/10", "zone", "1/2", true), "ZONE 之下的构件");
-        assert_eq!(located(2), unit("1/10", "zone", "1/2", true), "ZONE 之下的 PIPE");
-        assert_eq!(located(3), unit("1/10", "zone", "1/2", false), "就是那个 ZONE");
-        assert_eq!(located(4), unit("1/2", "root", "1/2", false), "就是那个 SITE");
+        assert_eq!(
+            located(0),
+            unit("1/10", "zone", "1/2", true),
+            "ZONE 之下的构件"
+        );
+        assert_eq!(
+            located(2),
+            unit("1/10", "zone", "1/2", true),
+            "ZONE 之下的 PIPE"
+        );
+        assert_eq!(
+            located(3),
+            unit("1/10", "zone", "1/2", false),
+            "就是那个 ZONE"
+        );
+        assert_eq!(
+            located(4),
+            unit("1/2", "root", "1/2", false),
+            "就是那个 SITE"
+        );
 
         // APPLDW 下经 APPLDA、APPDAR 两层才到 ZONE；夹在中间的容器层记在根名下、只算一块。
         let appl = chain(&[
@@ -1737,8 +2230,16 @@ mod tests {
             unit("2/2", "root", "2/2", true)
         );
         // 根下不在任何 ZONE 里的子节点是兜底单元。
-        let loose = chain(&[("3/9", "BOX"), ("3/3", "STRU"), ("3/2", "SITE"), ("3/1", "WORL")]);
-        assert_eq!(locate_unit("3/9", &loose), unit("3/3", "fallback", "3/2", true));
+        let loose = chain(&[
+            ("3/9", "BOX"),
+            ("3/3", "STRU"),
+            ("3/2", "SITE"),
+            ("3/1", "WORL"),
+        ]);
+        assert_eq!(
+            locate_unit("3/9", &loose),
+            unit("3/3", "fallback", "3/2", true)
+        );
         // 属主链到不了 WORLD：单元记节点自己。
         assert_eq!(
             locate_unit("9/9", &chain(&[("9/9", "EQUI")])),

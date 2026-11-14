@@ -197,6 +197,12 @@ pub struct RunRow {
     /// 行与改动前逐字段相同。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_dir_mismatch: Option<super::ProjectDirMismatch>,
+    /// 这次运行只核对了单元里的一块（批量的 `--scope`，或页面上比的是单元之下的节点；GitHub #130 / #158）：
+    /// `node` / `subtree` 与选中节点。整单元运行、比对没跑完、以及加这一格之前写进来的行没有它——没有就是「整单元」，查询照旧。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_refno: Option<String>,
 }
 
 /// `rvm_check_mismatch` 的一行。
@@ -360,6 +366,9 @@ pub struct RunFacts {
     pub elements: Option<ElementFacts>,
     /// 项目父目录与配置的 `project_path` 不一致时的那一笔（[`RunRow::project_dir_mismatch`]）。
     pub project_dir_mismatch: Option<super::ProjectDirMismatch>,
+    /// 这次运行只核对了单元里的一块（批量的 `--scope`，或页面上比的是单元之下的节点；GitHub #130 / #158）。
+    /// 整单元运行、比对没跑完时为 `None`。与构件行的 [`ElementFacts::scope`] 同一份。
+    pub scope: Option<ElementScope>,
 }
 
 pub const SOURCE_PAGE: &str = "page";
@@ -427,6 +436,8 @@ pub fn classify_failure(stage: &str, message: &str) -> &'static str {
                 "compare_duplicate_key"
             } else if has(&["e3d 名称重复"]) {
                 "compare_duplicate_name"
+            } else if has(&["基准不是这个单元"]) {
+                "compare_baseline_not_this_unit"
             } else {
                 "compare_failed"
             }
@@ -558,12 +569,13 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
         let mut row = base(0);
         row.category = CATEGORY_STAGE_FAILURE.to_string();
         let classified = classify_failure(&facts.stage, &facts.message);
-        row.reason_kind = if facts.stage == super::STAGE_COMPARE && classified == "compare_failed" {
-            "compare_nothing_paired"
-        } else {
-            classified
-        }
-        .to_string();
+        row.reason_kind =
+            if facts.stage == super::STAGE_COMPARE && classified == "compare_failed" {
+                "compare_nothing_paired"
+            } else {
+                classified
+            }
+            .to_string();
         row.reason = truncate_chars(&facts.message, MESSAGE_LIMIT);
         row.name = facts.refno.clone();
         rows.push(row);
@@ -659,6 +671,8 @@ pub fn build_rows(facts: &RunFacts) -> (RunRow, Vec<MismatchRow>) {
         finished_at,
         finished_unix_ms,
         project_dir_mismatch: facts.project_dir_mismatch.clone(),
+        scope_kind: facts.scope.as_ref().map(|scope| scope.kind.clone()),
+        scope_refno: facts.scope.as_ref().map(|scope| scope.refno.clone()),
     };
     (run, rows)
 }
@@ -978,8 +992,7 @@ fn element_row(
     key_shared: bool,
 ) -> ElementRow {
     let passed = check.passed();
-    let reason =
-        (!check.reason.is_empty()).then(|| truncate_chars(&check.reason, MESSAGE_LIMIT));
+    let reason = (!check.reason.is_empty()).then(|| truncate_chars(&check.reason, MESSAGE_LIMIT));
     let (derived_kind, derived_ordinal, tube_from, tube_to) = match check.derived {
         Some(derived) => (
             Some(derived.kind),
@@ -1274,8 +1287,7 @@ async fn persist_stream(
         let elements = elements.map(|elements| ElementWrite::new(&facts, elements));
         drop(facts);
         let limit = persist_timeout(queued);
-        let written =
-            tokio::time::timeout(limit, persist_rows_on(db, &run, &rows, elements)).await;
+        let written = tokio::time::timeout(limit, persist_rows_on(db, &run, &rows, elements)).await;
         release_pending(pending, queued);
         let failure = match written {
             Ok(Ok(stored)) => {
@@ -1427,6 +1439,9 @@ pub struct RunFilter {
     pub source: Option<String>,
     pub batch_id: Option<String>,
     pub project: Option<String>,
+    /// `true` 只看只核对了单元里一块的运行（`--scope`，GitHub #130），`false` 只看整单元的。
+    /// 加 `scope_kind` 这一格之前写进来的行没有它，按整单元算。
+    pub scoped: Option<bool>,
     /// 只看 `finished_unix_ms` 早于它的（往回翻页）。
     pub before: Option<i64>,
     pub limit: Option<usize>,
@@ -1460,6 +1475,9 @@ fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
 /// 批量行——那时一行就是一个根）把自己的 `refno` 当上级根，所以按 SITE 查历史不会漏掉老记录。
 const ROOT_SCOPE: &str = "root-scope";
 
+/// [`where_clause`] 的「这一格有没有」：值是 `true` 要有，`false` 要没有（老行没写这一格也算没有）。不绑参数。
+const PRESENT: &str = "present";
+
 /// `WHERE a = $a AND b = $b` 这一段；返回子句与要绑的参数。
 fn where_clause(
     terms: Vec<(&'static str, &'static str, Option<Value>)>,
@@ -1467,14 +1485,23 @@ fn where_clause(
     let mut parts = Vec::new();
     let mut binds = Vec::new();
     for (column, operator, value) in terms {
-        if let Some(value) = value {
-            parts.push(if operator == ROOT_SCOPE {
-                format!("({column} = ${column} OR (!{column} AND refno = ${column}))")
+        let Some(value) = value else {
+            continue;
+        };
+        if operator == PRESENT {
+            parts.push(if value == Value::Bool(true) {
+                format!("{column} != NONE")
             } else {
-                format!("{column} {operator} ${column}")
+                format!("{column} = NONE")
             });
-            binds.push((column, value));
+            continue;
         }
+        parts.push(if operator == ROOT_SCOPE {
+            format!("({column} = ${column} OR (!{column} AND refno = ${column}))")
+        } else {
+            format!("{column} {operator} ${column}")
+        });
+        binds.push((column, value));
     }
     let clause = if parts.is_empty() {
         String::new()
@@ -1515,6 +1542,7 @@ fn run_where(filter: &RunFilter) -> (String, Vec<(&'static str, Value)>) {
         ("source", "=", filter.source.clone().map(Value::from)),
         ("batch_id", "=", filter.batch_id.clone().map(Value::from)),
         ("project", "=", filter.project.clone().map(Value::from)),
+        ("scope_kind", PRESENT, filter.scoped.map(Value::from)),
         ("finished_unix_ms", "<", filter.before.map(Value::from)),
     ])
 }
@@ -1847,6 +1875,8 @@ struct RollupSource {
     #[serde(default)]
     root_name: Option<String>,
     #[serde(default)]
+    scope_kind: Option<String>,
+    #[serde(default)]
     status: String,
     #[serde(default)]
     verdict: String,
@@ -1886,7 +1916,8 @@ struct RootRollup {
 ///
 /// `mode` 是跑法：`root` 是把整个根当一个单元比的那一行，`zone` 是按 ZONE 拆开比的各单元之和（兜底单元
 /// 也算在里面，`units` 里分开计数）。同一批里两种跑法都有时各出一行，不相加——两行的 `counts` 正好
-/// 用来核对「各 ZONE 之和等于整根」。
+/// 用来核对「各 ZONE 之和等于整根」。只核对了单元里一块的运行（`--scope`，GitHub #130）另成一行
+/// `mode = "scope"`：它们不是哪个单元的完整结论，不进前两种行的终态、计数与 `clean`。
 ///
 /// 只汇总批量行（页面单根各是各的一次比对，没有批）。应答：`{count, scanned, truncated, roots: [...]}`，
 /// 最新的批在前；每行带单元数、各终态个数、计数合计、差异行数、各阶段耗时合计、生成峰值的最大值，以及
@@ -1898,8 +1929,8 @@ pub async fn rollup_on(db: &Surreal<Any>, filter: &RunFilter) -> Result<Value> {
     });
     let scan = ROLLUP_SCAN_LIMIT + 1;
     let mut query = db.query(format!(
-        "SELECT batch_id, dbnum, refno, noun, name, unit, root_refno, root_noun, root_name, status, \
-         verdict, counts, mismatch_total, seconds, gen_peak_private_mb, finished_unix_ms, finished_at \
+        "SELECT batch_id, dbnum, refno, noun, name, unit, root_refno, root_noun, root_name, scope_kind, \
+         status, verdict, counts, mismatch_total, seconds, gen_peak_private_mb, finished_unix_ms, finished_at \
          FROM {RUN_TABLE}{clause} ORDER BY finished_unix_ms DESC LIMIT {scan};"
     ));
     for (name, value) in binds {
@@ -1921,7 +1952,13 @@ pub async fn rollup_on(db: &Surreal<Any>, filter: &RunFilter) -> Result<Value> {
             serde_json::from_value(row).context("rvm_check_run 的行读不成汇总要的字段")?;
         let batch_id = row.batch_id.unwrap_or_default();
         let unit = row.unit.unwrap_or_else(|| "root".to_string());
-        let mode = if unit == "root" { "root" } else { "zone" };
+        let mode = if row.scope_kind.is_some() {
+            "scope"
+        } else if unit == "root" {
+            "root"
+        } else {
+            "zone"
+        };
         let root = row.root_refno.unwrap_or_else(|| row.refno.clone());
         let latest = batch_latest.entry(batch_id.clone()).or_insert(i64::MIN);
         *latest = (*latest).max(row.finished_unix_ms);
@@ -2126,6 +2163,7 @@ mod tests {
             root_refno: None,
             root_noun: None,
             root_name: None,
+            scope: None,
             verdict: verdict.to_string(),
             status: verdict.to_string(),
             stage: "compare".to_string(),
@@ -2272,8 +2310,14 @@ mod tests {
         );
         // 比对这一步的阶段名只有 `compare` 一种写法：批量侧早先写的 `compare_failed`、这里早先认的
         // `compare-failed`（那是终态，不是阶段）都不再是阶段名。
-        assert_eq!(classify_failure("compare_failed", "比对时 panic：x"), "run_failed");
-        assert_eq!(classify_failure("compare-failed", "比对时 panic：x"), "run_failed");
+        assert_eq!(
+            classify_failure("compare_failed", "比对时 panic：x"),
+            "run_failed"
+        );
+        assert_eq!(
+            classify_failure("compare-failed", "比对时 panic：x"),
+            "run_failed"
+        );
         assert_eq!(
             classify_failure("no-baseline", "基准目录里没有 …"),
             "baseline_missing"
@@ -2303,12 +2347,22 @@ mod tests {
             assert_eq!(row.mismatch_by_kind[rows[0].reason_kind.as_str()], 1);
             rows[0].reason_kind.clone()
         };
-        assert_eq!(stopped("比对时 panic：index out of bounds"), "compare_panic");
+        assert_eq!(
+            stopped("比对时 panic：index out of bounds"),
+            "compare_panic"
+        );
         assert_eq!(
             stopped("比对没有跑完：生成侧主键重复：Name(\"/A\")"),
             "compare_duplicate_key"
         );
         assert_eq!(stopped("没有跑到这个根"), "compare_failed");
+        // GitHub #163：基准的最外一层不是这个单元的上级根。
+        assert_eq!(
+            stopped(
+                "比对没有跑完：基准不是这个单元——基准的最外一层是 /MDS/TEMPLATES，这个单元的上级根是 /MDS/TEMPLATES-OGL"
+            ),
+            "compare_baseline_not_this_unit"
+        );
 
         // 比对跑完、判红、一件都没配上：终态是 `fail`，不是没跑完。
         let mut unpaired = facts("b-1/ams7999/1_5", "1/5", VERDICT_FAIL, Vec::new());
@@ -2353,7 +2407,10 @@ mod tests {
             vec![mismatch("off", reason::AABB_SHIFTED, "SJOI 1 /S", "SJOI")],
         );
         let (_, rows) = build_rows(&red);
-        assert!(rows.iter().all(|row| row.category != CATEGORY_STAGE_FAILURE));
+        assert!(
+            rows.iter()
+                .all(|row| row.category != CATEGORY_STAGE_FAILURE)
+        );
     }
 
     /// 写两次同一 `run_id` 不留两份；按 refno / 原因种类 / 运行号都查得到；汇总按种类计数。
@@ -2715,6 +2772,93 @@ mod tests {
         assert_eq!(runs["runs"].as_array().unwrap().len(), 4);
     }
 
+    /// GitHub #130 / #158：`build_rows` 带范围时写出两格，不带时两格都不落（老行按整单元）。
+    #[test]
+    fn build_rows_writes_scope_only_when_the_run_was_partial() {
+        let mut partial = facts("b-1/ams7999/5_2", "5/2", VERDICT_FAIL, Vec::new());
+        partial.scope = Some(ElementScope {
+            kind: "subtree".to_string(),
+            refno: "5/9".to_string(),
+        });
+        let (row, _) = build_rows(&partial);
+        assert_eq!(row.scope_kind.as_deref(), Some("subtree"));
+        assert_eq!(row.scope_refno.as_deref(), Some("5/9"));
+        let value = serde_json::to_value(&row).unwrap();
+        assert_eq!(value["scope_kind"], "subtree");
+        assert_eq!(value["scope_refno"], "5/9");
+
+        let (whole, _) = build_rows(&facts("b-1/ams7999/5_1", "5/1", "pass", Vec::new()));
+        assert_eq!(whole.scope_kind, None);
+        assert_eq!(whole.scope_refno, None);
+        let value = serde_json::to_value(&whole).unwrap();
+        assert!(value.get("scope_kind").is_none(), "{value}");
+        assert!(value.get("scope_refno").is_none(), "{value}");
+    }
+
+    /// GitHub #130：只核对了单元里一块的运行（`--scope`）在运行行上带范围，汇总时另成 `mode = "scope"` 一行，
+    /// 不进整单元那一行的终态与 `clean`；查询能按有没有范围筛，没有范围的行不出这两格。
+    #[tokio::test]
+    async fn scoped_runs_carry_their_scope_and_stay_out_of_the_whole_unit_rollup() {
+        let db = database("rollup-scope").await;
+        put(&db, &zone_facts("b-s", "5/1", "1/2", "pass", Vec::new())).await;
+        let mut scoped = zone_facts(
+            "b-s",
+            "5/2",
+            "1/2",
+            VERDICT_FAIL,
+            vec![mismatch("off", reason::AABB_SHIFTED, "/P9", "PIPE")],
+        );
+        scoped.scope = Some(ElementScope {
+            kind: "node".to_string(),
+            refno: "5/9".to_string(),
+        });
+        put(&db, &scoped).await;
+
+        let all = rollup_on(&db, &RunFilter::default()).await.unwrap();
+        let roots = all["roots"].as_array().unwrap();
+        let modes: Vec<&str> = roots
+            .iter()
+            .map(|root| root["mode"].as_str().unwrap())
+            .collect();
+        assert_eq!(modes, ["scope", "zone"], "{all}");
+        let zone = &roots[1];
+        assert_eq!(zone["runs"], 1);
+        assert_eq!(zone["status"]["pass"], 1);
+        assert_eq!(
+            zone["clean"], true,
+            "只核对一块的那次不冒充整单元的结论：{zone}"
+        );
+        let scope = &roots[0];
+        assert_eq!(scope["runs"], 1);
+        assert_eq!(scope["clean"], false);
+        assert_eq!(scope["not_clean"][0]["refno"], "5/2");
+
+        let only_scoped = list_runs_on(
+            &db,
+            &RunFilter {
+                scoped: Some(true),
+                ..RunFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(only_scoped.len(), 1, "{only_scoped:?}");
+        assert_eq!(only_scoped[0]["scope_kind"], "node");
+        assert_eq!(only_scoped[0]["scope_refno"], "5/9");
+        let whole = list_runs_on(
+            &db,
+            &RunFilter {
+                scoped: Some(false),
+                ..RunFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(whole.len(), 1, "{whole:?}");
+        assert_eq!(whole[0]["refno"], "5/1");
+        assert!(whole[0].get("scope_kind").is_none(), "{}", whole[0]);
+    }
+
     /// 各单元的秒数记到毫秒，汇总相加之后才取一位小数。一次导出会话摊给各单元的那几份加起来就是会话
     /// 耗时：10 秒的会话摊给三个单元是 3.334 / 3.333 / 3.333，汇总得 10.0。先前每份先四舍五入到 0.1 秒
     /// （各记 3.3），汇总成了 9.9。
@@ -2812,7 +2956,10 @@ mod tests {
     /// 一条构件级结果：通过的档给 `ok`，其余给 `error` 加一句原因。
     fn element(refno: Option<&str>, grade: &str, name: &str) -> ElementCheck {
         let passed = grade::passed(grade);
-        let paired = matches!(grade, "exact" | "chord" | "reference_artifact" | "film" | "off");
+        let paired = matches!(
+            grade,
+            "exact" | "chord" | "reference_artifact" | "film" | "off"
+        );
         ElementCheck {
             refno: refno.map(str::to_string),
             derived: None,
@@ -2918,7 +3065,12 @@ mod tests {
             derived("1/20", "implied_tube", 2, "exact"),
             derived("1/20", "implied_tube", 2, "only_baseline"),
             derived("1/20", DERIVED_CONTAINER_TUBES, 0, "off"),
-            derived("1/20", DERIVED_CONTAINER_RECORD, 3, "container_only_baseline"),
+            derived(
+                "1/20",
+                DERIVED_CONTAINER_RECORD,
+                3,
+                "container_only_baseline",
+            ),
             element(None, "only_baseline", "BOX 2 of EQUIPMENT /E1"),
             element(Some("24383/1234"), "unkeyable_baseline", "/A-OLD-NAME"),
             element(None, "only_generated", &long_name),
@@ -2935,16 +3087,25 @@ mod tests {
         assert_eq!(keys[5], "5_1~only_baseline~BOX 2 of EQUIPMENT /E1");
         assert_eq!(keys[6], "24383_1234~unkeyable_baseline");
         assert!(
-            keys[7].starts_with("5_1~only_generated~BOX 1 of EQUIPMENT /XXXX") && keys[7].contains('#'),
+            keys[7].starts_with("5_1~only_generated~BOX 1 of EQUIPMENT /XXXX")
+                && keys[7].contains('#'),
             "{}",
             keys[7]
         );
         assert!(keys[7].chars().count() < 220, "{}", keys[7].chars().count());
         assert_eq!(keys[8], "1_21:TUBI:1");
-        assert_eq!(build_element_rows(&run)[7].id, keys[7], "同一个名字每次得同一个键");
+        assert_eq!(
+            build_element_rows(&run)[7].id,
+            keys[7],
+            "同一个名字每次得同一个键"
+        );
 
         assert_eq!(rows[6].key_shared, Some(true));
-        assert!(rows.iter().enumerate().all(|(at, row)| at == 6 || row.key_shared.is_none()));
+        assert!(
+            rows.iter()
+                .enumerate()
+                .all(|(at, row)| at == 6 || row.key_shared.is_none())
+        );
         assert_eq!(rows[0].refno.as_deref(), Some("24383/1234"));
         assert!(rows[0].refno_resolved && !rows[0].derived && rows[0].passed);
         assert!(rows[1].derived);
@@ -2995,7 +3156,11 @@ mod tests {
         assert_eq!((stored.elements, stored.stale_elements), (5, 0));
         assert!(!stored.elements_superseded);
         let again = persist_facts_on(&db, &run).await.unwrap();
-        assert_eq!((again.elements, again.stale_elements), (5, 0), "同一次运行重写：不清自己");
+        assert_eq!(
+            (again.elements, again.stale_elements),
+            (5, 0),
+            "同一次运行重写：不清自己"
+        );
         ensure_schema_on(&db).await.unwrap();
         assert_eq!(
             element_table(&db).await,
@@ -3052,11 +3217,12 @@ mod tests {
         assert_eq!(row["baseline_kinds"][0], "Cylinder");
         assert_eq!(row["generated_aabb"][3], 1.0);
         assert_eq!(row["aabb_frame"], "local");
-        assert!(row["finished_at"].as_str().is_some_and(|at| at.contains('T')));
-        assert_eq!(
-            row["finished_unix_ms"],
-            run.finished_at.timestamp_millis()
+        assert!(
+            row["finished_at"]
+                .as_str()
+                .is_some_and(|at| at.contains('T'))
         );
+        assert_eq!(row["finished_unix_ms"], run.finished_at.timestamp_millis());
         for absent in [
             "reason",
             "reason_kind",
@@ -3221,7 +3387,13 @@ mod tests {
         put_all(&db, &unit_run("b-1", "5/1", "1/2", at(0), abc)).await;
         put_all(
             &db,
-            &unit_run("b-1", "5/2", "1/2", at(1), vec![element(Some("7/4"), "exact", "/D")]),
+            &unit_run(
+                "b-1",
+                "5/2",
+                "1/2",
+                at(1),
+                vec![element(Some("7/4"), "exact", "/D")],
+            ),
         )
         .await;
 
@@ -3280,7 +3452,13 @@ mod tests {
         assert_eq!(stored.stale_elements, 0);
         let stored = put_all(
             &db,
-            &unit_run("b-3", "5/1", "1/2", at(7), vec![element(Some("7/1"), "exact", "/A")]),
+            &unit_run(
+                "b-3",
+                "5/1",
+                "1/2",
+                at(7),
+                vec![element(Some("7/1"), "exact", "/A")],
+            ),
         )
         .await;
         assert_eq!(stored.stale_elements, 0, "B 已经记在 5/2 名下");
@@ -3300,12 +3478,24 @@ mod tests {
         // 整根核对：根 1/2 下只剩 A 与新出现的 X；此前按 ZONE 写的行只要这次没再出现就清。
         put_all(
             &db,
-            &unit_run("b-4", "5/3", "1/2", at(9), vec![element(Some("7/7"), "exact", "/Z")]),
+            &unit_run(
+                "b-4",
+                "5/3",
+                "1/2",
+                at(9),
+                vec![element(Some("7/7"), "exact", "/Z")],
+            ),
         )
         .await;
         put_all(
             &db,
-            &unit_run("b-4", "6/1", "1/3", at(9), vec![element(Some("8/1"), "exact", "/OTHER")]),
+            &unit_run(
+                "b-4",
+                "6/1",
+                "1/3",
+                at(9),
+                vec![element(Some("8/1"), "exact", "/OTHER")],
+            ),
         )
         .await;
         let mut whole = unit_run(
@@ -3321,7 +3511,11 @@ mod tests {
         whole.unit = Some("root".to_string());
         whole.elements.as_mut().unwrap().unit_kind = "root".to_string();
         let stored = put_all(&db, &whole).await;
-        assert_eq!((stored.elements, stored.stale_elements), (2, 1), "5/3 留下的 /Z");
+        assert_eq!(
+            (stored.elements, stored.stale_elements),
+            (2, 1),
+            "5/3 留下的 /Z"
+        );
         assert_eq!(
             element_table(&db).await,
             [
@@ -3387,7 +3581,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!((stored.elements, stored.stale_elements), (2, 0), "A、C 在范围外，不清");
+        assert_eq!(
+            (stored.elements, stored.stale_elements),
+            (2, 0),
+            "A、C 在范围外，不清"
+        );
         let b = elements_where(
             &db,
             ElementFilter {
@@ -3454,7 +3652,13 @@ mod tests {
         let at = |seconds: i64| t0 + chrono::Duration::seconds(seconds);
         put_all(
             &db,
-            &unit_run("b-new", "5/1", "1/2", at(100), vec![element(Some("7/1"), "exact", "/A")]),
+            &unit_run(
+                "b-new",
+                "5/1",
+                "1/2",
+                at(100),
+                vec![element(Some("7/1"), "exact", "/A")],
+            ),
         )
         .await;
 
@@ -3483,7 +3687,13 @@ mod tests {
         );
 
         // 页面上后来单比了这个单元下面的一个节点（运行行记的是那个节点，不是单元）：A 的行比下面这次新。
-        let mut page = unit_run("x", "5/1", "1/2", at(200), vec![element(Some("7/1"), "chord", "/A")]);
+        let mut page = unit_run(
+            "x",
+            "5/1",
+            "1/2",
+            at(200),
+            vec![element(Some("7/1"), "chord", "/A")],
+        );
         page.run_id = "rvm-check-page-1".to_string();
         page.source = SOURCE_PAGE;
         page.batch_id = None;
@@ -3562,7 +3772,10 @@ mod tests {
                 t0 + chrono::Duration::seconds(seconds),
                 checks,
             );
-            pending.fetch_add(run.elements.as_ref().unwrap().checks.len(), Ordering::Relaxed);
+            pending.fetch_add(
+                run.elements.as_ref().unwrap().checks.len(),
+                Ordering::Relaxed,
+            );
             facts.send(run).unwrap();
         }
         facts

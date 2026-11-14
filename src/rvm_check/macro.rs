@@ -83,6 +83,7 @@ fn render(navigate: &str, rvm: &str, export_element: &str) -> String {
     format!(
         "{navigate}\n\
          Q CE\n\
+         Q REF\n\
          Q NAME\n\
          Q TYPE\n\
          \n\
@@ -133,6 +134,30 @@ pub fn parse_element_name(log: &str) -> Option<String> {
         let name = line.strip_prefix("Name ")?.trim();
         name.starts_with('/').then(|| name.to_string())
     })
+}
+
+/// `Q REF` 打的那一行：`Ref =24383/66456` → `24383/66456`。
+pub fn parse_reported_ref(log: &str) -> Option<String> {
+    log.lines().map(str::trim).find_map(|line| {
+        let refno = line.strip_prefix("Ref ")?.trim().strip_prefix('=')?;
+        let (word0, word1) = refno.split_once('/')?;
+        (word0.parse::<u32>().is_ok() && word1.parse::<i64>().is_ok()).then(|| refno.to_string())
+    })
+}
+
+/// 按名称补导之后核对：名字解到的是不是要导的那一只（GitHub #162）。名字在 MDB 里不唯一时，E3D 按名字
+/// 导航会落到别的库的同名元素上，文件照样落下（e3d-model#54 的四份基准就是这样来的）。
+pub fn check_named_export(log: &str, refno: &str, name: &str) -> Result<(), String> {
+    let wanted = refno.trim().trim_start_matches('=');
+    match parse_reported_ref(log) {
+        Some(got) if got == wanted => Ok(()),
+        Some(got) => Err(format!(
+            "按名称 {name} 导出时，名字解到了 ={got}，不是要导的 ={wanted}（同名元素在别的库里）"
+        )),
+        None => Err(format!(
+            "按名称 {name} 导出后读不回 refno（日志里没有 `Ref =…` 那一行），核对不了是不是 ={wanted}"
+        )),
+    }
 }
 
 pub fn export_finished(log: &str) -> bool {
@@ -241,6 +266,26 @@ mod tests {
         assert!(export_body_by_name("C-OR-1", Path::new("e3d.rvm")).is_err());
         assert!(export_body_by_name("/A\"B", Path::new("e3d.rvm")).is_err());
         assert!(export_body_by_name("/A$B", Path::new("e3d.rvm")).is_err());
+    }
+
+    /// GitHub #162：按名称补导要读回 refno；名字解到别的库的同名元素、或者读不回来，都判失败。
+    #[test]
+    fn a_named_export_must_read_back_the_wanted_refno() {
+        let body = export_body_by_name("/MDS/FRAMES/FT04-HORI", Path::new("e3d.rvm")).unwrap();
+        assert!(
+            body.contains("/MDS/FRAMES/FT04-HORI\nQ CE\nQ REF\n"),
+            "{body}"
+        );
+        let log = "Q REF\nRef =23727/2\nQ NAME\nName /MDS/FRAMES/FT04-HORI\n";
+        assert_eq!(parse_reported_ref(log).as_deref(), Some("23727/2"));
+        assert!(check_named_export(log, "=23727/2", "/MDS/FRAMES/FT04-HORI").is_ok());
+        let wrong = "Q REF\nRef =23713/2\n";
+        let problem = check_named_export(wrong, "23727/2", "/MDS/FRAMES/FT04-HORI").unwrap_err();
+        assert!(
+            problem.contains("=23713/2") && problem.contains("=23727/2"),
+            "{problem}"
+        );
+        assert!(check_named_export("Q NAME\nName /Z\n", "23727/2", "/Z").is_err());
     }
 
     #[test]

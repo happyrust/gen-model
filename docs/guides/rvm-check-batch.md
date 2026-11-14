@@ -21,12 +21,17 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | 步 | 做法 | 来源 |
 |---|---|---|
 | 枚举根 | 该库 WORLD 的直接成员里 noun 为 `SITE` / `APPLDW` 的元素（`--site-only` 只取 SITE）。两类根件集合互不重叠，合起来才是整库 | `DirectTreeService::children(world)` |
-| 导基准 | **每库一次** `des.exe -tty` 会话，宏里逐根 `export`（`onerror continue`，每根一个哨兵）；哪个根没落出文件再单独按 refno / 名称补导一次 | `rvm_check::export_macro::export_batch_body` |
+| 导基准 | **每库一次** `des.exe -tty` 会话，宏里逐根 `export`（`onerror continue`，每根一个哨兵）；哪个根没落出文件再单独按 refno / 名称补导一次。按名称补导之后读回 `Q REF` 核对（GitHub #162）：名字解到别的库的同名元素、或者读不回 refno，都判导出失败、不留文件 | `rvm_check::export_macro::export_batch_body` |
 | 生成 | 缺省每个根起一个 `aios-database rvm-check --child` 子进程，父进程每 0.5 s 采一次样（可提交内存余量、耗时、子进程内存峰值），越线就杀：`commit-guard` / `timeout` 只记在那个根上。0.5 s 只是采样的节拍：子进程一退出，父进程立即接着处理，不等下一个采样点 | `rvm_check::generate_ours`（`e3d_model::rvm_export`） |
 | 比对 | 进程内 `compare_rvm_files`（只读映射 + 并行，几百 MB 以内）；判色与页面同一函数 | `rvm_check::compare_rvms` / `judge_report` |
 
 导出与生成是流水线：E3D 会话在自己的线程里逐库跑，生成工人不等它；一个根生成完、基准也到了
-才比对。`--jobs N` 同时生成 N 个根（注意 ams7333 一个根要 9 GB）。
+才比对。
+
+比对之前先核对基准是不是这个单元的导出（GitHub #163）：E3D 导出一个单元时把它的上级根（SITE / APPLDW）当最外一层组
+一起写，所以基准的最外一层组名应当就是上级根的名字。对不上（e3d-model#54 那种按名字补导认到别的库的同名单元，或
+`--baseline-dir` 里的文件登记错了）就记 `compare-failed`、原因种类 `compare_baseline_not_this_unit`，不往差异表里写成片的
+假差异。上级根无名时不核（无名 SITE 的序号生成侧与 E3D 可能数得不一样）。`--jobs N` 同时生成 N 个根（注意 ams7333 一个根要 9 GB）。
 
 ## 参数
 
@@ -111,6 +116,12 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 `unit` 与 `root_*` 是 2026-11-10 加的；页面单根，以及此前写进来的批量行没有这几格。按上级根查的时候，
 没有 `root_refno` 的行把自己的 `refno` 当上级根（那时一行就是一个根），所以老记录照样查得到。
 
+只核对了单元里一块的运行（`--scope node:<refno>` / `subtree:<refno>`）在运行行上多两格 `scope_kind`（`node` / `subtree`）
+与 `scope_refno`（选中的节点），与构件行同名、同一口径（GitHub #130 / #158）：档位只认这两个，refno 归一成 `w0/w1`；
+`subtree:` 选的就是这个单元自己、档位非法或 refno 空，两张表都按整单元，不写这两格。页面上比的是单元之下的节点时，
+运行行带同样的 `subtree` 与该节点；比的就是整个单元则没有这两格。整单元的运行、比对没跑完、以及加这两格之前写进来的行没有它们，按整单元算。
+它们不是这个单元的完整结论：按上级根汇总时另成一行（`mode = "scope"`），不进整单元那一行的终态、计数与 `clean`。页面运行不进这张汇总。
+
 `reason_kind` 是比 `category` 细一档的归因（`rvm_check::report::reason`）：
 
 | 原因种类 | 含义 |
@@ -128,12 +139,12 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | `container_tube_off` / `container_tube_missing_in_generated` / `container_tube_extra_in_generated` | 容器组内逐根账 |
 | `centreline_only` | E3D 只画中心线（`info`，不进判据，只记账） |
 | `generate_timeout` / `generate_commit_guard` / `generate_panic` / `generate_unbalanced` / `e3d_export_no_file` / `e3d_launcher_missing` / `baseline_missing` … | 某一步没跑完（`category = stage_failure`，由阶段与报错文本认） |
-| `compare_panic` / `compare_duplicate_key` / `compare_duplicate_name` / `compare_unknown_bbox_frame` / `compare_failed` | 比对这一步没跑完（同是 `stage_failure`）：比对时 panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 其他。批量的终态是 `compare-failed` |
+| `compare_panic` / `compare_duplicate_key` / `compare_duplicate_name` / `compare_unknown_bbox_frame` / `compare_baseline_not_this_unit` / `compare_failed` | 比对这一步没跑完（同是 `stage_failure`）：比对时 panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 基准的最外一层不是这个单元的上级根（GitHub #163）/ 其他。批量的终态是 `compare-failed` |
 | `compare_nothing_paired` | 比对跑完了、判红，却一件都没配上（两侧的主键口径对不上） |
 | `run_failed` | 兜底：阶段认不出来。正常不会出现 |
 
 比对这一步的阶段名只有 `compare` 一种写法。停在这一步的有两种情形，靠终态分：`fail` 是比对跑完判红，差异在
-清单里；`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分成上表那五种。
+清单里；`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分成上表那六种。
 （2026-11-10 之前批量侧把后一种的阶段写成 `compare_failed`，归类认不出，原因种类全落到 `run_failed`。）
 
 ### 构件级结果：`rvm_check_element`
@@ -200,7 +211,7 @@ refno 怎么来的：RVM 里没有 refno，比对按名称配对。生成侧每�
 
 | 查什么 | 命令行 | 服务端（GET） | 应答 |
 |---|---|---|---|
-| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`（各单元之和，相加之后取一位小数，与 `summary.json` 同一个算法）、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
+| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开 / `scope` 只核对了一块）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`（各单元之和，相加之后取一位小数，与 `summary.json` 同一个算法）、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
 | 运行记录 | `rvm-check-query runs` | `/api/v1/rvm-check/history` | `{count, runs: [...]}`，一个根 / 单元一行，最新在前 |
 | 差异明细 | `rvm-check-query mismatches` | `/api/v1/rvm-check/mismatches` | `{count, rows: [...]}` |
 | 差异按原因计数 | `rvm-check-query reasons` | `/api/v1/rvm-check/reasons` | `{count, kinds: [{reason_kind, category, severity, n}]}`，多的在前 |
@@ -232,7 +243,8 @@ aios-database rvm-check-query element-grades --batch-id <批>
 aios-database rvm-check-query rollup --dbnum 7999 2>$null | ConvertFrom-Json
 ```
 
-过滤条件（不给就不限）：`rollup` / `runs` 认 `--batch-id --root --refno --dbnum --unit --status --verdict --limit`；
+过滤条件（不给就不限）：`rollup` / `runs` 认 `--batch-id --root --refno --dbnum --unit --status --verdict --scoped --limit`
+（`--scoped true` 只看只核对了一块的运行，`false` 只看整单元的）；
 `mismatches` / `reasons` 认 `--batch-id --root --refno --dbnum --run-id --noun --category --reason-kind --severity --limit --offset`；
 `elements` / `element-grades` 认 `--refno`（构件自己的 refno）`--unit-refno --root --dbnum --batch-id --run-id --noun --grade
 --severity --passed --kind-match --derived --refno-resolved --limit --offset`。
@@ -240,7 +252,7 @@ aios-database rvm-check-query rollup --dbnum 7999 2>$null | ConvertFrom-Json
 
 ```text
 /api/v1/rvm-check/rollup?batch_id=…&dbnum=7999&root_refno=24383/80211
-/api/v1/rvm-check/history?refno=24383/73927&root_refno=…&unit=zone&dbnum=7999&verdict=fail&batch_id=…&before=<finished_unix_ms>&limit=50
+/api/v1/rvm-check/history?refno=24383/73927&root_refno=…&unit=zone&dbnum=7999&verdict=fail&batch_id=…&scoped=false&before=<finished_unix_ms>&limit=50
 /api/v1/rvm-check/mismatches?run_id=…&refno=…&root_refno=…&dbnum=…&category=off&reason_kind=aabb_shifted&noun=CTRAY&severity=error&limit=500&offset=0
 /api/v1/rvm-check/reasons?dbnum=7022            → 按 reason_kind / category / severity 的计数，多的在前
 /api/v1/rvm-check/elements?refno=24383/66459    → 这个构件（连同记在它名下的派生件）最近一次核对的结果

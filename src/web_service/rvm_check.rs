@@ -227,9 +227,10 @@ async fn answer(query: crate::rvm_check::store::Query) -> Result<Json<Value>, Ap
         .map_err(ApiError::from_domain)
 }
 
-/// `GET /api/v1/rvm-check/history?refno=&root_refno=&unit=&dbnum=&verdict=&status=&source=&batch_id=&before=&limit=`：
+/// `GET /api/v1/rvm-check/history?refno=&root_refno=&unit=&dbnum=&verdict=&status=&source=&batch_id=&scoped=&before=&limit=`：
 /// 库里的历次比对（一个根 / 单元一行），最新在前。`root_refno` 给上级 SITE / APPLDW，
-/// 取它自己那一行加它下面的全部单元。
+/// 取它自己那一行加它下面的全部单元。`scoped=true` 只看只核对了一块的运行，`false` 只看整单元
+/// （GitHub #130）；应答里局部运行带 `scope_kind` / `scope_refno`。
 pub async fn history(
     State(state): State<AppState>,
     axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::RunFilter>,
@@ -238,8 +239,9 @@ pub async fn history(
     answer(crate::rvm_check::store::Query::Runs(filter)).await
 }
 
-/// `GET /api/v1/rvm-check/rollup?batch_id=&dbnum=&root_refno=&…`（条件同 `history`）：
-/// 批量结果按上级根汇总，每批每个根一行：单元数、各终态个数、计数合计、没过的单元。
+/// `GET /api/v1/rvm-check/rollup?batch_id=&dbnum=&root_refno=&scoped=&…`（条件同 `history`）：
+/// 批量结果按上级根汇总，每批每个根每种跑法一行：单元数、各终态个数、计数合计、没过的单元。
+/// 只核对了一块的运行另成 `mode = "scope"`，不进整单元那一行（GitHub #130）。
 pub async fn rollup(
     State(state): State<AppState>,
     axum::extract::Query(filter): axum::extract::Query<crate::rvm_check::store::RunFilter>,
