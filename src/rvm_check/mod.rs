@@ -349,6 +349,12 @@ impl ExecuteOutcome {
             root_refno: None,
             root_noun: None,
             root_name: None,
+            // 与构件行同一份范围（GitHub #158）：比的是单元之下的节点时，运行行也标成局部，
+            // 不把一次局部比对写成整单元结论。整单元、以及比对没跑完（没有构件结果）时没有这一格。
+            scope: self
+                .elements
+                .as_ref()
+                .and_then(|elements| elements.scope.clone()),
             verdict: report.verdict.clone(),
             status: report.verdict.clone(),
             stage: report.stage.clone(),
@@ -1481,8 +1487,6 @@ impl RefnoParse for RefU64 {
 mod tests {
     use super::*;
 
-
-
     /// GitHub #163：基准的最外一层是上级根；对不上就说「基准不是这个单元」，无名上级根不核。
     /// 夹具是一根支管的 E3D 导出，最外一层是它的 SITE `/1RCV-PIPEBJ`。
     #[test]
@@ -1509,7 +1513,6 @@ mod tests {
             "读不了基准就交给比对去报"
         );
     }
-
 
     /// GitHub #162：日志里的 refno 对不上、或读不回来，判失败并且不留文件；对上了文件留着。
     #[test]
@@ -1538,7 +1541,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// GitHub #158：页面运行行带上构件行已经算出的那份范围；整单元则两格都没有。
+    #[test]
+    fn a_page_run_carries_the_same_scope_as_its_element_rows() {
+        let spec = prepare_connection(&input(), false).unwrap();
+        let partial = ExecuteOutcome {
+            report: report::failed_report("compare", "1/40", "ok", report::RvmTimingsMs::default()),
+            mismatches: Vec::new(),
+            task_dir: PathBuf::from("task"),
+            elements: Some(store::ElementFacts {
+                checks: Vec::new(),
+                unit_refno: "1/10".to_string(),
+                unit_kind: "zone".to_string(),
+                root_refno: Some("1/2".to_string()),
+                scope: Some(store::ElementScope {
+                    kind: "subtree".to_string(),
+                    refno: "1/40".to_string(),
+                }),
+            }),
+        };
+        let facts = partial.run_facts("task-1", "AvevaMarineSample", &spec, None);
+        assert_eq!(
+            facts.scope.as_ref().map(|scope| scope.kind.as_str()),
+            Some("subtree")
+        );
+        assert_eq!(
+            facts.scope.as_ref().map(|scope| scope.refno.as_str()),
+            Some("1/40")
+        );
+        assert_eq!(
+            facts
+                .elements
+                .as_ref()
+                .and_then(|elements| elements.scope.clone()),
+            facts.scope
+        );
 
+        let whole = ExecuteOutcome {
+            report: report::failed_report("compare", "1/10", "ok", report::RvmTimingsMs::default()),
+            mismatches: Vec::new(),
+            task_dir: PathBuf::from("task"),
+            elements: Some(store::ElementFacts {
+                checks: Vec::new(),
+                unit_refno: "1/10".to_string(),
+                unit_kind: "zone".to_string(),
+                root_refno: Some("1/2".to_string()),
+                scope: None,
+            }),
+        };
+        let facts = whole.run_facts("task-2", "AvevaMarineSample", &spec, None);
+        assert_eq!(facts.scope, None, "比的就是整个单元，运行行不标局部");
+    }
 
     /// `_flat` 普查（GitHub #163）：每个基准文件名是 `<项目码><库号>_<ref0>_<ref1>.rvm`，
     /// 到本机项目库里找出这个元素的上级根（SITE / APPLDW，与批量 `root_name` 同一口径），
@@ -1843,7 +1896,6 @@ mod tests {
             log_path.display()
         );
     }
-
 
     fn input() -> RunInput {
         RunInput {

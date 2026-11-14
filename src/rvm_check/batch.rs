@@ -249,6 +249,29 @@ pub fn batch_id_for(out_root: &Path) -> String {
 /// 把「生成失败」与「比对失败」分开（GitHub #131）。
 pub const COMPARE_DID_NOT_FINISH: &str = "比对没有跑完";
 
+/// 运行行与构件行共用的范围口径（GitHub #130 / #158）。
+///
+/// 走 [`ScopeArg::parse`]：档位只认 `node` / `subtree`，refno 归一成 `w0/w1`（trim、前导 `=`、下划线）。
+/// `subtree:` 选的就是这个单元自己、档位非法、refno 空或写不成 refno，都返回 `None`——按整单元，
+/// 不往库里写半个范围。[`RootRecord::take_element_facts`] 与 [`RootRecord::run_facts`] 走同一个函数。
+fn scope_of_record(raw: Option<&str>, unit_refno: &str) -> Option<super::store::ElementScope> {
+    let scope = ScopeArg::parse(raw?).ok()?;
+    if let ScopeArg::Subtree(refno) = &scope {
+        if refno == unit_refno {
+            return None;
+        }
+    }
+    let refno = scope.refno().to_string();
+    let kind = match scope {
+        ScopeArg::Node(_) => "node",
+        ScopeArg::Subtree(_) => "subtree",
+    };
+    Some(super::store::ElementScope {
+        kind: kind.to_string(),
+        refno,
+    })
+}
+
 /// 这个根的生成子进程 stderr 里有没有比对器报的「比对没有跑完」。
 ///
 /// 扫整份文件而不是 `generation.message`（那是最后 600 字符的尾巴，前缀可能已被截掉）。
@@ -1636,19 +1659,7 @@ impl RootRecord {
             Some(parent) => parent.refno.trim_start_matches('=').to_string(),
             None => unit_refno.clone(),
         };
-        let scope = self
-            .scope
-            .as_deref()
-            .and_then(|raw| ScopeArg::parse(raw).ok())
-            .filter(|scope| !matches!(scope, ScopeArg::Subtree(refno) if *refno == unit_refno))
-            .map(|scope| super::store::ElementScope {
-                kind: match scope {
-                    ScopeArg::Node(_) => "node",
-                    ScopeArg::Subtree(_) => "subtree",
-                }
-                .to_string(),
-                refno: scope.refno().to_string(),
-            });
+        let scope = scope_of_record(self.scope.as_deref(), &unit_refno);
         Some(super::store::ElementFacts {
             checks,
             unit_refno,
@@ -1672,6 +1683,8 @@ impl RootRecord {
     pub(crate) fn run_facts(&self, batch_id: &str, spec: &RunSpec) -> super::store::RunFacts {
         use super::store::{RunFacts, SOURCE_BATCH, StageSeconds};
         let refno = self.refno.trim_start_matches('=').to_string();
+        // 与构件行同一段解析（GitHub #158）：`subtree:<单元自己>` 与非法档位都是整单元。
+        let scope = scope_of_record(self.scope.as_deref(), &refno);
         let (root_refno, root_noun, root_name) = match &self.parent {
             Some(parent) => (
                 parent.refno.trim_start_matches('=').to_string(),
@@ -1769,6 +1782,9 @@ impl RootRecord {
             elements: None,
             // 取记录自己的，不取 `spec` 的：续跑补入库的记录说的是它当时那一次。
             project_dir_mismatch: self.project_dir_mismatch.clone(),
+            // 这次只核对了一块的话，运行行也要带范围（GitHub #130）：否则它看起来像一次
+            // 计数很小的整单元运行，跟真正的整单元结论混在一起。取记录自己的，口径与构件行相同。
+            scope,
         }
     }
 
@@ -2020,11 +2036,7 @@ fn process_root(
         let _ = std::fs::remove_file(job.dir.join("judgement.json"));
         // 构件级结果与成员出处同理：这一轮没比对出结果时，不能把上一轮的构件行再写一遍。
         let _ = std::fs::remove_file(job.dir.join(super::element::ELEMENTS_FILE));
-        let _ = std::fs::remove_file(
-            job.dir
-                .join("ours")
-                .join(super::element::SOURCES_FILE),
-        );
+        let _ = std::fs::remove_file(job.dir.join("ours").join(super::element::SOURCES_FILE));
         // 阶段标记也要清：上一轮留下的 compare_start 会让这一轮的采样一开始就归到比对段。
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_START));
         let _ = std::fs::remove_file(job.dir.join(PHASE_COMPARE_END));
@@ -2922,6 +2934,43 @@ impl Summary {
 mod tests {
     use super::*;
 
+    /// GitHub #130 / #158：运行行的范围与构件行同一口径。
+    /// `node:` / `subtree:` 摊成两格；选的就是单元自身、非法档位、空 refno、写不成 refno 都当整单元。
+    #[test]
+    fn a_record_scope_uses_the_same_rules_as_element_rows() {
+        let scope = scope_of_record(Some("node:24383/66456"), "24383/1").unwrap();
+        assert_eq!(
+            (scope.kind.as_str(), scope.refno.as_str()),
+            ("node", "24383/66456")
+        );
+        let scope = scope_of_record(Some("subtree:=24383_66456"), "24383/1").unwrap();
+        assert_eq!(
+            (scope.kind.as_str(), scope.refno.as_str()),
+            ("subtree", "24383/66456"),
+            "下划线与前导等号归一"
+        );
+        let scope = scope_of_record(Some("  Subtree : 24383/9 "), "24383/1").unwrap();
+        assert_eq!(
+            (scope.kind.as_str(), scope.refno.as_str()),
+            ("subtree", "24383/9")
+        );
+        assert!(
+            scope_of_record(Some("subtree:24383/66456"), "24383/66456").is_none(),
+            "subtree 选的就是单元自己，按整单元"
+        );
+        assert!(scope_of_record(Some("subtree:=24383_66456"), "24383/66456").is_none());
+        let scope = scope_of_record(Some("node:24383/66456"), "24383/66456").unwrap();
+        assert_eq!(scope.kind, "node", "只比单元节点自己仍然是局部");
+        assert!(
+            scope_of_record(Some("foo:24383/66456"), "24383/1").is_none(),
+            "非法档位"
+        );
+        assert!(scope_of_record(Some("node:"), "24383/1").is_none());
+        assert!(scope_of_record(Some("node:   "), "24383/1").is_none());
+        assert!(scope_of_record(Some("24383/66456"), "24383/1").is_none());
+        assert!(scope_of_record(None, "24383/1").is_none());
+    }
+
     #[test]
     fn refnos_normalize_to_slash_form() {
         assert_eq!(
@@ -3251,7 +3300,10 @@ mod tests {
             assert_eq!(facts.verdict, "fail");
             let (row, rows) = build_rows(&facts);
             assert_eq!(rows.len(), 1, "{name}：{message}");
-            assert_eq!(rows[0].category, CATEGORY_STAGE_FAILURE, "{name}：{message}");
+            assert_eq!(
+                rows[0].category, CATEGORY_STAGE_FAILURE,
+                "{name}：{message}"
+            );
             assert_eq!(rows[0].reason, message);
             assert_eq!(row.mismatch_total, 1);
             rows[0].reason_kind.clone()
@@ -3456,7 +3508,10 @@ mod tests {
         assert!(
             record.seconds < 0.45,
             "子进程报错即退，父进程却过了 {:?} 秒才接着处理",
-            records.iter().map(|record| record.seconds).collect::<Vec<_>>()
+            records
+                .iter()
+                .map(|record| record.seconds)
+                .collect::<Vec<_>>()
         );
         assert_eq!(record.seconds, round3(record.seconds), "记到毫秒");
         assert_ne!(
@@ -3478,7 +3533,11 @@ mod tests {
             return; // 刚开机不到半秒的机器上起点减不出来，跳过。
         };
         let coarse = StageRecord::new(0, started, "");
-        assert_eq!(coarse.seconds, round1(coarse.seconds), "别的段照旧记到 0.1 秒");
+        assert_eq!(
+            coarse.seconds,
+            round1(coarse.seconds),
+            "别的段照旧记到 0.1 秒"
+        );
         let record = StageRecord::new(0, started, "x").to_the_millisecond(started);
         // 四舍五入到 0.1 秒的话这里是 0.5。上限放宽：测试线程被别的活挤一下不该让它红。
         assert!(
@@ -3487,7 +3546,11 @@ mod tests {
             record.seconds
         );
         assert_eq!(record.seconds, round3(record.seconds), "只留三位小数");
-        assert_eq!((record.exit.clone(), record.message.as_str()), (0.into(), "x"), "别的格不动");
+        assert_eq!(
+            (record.exit.clone(), record.message.as_str()),
+            (0.into(), "x"),
+            "别的格不动"
+        );
     }
 
     /// 一次导出会话的耗时摊给各单元：各份之和就是会话耗时，汇总出来的导出秒数与会话实测一致。
@@ -3537,7 +3600,10 @@ mod tests {
         assert_eq!(summed(&vec![old_share; 1062]), (212.4, 212.4));
 
         // 除不尽：多出来的毫秒给排在前面的单元；一个单元拿走整段；没有单元也不出事。
-        assert_eq!(session_shares(Duration::from_millis(7), 3), [0.003, 0.002, 0.002]);
+        assert_eq!(
+            session_shares(Duration::from_millis(7), 3),
+            [0.003, 0.002, 0.002]
+        );
         assert_eq!(session_shares(Duration::from_millis(12_345), 1), [12.345]);
         assert!(session_shares(Duration::from_secs(5), 0).is_empty());
         // 会话比单元数还短（一毫秒都摊不到）：照样加得回来。
@@ -3906,12 +3972,17 @@ mod tests {
             // 续跑读回来的记录照样带着范围。
             let mut back: RootRecord = serde_json::from_value(json).unwrap();
             back.elements = root.elements.take();
-            back.take_run_facts("b", &spec).elements.unwrap()
+            back.take_run_facts("b", &spec)
         };
-        let elements = scoped("subtree:17496/9000");
+        let facts = scoped("subtree:17496/9000");
+        let elements = facts.elements.expect("比对出了结果就有构件级结果");
         assert_eq!(elements.unit_refno, "9304/2");
         assert_eq!(elements.unit_kind, "root");
-        assert_eq!(elements.root_refno.as_deref(), Some("9304/2"), "根的上级根是它自己");
+        assert_eq!(
+            elements.root_refno.as_deref(),
+            Some("9304/2"),
+            "根的上级根是它自己"
+        );
         assert_eq!(
             elements.scope,
             Some(super::super::store::ElementScope {
@@ -3919,12 +3990,32 @@ mod tests {
                 refno: "17496/9000".to_string()
             })
         );
-        assert_eq!(scoped("node:17496/9000").scope.unwrap().kind, "node");
-        assert_eq!(scoped("subtree:9304/2").scope, None, "选的就是整个作业");
+        assert_eq!(facts.scope, elements.scope, "运行行与构件行同一份范围");
+        let node = scoped("node:17496/9000");
+        assert_eq!(node.elements.unwrap().scope.unwrap().kind, "node");
+        assert_eq!(node.scope.unwrap().kind, "node");
+        let whole = scoped("subtree:9304/2");
+        assert_eq!(whole.elements.unwrap().scope, None, "选的就是整个作业");
+        assert_eq!(whole.scope, None, "运行行不能把整个作业标成局部");
+        let node_self = scoped("node:9304/2");
         assert!(
-            scoped("node:9304/2").scope.is_some(),
+            node_self.elements.unwrap().scope.is_some(),
             "只比根节点自己不等于整个根"
         );
+        assert_eq!(
+            node_self.scope.as_ref().map(|scope| scope.kind.as_str()),
+            Some("node")
+        );
+        let illegal = scoped("foo:17496/9000");
+        assert_eq!(
+            illegal.elements.unwrap().scope,
+            None,
+            "非法档位两边都当整单元"
+        );
+        assert_eq!(illegal.scope, None);
+        let blank = scoped("node:");
+        assert_eq!(blank.elements.unwrap().scope, None);
+        assert_eq!(blank.scope, None);
     }
 
     /// 续跑补入库：构件级结果从作业目录的 `element-checks.json` 取；没有那份文件的老产物目录补不了构件行。
@@ -3944,7 +4035,11 @@ mod tests {
             "老产物目录：没有构件级结果"
         );
 
-        let checks = vec![element_check("1/1"), element_check("1/2"), element_check("1/3")];
+        let checks = vec![
+            element_check("1/1"),
+            element_check("1/2"),
+            element_check("1/3"),
+        ];
         super::super::element::write_checks(&dir, &checks).unwrap();
         let facts = resumed_facts(&record, "b", &spec);
         let _ = std::fs::remove_dir_all(&dir);

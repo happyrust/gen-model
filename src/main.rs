@@ -153,6 +153,9 @@ struct RvmCheckQueryArgs {
     /// 三色：pass / kind_differ / fail（rollup、runs）。
     #[arg(long)]
     verdict: Option<String>,
+    /// 只看只核对了单元里一块的运行（`--scope` 跑的）/ 只看整单元的运行（rollup、runs）。
+    #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
+    scoped: Option<bool>,
     /// 某一次运行的 run_id（mismatches、reasons、elements、element-grades）。
     #[arg(long, value_name = "ID")]
     run_id: Option<String>,
@@ -548,6 +551,7 @@ fn run_rvm_check_query(args: RvmCheckQueryArgs) -> anyhow::Result<()> {
         verdict: args.verdict.clone(),
         status: args.status.clone(),
         batch_id: args.batch_id.clone(),
+        scoped: args.scoped,
         limit: args.limit,
         ..RunFilter::default()
     };

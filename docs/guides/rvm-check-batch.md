@@ -116,6 +116,12 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 `unit` 与 `root_*` 是 2026-11-10 加的；页面单根，以及此前写进来的批量行没有这几格。按上级根查的时候，
 没有 `root_refno` 的行把自己的 `refno` 当上级根（那时一行就是一个根），所以老记录照样查得到。
 
+只核对了单元里一块的运行（`--scope node:<refno>` / `subtree:<refno>`）在运行行上多两格 `scope_kind`（`node` / `subtree`）
+与 `scope_refno`（选中的节点），与构件行同名、同一口径（GitHub #130 / #158）：档位只认这两个，refno 归一成 `w0/w1`；
+`subtree:` 选的就是这个单元自己、档位非法或 refno 空，两张表都按整单元，不写这两格。页面上比的是单元之下的节点时，
+运行行带同样的 `subtree` 与该节点；比的就是整个单元则没有这两格。整单元的运行、比对没跑完、以及加这两格之前写进来的行没有它们，按整单元算。
+它们不是这个单元的完整结论：按上级根汇总时另成一行（`mode = "scope"`），不进整单元那一行的终态、计数与 `clean`。页面运行不进这张汇总。
+
 `reason_kind` 是比 `category` 细一档的归因（`rvm_check::report::reason`）：
 
 | 原因种类 | 含义 |
@@ -205,7 +211,7 @@ refno 怎么来的：RVM 里没有 refno，比对按名称配对。生成侧每�
 
 | 查什么 | 命令行 | 服务端（GET） | 应答 |
 |---|---|---|---|
-| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`（各单元之和，相加之后取一位小数，与 `summary.json` 同一个算法）、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
+| 按上级根汇总 | `rvm-check-query rollup` | `/api/v1/rvm-check/rollup` | `{count, scanned, truncated, roots: [...]}`：每批、每个库、每个上级根、每种跑法（`mode` = `root` 整根 / `zone` 按 ZONE 拆开 / `scope` 只核对了一块）一行，带 `runs`、`units`、`status`（各终态个数）、`clean`、`not_clean`（没过的单元，最多 50 个）、`counts`（各单元之和）、`mismatch_total`、`seconds`（各单元之和，相加之后取一位小数，与 `summary.json` 同一个算法）、`gen_peak_private_mb`（最大值）。只汇总批量行；一次最多读最新的 20,000 行 |
 | 运行记录 | `rvm-check-query runs` | `/api/v1/rvm-check/history` | `{count, runs: [...]}`，一个根 / 单元一行，最新在前 |
 | 差异明细 | `rvm-check-query mismatches` | `/api/v1/rvm-check/mismatches` | `{count, rows: [...]}` |
 | 差异按原因计数 | `rvm-check-query reasons` | `/api/v1/rvm-check/reasons` | `{count, kinds: [{reason_kind, category, severity, n}]}`，多的在前 |
@@ -237,7 +243,8 @@ aios-database rvm-check-query element-grades --batch-id <批>
 aios-database rvm-check-query rollup --dbnum 7999 2>$null | ConvertFrom-Json
 ```
 
-过滤条件（不给就不限）：`rollup` / `runs` 认 `--batch-id --root --refno --dbnum --unit --status --verdict --limit`；
+过滤条件（不给就不限）：`rollup` / `runs` 认 `--batch-id --root --refno --dbnum --unit --status --verdict --scoped --limit`
+（`--scoped true` 只看只核对了一块的运行，`false` 只看整单元的）；
 `mismatches` / `reasons` 认 `--batch-id --root --refno --dbnum --run-id --noun --category --reason-kind --severity --limit --offset`；
 `elements` / `element-grades` 认 `--refno`（构件自己的 refno）`--unit-refno --root --dbnum --batch-id --run-id --noun --grade
 --severity --passed --kind-match --derived --refno-resolved --limit --offset`。
@@ -245,7 +252,7 @@ aios-database rvm-check-query rollup --dbnum 7999 2>$null | ConvertFrom-Json
 
 ```text
 /api/v1/rvm-check/rollup?batch_id=…&dbnum=7999&root_refno=24383/80211
-/api/v1/rvm-check/history?refno=24383/73927&root_refno=…&unit=zone&dbnum=7999&verdict=fail&batch_id=…&before=<finished_unix_ms>&limit=50
+/api/v1/rvm-check/history?refno=24383/73927&root_refno=…&unit=zone&dbnum=7999&verdict=fail&batch_id=…&scoped=false&before=<finished_unix_ms>&limit=50
 /api/v1/rvm-check/mismatches?run_id=…&refno=…&root_refno=…&dbnum=…&category=off&reason_kind=aabb_shifted&noun=CTRAY&severity=error&limit=500&offset=0
 /api/v1/rvm-check/reasons?dbnum=7022            → 按 reason_kind / category / severity 的计数，多的在前
 /api/v1/rvm-check/elements?refno=24383/66459    → 这个构件（连同记在它名下的派生件）最近一次核对的结果
