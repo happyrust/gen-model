@@ -34,6 +34,7 @@
 - **代价**（手动量法 `live_measure_what_the_host_cutter_cascades_add_on_natural_windows`，只读真库文件，取代上一节的 `live_measure_host_walls_left_on_old_holes_on_natural_windows`）：23 本库整条会话链 2,638 窗（另 10 个候选超两万的导入窗跳过），计划重建合计 93,347 件。墙那条腿一面墙都没有带出来（真实历史里没有一窗单独改过开孔件）；型钢那条腿带出 22 根、分在 2 窗（aps7200 3→4 的 18 根、aps7324 1361→1362 的 4 根），两端各建一次形状都没变——是多算，不是错算。正式后端监听的五本库（2,248 窗）与 ams7999（230 窗）两条腿都是 0 窗，回放套件钉的单元数不受影响。
 - **门比建模宽**：型钢那条腿只问「这只件有没有出刀的几何源」（`elmodl::has_cut_source`：模板里有设计负体，或目录件带负体集），不过 NAPP 门、不求值，与「不成单元的关节」那条腿同一个口径。所以刀全被 NAPP 挡下的件（aps7200 的法兰端板 `SJOI`：刀只切被接的梁、不切挂着它的柱）、有负体集却一把刀都不出的件（ams7997 的 `FITT` 1,073 只）动了也会带出型钢，多建一根、结果相同。反方向「建模真取到刀而门说没有源」由 e3d-model 的真库测试逐只核对为 0。
 - **没动**：另一件单元名下、直属 `CMPF` 里更深处的负体（结构上同型，23 本库普查 0 例，没接）；跨库不涉及（件与宿主是属主关系，必在同一本库）。E3D 回放套件的清单 `scripts/e3d/increment_suite/manifest.d/T2-joint2.json` 不是这次的文件，没有动：并入之后 `D5-sjoi-spre` 与 `D5-sjoi-beam` 两条的期望要各多一件宿主立杆。没有上真机。
+- **并入 e3d-model main 时（2026-11-14，在 e3d-model #64 之后）**：弧墙 `WALL` ← `FIXING` 那一行没有进 `HOST_CUTTERS`，`fixing_world_cutter` 删了——#64 已把弧墙 datum 树里的 `FIXING` 改成按目录负体开洞（`collect_wall_fixing_negatives`；ams1112 的套管目录件 `/W-HOLE-W` 自带负体集，洞照旧由 `DESP` 定尺寸），件要重建或已删除时由 `datum_fixing_host_of` 的 WALL 分支带墙（门是 `has_cut_source`）。表里只剩 `GWALL` ← `SBFI`。上面那条 ams1112 测试的 `WALL` 一类改由这条腿接住；`window_root_plan.rs` 刚性前推的排除表照旧留着 `(FIXING, WALL)`（只会多判不刚；datum 树里的件另有 WALL datum 那条一律不刚），只改了注释。
 
 ### 人工执行是通用的「再试一次」：数据已是最新的库，`update/execute` 也清模型侧的失败账并重排模型补算
 

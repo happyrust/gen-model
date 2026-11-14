@@ -986,10 +986,13 @@ fn anchor_lineage_exclusion(
 /// e3d-model `elmodl::SBFI_DESP_MIN`：墙名下的刀凑得齐这么多项 `DESP` 才开洞（`elmodl::carries_host_cut` 那道门）。
 const HOST_CUTTER_DESP_MIN: usize = 10;
 
-/// 宿主墙与它开洞用的刀：`(刀 noun, 宿主 noun)`。宿主的网格扣的是刀的**世界体**（e3d-model `elmodl.rs` 的
-/// `HOST_CUTTERS` 那张表：WALL 收 FIXING → `fixing_world_cutter`，GWALL 收 SBFI → `sleeve_world_cutter`），收刀是
-/// `collect_host_cutters`：「沿成员往下钻，遇到刀 noun 就停」。这里管的是刚性前推那条路（挪刀不挪墙就不许前推）；
-/// 走重建那条路时「刀要重建 → 墙一并重建」由 e3d-model 的 `increment::host_cutter_walls_of` 管（gen-model #150）。
+/// 宿主墙与它开洞用的刀：`(刀 noun, 宿主 noun)`。GWALL 的网格扣的是 SBFI 的**世界体**（e3d-model `elmodl.rs` 的
+/// `HOST_CUTTERS` 那张表：GWALL 收 SBFI → `sleeve_world_cutter`），收刀是 `collect_host_cutters`：「沿成员往下钻，
+/// 遇到刀 noun 就停」。弧墙 WALL 名下 datum 树里的 FIXING 自 e3d-model #64 起按目录负体开洞
+/// （`collect_wall_fixing_negatives`），不在那张表里；这里照 `DESP` 留着 `(FIXING, WALL)` 一行只会多判不刚，datum
+/// 树里的件另由 `WALL_DATUM_NOUNS` 那条一律判不刚。这里管的是刚性前推那条路（挪刀不挪墙就不许前推）；走重建那条路时
+/// 「刀要重建 → 墙一并重建」由 e3d-model 的 `increment::host_cutter_walls_of`（GWALL）与 `datum_fixing_host_of`
+/// （弧墙）管（gen-model #150）。
 const HOST_CUTTERS: [(&str, &str); 2] = [("FIXING", "WALL"), ("SBFI", "GWALL")];
 
 /// 墙 datum 的两级：没有 POS/ORI，标架由属主现算。
@@ -5104,8 +5107,8 @@ mod tests {
     ///
     /// - aps250110：GENSEC 的 `JOIS` / `JOIE` 关节 FIXING 挂在**别的**框架下，挪梁所在的那个框架——梁端头的负体取自
     ///   不动的 FIXING（e3d-model `elmodl::collect_joint_negatives`），左乘 Δ 的刀口是错的；
-    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（`collect_host_cutters` → `fixing_world_cutter` 在墙上开洞）、SBFI 在
-    ///   GWALL 下（`collect_host_cutters` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
+    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（e3d-model #64 起按目录负体在墙上开洞，`collect_wall_fixing_negatives`）、
+    ///   SBFI 在 GWALL 下（`collect_host_cutters` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
     ///
     /// 三种形状都必须判 `rigid: Err`，原因分别带 `structural connection` 与 `host cutter owner`；顺带数出语料里这种框架 /
     /// 刀有多少个。

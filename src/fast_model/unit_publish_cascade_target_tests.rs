@@ -1871,10 +1871,12 @@ fn live_aps7324_a_joint_without_a_body_and_the_section_it_cuts_are_planned_toget
 
 /// 墙上的套管 / 开孔件与照它开洞的墙（gen-model #150），ams1112 真库、假定窗。随整套跑；语料不在本机就跳过。
 ///
-/// 墙建模时到自己名下把带 `DESP` 的件找出来、照每一只的 `DESP` 开一个洞：`WALL` 收 `FIXING`，`GWALL` 收 `SBFI`
-/// （e3d-model `elmodl::collect_host_cutters`）。这些件自己是模型单元，只改一只（改 `DESP`、挪位置），`plan_update`
-/// 原先上卷到它自己为止，墙不被点名——单元级发布只重建了套管，墙上的洞停在旧尺寸、旧位置。2026-11-12 起 e3d-model
-/// 补了一条从「要重建或已删除的单元」出发的腿（`increment::host_cutter_walls_of`）：
+/// 墙建模时照名下套管的 `DESP` 开洞：`GWALL` 收 `SBFI`（e3d-model `elmodl::collect_host_cutters`）；弧墙 `WALL`
+/// datum 树里的 `FIXING` 自 e3d-model #64 起按目录负体开洞（`collect_wall_fixing_negatives`——ams1112 这 190 只套管的
+/// 目录件 `/W-HOLE-W` 自带负体集，洞的尺寸照旧取 `DESP`）。这些件自己是模型单元，只改一只（改 `DESP`、挪位置），
+/// `plan_update` 原先上卷到它自己为止，墙不被点名——单元级发布只重建了套管，墙上的洞停在旧尺寸、旧位置。2026-11-12
+/// 起 e3d-model 补了一条从「要重建或已删除的单元」出发的腿（`increment::host_cutter_walls_of`，管 `GWALL`）；弧墙并入
+/// #64 之后由 `increment::datum_fixing_host_of` 的 WALL 分支接（门是 `elmodl::has_cut_source`，只有正几何的件不拉墙）：
 ///
 /// 1. 只改一只带 `DESP` 的件 → 照它开洞的墙被 `plan_update` 点名，墙所在的根在 regen 里、子计划里有这面墙；
 /// 2. 同一窗里同一面墙上的另一只件也改了 → 两只件与墙都被点名，子计划里有这面墙；

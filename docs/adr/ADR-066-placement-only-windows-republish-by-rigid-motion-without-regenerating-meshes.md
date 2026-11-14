@@ -154,6 +154,8 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    成员表把锚点子树走一遍收齐，子树超过 20 万元素就不审、判不刚），排在前五类与路由容器之后：
    (d) **宿主墙上的刀**：锚点之上有 WALL / GWALL（中间没隔着同名刀），锚点自己或名下有那面墙开洞用的刀（WALL 名下 `DESP` 凑得齐
    10 项的 FIXING、GWALL 名下的 SBFI，与 e3d-model 的收刀同一种下钻）——挪刀不挪墙，洞停在原处。原因带 `host cutter owner <宿主>`；
+   （2026-11-14 并入 e3d-model #64 之后：弧墙 WALL 名下 datum 树里的 FIXING 改按目录负体开洞，不再走 `collect_host_cutters`；
+   WALL 这一行照 `DESP` 留着只会多判不刚，datum 树里的件另由 (e) 一律判不刚。）
    (e) **WALL datum 的现算标架**：锚点之上有 WALL 名下的 `JLDATU` / `PLDATU`——这两级没有 POS/ORI，`world_matrix` 在这条链上折出的 Δ
    不是 FIXING 真正的位移（GENSEC 名下的 datum `world_matrix` 认得，且已被规则 M 挡住）；
    (f) **跨锚点边界的结构连接**：子树里的 GENSEC 的关节 FIXING 在子树外（梁端的刀口不随 Δ 走），或子树里的关节 FIXING 被子树外的
