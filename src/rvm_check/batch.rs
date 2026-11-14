@@ -500,6 +500,12 @@ impl RootJob {
     fn display_ref(&self) -> String {
         format!("={}", self.refno)
     }
+    /// 上级根（SITE / APPLDW）的显示名：单元作业取它的上级根，根作业就是自己。
+    fn root_name(&self) -> &str {
+        self.parent
+            .as_ref()
+            .map_or(self.name.as_str(), |parent| parent.name.as_str())
+    }
     fn stem(&self) -> String {
         self.refno.replace('/', "_")
     }
@@ -2031,7 +2037,17 @@ fn process_root(
             record.export = Some(outcome.record().clone());
             export_seen = true;
             match fused_from(&outcome, job, opts) {
-                Ok(fused) => Some(fused),
+                Ok(fused) => {
+                    if let Some(problem) =
+                        super::baseline_is_not_this_unit(&fused.baseline, job.root_name())
+                    {
+                        record.status = status::COMPARE_FAILED.to_string();
+                        record.message = problem.clone();
+                        record.compare = Some(StageRecord::new(1, Instant::now(), problem));
+                        return record;
+                    }
+                    Some(fused)
+                }
                 Err(message) => {
                     record.status = status::NO_BASELINE.to_string();
                     record.message = message;
@@ -2172,6 +2188,10 @@ fn process_root(
                  先跑生成（--stage full 或 generate）",
                 job.dir.join("scope.json").display()
             ))
+        } else if let Some(problem) =
+            super::baseline_is_not_this_unit(&job.dir.join("e3d.rvm"), job.root_name())
+        {
+            Err(problem)
         } else {
             match super::read_scope_file(&job.dir) {
                 Ok(scope) => compare_files(job, spec, tree, &scope),

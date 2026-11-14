@@ -427,6 +427,8 @@ pub fn classify_failure(stage: &str, message: &str) -> &'static str {
                 "compare_duplicate_key"
             } else if has(&["e3d 名称重复"]) {
                 "compare_duplicate_name"
+            } else if has(&["基准不是这个单元"]) {
+                "compare_baseline_not_this_unit"
             } else {
                 "compare_failed"
             }
@@ -2309,6 +2311,13 @@ mod tests {
             "compare_duplicate_key"
         );
         assert_eq!(stopped("没有跑到这个根"), "compare_failed");
+        // GitHub #163：基准的最外一层不是这个单元的上级根。
+        assert_eq!(
+            stopped(
+                "比对没有跑完：基准不是这个单元——基准的最外一层是 /MDS/TEMPLATES，这个单元的上级根是 /MDS/TEMPLATES-OGL"
+            ),
+            "compare_baseline_not_this_unit"
+        );
 
         // 比对跑完、判红、一件都没配上：终态是 `fail`，不是没跑完。
         let mut unpaired = facts("b-1/ams7999/1_5", "1/5", VERDICT_FAIL, Vec::new());

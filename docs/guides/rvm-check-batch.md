@@ -26,7 +26,12 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | 比对 | 进程内 `compare_rvm_files`（只读映射 + 并行，几百 MB 以内）；判色与页面同一函数 | `rvm_check::compare_rvms` / `judge_report` |
 
 导出与生成是流水线：E3D 会话在自己的线程里逐库跑，生成工人不等它；一个根生成完、基准也到了
-才比对。`--jobs N` 同时生成 N 个根（注意 ams7333 一个根要 9 GB）。
+才比对。
+
+比对之前先核对基准是不是这个单元的导出（GitHub #163）：E3D 导出一个单元时把它的上级根（SITE / APPLDW）当最外一层组
+一起写，所以基准的最外一层组名应当就是上级根的名字。对不上（e3d-model#54 那种按名字补导认到别的库的同名单元，或
+`--baseline-dir` 里的文件登记错了）就记 `compare-failed`、原因种类 `compare_baseline_not_this_unit`，不往差异表里写成片的
+假差异。上级根无名时不核（无名 SITE 的序号生成侧与 E3D 可能数得不一样）。`--jobs N` 同时生成 N 个根（注意 ams7333 一个根要 9 GB）。
 
 ## 参数
 
@@ -128,12 +133,12 @@ aios-database rvm-check --dbnum 7999,7326,7327,7331,7332,7352,7354,7356,7333 `
 | `container_tube_off` / `container_tube_missing_in_generated` / `container_tube_extra_in_generated` | 容器组内逐根账 |
 | `centreline_only` | E3D 只画中心线（`info`，不进判据，只记账） |
 | `generate_timeout` / `generate_commit_guard` / `generate_panic` / `generate_unbalanced` / `e3d_export_no_file` / `e3d_launcher_missing` / `baseline_missing` … | 某一步没跑完（`category = stage_failure`，由阶段与报错文本认） |
-| `compare_panic` / `compare_duplicate_key` / `compare_duplicate_name` / `compare_unknown_bbox_frame` / `compare_failed` | 比对这一步没跑完（同是 `stage_failure`）：比对时 panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 其他。批量的终态是 `compare-failed` |
+| `compare_panic` / `compare_duplicate_key` / `compare_duplicate_name` / `compare_unknown_bbox_frame` / `compare_baseline_not_this_unit` / `compare_failed` | 比对这一步没跑完（同是 `stage_failure`）：比对时 panic / 主键重复 / E3D 名称重复 / bbox 帧认不出来 / 基准的最外一层不是这个单元的上级根（GitHub #163）/ 其他。批量的终态是 `compare-failed` |
 | `compare_nothing_paired` | 比对跑完了、判红，却一件都没配上（两侧的主键口径对不上） |
 | `run_failed` | 兜底：阶段认不出来。正常不会出现 |
 
 比对这一步的阶段名只有 `compare` 一种写法。停在这一步的有两种情形，靠终态分：`fail` 是比对跑完判红，差异在
-清单里；`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分成上表那五种。
+清单里；`compare-failed` 是比对没跑完，留一行 `stage_failure`，原因种类按报错文本分成上表那六种。
 （2026-11-10 之前批量侧把后一种的阶段写成 `compare_failed`，归类认不出，原因种类全落到 `run_failed`。）
 
 ### 构件级结果：`rvm_check_element`
