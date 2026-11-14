@@ -1,0 +1,50 @@
+{
+  "name": "t4-whole-library-retry-limit",
+  "registry": ["GH-170"],
+  "_doc": "GitHub #170。同一份 ams8000-equi-move-chain 夹具（会话链回到 1，726 只登录）。init 追平到 725 后把 model_sesno 预置成 0，再带 AIOS_TEST_FAIL_ROOTS=24384/24776 冷重启：整库重排连败 3 次停跑。然后去掉钩子、冷重启、把文件推到 726。修之前这一步会打开不存在的会话 0 并按 data_batch 停跑。修好后（batch_worker 单测 a_new_session_after_the_whole_library_retry_limit_plans_from_the_data_watermark_not_session_zero）：726 的数据批次窗口从数据左端 725 起算，任务是 partial（model_watermark_discontinuous，applied 到 726，model_sesno 仍是 0），不记 data_batch 停跑，并立刻排起点 0 的整库 model_only（现场跑到 sesno 1..=726）。本用例钉住数据批次这一拍，不等整库重排把 model_sesno 盖到 726。第一步断言来自 2026-11-12 r6 失败原文。没有另开 E3D。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-move-chain",
+  "start": 725,
+  "service_env": {
+    "AIOS_WATCH_RECONCILE_SECS": "2",
+    "AIOS_WATCH_MIN_SWEEP_GAP_SECS": "1",
+    "AIOS_WATCH_POLL_SECS": "1"
+  },
+  "seed": [
+    "UPDATE dbnum_watermark:8000 SET model_sesno = 0;"
+  ],
+  "init": {
+    "to": 725,
+    "records_present": ["24384/24776", "24384/23257"],
+    "generate_prime": ["24384/24776", "24384/23257"]
+  },
+  "steps": [
+    {
+      "to": 725,
+      "fail_roots": ["24384/24776"],
+      "hold_primary": true,
+      "timeout_secs": 420,
+      "expect_health": [
+        { "path": "/batch_failures/8000/parked", "eq": true },
+        { "path": "/batch_failures/8000/cause", "eq": "whole_library_retry_limit" },
+        { "path": "/whole_library_retries/8000/failed_runs", "eq": 3 },
+        { "path": "/whole_library_retries/8000/capped", "eq": true }
+      ],
+      "log_must_contain": [
+        "连续第 2 次失败，到 3 次就停下等人",
+        "本轮不自动重跑"
+      ]
+    },
+    {
+      "to": 726,
+      "clear_fail_injection": true,
+      "timeout_secs": 420,
+      "expect_model_sesno_stay": 0,
+      "task_state": "partial",
+      "unit_count": 0,
+      "log_must_contain": ["model_watermark_discontinuous", "sesno 1..=726"],
+      "log_must_not_contain": ["no session 0"]
+    }
+  ]
+}
