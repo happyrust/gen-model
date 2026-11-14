@@ -14,9 +14,10 @@
 //!   椭球碟（`EllipticalDish`，折边碟）与不认识的图元标成不可比。
 //! - **只有中心线**（`Line`）：没有体，不比。
 //!
-//! 两侧按**主键**对：生成侧按成员路径（报告的 `pairs[].refno`）接，基准侧按显示名归一后的主键接
-//! （[`display_key`]，与 vendor 建表同一口径）。按几何中心配上的管身两侧主键不同，找不到对侧——照旧只比
-//! 包围盒，并在构件行上写明没比体积。
+//! 两侧按**配对主键**对：生成侧按成员路径（报告的 `pairs[].refno`）接，基准侧在同键配对时按
+//! [`display_key`]（与 vendor 建表同一口径）接；同一属主下的管身按世界 AABB 中心最近配对且序号不同时，
+//! `rvm_compare` 会把 `pairs[].key` 写成 `"<基准主键> ↔ <生成主键>"`，此时基准侧必须取左半边的
+//! 基准主键去查，不能拿 `pairs[].refno` 对应的右半边主键张冠李戴成基准里的另一根管子。
 //!
 //! ## 两侧都是面片时的两道体积门（GitHub #171）
 //!
@@ -801,7 +802,29 @@ fn evaluate_facet_pair(
     ))
 }
 
+/// 从 `rvm_compare` 的 `Pair::key` 与生成侧成员主键解析出基准侧查询主键。
+///
+/// 跨序号中心配对（如同一属主下 `TUBI`）会把 `Pair::key` 写成 `"<基准主键> ↔ <生成主键>"`；
+/// 仅当 `pair_key` 以 `" ↔ <生成主键>"` 结尾时才剥出左半边去基准里查（既不误伤名字本身含 `" ↔ "`
+/// 的路径，左半边查不到时也不退回右半边以免张冠李戴成基准里的另一根管子）。
+fn baseline_lookup_key<'a>(pair_key: Option<&'a str>, generated_key: Option<&'a str>) -> Option<&'a str> {
+    let Some(pair_key) = pair_key.map(str::trim) else {
+        return generated_key;
+    };
+    let Some(gen_key) = generated_key else {
+        return pair_key.split_once(" ↔ ").map(|(lhs, _)| lhs.trim());
+    };
+    if let Some(prefix) = pair_key.strip_suffix(gen_key)
+        && let Some(lhs) = prefix.strip_suffix(" ↔ ")
+    {
+        return Some(lhs.trim());
+    }
+    Some(gen_key)
+}
+
 /// 比一对：`generated_path` 是报告的 `pairs[].refno`（生成成员路径），基准侧按同一主键去查。
+/// 若有 `rvm_compare` 报告的 `pairs[].key`，请优先调用 [`compare_pair_with_key`]，以便跨序号配对的
+/// 管身（`<基准主键> ↔ <生成主键>`）能在基准侧准确查到配对左半边。
 /// 两侧任一算不出体积就返回「没比」——**不能当成通过**。
 pub fn compare_pair(
     baseline: &RvmVolumes,
@@ -809,10 +832,23 @@ pub fn compare_pair(
     generated_path: &str,
     noun: &str,
 ) -> VolumeVerdict {
+    compare_pair_with_key(baseline, generated, generated_path, None, noun)
+}
+
+/// 比一对（带 `rvm_compare` 的 `pairs[].key`）：同键配对沿用生成侧主键；跨序号几何配对
+/// （`"<基准主键> ↔ <生成主键>"`）按左半边查基准侧体积与面片。
+pub fn compare_pair_with_key(
+    baseline: &RvmVolumes,
+    generated: &RvmVolumes,
+    generated_path: &str,
+    pair_key: Option<&str>,
+    noun: &str,
+) -> VolumeVerdict {
     let trimmed_path = generated_path.trim();
-    let key = generated.key_of_path(trimmed_path);
+    let gen_key = generated.key_of_path(trimmed_path);
+    let base_key = baseline_lookup_key(pair_key, gen_key);
     let ours = generated.by_path(trimmed_path);
-    let theirs = key.and_then(|key| baseline.by_key(key));
+    let theirs = base_key.and_then(|key| baseline.by_key(key));
     let (baseline_mm3, generated_mm3) = match (theirs, ours) {
         (Some(theirs), Some(ours)) => (theirs.volume_mm3, ours.volume_mm3),
         _ => (None, None),
@@ -822,7 +858,7 @@ pub fn compare_pair(
             let delta = (generated_mm3 - baseline_mm3).abs() / baseline_mm3;
             let percent = delta * 100.0;
             if delta > VOLUME_DELTA_LIMIT {
-                let facet_pair = key.and_then(|k| {
+                let facet_pair = base_key.and_then(|k| {
                     Some((
                         baseline.facets_by_key.get(k)?,
                         generated.facets_by_path.get(trimmed_path)?,
@@ -985,7 +1021,7 @@ pub fn apply_to_report(
         } else {
             pair.noun.as_str()
         };
-        let verdict = compare_pair(&baseline, &generated, &pair.refno, noun);
+        let verdict = compare_pair_with_key(&baseline, &generated, &pair.refno, Some(&pair.key), noun);
         if verdict.differs {
             let old_verdict = pair.verdict;
             pair.verdict = "off";
@@ -1587,5 +1623,372 @@ mod tests {
             recorded_only, 67,
             "60 只分格不同的 GENPRI + 7 只内壁重合的 NOZZ 应逐件记账"
         );
+    }
+
+    /// e3d-model#65：同一属主下的管身按世界 AABB 中心最近配对时，若两端序号不同，
+    /// `rvm_compare` 会把 `Pair::key` 写成 `"<基准主键> ↔ <生成主键>"`（例如
+    /// `TUBI 13 /Copy-of-1RCS011MN-TUBE/806VP ↔ TUBI 14 /Copy-of-1RCS011MN-TUBE/806VP`）。
+    /// 体积复核在基准侧必须按配对左半边（`TUBI 13 ...`）去查，而不能拿 `generated_path`
+    /// 对应的右半边主键（`TUBI 14 ...`）错查成基准里的下一根管子；对于最后一根
+    /// `TUBI 33 ... ↔ TUBI 34 ...`（基准没有 34 号）同样必须命中 33 号并算出 0% 体积差。
+    #[test]
+    fn cross_ordinal_paired_tubes_compare_baseline_side_by_paired_key() {
+        use e3d_model::rvm_compare::{CompareReport, ContainerTubeTally, NounTally, Pair};
+        use e3d_model::rvm_read::{Primitive, RvmFile, RvmHeader, RvmMember};
+
+        // 构造两份最小 RVM 落盘，直接过 `apply_to_report` 的完整链路（读文件 → 配对查键 → 更新 report/账本）：
+        // 基准侧：TUBE 13（h = 49.653343）与 TUBE 14（h = 34.506798），r = 4.765；
+        // 生成侧：TUBI 14（h = 49.653343）与 TUBI 15（h = 34.506798），r = 4.765。
+        // 两者中心配对为 `TUBI 13 /B ↔ TUBI 14 /B`、`TUBI 14 /B ↔ TUBI 15 /B`。
+        let cyl = |r: f64, h: f64| RvmGeometry {
+            tag: "PRIM".to_string(),
+            flags: 0,
+            primitive: Primitive::Cylinder([r, h]),
+            matrix3: [0.001, 0.0, 0.0, 0.0, 0.001, 0.0, 0.0, 0.0, 0.001],
+            translation_mm: [0.0; 3],
+            record_bbox: [-r, -r, -h / 2.0, r, r, h / 2.0],
+            bbox_frame: e3d_model::rvm_read::BboxFrame::Local,
+            level: None,
+        };
+        let member = |path: &str, name: &str, r: f64, h: f64| RvmMember {
+            path: path.to_string(),
+            name: name.to_string(),
+            parent: None,
+            translation_mm: [0.0; 3],
+            material: 1,
+            geometries: vec![cyl(r, h)],
+        };
+
+        let dir = std::env::temp_dir().join(format!("rvm-check-65-tubi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ours")).unwrap();
+
+        let header = RvmHeader {
+            banner: "AVEVA RVM".to_string(),
+            note: String::new(),
+            date: String::new(),
+            user: String::new(),
+            encoding: String::new(),
+            model: "TEST".to_string(),
+            project: "AMS".to_string(),
+        };
+        RvmFile {
+            header: header.clone(),
+            members: vec![
+                member(
+                    "/TUBE 13 of BRANCH /B",
+                    "TUBE 13 of BRANCH /B",
+                    4.765,
+                    49.653343,
+                ),
+                member(
+                    "/TUBE 14 of BRANCH /B",
+                    "TUBE 14 of BRANCH /B",
+                    4.765,
+                    34.506798,
+                ),
+                member(
+                    "/TUBE 15 of BRANCH /B",
+                    "TUBE 15 of BRANCH /B",
+                    3.0,
+                    100.0,
+                ),
+                member(
+                    "/TUBE 16 of BRANCH /B",
+                    "TUBE 16 of BRANCH /B",
+                    4.765,
+                    100.0,
+                ),
+                member(
+                    "/TUBE 1 of BRANCH /B↔1",
+                    "TUBE 1 of BRANCH /B↔1",
+                    4.765,
+                    50.0,
+                ),
+                member(
+                    "/BOX ↔ 1",
+                    "/BOX ↔ 1",
+                    5.0,
+                    20.0,
+                ),
+                member(
+                    "/BOX_DIFF ↔ 1",
+                    "/BOX_DIFF ↔ 1",
+                    5.0,
+                    20.0,
+                ),
+            ],
+        }
+        .write(dir.join("e3d.rvm"))
+        .unwrap();
+        RvmFile {
+            header,
+            members: vec![
+                RvmMember {
+                    path: "/GENERATED".to_string(),
+                    name: "/GENERATED".to_string(),
+                    parent: None,
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: Vec::new(),
+                },
+                RvmMember {
+                    path: "/GENERATED/TUBI 14 of BRAN /B".to_string(),
+                    name: "TUBI 14 of BRAN /B".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(4.765, 49.653343)],
+                },
+                RvmMember {
+                    path: "/GENERATED/TUBI 15 of BRAN /B".to_string(),
+                    name: "TUBI 15 of BRAN /B".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(4.765, 34.506798)],
+                },
+                RvmMember {
+                    path: "/GENERATED/TUBI 16 of BRAN /B".to_string(),
+                    name: "TUBI 16 of BRAN /B".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(4.765, 100.0)],
+                },
+                RvmMember {
+                    path: "/GENERATED/TUBI 17 of BRAN /B".to_string(),
+                    name: "TUBI 17 of BRAN /B".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(4.765, 100.0)],
+                },
+                RvmMember {
+                    path: "/GENERATED/TUBI 1 of BRAN /B↔1".to_string(),
+                    name: "TUBI 1 of BRAN /B↔1".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(4.765, 50.0)],
+                },
+                RvmMember {
+                    path: "/GENERATED/BOX ↔ 1".to_string(),
+                    name: "/BOX ↔ 1".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(5.0, 20.0)],
+                },
+                RvmMember {
+                    path: "/GENERATED/BOX_DIFF ↔ 1".to_string(),
+                    name: "/BOX_DIFF ↔ 1".to_string(),
+                    parent: Some(0),
+                    translation_mm: [0.0; 3],
+                    material: 1,
+                    geometries: vec![cyl(5.0, 30.0)],
+                },
+            ],
+        }
+        .write(dir.join("ours").join("generated.rvm"))
+        .unwrap();
+
+        let mk_pair = |key: &str, refno: &str, noun: &str, h: f64| Pair {
+            key: key.to_string(),
+            refno: refno.to_string(),
+            noun: noun.to_string(),
+            max_axis_delta_mm: 0.0,
+            raw_max_axis_delta_mm: 0.0,
+            significant_max_axis_delta_mm: None,
+            verdict: "exact",
+            film_thickness_mm: None,
+            film_side: None,
+            aabb_source: "facets",
+            comparison_frame: "local",
+            kind_match: Some(true),
+            baseline_kinds: vec!["Cylinder".to_string()],
+            generated_kinds: vec!["Cylinder".to_string()],
+            container_tubes: None,
+            delta_min_mm: [0.0; 3],
+            delta_max_mm: [0.0; 3],
+            baseline_aabb: [-4.765, -4.765, -h / 2.0, 4.765, 4.765, h / 2.0],
+            generated_aabb: [-4.765, -4.765, -h / 2.0, 4.765, 4.765, h / 2.0],
+            significant_baseline_aabb: None,
+            significant_generated_aabb: None,
+            volume_mm3: 0.0,
+            genus: 0,
+            negatives_applied: 0,
+            negatives_skipped: 0,
+        };
+        let mut by_noun = std::collections::BTreeMap::new();
+        by_noun.insert(
+            "TUBI".to_string(),
+            NounTally {
+                both: 4,
+                exact: 4,
+                kind_match: 4,
+                ..Default::default()
+            },
+        );
+        by_noun.insert(
+            "BOX".to_string(),
+            NounTally {
+                both: 2,
+                exact: 2,
+                kind_match: 2,
+                ..Default::default()
+            },
+        );
+        let mut report = CompareReport {
+            baseline: String::new(),
+            elements: String::new(),
+            facets: None,
+            aabb_from_facets: 6,
+            aabb_from_snapshot: 0,
+            dbnum: None,
+            root_name: None,
+            export_scope: Some("rvm".to_string()),
+            baseline_members: Some(7),
+            baseline_geometries: Some(7),
+            unkeyable_generated: Vec::new(),
+            unkeyable_baseline: Vec::new(),
+            centreline_only_baseline: Vec::new(),
+            by_noun,
+            pairs: vec![
+                mk_pair(
+                    "TUBI 13 /B ↔ TUBI 14 /B",
+                    "/GENERATED/TUBI 14 of BRAN /B",
+                    "TUBI",
+                    49.653343,
+                ),
+                mk_pair(
+                    "TUBI 14 /B ↔ TUBI 15 /B",
+                    "/GENERATED/TUBI 15 of BRAN /B",
+                    "TUBI",
+                    34.506798,
+                ),
+                // 真体积差场景：基准 TUBE 15（r=3.0）与生成 TUBI 16（r=4.765），不能被基准 TUBE 16 掩盖。
+                mk_pair(
+                    "TUBI 15 /B ↔ TUBI 16 /B",
+                    "/GENERATED/TUBI 16 of BRAN /B",
+                    "TUBI",
+                    100.0,
+                ),
+                // 属主名自身带 ↔ 且同序号配对时，不能被误拆。
+                mk_pair(
+                    "TUBI 1 /B↔1",
+                    "/GENERATED/TUBI 1 of BRAN /B↔1",
+                    "TUBI",
+                    50.0,
+                ),
+                // 命名元素自身名字带 " ↔ " 时，不能被误拆（体积相同留 exact，真差必翻 off）。
+                mk_pair(
+                    "BOX /BOX ↔ 1",
+                    "/GENERATED/BOX ↔ 1",
+                    "BOX",
+                    20.0,
+                ),
+                mk_pair(
+                    "BOX /BOX_DIFF ↔ 1",
+                    "/GENERATED/BOX_DIFF ↔ 1",
+                    "BOX",
+                    30.0,
+                ),
+            ],
+            only_baseline: Vec::new(),
+            only_generated: Vec::new(),
+            only_generated_members: Vec::new(),
+            unkeyable_generated_members: Vec::new(),
+            container_tube_groups: 0,
+            container_tubes: ContainerTubeTally::default(),
+        };
+
+        apply_to_report(&dir, &mut report, &[]);
+        assert_eq!(report.pairs[0].verdict, "exact", "跨序号配对的 TUBI 13↔14 体积完全相同，不应改判 off");
+        assert_eq!(report.pairs[1].verdict, "exact", "跨序号配对的 TUBI 14↔15 体积完全相同，不应漏比");
+        assert_eq!(report.pairs[2].verdict, "off", "跨序号配对后真实有体积差的 TUBI 15↔16 必须改判 off");
+        assert_eq!(report.pairs[3].verdict, "exact", "属主名带 ↔ 的同序号管身不应被误拆");
+        assert_eq!(report.pairs[4].verdict, "exact", "名字带 ↔ 的命名构件不应被误拆");
+        assert_eq!(report.pairs[5].verdict, "off", "名字带 ↔ 且真实有体积差的命名构件仍必须改判 off");
+        assert_eq!(report.by_noun["TUBI"].off, 1);
+        assert_eq!(report.by_noun["TUBI"].exact, 3);
+        assert_eq!(report.by_noun["BOX"].off, 1);
+        assert_eq!(report.by_noun["BOX"].exact, 1);
+
+        let ledger: Vec<VolumeLedgerEntry> = serde_json::from_slice(
+            &std::fs::read(dir.join(VOLUME_LEDGER_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger[0].key, "TUBI 15 /B ↔ TUBI 16 /B");
+        assert_eq!(ledger[1].key, "BOX /BOX_DIFF ↔ 1");
+        let r3_f32 = 3.0_f32 as f64;
+        let r_pipe_f32 = 4.765_f32 as f64;
+        let h100_f32 = 100.0_f32 as f64;
+        assert!(
+            (ledger[0].baseline_mm3 - std::f64::consts::PI * r3_f32 * r3_f32 * h100_f32).abs()
+                < 1e-6
+        );
+        assert!(
+            (ledger[0].generated_mm3 - std::f64::consts::PI * r_pipe_f32 * r_pipe_f32 * h100_f32)
+                .abs()
+                < 1e-6
+        );
+
+        let base_vols = read_volumes(&dir.join("e3d.rvm")).unwrap();
+        let gen_vols = read_volumes(&dir.join("ours").join("generated.rvm")).unwrap();
+        // 末尾跨序号配对（基准只有 13..16，没有 17 号）：传入 pair.key 时能命中基准 16 号且差为 0；
+        // 即使左半边给了一个基准里不存在的键，也绝不退回右半边张冠李戴。
+        let tail_hit = compare_pair_with_key(
+            &base_vols,
+            &gen_vols,
+            "/GENERATED/TUBI 17 of BRAN /B",
+            Some("TUBI 16 /B ↔ TUBI 17 /B"),
+            "TUBI",
+        );
+        assert!(!tail_hit.differs);
+        assert_eq!(tail_hit.delta, Some(0.0));
+        let missing_lhs = compare_pair_with_key(
+            &base_vols,
+            &gen_vols,
+            "/GENERATED/TUBI 16 of BRAN /B",
+            Some("TUBI 99 /B ↔ TUBI 16 /B"),
+            "TUBI",
+        );
+        assert!(!missing_lhs.differs);
+        assert!(missing_lhs.note.starts_with("没有比体积："));
+        assert!(missing_lhs.note.contains("基准侧没算出来"));
+
+        // 属主名自身包含 ↔ 且同时发生跨序号配对、以及名字含 " ↔ " 的同对校验均准确命中：
+        let arrow_owner_same = compare_pair_with_key(
+            &base_vols,
+            &gen_vols,
+            "/GENERATED/TUBI 1 of BRAN /B↔1",
+            Some("TUBI 1 /B↔1"),
+            "TUBI",
+        );
+        assert!(!arrow_owner_same.differs);
+        assert_eq!(arrow_owner_same.delta, Some(0.0));
+        let arrow_owner_cross = compare_pair_with_key(
+            &base_vols,
+            &gen_vols,
+            "/GENERATED/TUBI 1 of BRAN /B↔1",
+            Some("TUBI 13 /B ↔ TUBI 1 /B↔1"),
+            "TUBI",
+        );
+        assert!(
+            arrow_owner_cross.differs,
+            "属主带 ↔ 的跨序号左半边查到 TUBE 13（49.65 vs 50.0）应触发体积差：{arrow_owner_cross:?}"
+        );
+        let named_arrow_same = compare_pair_with_key(
+            &base_vols,
+            &gen_vols,
+            "/GENERATED/BOX ↔ 1",
+            Some("BOX /BOX ↔ 1"),
+            "BOX",
+        );
+        assert!(!named_arrow_same.differs);
+        assert_eq!(named_arrow_same.delta, Some(0.0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
